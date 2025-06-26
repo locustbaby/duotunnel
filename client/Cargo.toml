@@ -1,0 +1,27 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "client"
+path = "main.rs"
+
+[dependencies]
+tunnel-lib = { path = "../tunnel-lib" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.10"
+hyper = "0.14"
+hyper-tls = "0.5"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
+
+[build-dependencies]
+tonic-build = "0.10" 

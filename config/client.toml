@@ -1,0 +1,24 @@
+# Client 配置示例
+
+log_level = "info"
+
+# 连接到的 server 地址和端口
+server_addr = "127.0.0.1"
+server_port = 50001
+
+# client group id
+client_group_id = "group-a"
+
+# 可选：认证 token
+auth_token = "your-token-here"
+
+# 本地监听端口
+http_entry_port = 8003
+grpc_entry_port = 8004
+
+# 可选：本地 upstream 配置（如需本地正向代理/反代）
+[upstreams.local_service]
+servers = [
+    { address = "www.google.com:443", resolve = true }
+]
+lb_policy = "round_robin" 

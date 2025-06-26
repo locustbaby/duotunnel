@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package tunnel;
+
+service TunnelService {
+  rpc Proxy(stream TunnelMessage) returns (stream TunnelMessage);
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc ConfigSync(ConfigSyncRequest) returns (ConfigSyncResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message TunnelMessage {
+  string client_id = 1;
+  string request_id = 2;
+  Direction direction = 3;  // 请求方向
+  oneof payload {
+    HttpRequest http_request = 4;
+    HttpResponse http_response = 5;
+    GrpcRequest grpc_request = 6;
+    GrpcResponse grpc_response = 7;
+    Heartbeat heartbeat = 8;
+    ConnectRequest connect_request = 9;
+    ConnectResponse connect_response = 10;
+    ErrorMessage error_message = 11;
+    ConfigSyncRequest config_sync = 12;
+    ConfigSyncResponse config_sync_response = 13;
+  }
+}
+
+enum Direction {
+  CLIENT_TO_SERVER = 0;  // client 发起，server 处理
+  SERVER_TO_CLIENT = 1;  // server 发起，client 处理
+}
+
+message HttpRequest {
+  string method = 1;
+  string url = 2;
+  string host = 3;
+  string path = 4;
+  string query = 5;
+  map<string, string> headers = 6;
+  bytes body = 7;
+  string original_dst = 8;
+}
+
+message HttpResponse {
+  int32 status_code = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+}
+
+message GrpcRequest {
+  string service = 1;
+  string method = 2;
+  string host = 3;
+  map<string, string> headers = 4;
+  map<string, string> metadata = 5;
+  bytes body = 6;
+  string original_dst = 7;
+}
+
+message GrpcResponse {
+  int32 status_code = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+}
+
+message Heartbeat {
+  int64 timestamp = 1;
+}
+
+message ConnectRequest {
+  string client_id = 1;
+  int64 timestamp = 2;
+}
+
+message ConnectResponse {
+  bool success = 1;
+  string message = 2;
+  int64 timestamp = 3;
+}
+
+message ErrorMessage {
+  int32 code = 1;
+  string message = 2;
+  string request_id = 3;
+}
+
+message RegisterRequest {
+  string client_id = 1;
+  string group = 2;
+  string version = 3;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+  string config_version = 3;
+}
+
+message ConfigSyncRequest {
+  string client_id = 1;
+  string group = 2;
+  string config_version = 3;
+}
+
+message ConfigSyncResponse {
+  string config_version = 1;
+  repeated Rule rules = 2;
+  repeated Upstream upstreams = 3;
+}
+
+message Rule {
+  string rule_id = 1;
+  string type = 2; // http/grpc
+  string match_host = 3;
+  string match_path_prefix = 4;
+  string match_service = 5; // grpc
+  map<string, string> match_header = 6;
+  string action_proxy_pass = 7;
+  string action_set_host = 8;
+  string action_upstream = 9;
+  bool   action_ssl = 10;
+  // 可扩展更多 action 字段
+}
+
+message Upstream {
+  string name = 1;
+  repeated UpstreamServer servers = 2;
+  string lb_policy = 3;
+}
+
+message UpstreamServer {
+  string address = 1;
+  bool resolve = 2;
+}
+
+message HeartbeatRequest {
+  string client_id = 1;
+  string group = 2;
+  int64 timestamp = 3;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  string message = 2;
+  int64 timestamp = 3;
+} 

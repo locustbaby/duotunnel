@@ -1,0 +1,82 @@
+# ========== 1. Server 基础配置 ==========
+[server]
+config_version = "v1.0.0"
+tunnel_port = 50001
+http_entry_port = 8001
+grpc_entry_port = 8002
+log_level = "info"
+
+# ========== 2. Upstreams 全局定义 ==========
+[upstreams.backend]
+servers = [
+    { address = "backend.example.com:443", resolve = true }
+]
+lb_policy = "round_robin"
+
+[upstreams.grpc_backend]
+servers = [
+    { address = "127.0.0.1:9002", resolve = false }
+]
+lb_policy = "round_robin"
+
+# ========== 3. Forward Proxy 配置 ==========
+[[forward.rules.http]]
+match_host = "api.backend.com"
+action_upstream = "backend"
+
+[[forward.rules.grpc]]
+match_host = "grpc.backend.com"
+match_service = "com.example.BackendService"
+action_upstream = "grpc_backend"
+
+# ========== 4. Reverse Proxy (Tunnel/Client Group) 配置 ==========
+[[reverse_proxy.rules.http]]
+match_host = "www.google.com"
+action_client_group = "group-a"
+
+[[reverse_proxy.rules.http]]
+match_host = "b.com"
+action_client_group = "group-b"
+
+[[reverse_proxy.rules.grpc]]
+match_host = "grpc.google.com"
+match_service = "com.example.MyService"
+action_client_group = "group-a"
+
+# ========== 5. Client Group 配置（下发给 client） ==========
+[client_groups.group-a]
+config_version = "v1.0.0"
+
+[client_groups.group-a.upstreams.local_service]
+servers = [
+    { address = "https://www.google.com", resolve = true }
+]
+lb_policy = "round_robin"
+
+[[client_groups.group-a.rules.http]]
+match_host = "www.google.com"
+action_upstream = "local_service"
+
+# 也可以配置HTTP服务
+[client_groups.group-a.upstreams.http_service]
+servers = [
+    { address = "http://127.0.0.1:8080", resolve = false }
+]
+lb_policy = "round_robin"
+
+[[client_groups.group-a.rules.http]]
+match_host = "localhost"
+action_upstream = "http_service"
+
+[client_groups.group-b]
+config_version = "v1.0.0"
+
+[client_groups.group-b.upstreams.local_service]
+servers = [
+    { address = "127.0.0.1:9100", resolve = false }
+]
+lb_policy = "round_robin"
+
+[[client_groups.group-b.rules.http]]
+match_host = "b.com"
+action_upstream = "local_service" 
