@@ -13,7 +13,7 @@ use tokio::sync::{oneshot, mpsc};
 use uuid::Uuid;
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, info_span, Instrument};
 
 // Global round-robin index for each upstream
 lazy_static! {
@@ -54,14 +54,16 @@ pub struct ProxyHandler {
     client_registry: Arc<ClientRegistry>,
     pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
     connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
+    pub trace_enabled: bool,
 }
 
 impl ProxyHandler {
-    pub fn new() -> Self {
+    pub fn new(trace_enabled: bool) -> Self {
         Self {
             client_registry: Arc::new(ClientRegistry::new()),
             pending_reverse_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             connected_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            trace_enabled,
         }
     }
 
@@ -69,11 +71,13 @@ impl ProxyHandler {
         client_registry: Arc<ClientRegistry>,
         pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
         connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
+        trace_enabled: bool,
     ) -> Self {
         Self {
             client_registry,
             pending_reverse_requests,
             connected_clients,
+            trace_enabled,
         }
     }
 
@@ -136,112 +140,199 @@ impl ProxyHandler {
         req: HyperRequest<Body>,
         target_group: &str,
     ) -> Result<HyperResponse<Body>, hyper::Error> {
-        debug!("Starting tunnel forward for group: {}", target_group);
-        
-        // 1. 选择 group 下的健康 client
-        let target_client = match self.client_registry.select_client_in_group(target_group) {
-            Some(client) => {
-                debug!("Selected client: {} for group: {}", client, target_group);
-                client
-            },
-            None => {
-                error!("No healthy clients found in group: {}", target_group);
-                return Ok(HyperResponse::builder()
-                    .status(502)
-                    .body(Body::from("No healthy clients in group"))
-                    .unwrap());
-            }
-        };
-
-        // 2. 等待客户端连接（最多等待5秒）
-        let mut attempts = 0;
-        let max_attempts = 10; // 10 attempts * 500ms = 5 seconds
-        
-        let client_tx = loop {
-            if let Some(tx) = self.connected_clients.lock().await.get(&target_client) {
-                break tx.clone();
-            }
-            
-            attempts += 1;
-            if attempts >= max_attempts {
-                error!("Client {} not connected after {} attempts", target_client, max_attempts);
-                return Ok(HyperResponse::builder()
-                    .status(502)
-                    .body(Body::from("Client not connected"))
-                    .unwrap());
-            }
-            
-            debug!("Waiting for client {} connection, attempt {}/{}", target_client, attempts, max_attempts);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        };
-
-        // 2. 转换 HTTP 请求为 tunnel 消息
         let (parts, body) = req.into_parts();
-        let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
-        
-        let request_id = Uuid::new_v4().to_string();
-        let tunnel_request = HttpRequest {
-            method: parts.method.to_string(),
-            url: parts.uri.to_string(),
-            host: parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost").to_string(),
-            path: parts.uri.path().to_string(),
-            query: parts.uri.query().unwrap_or("").to_string(),
-            headers: parts.headers.iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect(),
-            body: body_bytes.to_vec(),
-            original_dst: "".to_string(),
+        let host = parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost");
+        let path = parts.uri.path();
+        let trace_id = parts.headers
+            .get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let span = if self.trace_enabled {
+            Some(info_span!(
+                "forward_via_tunnel",
+                trace_id = %trace_id,
+                host = ?host,
+                path = ?path,
+                group = target_group
+            ))
+        } else {
+            None
         };
-
-        let tunnel_msg = TunnelMessage {
-            client_id: target_client.clone(),
-            request_id: request_id.clone(),
-            direction: Direction::ServerToClient as i32,
-            payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpRequest(tunnel_request)),
-        };
-
-        // 3. 设置响应等待
-        let (tx, rx) = oneshot::channel();
-        self.pending_reverse_requests.lock().await.insert(request_id.clone(), tx);
-
-        // 4. 发送 tunnel 消息
-        if let Err(e) = client_tx.send(tunnel_msg).await {
-            error!("Failed to send tunnel message to client {}: {}", target_client, e);
-            self.pending_reverse_requests.lock().await.remove(&request_id);
-            return Ok(HyperResponse::builder()
-                .status(502)
-                .body(Body::from("Failed to send tunnel message"))
-                .unwrap());
-        }
-
-        // 5. 等待响应（30秒超时）
-        match timeout(Duration::from_secs(30), rx).await {
-            Ok(Ok(http_resp)) => {
-                let mut response_builder = HyperResponse::builder().status(http_resp.status_code as u16);
-                
-                // 设置响应头
-                for (key, value) in http_resp.headers {
-                    response_builder = response_builder.header(key, value);
+        let fut = async {
+            let (target_client, healthy_clients, all_clients) = {
+                let healthy_clients = self.client_registry.get_clients_in_group(target_group);
+                let all_clients = self.client_registry.get_all_clients();
+                let target_client = healthy_clients.get(0).cloned();
+                (target_client, healthy_clients, all_clients)
+            };
+            match target_client {
+                Some(client) => {
+                    tracing::info!(
+                        event = "access",
+                        trace_id = %trace_id,
+                        host = %host,
+                        path = %path,
+                        group = %target_group,
+                        selected_client = %client,
+                        healthy_clients = ?healthy_clients,
+                        all_clients = ?all_clients,
+                        message = "access log"
+                    );
+                    let target_client = client;
+                    let mut attempts = 0;
+                    let max_attempts = 10;
+                    let client_tx = loop {
+                        if let Some(tx) = self.connected_clients.lock().await.get(&target_client) {
+                            break tx.clone();
+                        }
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            if self.trace_enabled {
+                                tracing::error!(
+                                    event = "select_client_error",
+                                    trace_id = %trace_id,
+                                    host = %host,
+                                    path = %path,
+                                    group = %target_group,
+                                    selected_client = %target_client,
+                                    message = "Client not connected after max attempts"
+                                );
+                            }
+                            return Ok(HyperResponse::builder()
+                                .status(502)
+                                .body(Body::from("Client not connected"))
+                                .unwrap());
+                        }
+                        if self.trace_enabled {
+                            tracing::debug!(
+                                event = "select_client_wait",
+                                trace_id = %trace_id,
+                                host = %host,
+                                path = %path,
+                                group = %target_group,
+                                selected_client = %target_client,
+                                attempt = attempts,
+                                message = "Waiting for client connection"
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    };
+                    let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
+                    let request_id = Uuid::new_v4().to_string();
+                    let tunnel_request = HttpRequest {
+                        method: parts.method.to_string(),
+                        url: parts.uri.to_string(),
+                        host: parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost").to_string(),
+                        path: parts.uri.path().to_string(),
+                        query: parts.uri.query().unwrap_or("").to_string(),
+                        headers: parts.headers.iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect(),
+                        body: body_bytes.to_vec(),
+                        original_dst: "".to_string(),
+                    };
+                    let tunnel_msg = TunnelMessage {
+                        client_id: target_client.clone(),
+                        request_id: request_id.clone(),
+                        direction: Direction::ServerToClient as i32,
+                        payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpRequest(tunnel_request)),
+                        trace_id: trace_id.clone(),
+                    };
+                    let (tx, rx) = oneshot::channel();
+                    self.pending_reverse_requests.lock().await.insert(request_id.clone(), tx);
+                    if let Err(e) = client_tx.send(tunnel_msg).await {
+                        if self.trace_enabled {
+                            tracing::error!(
+                                event = "tunnel_send_error",
+                                trace_id = %trace_id,
+                                host = %host,
+                                path = %path,
+                                group = %target_group,
+                                selected_client = %target_client,
+                                error = %e,
+                                message = "Failed to send tunnel message to client"
+                            );
+                        }
+                        self.pending_reverse_requests.lock().await.remove(&request_id);
+                        return Ok(HyperResponse::builder()
+                            .status(502)
+                            .body(Body::from("Failed to send tunnel message"))
+                            .unwrap());
+                    }
+                    match timeout(Duration::from_secs(30), rx).await {
+                        Ok(Ok(http_resp)) => {
+                            if self.trace_enabled {
+                                tracing::info!(
+                                    event = "server_received_tunnel_response",
+                                    trace_id = %trace_id,
+                                    request_id = %request_id,
+                                    host = %host,
+                                    path = %path,
+                                    group = %target_group,
+                                    selected_client = %target_client,
+                                    status_code = http_resp.status_code,
+                                    message = "server received tunnel response from client"
+                                );
+                            }
+                            let mut response_builder = HyperResponse::builder().status(http_resp.status_code as u16);
+                            for (key, value) in http_resp.headers {
+                                response_builder = response_builder.header(key, value);
+                            }
+                            Ok(response_builder.body(Body::from(http_resp.body)).unwrap())
+                        }
+                        Ok(Err(_)) => {
+                            tracing::error!(
+                                event = "tunnel_response_channel_closed",
+                                trace_id = %trace_id,
+                                host = %host,
+                                path = %path,
+                                group = %target_group,
+                                selected_client = %target_client,
+                                message = "Tunnel response channel closed"
+                            );
+                            Ok(HyperResponse::builder()
+                                .status(502)
+                                .body(Body::from("Tunnel response failed"))
+                                .unwrap())
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                event = "tunnel_request_timeout",
+                                trace_id = %trace_id,
+                                host = %host,
+                                path = %path,
+                                group = %target_group,
+                                selected_client = %target_client,
+                                message = "Tunnel request timeout"
+                            );
+                            self.pending_reverse_requests.lock().await.remove(&request_id);
+                            Ok(HyperResponse::builder()
+                                .status(504)
+                                .body(Body::from("Tunnel request timeout"))
+                                .unwrap())
+                        }
+                    }
+                },
+                None => {
+                    if self.trace_enabled {
+                        tracing::error!(
+                            event = "select_client_error",
+                            trace_id = %trace_id,
+                            host = %host,
+                            path = %path,
+                            group = %target_group,
+                            message = "No healthy clients found in group"
+                        );
+                    }
+                    return Ok(HyperResponse::builder()
+                        .status(502)
+                        .body(Body::from("No healthy clients in group"))
+                        .unwrap());
                 }
-                
-                Ok(response_builder.body(Body::from(http_resp.body)).unwrap())
             }
-            Ok(Err(_)) => {
-                println!("Tunnel response channel closed");
-                Ok(HyperResponse::builder()
-                    .status(502)
-                    .body(Body::from("Tunnel response failed"))
-                    .unwrap())
-            }
-            Err(_) => {
-                println!("Tunnel request timeout");
-                self.pending_reverse_requests.lock().await.remove(&request_id);
-                Ok(HyperResponse::builder()
-                    .status(504)
-                    .body(Body::from("Tunnel request timeout"))
-                    .unwrap())
-            }
-        }
+        };
+        if let Some(span) = span { fut.instrument(span).await } else { fut.await }
     }
 }
 

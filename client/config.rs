@@ -12,6 +12,7 @@ pub struct ClientConfig {
     pub grpc_entry_port: Option<u16>,
     pub upstreams: Option<HashMap<String, Upstream>>,
     pub log_level: String,
+    pub trace_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

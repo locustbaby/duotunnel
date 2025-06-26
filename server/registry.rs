@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use tunnel_lib::tunnel::{TunnelMessage, HttpResponse, HttpRequest};
 use tracing;
+use function_name::named;
 
 #[derive(Clone, Debug)]
 pub struct ClientInfo {
@@ -24,30 +25,34 @@ impl ClientRegistry {
     }
 
     /// 注册 client 到指定 group
+    #[named]
     pub fn register_client(&self, client_id: &str, group: &str) -> bool {
         let mut clients = self.clients.lock().unwrap();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        tracing::info!("[register_client] BEFORE: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
+        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
+        let existed = clients.contains_key(client_id);
         clients.insert(client_id.to_string(), ClientInfo {
             group: group.to_string(),
-            last_heartbeat: now,
+            last_heartbeat: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         });
-        tracing::info!("[register_client] AFTER: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        tracing::info!("Registered client {} to group {}", client_id, group);
+        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
+        tracing::info!(target: module_path!(), "[{}] {}: client_id={}, group={}, existed={}, before={:?}, after={:?}", function_name!(), "register_client", client_id, group, existed, before, after);
         true
     }
 
     /// 更新 client 心跳时间
     pub fn update_heartbeat(&self, client_id: &str) {
         let mut clients = self.clients.lock().unwrap();
-        tracing::info!("[update_heartbeat] BEFORE: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
+        let before = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect::<Vec<_>>();
         if let Some(client_info) = clients.get_mut(client_id) {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let old_group = client_info.group.clone();
             client_info.last_heartbeat = now;
-            tracing::debug!("Updated heartbeat for client {}", client_id);
+            let after_group = client_info.group.clone();
+            if old_group != after_group {
+                tracing::info!("[update_heartbeat] client {} group changed: from {} to {}", client_id, old_group, after_group);
+            }
         }
-        tracing::info!("[update_heartbeat] AFTER: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        tracing::debug!("All clients after heartbeat: {:?}", *clients);
+        // 不再打印BEFORE/AFTER，只有变化时才打印
     }
 
     /// 获取指定 group 下的所有健康 client
@@ -92,24 +97,34 @@ impl ClientRegistry {
     }
 
     /// 清理不健康的 client
+    #[named]
     pub fn cleanup_unhealthy_clients(&self) {
         let mut clients = self.clients.lock().unwrap();
+        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        tracing::info!("[cleanup_unhealthy_clients] BEFORE: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        clients.retain(|client_id, info| {
+        let mut removed = Vec::new();
+        let mut retain_vec = Vec::new();
+        for (client_id, info) in clients.iter() {
             let healthy = self.is_client_healthy_internal(info.last_heartbeat, now);
-            if !healthy {
-                tracing::info!("Removing unhealthy client: {}", client_id);
+            if healthy {
+                retain_vec.push((client_id.clone(), info.clone()));
+            } else {
+                removed.push(client_id.clone());
             }
-            healthy
-        });
-        tracing::info!("[cleanup_unhealthy_clients] AFTER: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        tracing::info!("All clients after cleanup: {:?}", *clients);
+        }
+        clients.clear();
+        for (id, info) in retain_vec {
+            clients.insert(id, info);
+        }
+        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
+        tracing::info!(target: module_path!(), "[{}] {}: removed_clients={:?}, before={:?}, after={:?}", function_name!(), "cleanup_unhealthy_clients", removed, before, after);
+        tracing::info!(target: module_path!(), "[{}] All clients after cleanup: {:?}", function_name!(), *clients);
     }
 
-    /// 获取所有 client 状态（用于调试）
-    pub fn get_all_clients(&self) -> HashMap<String, ClientInfo> {
-        self.clients.lock().unwrap().clone()
+    /// 获取所有 client (id, group) 列表
+    pub fn get_all_clients(&self) -> Vec<(String, String)> {
+        let clients = self.clients.lock().unwrap();
+        clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect()
     }
 
     /// 发送消息到指定 client
@@ -145,12 +160,15 @@ impl ClientRegistry {
             .next()
     }
 
+    #[named]
     pub fn remove_client(&self, client_id: &str) {
         let mut clients = self.clients.lock().unwrap();
-        tracing::info!("[remove_client] BEFORE: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
+        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
+        let existed = clients.contains_key(client_id);
         clients.remove(client_id);
-        tracing::info!("[remove_client] AFTER: {:?}", clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        tracing::info!("Removed client {}", client_id);
-        tracing::info!("All clients after remove: {:?}", *clients);
+        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
+        tracing::info!(target: module_path!(), "[{}] {}: client_id={}, existed={}, before={:?}, after={:?}", function_name!(), "remove_client", client_id, existed, before, after);
+        tracing::info!(target: module_path!(), "[{}] Removed client {}", function_name!(), client_id);
+        tracing::info!(target: module_path!(), "[{}] All clients after remove: {:?}", function_name!(), *clients);
     }
 } 

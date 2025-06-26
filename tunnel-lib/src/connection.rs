@@ -36,6 +36,7 @@ impl ConnectionManager {
                     payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
                         timestamp: chrono::Utc::now().timestamp(),
                     })),
+                    trace_id: String::new(),
                 };
                 
                 if tx.send(heartbeat).await.is_err() {

@@ -58,7 +58,48 @@ impl Default for MyTunnelServer {
 
 #[tonic::async_trait]
 impl TunnelService for MyTunnelServer {
+    type ControlStreamStream = tokio_stream::wrappers::ReceiverStream<Result<TunnelMessage, Status>>;
     type ProxyStream = tokio_stream::wrappers::ReceiverStream<Result<TunnelMessage, Status>>;
+
+    async fn control_stream(
+        &self,
+        request: Request<tonic::Streaming<TunnelMessage>>,
+    ) -> Result<Response<Self::ControlStreamStream>, Status> {
+        let mut stream = request.into_inner();
+        let (tx, rx) = mpsc::channel(32);
+        let client_registry = self.client_registry.clone();
+        let rules_engine = self.rules_engine.clone();
+        // 这里只处理注册、心跳、配置同步等控制消息
+        tokio::spawn(async move {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(tunnel_msg) => {
+                        match tunnel_msg.payload {
+                            Some(tunnel_lib::tunnel::tunnel_message::Payload::ConnectRequest(connect_req)) => {
+                                client_registry.register_client(&connect_req.client_id, "default-group");
+                                // 可选：返回注册结果
+                            }
+                            Some(tunnel_lib::tunnel::tunnel_message::Payload::Heartbeat(_)) => {
+                                client_registry.update_heartbeat(&tunnel_msg.client_id);
+                            }
+                            Some(tunnel_lib::tunnel::tunnel_message::Payload::ConfigSync(config_req)) => {
+                                // 配置同步逻辑
+                                let (rules, upstreams) = if let Some(group) = rules_engine.get_group(&config_req.group) {
+                                    (group.rules.http.clone(), group.upstreams.clone())
+                                } else {
+                                    (Vec::new(), std::collections::HashMap::new())
+                                };
+                                // ...组装 ConfigSyncResponse 并通过 tx 发送回 client
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
 
     async fn proxy(
         &self,
@@ -80,14 +121,12 @@ impl TunnelService for MyTunnelServer {
                 match message {
                     Ok(msg) => {
                         client_id = msg.client_id.clone();
-                        info!("Received message from client {}: {:?}", client_id, msg.payload.is_some());
                         
                         // 存储客户端连接（只在第一次收到消息时）
                         if client_tx.is_none() {
                             let (ctx, crx) = mpsc::channel(128);
                             client_tx = Some(ctx.clone());
                             connected_clients.lock().await.insert(client_id.clone(), ctx);
-                            info!("Stored client connection for: {}", client_id);
                             
                             // 启动客户端消息分发器
                             let tx_clone = tx.clone();
@@ -104,77 +143,67 @@ impl TunnelService for MyTunnelServer {
                         // 处理消息
                         match msg.payload {
                             Some(tunnel_message::Payload::HttpResponse(resp)) => {
-                                info!("Received HttpResponse from client {} for request {}", client_id, msg.request_id);
                                 if let Some(sender) = pending_reverse_requests.lock().await.remove(&msg.request_id) {
                                     let _ = sender.send(resp);
-                                    info!("Sent HttpResponse to pending request {}", msg.request_id);
-                                } else {
-                                    error!("No pending request found for HttpResponse {}", msg.request_id);
                                 }
                             }
                             Some(tunnel_message::Payload::ConfigSync(config_req)) => {
                                 // 处理通过tunnel的配置同步请求
-                                info!("Client {} syncing config for group {} via tunnel", config_req.client_id, config_req.group);
-                                
-                                // 获取该 group 的配置
-                                let (rules, upstreams) = if let Some(group) = rules_engine.get_group(&config_req.group) {
-                                    (group.rules.http.clone(), group.upstreams.clone())
-                                } else {
-                                    (Vec::new(), std::collections::HashMap::new())
-                                };
-                                
-                                // 转换为 proto 格式
-                                let proto_rules: Vec<ProtoRule> = rules.into_iter().map(|r| ProtoRule {
-                                    rule_id: String::new(),
-                                    r#type: String::new(),
-                                    match_host: r.match_host.unwrap_or_default(),
-                                    match_path_prefix: r.match_path_prefix.unwrap_or_default(),
-                                    match_service: r.match_service.unwrap_or_default(),
-                                    match_header: std::collections::HashMap::new(),
-                                    action_proxy_pass: String::new(),
-                                    action_set_host: String::new(),
-                                    action_upstream: r.action_upstream.unwrap_or_default(),
-                                    action_ssl: false,
-                                }).collect();
-                                
-                                let proto_upstreams: Vec<Upstream> = upstreams.into_iter().map(|(name, u)| Upstream {
-                                    name,
-                                    servers: u.servers.into_iter().map(|s| UpstreamServer {
-                                        address: s.address,
-                                        resolve: s.resolve,
-                                    }).collect(),
-                                    lb_policy: u.lb_policy.unwrap_or_else(|| "round_robin".to_string()),
-                                }).collect();
-                                
-                                let config_response = ConfigSyncResponse {
-                                    config_version: "v1.0.0".to_string(),
-                                    rules: proto_rules,
-                                    upstreams: proto_upstreams,
-                                };
-                                
-                                // 发送配置同步响应
-                                let response_msg = TunnelMessage {
-                                    client_id: msg.client_id.clone(),
-                                    request_id: msg.request_id,
-                                    direction: Direction::ServerToClient as i32,
-                                    payload: Some(tunnel_message::Payload::ConfigSyncResponse(config_response)),
-                                };
-                                
-                                if let Some(tx) = client_tx.as_ref() {
-                                    if let Err(e) = tx.send(response_msg).await {
-                                        error!("Failed to send config sync response: {}", e);
+                                if let Some(group) = rules_engine.get_group(&config_req.group) {
+                                    // 获取该 group 的配置
+                                    let (rules, upstreams) = (group.rules.http.clone(), group.upstreams.clone());
+                                    
+                                    // 转换为 proto 格式
+                                    let proto_rules: Vec<ProtoRule> = rules.into_iter().map(|r| ProtoRule {
+                                        rule_id: String::new(),
+                                        r#type: String::new(),
+                                        match_host: r.match_host.unwrap_or_default(),
+                                        match_path_prefix: r.match_path_prefix.unwrap_or_default(),
+                                        match_service: r.match_service.unwrap_or_default(),
+                                        match_header: std::collections::HashMap::new(),
+                                        action_proxy_pass: String::new(),
+                                        action_set_host: String::new(),
+                                        action_upstream: r.action_upstream.unwrap_or_default(),
+                                        action_ssl: false,
+                                    }).collect();
+                                    
+                                    let proto_upstreams: Vec<Upstream> = upstreams.into_iter().map(|(name, u)| Upstream {
+                                        name,
+                                        servers: u.servers.into_iter().map(|s| UpstreamServer {
+                                            address: s.address,
+                                            resolve: s.resolve,
+                                        }).collect(),
+                                        lb_policy: u.lb_policy.unwrap_or_else(|| "round_robin".to_string()),
+                                    }).collect();
+                                    
+                                    let config_response = ConfigSyncResponse {
+                                        config_version: "v1.0.0".to_string(),
+                                        rules: proto_rules,
+                                        upstreams: proto_upstreams,
+                                    };
+                                    
+                                    // 发送配置同步响应
+                                    let response_msg = TunnelMessage {
+                                        client_id: msg.client_id.clone(),
+                                        request_id: msg.request_id,
+                                        direction: Direction::ServerToClient as i32,
+                                        payload: Some(tunnel_message::Payload::ConfigSyncResponse(config_response)),
+                                        trace_id: String::new(),
+                                    };
+                                    
+                                    if let Some(tx) = client_tx.as_ref() {
+                                        if let Err(e) = tx.send(response_msg).await {
+                                            error!("Failed to send config sync response: {}", e);
+                                        }
                                     }
                                 }
                             }
                             Some(tunnel_message::Payload::Heartbeat(_)) => {
-                                info!("Heartbeat from client {}", client_id);
                                 client_registry.update_heartbeat(&client_id);
                             }
                             Some(payload) => {
-                                info!("Unhandled message type from client {}: {:?}", client_id, std::mem::discriminant(&payload));
                             }
                             None => {
-                                info!("Received message with no payload from client {}", client_id);
                             }
                         }
                     }
@@ -189,7 +218,6 @@ impl TunnelService for MyTunnelServer {
             if !client_id.is_empty() {
                 connected_clients.lock().await.remove(&client_id);
                 client_registry.remove_client(&client_id);
-                info!("Client {} disconnected", client_id);
             }
         });
         
@@ -498,6 +526,7 @@ async fn main() -> anyhow::Result<()> {
         client_registry.clone(),
         pending_reverse_requests.clone(),
         connected_clients.clone(),
+        config.server.trace_enabled.unwrap_or(true),
     ));
 
     // HTTP 入口监听

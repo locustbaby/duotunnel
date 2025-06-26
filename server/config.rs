@@ -17,6 +17,7 @@ pub struct ServerSection {
     pub http_entry_port: u16,
     pub grpc_entry_port: u16,
     pub log_level: String,
+    pub trace_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -3,6 +3,7 @@ syntax = "proto3";
 package tunnel;
 
 service TunnelService {
+  rpc ControlStream(stream TunnelMessage) returns (stream TunnelMessage);
   rpc Proxy(stream TunnelMessage) returns (stream TunnelMessage);
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc ConfigSync(ConfigSyncRequest) returns (ConfigSyncResponse);
@@ -25,6 +26,7 @@ message TunnelMessage {
     ConfigSyncRequest config_sync = 12;
     ConfigSyncResponse config_sync_response = 13;
   }
+  string trace_id = 14;
 }
 
 enum Direction {
