@@ -18,6 +18,7 @@ use tracing_subscriber;
 use chrono;
 use tracing::Instrument;
 use hyper_tls::HttpsConnector;
+use hyper::client::HttpConnector;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -90,11 +91,16 @@ struct TunnelClient {
     pending_requests: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
     rules_engine: Arc<Mutex<ClientRulesEngine>>,
     trace_enabled: bool,
+    http_client: hyper::Client<HttpConnector>,
+    https_client: hyper::Client<HttpsConnector<HttpConnector>>,
 }
 
 impl TunnelClient {
     fn new(client_id: String, group_id: String, server_addr: String, trace_enabled: bool) -> (Self, mpsc::Receiver<TunnelMessage>) {
         let (tx, rx) = mpsc::channel(128);
+        let http_client = hyper::Client::new();
+        let https_connector = HttpsConnector::new();
+        let https_client = hyper::Client::builder().build::<_, hyper::Body>(https_connector);
         let client = Self {
             client_id,
             group_id,
@@ -105,6 +111,8 @@ impl TunnelClient {
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             rules_engine: Arc::new(Mutex::new(ClientRulesEngine::new())),
             trace_enabled,
+            http_client,
+            https_client,
         };
         (client, rx)
     }
@@ -359,8 +367,7 @@ impl TunnelClient {
     }
 
     async fn forward_to_backend_http(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
-        use hyper::Client;
-        let client = Client::new();
+        let client = &self.http_client;
         let method = match req.method.parse::<Method>() {
             Ok(m) => m,
             Err(_) => return HttpResponse {
@@ -442,9 +449,7 @@ impl TunnelClient {
     }
 
     async fn forward_to_backend_https(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
-        use hyper::Client;
-        let https = HttpsConnector::new();
-        let client = Client::builder().build::<_, hyper::Body>(https);
+        let client = &self.https_client;
         let method = match req.method.parse::<Method>() {
             Ok(m) => m,
             Err(_) => return HttpResponse {
