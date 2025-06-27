@@ -1,139 +1,106 @@
 use crate::tunnel::*;
-use hyper::{Client as HyperClient, Request as HyperRequest, Body, Method};
+use hyper::{Request as HyperRequest, Body};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
+use std::sync::Mutex;
+use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::time::timeout;
+use uuid::Uuid;
 
-#[derive(Clone)]
-pub struct ProxyHandler {
-    http_client: HyperClient<hyper::client::HttpConnector>,
-    // 可扩展：grpc_client, upstream_pool, etc.
-}
-
-impl ProxyHandler {
-    pub fn new() -> Self {
-        Self {
-            http_client: HyperClient::new(),
-        }
+/// 通用 tunnel 代理转发逻辑，client/server 入口 handler 可复用
+pub async fn forward_via_tunnel(
+    req: HyperRequest<Body>,
+    client_id: &str,
+    tunnel_tx: &mpsc::Sender<TunnelMessage>,
+    pending_requests: &Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>,
+    request_id: String,
+    direction: Direction,
+) -> Result<hyper::Response<Body>, hyper::Error> {
+    let (parts, body) = req.into_parts();
+    let host = parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+    let path = parts.uri.path();
+    let trace_id = parts.headers
+        .get("x-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
+    let http_req = HttpRequest {
+        method: parts.method.to_string(),
+        url: parts.uri.to_string(),
+        host: host.to_string(),
+        path: path.to_string(),
+        query: parts.uri.query().unwrap_or("").to_string(),
+        headers: parts.headers.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
+        body: body_bytes.to_vec(),
+        original_dst: "".to_string(),
+    };
+    let tunnel_msg = TunnelMessage {
+        client_id: client_id.to_string(),
+        request_id: request_id.clone(),
+        direction: direction as i32,
+        payload: Some(crate::tunnel::tunnel_message::Payload::HttpRequest(http_req)),
+        trace_id: trace_id.clone(),
+    };
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut pending = pending_requests.lock().unwrap();
+        pending.insert(request_id.clone(), tx);
     }
-
-    /// 通用 HTTP 反代，支持 header 注入、upstream 负载均衡
-    pub async fn handle_http_request(&self, req: HttpRequest, extra_headers: Option<HashMap<String, String>>) -> HttpResponse {
-        let method = match req.method.parse::<Method>() {
-            Ok(m) => m,
-            Err(_) => return self.error_response(400, "Invalid method"),
-        };
-        let mut builder = HyperRequest::builder()
-            .method(method)
-            .uri(&req.url);
-        for (k, v) in req.headers.iter() {
-            builder = builder.header(k, v);
-        }
-        if let Some(extra) = extra_headers {
-            for (k, v) in extra.iter() {
+    if let Err(e) = tunnel_tx.send(tunnel_msg).await {
+        let mut pending = pending_requests.lock().unwrap();
+        pending.remove(&request_id);
+        return Ok(hyper::Response::builder().status(502).body(Body::from(format!("Tunnel send error: {}", e))).unwrap());
+    }
+    match timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(resp)) => {
+            let mut builder = hyper::Response::builder().status(resp.status_code as u16);
+            for (k, v) in resp.headers {
                 builder = builder.header(k, v);
             }
+            Ok(builder.body(Body::from(resp.body)).unwrap())
         }
-        let hyper_req = match builder.body(Body::from(req.body)) {
-            Ok(req) => req,
-            Err(_) => return self.error_response(400, "Invalid request"),
-        };
-        match self.http_client.request(hyper_req).await {
-            Ok(resp) => {
-                let status = resp.status().as_u16() as i32;
-                let headers: HashMap<String, String> = resp
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
-                let body_bytes = match hyper::body::to_bytes(resp.into_body()).await {
-                    Ok(bytes) => bytes.to_vec(),
-                    Err(_) => b"Failed to read response body".to_vec(),
-                };
-                HttpResponse {
-                    status_code: status,
-                    headers,
-                    body: body_bytes,
-                }
-            }
-            Err(e) => {
-                eprintln!("HTTP request failed: {}", e);
-                self.error_response(500, "Request failed")
-            }
+        Ok(Err(_)) => {
+            Ok(hyper::Response::builder().status(502).body(Body::from("Tunnel response failed")).unwrap())
         }
-    }
-
-    /// 预留 gRPC 反代接口
-    pub async fn handle_grpc_request(&self, _req: GrpcRequest) -> GrpcResponse {
-        // TODO: 实现 gRPC 反代
-        GrpcResponse {
-            status_code: 501,
-            headers: HashMap::new(),
-            body: b"gRPC proxy not implemented".to_vec(),
-        }
-    }
-
-    fn error_response(&self, status: u16, message: &str) -> HttpResponse {
-        HttpResponse {
-            status_code: status as i32,
-            headers: HashMap::new(),
-            body: message.as_bytes().to_vec(),
+        Err(_) => {
+            let mut pending = pending_requests.lock().unwrap();
+            pending.remove(&request_id);
+            Ok(hyper::Response::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
         }
     }
 }
 
-pub struct RequestTracker {
-    pending: std::sync::Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<TunnelMessage>>>>,
-}
-
-impl RequestTracker {
-    pub fn new() -> Self {
-        Self {
-            pending: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn track_request(&self, request_id: String, sender: oneshot::Sender<TunnelMessage>) {
-        self.pending.lock().unwrap().insert(request_id, sender);
-    }
-
-    pub fn complete_request(&self, request_id: &str, response: TunnelMessage) -> bool {
-        if let Some(sender) = self.pending.lock().unwrap().remove(request_id) {
-            sender.send(response).is_ok()
-        } else {
-            false
-        }
-    }
-
-    pub fn get_pending_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+/// 辅助函数：从 HyperRequest parts 和 body 构建 HttpRequest
+pub fn build_http_request_from_parts(req: &hyper::Request<hyper::Body>, body: Vec<u8>) -> crate::tunnel::HttpRequest {
+    let parts = req;
+    let host = parts.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+    crate::tunnel::HttpRequest {
+        method: parts.method().to_string(),
+        url: parts.uri().to_string(),
+        host: host.to_string(),
+        path: parts.uri().path().to_string(),
+        query: parts.uri().query().unwrap_or("").to_string(),
+        headers: parts.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
+        body,
+        original_dst: "".to_string(),
     }
 }
 
-/// HTTP 入口服务启动函数
-pub async fn start_http_entry(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-    use hyper::{Server, service::{make_service_fn, service_fn}};
-    use hyper::{Body, Request, Response};
-    
-    let make_svc = make_service_fn(|_conn| async {
-        Ok::<_, hyper::Error>(service_fn(|_req: Request<Body>| async {
-            Ok::<_, hyper::Error>(Response::new(Body::from("HTTP Entry Point")))
-        }))
-    });
-
-    let server = Server::bind(&addr).serve(make_svc);
-    println!("HTTP entry listening on {}", addr);
-    
-    if let Err(e) = server.await {
-        eprintln!("HTTP server error: {}", e);
+/// 辅助函数：构建 TunnelMessage
+pub fn build_tunnel_message(
+    client_id: &str,
+    request_id: &str,
+    direction: crate::tunnel::Direction,
+    http_req: crate::tunnel::HttpRequest,
+    trace_id: &str,
+) -> crate::tunnel::TunnelMessage {
+    crate::tunnel::TunnelMessage {
+        client_id: client_id.to_string(),
+        request_id: request_id.to_string(),
+        direction: direction as i32,
+        payload: Some(crate::tunnel::tunnel_message::Payload::HttpRequest(http_req)),
+        trace_id: trace_id.to_string(),
     }
-    
-    Ok(())
-}
-
-/// gRPC 入口服务启动函数
-pub async fn start_grpc_entry(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-    println!("gRPC entry listening on {}", addr);
-    // TODO: 实现实际的 gRPC 服务
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    Ok(())
 } 

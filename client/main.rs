@@ -1,6 +1,5 @@
 use tunnel_lib::tunnel::tunnel_service_client::TunnelServiceClient;
 use tunnel_lib::tunnel::*;
-use tunnel_lib::proxy::{ProxyHandler, RequestTracker};
 use tonic::Request;
 use tokio_stream::StreamExt;
 use tokio::sync::{mpsc, oneshot};
@@ -85,8 +84,6 @@ struct TunnelClient {
     client_id: String,
     group_id: String,
     server_addr: String,
-    proxy_handler: ProxyHandler,
-    request_tracker: RequestTracker,
     tx: mpsc::Sender<TunnelMessage>,
     pending_requests: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
     rules_engine: Arc<Mutex<ClientRulesEngine>>,
@@ -105,8 +102,6 @@ impl TunnelClient {
             client_id,
             group_id,
             server_addr,
-            proxy_handler: ProxyHandler::new(),
-            request_tracker: RequestTracker::new(),
             tx,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             rules_engine: Arc::new(Mutex::new(ClientRulesEngine::new())),
@@ -651,52 +646,29 @@ async fn main() -> anyhow::Result<()> {
                     let pending_requests = pending_requests.clone();
                     let client_id = client_id.clone();
                     async move {
-                        // 1. 封装为 TunnelMessage
-                        let (parts, body) = req.into_parts();
-                        let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
+                        // 1. 生成 request_id
                         let request_id = Uuid::new_v4().to_string();
-                        let http_req = tunnel_lib::tunnel::HttpRequest {
-                            method: parts.method.to_string(),
-                            url: parts.uri.to_string(),
-                            host: parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string(),
-                            path: parts.uri.path().to_string(),
-                            query: parts.uri.query().unwrap_or("").to_string(),
-                            headers: parts.headers.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
-                            body: body_bytes.to_vec(),
-                            original_dst: "".to_string(),
-                        };
-                        let tunnel_msg = tunnel_lib::tunnel::TunnelMessage {
-                            client_id: client_id.clone(),
-                            request_id: request_id.clone(),
-                            direction: tunnel_lib::tunnel::Direction::ClientToServer as i32,
-                            payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpRequest(http_req)),
-                            trace_id: String::new(),
-                        };
-                        // 2. 注册 oneshot
-                        let (tx, rx) = oneshot::channel();
-                        pending_requests.lock().unwrap().insert(request_id.clone(), tx);
-                        // 3. 发送到 server
-                        if let Err(e) = tunnel_tx.send(tunnel_msg).await {
-                            pending_requests.lock().unwrap().remove(&request_id);
-                            return Ok::<_, hyper::Error>(HyperResponse::builder().status(502).body(Body::from(format!("Tunnel send error: {}", e))).unwrap());
-                        }
-                        // 4. 等待响应
-                        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-                            Ok(Ok(resp)) => {
-                                let mut builder = HyperResponse::builder().status(resp.status_code as u16);
-                                for (k, v) in resp.headers {
-                                    builder = builder.header(k, v);
-                                }
-                                Ok::<_, hyper::Error>(builder.body(Body::from(resp.body)).unwrap())
-                            }
-                            Ok(Err(_)) => {
-                                Ok::<_, hyper::Error>(HyperResponse::builder().status(502).body(Body::from("Tunnel response failed")).unwrap())
-                            }
-                            Err(_) => {
-                                pending_requests.lock().unwrap().remove(&request_id);
-                                Ok::<_, hyper::Error>(HyperResponse::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
-                            }
-                        }
+                        // 2. 记录 access log
+                        let method = req.method().to_string();
+                        let path = req.uri().path().to_string();
+                        let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+                        tracing::info!(
+                            event = "client_http_entry",
+                            method = %method,
+                            path = %path,
+                            host = %host,
+                            request_id = %request_id,
+                            message = "Received HTTP request at client entry"
+                        );
+                        // 3. 调用 forward_via_tunnel 统一处理
+                        tunnel_lib::proxy::forward_via_tunnel(
+                            req,
+                            &client_id,
+                            &tunnel_tx,
+                            &pending_requests,
+                            request_id.clone(),
+                            tunnel_lib::tunnel::Direction::ClientToServer,
+                        ).await
                     }
                 }))
             }
