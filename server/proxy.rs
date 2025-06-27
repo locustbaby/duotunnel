@@ -346,56 +346,20 @@ pub async fn handle_http_request(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
     let path = req.uri().path();
-    let headers: HashMap<String, String> = req.headers().iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
 
-    // 1. 尝试匹配规则
+    // 1. 尝试匹配规则，匹配则发到对应 client group
     if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, path, None) {
-        
-        // 2. 处理 reverse proxy 规则（使用本地 upstream）
-        if rule.is_reverse_proxy_rule() {
-            if let Some(ref upstream_name) = rule.action_upstream {
-                if let Some(upstream) = rules_engine.get_upstream(upstream_name) {
-                    if let Some(backend) = pick_backend(upstream) {
-                        println!("Reverse proxy to upstream '{}': {}", upstream_name, backend);
-                        return proxy_handler.handle_proxy_pass(req, &backend).await;
-                    } else {
-                        return Ok(HyperResponse::builder()
-                            .status(502)
-                            .body(Body::from("No available backends in upstream"))
-                            .unwrap());
-                    }
-                } else {
-                    return Ok(HyperResponse::builder()
-                        .status(502)
-                        .body(Body::from("Upstream not found"))
-                        .unwrap());
-                }
-            }
-        }
-        
-        // 3. 处理 client group 转发规则
-        if rule.is_client_group_rule() {
-            if let Some(group_name) = rule.extract_client_group() {
-                println!("Forwarding to client group: {}", group_name);
-                return proxy_handler.forward_via_tunnel(req, &group_name).await;
-            }
+        if let Some(group_name) = rule.extract_client_group() {
+            println!("Forwarding to client group: {}", group_name);
+            return proxy_handler.forward_via_tunnel(req, &group_name).await;
         }
     }
 
-    // 5. 未匹配规则，尝试基于 host 的默认 group 转发
-    let target_group = extract_group_from_host(host);
-    if !target_group.is_empty() {
-        println!("Default group forwarding to: {}", target_group);
-        return proxy_handler.forward_via_tunnel(req, &target_group).await;
-    }
-
-    // 6. 默认 404
+    // 2. 未匹配规则，404
     println!("No matching rule for host: {}, path: {}", host, path);
     Ok(HyperResponse::builder()
         .status(404)
-        .body(Body::from("No matching rule or group"))
+        .body(Body::from("No matching rule"))
         .unwrap())
 }
 

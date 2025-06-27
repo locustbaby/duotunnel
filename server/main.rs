@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use crate::proxy::{ProxyHandler};
 use tokio::sync::Mutex as TokioMutex;
 use hyper::Client as HyperClient;
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 use tracing_subscriber;
 
 
@@ -143,65 +143,74 @@ impl TunnelService for MyTunnelServer {
                         // 处理消息
                         match msg.payload {
                             Some(tunnel_message::Payload::HttpResponse(resp)) => {
-                                if let Some(sender) = pending_reverse_requests.lock().await.remove(&msg.request_id) {
-                                    let _ = sender.send(resp);
+                                if msg.direction == Direction::ClientToServer as i32 {
+                                    if let Some(sender) = pending_reverse_requests.lock().await.remove(&msg.request_id) {
+                                        let _ = sender.send(resp);
+                                    }
+                                } else {
+                                    warn!("Ignore HttpResponse with wrong direction: {}", msg.direction);
                                 }
                             }
                             Some(tunnel_message::Payload::ConfigSync(config_req)) => {
-                                // 处理通过tunnel的配置同步请求
-                                if let Some(group) = rules_engine.get_group(&config_req.group) {
-                                    // 获取该 group 的配置
-                                    let (rules, upstreams) = (group.rules.http.clone(), group.upstreams.clone());
-                                    
-                                    // 转换为 proto 格式
-                                    let proto_rules: Vec<ProtoRule> = rules.into_iter().map(|r| ProtoRule {
-                                        rule_id: String::new(),
-                                        r#type: String::new(),
-                                        match_host: r.match_host.unwrap_or_default(),
-                                        match_path_prefix: r.match_path_prefix.unwrap_or_default(),
-                                        match_service: r.match_service.unwrap_or_default(),
-                                        match_header: std::collections::HashMap::new(),
-                                        action_proxy_pass: String::new(),
-                                        action_set_host: String::new(),
-                                        action_upstream: r.action_upstream.unwrap_or_default(),
-                                        action_ssl: false,
-                                    }).collect();
-                                    
-                                    let proto_upstreams: Vec<Upstream> = upstreams.into_iter().map(|(name, u)| Upstream {
-                                        name,
-                                        servers: u.servers.into_iter().map(|s| UpstreamServer {
-                                            address: s.address,
-                                            resolve: s.resolve,
-                                        }).collect(),
-                                        lb_policy: u.lb_policy.unwrap_or_else(|| "round_robin".to_string()),
-                                    }).collect();
-                                    
-                                    let config_response = ConfigSyncResponse {
-                                        config_version: "v1.0.0".to_string(),
-                                        rules: proto_rules,
-                                        upstreams: proto_upstreams,
-                                    };
-                                    
-                                    // 发送配置同步响应
-                                    let response_msg = TunnelMessage {
-                                        client_id: msg.client_id.clone(),
-                                        request_id: msg.request_id,
-                                        direction: Direction::ServerToClient as i32,
-                                        payload: Some(tunnel_message::Payload::ConfigSyncResponse(config_response)),
-                                        trace_id: String::new(),
-                                    };
-                                    
-                                    if let Some(tx) = client_tx.as_ref() {
-                                        if let Err(e) = tx.send(response_msg).await {
-                                            error!("Failed to send config sync response: {}", e);
+                                if msg.direction == Direction::ClientToServer as i32 {
+                                    if let Some(group) = rules_engine.get_group(&config_req.group) {
+                                        // 获取该 group 的配置
+                                        let (rules, upstreams) = (group.rules.http.clone(), group.upstreams.clone());
+                                        
+                                        // 转换为 proto 格式
+                                        let proto_rules: Vec<ProtoRule> = rules.into_iter().map(|r| ProtoRule {
+                                            rule_id: String::new(),
+                                            r#type: String::new(),
+                                            match_host: r.match_host.unwrap_or_default(),
+                                            match_path_prefix: r.match_path_prefix.unwrap_or_default(),
+                                            match_service: r.match_service.unwrap_or_default(),
+                                            match_header: std::collections::HashMap::new(),
+                                            action_proxy_pass: String::new(),
+                                            action_set_host: String::new(),
+                                            action_upstream: r.action_upstream.unwrap_or_default(),
+                                            action_ssl: false,
+                                        }).collect();
+                                        
+                                        let proto_upstreams: Vec<Upstream> = upstreams.into_iter().map(|(name, u)| Upstream {
+                                            name,
+                                            servers: u.servers.into_iter().map(|s| UpstreamServer {
+                                                address: s.address,
+                                                resolve: s.resolve,
+                                            }).collect(),
+                                            lb_policy: u.lb_policy.unwrap_or_else(|| "round_robin".to_string()),
+                                        }).collect();
+                                        
+                                        let config_response = ConfigSyncResponse {
+                                            config_version: "v1.0.0".to_string(),
+                                            rules: proto_rules,
+                                            upstreams: proto_upstreams,
+                                        };
+                                        
+                                        // 发送配置同步响应
+                                        let response_msg = TunnelMessage {
+                                            client_id: msg.client_id.clone(),
+                                            request_id: msg.request_id,
+                                            direction: Direction::ServerToClient as i32,
+                                            payload: Some(tunnel_message::Payload::ConfigSyncResponse(config_response)),
+                                            trace_id: String::new(),
+                                        };
+                                        
+                                        if let Some(tx) = client_tx.as_ref() {
+                                            if let Err(e) = tx.send(response_msg).await {
+                                                error!("Failed to send config sync response: {}", e);
+                                            }
                                         }
                                     }
+                                } else {
+                                    warn!("Ignore ConfigSync with wrong direction: {}", msg.direction);
                                 }
                             }
                             Some(tunnel_message::Payload::Heartbeat(_)) => {
+                                // 心跳包一般双向都可接受，这里可不判断方向
                                 client_registry.update_heartbeat(&client_id);
                             }
                             Some(payload) => {
+                                tracing::warn!("Received unknown payload type: {:?}, direction: {}", payload, msg.direction);
                             }
                             None => {
                             }
