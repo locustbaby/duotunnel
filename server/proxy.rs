@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tunnel_lib::tunnel::HttpRequest;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
-use crate::registry::ClientRegistry;
+use crate::registry::ManagedClientRegistry;
 use tunnel_lib::tunnel::{TunnelMessage, HttpResponse, Direction};
 use tokio::sync::{oneshot, mpsc};
 use uuid::Uuid;
@@ -51,7 +51,7 @@ pub async fn start_http_entry(rules_engine: Arc<RulesEngine>, proxy_handler: Arc
 }
 
 pub struct ProxyHandler {
-    client_registry: Arc<ClientRegistry>,
+    client_registry: Arc<ManagedClientRegistry>,
     pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
     connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
     pub trace_enabled: bool,
@@ -60,7 +60,7 @@ pub struct ProxyHandler {
 impl ProxyHandler {
     pub fn new(trace_enabled: bool) -> Self {
         Self {
-            client_registry: Arc::new(ClientRegistry::new()),
+            client_registry: Arc::new(ManagedClientRegistry::new()),
             pending_reverse_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             connected_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             trace_enabled,
@@ -68,7 +68,7 @@ impl ProxyHandler {
     }
 
     pub fn with_dependencies(
-        client_registry: Arc<ClientRegistry>,
+        client_registry: Arc<ManagedClientRegistry>,
         pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
         connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
         trace_enabled: bool,

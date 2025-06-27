@@ -15,13 +15,13 @@ pub struct ClientConfig {
     pub trace_enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Upstream {
     pub servers: Vec<ServerAddr>,
     pub lb_policy: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ServerAddr {
     pub address: String,
     pub resolve: bool,

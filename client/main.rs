@@ -5,7 +5,8 @@ use tokio_stream::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server as HyperServer, Method};
 use hyper::service::{make_service_fn, service_fn};
 use uuid::Uuid;
@@ -18,6 +19,7 @@ use chrono;
 use tracing::Instrument;
 use hyper_tls::HttpsConnector;
 use hyper::client::HttpConnector;
+mod proxy;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -36,18 +38,19 @@ impl ClientRulesEngine {
         }
     }
     
-    fn update_rules(&mut self, rules: Vec<Rule>, upstreams: Vec<tunnel_lib::tunnel::Upstream>) {
-        let old_http_count = self.http_rules.len();
-        let old_grpc_count = self.grpc_rules.len();
-        let old_upstreams_count = self.upstreams.len();
-        self.http_rules.clear();
-        self.grpc_rules.clear();
-        self.upstreams.clear();
+    async fn update_rules(&mut self, rules: Vec<Rule>, upstreams: Vec<tunnel_lib::tunnel::Upstream>) {
+        let old_http = self.http_rules.clone();
+        let old_grpc = self.grpc_rules.clone();
+        let old_upstreams = self.upstreams.clone();
+        // 构造新规则和 upstreams
+        let mut new_http = Vec::new();
+        let mut new_grpc = Vec::new();
+        let mut new_upstreams = HashMap::new();
         for rule in rules {
             if !rule.match_service.is_empty() {
-                self.grpc_rules.push(rule);
+                new_grpc.push(rule);
             } else {
-                self.http_rules.push(rule);
+                new_http.push(rule);
             }
         }
         for upstream in upstreams {
@@ -58,13 +61,28 @@ impl ClientRulesEngine {
                 }).collect(),
                 lb_policy: if upstream.lb_policy.is_empty() { None } else { Some(upstream.lb_policy) },
             };
-            self.upstreams.insert(upstream.name, up);
+            new_upstreams.insert(upstream.name, up);
         }
-        let new_http_count = self.http_rules.len();
-        let new_grpc_count = self.grpc_rules.len();
-        let new_upstreams_count = self.upstreams.len();
-        if old_http_count != new_http_count || old_grpc_count != new_grpc_count || old_upstreams_count != new_upstreams_count {
-            info!("Updated local rules: {} HTTP, {} gRPC, {} upstreams", new_http_count, new_grpc_count, new_upstreams_count);
+        // debug 打印 old/new 内容
+        debug!("old_http_rules = {:?}", old_http);
+        debug!("new_http_rules = {:?}", new_http);
+        debug!("old_grpc_rules = {:?}", old_grpc);
+        debug!("new_grpc_rules = {:?}", new_grpc);
+        debug!("old_upstreams = {:?}", old_upstreams);
+        debug!("new_upstreams = {:?}", new_upstreams);
+        // 只有内容变化时才更新和打印日志
+        if old_http != new_http || old_grpc != new_grpc || old_upstreams != new_upstreams {
+            self.http_rules = new_http;
+            self.grpc_rules = new_grpc;
+            self.upstreams = new_upstreams;
+            info!(
+                event = "client_config_changed",
+                old_rules_count = old_http.len() + old_grpc.len(),
+                new_rules_count = self.http_rules.len() + self.grpc_rules.len(),
+                old_upstreams_count = old_upstreams.len(),
+                new_upstreams_count = self.upstreams.len(),
+                message = "client config changed"
+            );
         }
     }
     
@@ -77,6 +95,15 @@ impl ClientRulesEngine {
     
     fn pick_backend(&self, upstream_name: &str) -> Option<String> {
         self.upstreams.get(upstream_name).and_then(|up| up.servers.get(0)).map(|s| s.address.clone())
+    }
+
+    pub fn debug_print_upstreams(&self) {
+        for (name, upstream) in &self.upstreams {
+            println!("upstream: {}", name);
+            for server in &upstream.servers {
+                println!("  server: {} (resolve: {})", server.address, server.resolve);
+            }
+        }
     }
 }
 
@@ -93,12 +120,11 @@ struct TunnelClient {
 }
 
 impl TunnelClient {
-    fn new(client_id: String, group_id: String, server_addr: String, trace_enabled: bool) -> (Self, mpsc::Receiver<TunnelMessage>) {
-        let (tx, rx) = mpsc::channel(128);
+    fn new(client_id: String, group_id: String, server_addr: String, trace_enabled: bool, tx: mpsc::Sender<TunnelMessage>) -> Self {
         let http_client = hyper::Client::new();
         let https_connector = HttpsConnector::new();
         let https_client = hyper::Client::builder().build::<_, hyper::Body>(https_connector);
-        let client = Self {
+        Self {
             client_id,
             group_id,
             server_addr,
@@ -108,8 +134,7 @@ impl TunnelClient {
             trace_enabled,
             http_client,
             https_client,
-        };
-        (client, rx)
+        }
     }
 
     async fn register_group(&self, grpc_client: &mut TunnelServiceClient<tonic::transport::Channel>) -> Result<()> {
@@ -137,16 +162,12 @@ impl TunnelClient {
             group: self.group_id.clone(),
             config_version: "".to_string(),
         };
-        
         let response = grpc_client.config_sync(Request::new(config_req)).await?;
         let resp = response.into_inner();
-        
-        info!("Synced config version: {}, got {} rules, {} upstreams", 
-                resp.config_version, resp.rules.len(), resp.upstreams.len());
-        
-        // 更新本地规则引擎
-        self.rules_engine.lock().unwrap().update_rules(resp.rules, resp.upstreams);
-        
+        info!("Synced config version: {}, got {} rules, {} upstreams", resp.config_version, resp.rules.len(), resp.upstreams.len());
+        debug!("Received config rules: {:?}", resp.rules);
+        debug!("Received config upstreams: {:?}", resp.upstreams);
+        self.rules_engine.lock().await.update_rules(resp.rules, resp.upstreams).await;
         Ok(())
     }
 
@@ -179,44 +200,23 @@ impl TunnelClient {
         });
     }
 
-    async fn start(&self) -> Result<()> {
-        loop {
-            info!("Connecting to server at {}...", self.server_addr);
-            match self.connect_with_retry().await {
-                Ok(_) => info!("Connection lost, reconnecting..."),
-                Err(e) => {
-                    error!("Connection failed: {}, retrying in 5 seconds...", e);
-                    sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-    }
-
-    async fn connect_with_retry(&self) -> Result<()> {
-        let mut grpc_client = TunnelServiceClient::connect(self.server_addr.clone()).await?;
-        let (tx, rx) = mpsc::channel(128);
-        
+    async fn connect_with_retry(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: mpsc::Receiver<TunnelMessage>) -> Result<()> {
         // 注册到 group
         self.register_group(&mut grpc_client).await?;
-        
         // 启动心跳机制
-        self.start_heartbeat(tx.clone()).await;
-        
+        self.start_heartbeat(self.tx.clone()).await;
         // 启动配置同步（通过tunnel连接）
-        self.start_config_sync_via_tunnel(tx.clone()).await;
-        
+        self.start_config_sync_via_tunnel(self.tx.clone()).await;
         // 创建双向流
         let outbound = tokio_stream::wrappers::ReceiverStream::new(rx);
         let response = grpc_client.proxy(Request::new(outbound)).await?;
         let mut inbound = response.into_inner();
-        
         info!("Tunnel connection established successfully");
-        
         // 处理来自服务器的消息
         while let Some(message) = inbound.next().await {
             match message {
                 Ok(msg) => {
-                    self.handle_tunnel_message(msg, &tx).await;
+                    self.handle_tunnel_message(msg, &self.tx).await;
                 }
                 Err(e) => {
                     error!("Error receiving message: {}", e);
@@ -224,7 +224,6 @@ impl TunnelClient {
                 }
             }
         }
-        
         Ok(())
     }
 
@@ -274,12 +273,15 @@ impl TunnelClient {
                         status_code = resp.status_code,
                         message = "client received tunnel response from server"
                     );
-                    if let Some(sender) = self.pending_requests.lock().unwrap().remove(&msg.request_id) {
+                    let mut pending = self.pending_requests.lock().await;
+                    if let Some(sender) = pending.remove(&msg.request_id) {
                         let _ = sender.send(resp);
                     }
                 }
                 Some(tunnel_message::Payload::ConfigSyncResponse(resp)) => {
-                    let mut rules_engine = self.rules_engine.lock().unwrap();
+                    let mut rules_engine = self.rules_engine.lock().await;
+                    debug!("Received tunnel config rules: {:?}", resp.rules);
+                    debug!("Received tunnel config upstreams: {:?}", resp.upstreams);
                     let old_rules = rules_engine.http_rules.clone();
                     let old_upstreams = rules_engine.upstreams.clone();
                     let old_rules_count = old_rules.len();
@@ -298,7 +300,7 @@ impl TunnelClient {
                             message = "client config changed"
                         );
                     }
-                    rules_engine.update_rules(resp.rules, resp.upstreams);
+                    rules_engine.update_rules(resp.rules, resp.upstreams).await;
                 }
                 Some(tunnel_message::Payload::Heartbeat(_)) => {
                     tracing::info!(
@@ -319,7 +321,7 @@ impl TunnelClient {
         let host = req.host.as_str();
         let path = req.url.split('?').next().unwrap_or("/");
 
-        let rules_engine = self.rules_engine.lock().unwrap();
+        let rules_engine = self.rules_engine.lock().await;
         let maybe_rule = rules_engine.match_http_rule(host, path);
         match maybe_rule {
             Some(rule) => {
@@ -371,10 +373,10 @@ impl TunnelClient {
                 body: b"Invalid method".to_vec(),
             },
         };
-        let url = if target_url.starts_with("http://") {
-            format!("{}{}", target_url, req.url.split('?').skip(1).next().map(|q| format!("?{}", q)).unwrap_or_default())
+        let url = if target_url.ends_with('/') {
+            format!("{}{}", target_url.trim_end_matches('/'), req.url)
         } else {
-            format!("http://{}{}", target_url, req.url)
+            format!("{}{}", target_url, req.url)
         };
         if self.trace_enabled {
             debug!("Forwarding HTTP request to: {}", url);
@@ -453,10 +455,10 @@ impl TunnelClient {
                 body: b"Invalid method".to_vec(),
             },
         };
-        let url = if target_url.starts_with("https://") {
-            format!("{}{}", target_url, req.url.split('?').skip(1).next().map(|q| format!("?{}", q)).unwrap_or_default())
+        let url = if target_url.ends_with('/') {
+            format!("{}{}", target_url.trim_end_matches('/'), req.url)
         } else {
-            format!("https://{}{}", target_url, req.url)
+            format!("{}{}", target_url, req.url)
         };
         if self.trace_enabled {
             debug!("Forwarding HTTPS request to: {}", url);
@@ -626,77 +628,55 @@ async fn main() -> anyhow::Result<()> {
     let group_id = client_group_id.clone();
     info!("Starting tunnel client {} in group {}", client_id, group_id);
 
-    let (client, _rx) = TunnelClient::new(client_id.clone(), group_id, server_addr.clone(), trace_enabled);
-
-    // 启动本地 HTTP 入口监听
-    let http_port = config.http_entry_port.unwrap_or(8003);
-    let http_addr = format!("0.0.0.0:{}", http_port);
-    let tunnel_tx = client.tx.clone();
-    let pending_requests = client.pending_requests.clone();
-    let client_id = client_id.clone();
-    tokio::spawn(async move {
-        let client_id = client_id.clone();
-        let make_svc = make_service_fn(move |_| {
-            let tunnel_tx = tunnel_tx.clone();
-            let pending_requests = pending_requests.clone();
-            let client_id = client_id.clone();
-            async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| {
-                    let tunnel_tx = tunnel_tx.clone();
-                    let pending_requests = pending_requests.clone();
-                    let client_id = client_id.clone();
-                    async move {
-                        // 1. 生成 request_id
-                        let request_id = Uuid::new_v4().to_string();
-                        // 2. 记录 access log
-                        let method = req.method().to_string();
-                        let path = req.uri().path().to_string();
-                        let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-                        tracing::info!(
-                            event = "client_http_entry",
-                            method = %method,
-                            path = %path,
-                            host = %host,
-                            request_id = %request_id,
-                            message = "Received HTTP request at client entry"
-                        );
-                        // 3. 调用 forward_via_tunnel 统一处理
-                        tunnel_lib::proxy::forward_via_tunnel(
+    // 自动重连 loop
+    loop {
+        let (tx, rx) = mpsc::channel(128);
+        let client = TunnelClient::new(client_id.clone(), group_id.clone(), server_addr.clone(), trace_enabled, tx.clone());
+        // 打印所有 upstreams（可选）
+        let rules_engine = client.rules_engine.lock().await;
+        rules_engine.debug_print_upstreams();
+        drop(rules_engine);
+        // 启动本地 HTTP 入口监听（每次重连都用新的 tx、pending_requests、client_id）
+        let tunnel_tx = client.tx.clone();
+        let pending_requests = client.pending_requests.clone();
+        let client_id = client.client_id.clone();
+        let http_port = config.http_entry_port.unwrap_or(8003);
+        let http_addr = format!("0.0.0.0:{}", http_port);
+        let http_handle = tokio::spawn(async move {
+            let make_svc = make_service_fn(move |_| {
+                let tunnel_tx = tunnel_tx.clone();
+                let pending_requests = pending_requests.clone();
+                let client_id = client_id.clone();
+                async move {
+                    Ok::<_, hyper::Error>(service_fn(move |req| {
+                        proxy::handle_http_entry(
                             req,
-                            &client_id,
-                            &tunnel_tx,
-                            &pending_requests,
-                            request_id.clone(),
-                            tunnel_lib::tunnel::Direction::ClientToServer,
-                        ).await
-                    }
-                }))
+                            client_id.clone(),
+                            tunnel_tx.clone(),
+                            pending_requests.clone(),
+                        )
+                    }))
+                }
+            });
+            let server = hyper::Server::bind(&http_addr.parse().unwrap()).serve(make_svc);
+            info!("Client HTTP entry listening on http://{}", http_addr);
+            if let Err(e) = server.await {
+                error!("Client HTTP entry server error: {}", e);
             }
         });
-        let server = HyperServer::bind(&http_addr.parse().unwrap()).serve(make_svc);
-        info!("Client HTTP entry listening on http://{}", http_addr);
-        if let Err(e) = server.await {
-            error!("Client HTTP entry server error: {}", e);
+        // tunnel 连接
+        match TunnelServiceClient::connect(server_addr.clone()).await {
+            Ok(grpc_client) => {
+                if let Err(e) = client.connect_with_retry(grpc_client, rx).await {
+                    eprintln!("Tunnel connection lost: {e}, retrying in 5s...");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to server: {e}, retrying in 5s...");
+            }
         }
-    });
-
-    // 启动本地 gRPC 入口监听
-    let grpc_port = config.grpc_entry_port.unwrap_or(8004);
-    let grpc_addr = format!("0.0.0.0:{}", grpc_port);
-    tokio::spawn(async move {
-        let make_svc = make_service_fn(|_| async {
-            Ok::<_, hyper::Error>(service_fn(|_req| async {
-                Ok::<_, hyper::Error>(HyperResponse::new(Body::from("Client gRPC entry (stub)")))
-            }))
-        });
-        let server = HyperServer::bind(&grpc_addr.parse().unwrap()).serve(make_svc);
-        info!("Client gRPC entry listening on http://{} (stub, not real gRPC)", grpc_addr);
-        if let Err(e) = server.await {
-            error!("Client gRPC entry server error: {}", e);
-        }
-    });
-
-    // 启动 tunnel 连接
-    client.start().await?;
-    Ok(())
+        // 关闭 HTTP 入口监听
+        http_handle.abort();
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 } 

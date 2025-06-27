@@ -12,12 +12,12 @@ pub struct ClientInfo {
     pub last_heartbeat: u64, // timestamp
 }
 
-pub struct ClientRegistry {
+pub struct ManagedClientRegistry {
     // client_id -> ClientInfo
     clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
 }
 
-impl ClientRegistry {
+impl ManagedClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),

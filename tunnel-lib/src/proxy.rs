@@ -7,13 +7,14 @@ use tokio::sync::mpsc;
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
+use std::sync::Arc;
 
 /// 通用 tunnel 代理转发逻辑，client/server 入口 handler 可复用
 pub async fn forward_via_tunnel(
     req: HyperRequest<Body>,
     client_id: &str,
     tunnel_tx: &mpsc::Sender<TunnelMessage>,
-    pending_requests: &Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>,
+    pending_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
     request_id: String,
     direction: Direction,
 ) -> Result<hyper::Response<Body>, hyper::Error> {
@@ -45,11 +46,11 @@ pub async fn forward_via_tunnel(
     };
     let (tx, rx) = oneshot::channel();
     {
-        let mut pending = pending_requests.lock().unwrap();
+        let mut pending = pending_requests.lock().await;
         pending.insert(request_id.clone(), tx);
     }
     if let Err(e) = tunnel_tx.send(tunnel_msg).await {
-        let mut pending = pending_requests.lock().unwrap();
+        let mut pending = pending_requests.lock().await;
         pending.remove(&request_id);
         return Ok(hyper::Response::builder().status(502).body(Body::from(format!("Tunnel send error: {}", e))).unwrap());
     }
@@ -65,7 +66,7 @@ pub async fn forward_via_tunnel(
             Ok(hyper::Response::builder().status(502).body(Body::from("Tunnel response failed")).unwrap())
         }
         Err(_) => {
-            let mut pending = pending_requests.lock().unwrap();
+            let mut pending = pending_requests.lock().await;
             pending.remove(&request_id);
             Ok(hyper::Response::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
         }

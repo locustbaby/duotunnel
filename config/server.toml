@@ -10,7 +10,7 @@ trace_enabled = false
 # ========== 2. Upstreams 全局定义 ==========
 [upstreams.backend]
 servers = [
-    { address = "backend.example.com:443", resolve = true }
+    { address = "https://echo.free.beeceptor.com", resolve = true }
 ]
 lb_policy = "round_robin"
 
@@ -22,7 +22,7 @@ lb_policy = "round_robin"
 
 # ========== 3. Forward Proxy 配置 ==========
 [[forward.rules.http]]
-match_host = "api.backend.com"
+match_host = "echo.free.beeceptor.com"
 action_upstream = "backend"
 
 [[forward.rules.grpc]]
@@ -32,7 +32,7 @@ action_upstream = "grpc_backend"
 
 # ========== 4. Reverse Proxy (Tunnel/Client Group) 配置 ==========
 [[reverse_proxy.rules.http]]
-match_host = "www.google.com"
+match_host = "echo.free.beeceptor.com"
 action_client_group = "group-a"
 
 [[reverse_proxy.rules.http]]
@@ -50,12 +50,12 @@ config_version = "v1.0.0"
 
 [client_groups.group-a.upstreams.local_service]
 servers = [
-    { address = "https://www.google.com", resolve = true }
+    { address = "https://echo.free.beeceptor.com", resolve = true }
 ]
 lb_policy = "round_robin"
 
 [[client_groups.group-a.rules.http]]
-match_host = "www.google.com"
+match_host = "echo.free.beeceptor.com"
 action_upstream = "local_service"
 
 # 也可以配置HTTP服务

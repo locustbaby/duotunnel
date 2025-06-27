@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tonic = "0.10"
-prost = "0.12"
+tonic = "0.9"
+prost = "0.11"
+prost-types = "0.11"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 hyper = "0.14"
@@ -14,4 +15,6 @@ chrono = "0.4"
 futures = "0.3"
 
 [build-dependencies]
-tonic-build = "0.10" 
+tonic-build = "0.9"
+prost = "0.11"
+prost-types = "0.11" 
