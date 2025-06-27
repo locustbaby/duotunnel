@@ -1,6 +1,6 @@
 # Client 配置示例
 
-log_level = "info"
+log_level = "debug"
 trace_enabled = false
 
 # 连接到的 server 地址和端口

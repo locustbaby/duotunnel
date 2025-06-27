@@ -65,6 +65,7 @@ pub struct Rule {
     pub match_service: Option<String>,
     pub action_upstream: Option<String>,      // forward 用
     pub action_client_group: Option<String>,  // reverse_proxy 用
+    pub action_set_host: Option<String>,      // 新增：支持 Host 头替换
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

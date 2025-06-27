@@ -28,6 +28,7 @@ use crate::proxy::{ProxyHandler};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, debug, warn};
 use tracing_subscriber;
+use tunnel_lib::proxy::forward_to_backend_http_like;
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
@@ -164,7 +165,7 @@ impl TunnelService for MyTunnelServer {
                                             match_service: r.match_service.unwrap_or_default(),
                                             match_header: std::collections::HashMap::new(),
                                             action_proxy_pass: String::new(),
-                                            action_set_host: String::new(),
+                                            action_set_host: r.action_set_host.unwrap_or_default(),
                                             action_upstream: r.action_upstream.unwrap_or_default(),
                                             action_ssl: false,
                                         }).collect();
@@ -235,7 +236,7 @@ impl TunnelService for MyTunnelServer {
                         }
                     }
                     Err(_) => break,
-                }
+                    }
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -417,13 +418,14 @@ async fn handle_forward_proxy_from_client(
     // 查找匹配的规则
     if let Some(rule) = rules_engine.match_forward_rule(host, path, None) {
         if let Some(ref upstream_name) = rule.action_upstream {
-            return forward_to_backend_server(&req, upstream_name, http_client.clone()).await;
+            let set_host = rule.action_set_host.as_deref().unwrap_or("");
+            return forward_to_backend_server(&req, upstream_name, http_client.clone(), set_host).await;
         }
     }
     
     // 默认处理：直接代理
     if req.url.starts_with("http://") || req.url.starts_with("https://") {
-        forward_to_backend_server(&req, &req.url, http_client.clone()).await
+        forward_to_backend_server(&req, &req.url, http_client.clone(), &req.host).await
     } else {
         HttpResponse {
             status_code: 404,
@@ -433,78 +435,8 @@ async fn handle_forward_proxy_from_client(
     }
 }
 
-async fn forward_to_backend_server(req: &HttpRequest, target_url: &str, http_client: Arc<HyperClient<hyper::client::HttpConnector>>) -> HttpResponse {
-    let client = &*http_client;
-    
-    let method = match req.method.parse::<Method>() {
-        Ok(m) => m,
-        Err(_) => return HttpResponse {
-            status_code: 400,
-            headers: HashMap::new(),
-            body: b"Invalid method".to_vec(),
-        },
-    };
-    
-    // 修正 URL 拼接逻辑
-    let url = if req.url.starts_with("http://") || req.url.starts_with("https://") {
-        req.url.clone()
-    } else if !req.host.is_empty() {
-        // 默认用 http，或根据端口判断 http/https
-        format!("http://{}{}", req.host, req.url)
-    } else if target_url.starts_with("http://") || target_url.starts_with("https://") {
-        format!("{}{}", target_url, req.url)
-    } else if target_url.ends_with(":443") {
-        format!("https://{}{}", target_url, req.url)
-    } else {
-        format!("http://{}{}", target_url, req.url)
-    };
-    
-    let mut builder = HyperRequest::builder()
-        .method(method)
-        .uri(&url);
-    
-    for (k, v) in req.headers.iter() {
-        builder = builder.header(k, v);
-    }
-    
-    let hyper_req = match builder.body(Body::from(req.body.clone())) {
-        Ok(req) => req,
-        Err(_) => return HttpResponse {
-            status_code: 400,
-            headers: HashMap::new(),
-            body: b"Invalid request".to_vec(),
-        },
-    };
-    
-    match client.request(hyper_req).await {
-        Ok(resp) => {
-            let status = resp.status().as_u16() as i32;
-            let headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            
-            let body_bytes = match hyper::body::to_bytes(resp.into_body()).await {
-                Ok(bytes) => bytes.to_vec(),
-                Err(_) => b"Failed to read response body".to_vec(),
-            };
-            
-            HttpResponse {
-                status_code: status,
-                headers,
-                body: body_bytes,
-            }
-        }
-        Err(e) => {
-            error!("HTTP request failed: {}", e);
-            HttpResponse {
-                status_code: 500,
-                headers: HashMap::new(),
-                body: b"Request failed".to_vec(),
-            }
-        }
-    }
+async fn forward_to_backend_server(req: &HttpRequest, target_url: &str, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, action_set_host: &str) -> HttpResponse {
+    forward_to_backend_http_like(req, target_url, http_client, action_set_host).await
 }
 
 fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {

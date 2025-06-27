@@ -20,6 +20,7 @@ use tracing::Instrument;
 use hyper_tls::HttpsConnector;
 use hyper::client::HttpConnector;
 mod proxy;
+use tunnel_lib::proxy::set_host_header;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -326,13 +327,33 @@ impl TunnelClient {
         match maybe_rule {
             Some(rule) => {
                 info!("Processing tunnel request: {} {} host={} matched_rule=host:{} path_prefix:{} upstream:{} proxy_pass:{}", req.method, req.url, host, rule.match_host, rule.match_path_prefix, rule.action_upstream, rule.action_proxy_pass);
-                // 处理 action_proxy_pass
+                // Handle action_proxy_pass
                 if !rule.action_proxy_pass.is_empty() {
+                    info!("Forwarding to backend URL: {}", rule.action_proxy_pass);
                     return self.forward_to_backend(&req, &rule.action_proxy_pass, trace_id.clone()).await;
                 }
-                // 处理 action_upstream
+                // Handle action_upstream
                 if !rule.action_upstream.is_empty() {
                     if let Some(backend) = rules_engine.pick_backend(&rule.action_upstream) {
+                        let mut req = req.clone();
+                        // 解析 backend host
+                        let backend_host = match url::Url::parse(&backend) {
+                            Ok(url) => url.host_str().unwrap_or("").to_string(),
+                            Err(_) => String::new(),
+                        };
+                        // 优先用 action_set_host，否则用 backend host
+                        let set_host = if !rule.action_set_host.is_empty() {
+                            rule.action_set_host.as_str()
+                        } else {
+                            backend_host.as_str()
+                        };
+                        set_host_header(&mut req.headers, set_host);
+                        let full_url = if backend.ends_with('/') {
+                            format!("{}{}", backend.trim_end_matches('/'), req.url)
+                        } else {
+                            format!("{}{}", backend, req.url)
+                        };
+                        info!("Forwarding to backend URL: {}", full_url);
                         return self.forward_to_backend(&req, &backend, trace_id.clone()).await;
                     }
                 }
@@ -347,105 +368,6 @@ impl TunnelClient {
     }
 
     async fn forward_to_backend(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
-        // 根据target_url判断是否使用HTTPS
-        let is_https = if target_url.starts_with("https://") {
-            true
-        } else if target_url.starts_with("http://") {
-            false
-        } else {
-            // 如果没有协议前缀，根据端口判断
-            target_url.contains(":443")
-        };
-        if is_https {
-            self.forward_to_backend_https(req, target_url, trace_id).await
-        } else {
-            self.forward_to_backend_http(req, target_url, trace_id).await
-        }
-    }
-
-    async fn forward_to_backend_http(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
-        let client = &self.http_client;
-        let method = match req.method.parse::<Method>() {
-            Ok(m) => m,
-            Err(_) => return HttpResponse {
-                status_code: 400,
-                headers: HashMap::new(),
-                body: b"Invalid method".to_vec(),
-            },
-        };
-        let url = if target_url.ends_with('/') {
-            format!("{}{}", target_url.trim_end_matches('/'), req.url)
-        } else {
-            format!("{}{}", target_url, req.url)
-        };
-        if self.trace_enabled {
-            debug!("Forwarding HTTP request to: {}", url);
-        }
-        let mut builder = HyperRequest::builder()
-            .method(method)
-            .uri(&url);
-        for (k, v) in req.headers.iter() {
-            builder = builder.header(k, v);
-        }
-        let hyper_req = match builder.body(Body::from(req.body.clone())) {
-            Ok(req) => req,
-            Err(_) => return HttpResponse {
-                status_code: 400,
-                headers: HashMap::new(),
-                body: b"Invalid request".to_vec(),
-            },
-        };
-        match client.request(hyper_req).await {
-            Ok(resp) => {
-                let status = resp.status().as_u16() as i32;
-                let headers: HashMap<String, String> = resp
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
-                let body_bytes = match hyper::body::to_bytes(resp.into_body()).await {
-                    Ok(bytes) => bytes.to_vec(),
-                    Err(_) => b"Failed to read response body".to_vec(),
-                };
-                if self.trace_enabled {
-                    tracing::info!(
-                        event = "client_received_backend_response",
-                        trace_id = %trace_id,
-                        host = %req.host,
-                        path = %req.path,
-                        backend = %target_url,
-                        status_code = status,
-                        message = "client received HTTP response from backend"
-                    );
-                }
-                HttpResponse {
-                    status_code: status,
-                    headers,
-                    body: body_bytes,
-                }
-            }
-            Err(e) => {
-                if self.trace_enabled {
-                    tracing::error!(
-                        event = "client_backend_error",
-                        trace_id = %trace_id,
-                        host = %req.host,
-                        path = %req.path,
-                        backend = %target_url,
-                        error = %e,
-                        message = "HTTP request to backend failed"
-                    );
-                }
-                HttpResponse {
-                    status_code: 500,
-                    headers: HashMap::new(),
-                    body: b"Request failed".to_vec(),
-                }
-            }
-        }
-    }
-
-    async fn forward_to_backend_https(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
         let client = &self.https_client;
         let method = match req.method.parse::<Method>() {
             Ok(m) => m,
@@ -461,7 +383,7 @@ impl TunnelClient {
             format!("{}{}", target_url, req.url)
         };
         if self.trace_enabled {
-            debug!("Forwarding HTTPS request to: {}", url);
+            debug!("Forwarding HTTP(S) request to: {}", url);
         }
         let mut builder = HyperRequest::builder()
             .method(method)
@@ -497,7 +419,7 @@ impl TunnelClient {
                         path = %req.path,
                         backend = %target_url,
                         status_code = status,
-                        message = "client received HTTP response from backend"
+                        message = "client received HTTP(S) response from backend"
                     );
                 }
                 HttpResponse {
@@ -515,7 +437,7 @@ impl TunnelClient {
                         path = %req.path,
                         backend = %target_url,
                         error = %e,
-                        message = "HTTPS request to backend failed"
+                        message = "HTTP(S) request to backend failed"
                     );
                 }
                 HttpResponse {

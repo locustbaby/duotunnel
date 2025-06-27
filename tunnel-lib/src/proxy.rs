@@ -1,5 +1,6 @@
 use crate::tunnel::*;
-use hyper::{Request as HyperRequest, Body};
+use hyper::{Request as HyperRequest, Body, Client, Method, Response as HyperResponse};
+use hyper::client::HttpConnector;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 use std::sync::Mutex;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
 use std::sync::Arc;
+use url;
 
 /// 通用 tunnel 代理转发逻辑，client/server 入口 handler 可复用
 pub async fn forward_via_tunnel(
@@ -103,5 +105,93 @@ pub fn build_tunnel_message(
         direction: direction as i32,
         payload: Some(crate::tunnel::tunnel_message::Payload::HttpRequest(http_req)),
         trace_id: trace_id.to_string(),
+    }
+}
+
+/// 通用：根据 action_set_host 字段安全地替换/设置 Host 头
+pub fn set_host_header(headers: &mut HashMap<String, String>, set_host: &str) {
+    if !set_host.is_empty() {
+        headers.insert("host".to_string(), set_host.to_string());
+    }
+}
+
+/// 通用 HTTP/HTTPS 代理转发方法，自动设置 Host 头
+pub async fn forward_to_backend_http_like(
+    req: &crate::tunnel::HttpRequest,
+    target_url: &str,
+    http_client: Arc<Client<HttpConnector, Body>>,
+    action_set_host: &str,
+) -> crate::tunnel::HttpResponse {
+    let client = &*http_client;
+    let method = match req.method.parse::<Method>() {
+        Ok(m) => m,
+        Err(_) => return crate::tunnel::HttpResponse {
+            status_code: 400,
+            headers: HashMap::new(),
+            body: b"Invalid method".to_vec(),
+        },
+    };
+    // 拼接 URL
+    let url = if req.url.starts_with("http://") || req.url.starts_with("https://") {
+        req.url.clone()
+    } else if !req.host.is_empty() {
+        format!("http://{}{}", req.host, req.url)
+    } else if target_url.starts_with("http://") || target_url.starts_with("https://") {
+        format!("{}{}", target_url, req.url)
+    } else if target_url.ends_with(":443") {
+        format!("https://{}{}", target_url, req.url)
+    } else {
+        format!("http://{}{}", target_url, req.url)
+    };
+    // 构建 headers，自动设置 Host
+    let mut headers = req.headers.clone();
+    // 解析 backend host
+    let backend_host = match url::Url::parse(&url) {
+        Ok(url) => url.host_str().unwrap_or("").to_string(),
+        Err(_) => String::new(),
+    };
+    let set_host = if !action_set_host.is_empty() {
+        action_set_host
+    } else {
+        backend_host.as_str()
+    };
+    set_host_header(&mut headers, set_host);
+    let mut builder = HyperRequest::builder().method(method).uri(&url);
+    for (k, v) in headers.iter() {
+        builder = builder.header(k, v);
+    }
+    let hyper_req = match builder.body(Body::from(req.body.clone())) {
+        Ok(req) => req,
+        Err(_) => return crate::tunnel::HttpResponse {
+            status_code: 400,
+            headers: HashMap::new(),
+            body: b"Invalid request".to_vec(),
+        },
+    };
+    match client.request(hyper_req).await {
+        Ok(resp) => {
+            let status = resp.status().as_u16() as i32;
+            let headers: HashMap<String, String> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_bytes = match hyper::body::to_bytes(resp.into_body()).await {
+                Ok(bytes) => bytes.to_vec(),
+                Err(_) => b"Failed to read response body".to_vec(),
+            };
+            crate::tunnel::HttpResponse {
+                status_code: status,
+                headers,
+                body: body_bytes,
+            }
+        }
+        Err(e) => {
+            crate::tunnel::HttpResponse {
+                status_code: 500,
+                headers: HashMap::new(),
+                body: b"Request failed".to_vec(),
+            }
+        }
     }
 } 
