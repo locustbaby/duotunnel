@@ -23,6 +23,7 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 url = "2"
+tokio-util = "0.7"
 
 [build-dependencies]
 tonic-build = "0.9"

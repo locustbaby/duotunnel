@@ -21,6 +21,10 @@ use hyper_tls::HttpsConnector;
 use hyper::client::HttpConnector;
 mod proxy;
 use tunnel_lib::proxy::set_host_header;
+use tokio_util::sync::CancellationToken;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc as StdArc;
+use tokio::sync::RwLock;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -201,31 +205,129 @@ impl TunnelClient {
         });
     }
 
-    async fn connect_with_retry(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: mpsc::Receiver<TunnelMessage>) -> Result<()> {
+    async fn connect_with_retry(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>) -> Result<()> {
         // 注册到 group
         self.register_group(&mut grpc_client).await?;
-        // 启动心跳机制
-        self.start_heartbeat(self.tx.clone()).await;
-        // 启动配置同步（通过tunnel连接）
-        self.start_config_sync_via_tunnel(self.tx.clone()).await;
-        // 创建双向流
-        let outbound = tokio_stream::wrappers::ReceiverStream::new(rx);
-        let response = grpc_client.proxy(Request::new(outbound)).await?;
-        let mut inbound = response.into_inner();
-        info!("Tunnel connection established successfully");
-        // 处理来自服务器的消息
-        while let Some(message) = inbound.next().await {
-            match message {
-                Ok(msg) => {
-                    self.handle_tunnel_message(msg, &self.tx).await;
+        loop {
+            let cancel_token = CancellationToken::new();
+            let child_token = cancel_token.child_token();
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone()));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), self.client_id.clone(), self.group_id.clone(), self.trace_enabled));
+            // 每次重连时取出 rx 的所有权
+            let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
+            let response = grpc_client.proxy(Request::new(outbound)).await;
+            match response {
+                Ok(resp) => {
+                    let mut inbound = resp.into_inner();
+                    info!("Tunnel connection established successfully");
+                    while let Some(message) = inbound.next().await {
+                        match message {
+                            Ok(msg) => {
+                                self.handle_tunnel_message(msg, &self.tx).await;
+                            }
+                            Err(e) => {
+                                use tonic::Code;
+                                let mut should_break_outer = false;
+                                // 1. tonic::Status 直接用 e
+                                match e.code() {
+                                    Code::Unknown | Code::Unavailable => {
+                                        should_break_outer = true;
+                                    }
+                                    _ => {}
+                                }
+                                // 额外检查 message
+                                let msg = e.message().to_ascii_lowercase();
+                                if msg.contains("broken pipe") || msg.contains("connection refused") {
+                                    should_break_outer = true;
+                                }
+                                // 2. 其他 IO 错误
+                                let err_str = e.to_string().to_ascii_lowercase();
+                                if err_str.contains("broken pipe") || err_str.contains("connection refused") {
+                                    should_break_outer = true;
+                                }
+                                error!("Error receiving message: {}", e);
+                                if should_break_outer {
+                                    // 让 connect_with_retry 返回错误，main 外层 loop 负责重连
+                                    return Err(anyhow::anyhow!("Critical tunnel error: {}", e));
+                                } else {
+                                    break; // 只重连 stream
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!("Error receiving message: {}", e);
+                    error!("Tunnel stream error: {}", e);
+                }
+            }
+            cancel_token.cancel();
+            let _ = heartbeat_handle.await;
+            let _ = config_sync_handle.await;
+            info!("Tunnel stream closed, will reconnect");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    // 新增：带 CancellationToken 的心跳任务
+    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>) {
+        let client_id = "heartbeat-client".to_string(); // 可传参
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let heartbeat = TunnelMessage {
+                        client_id: client_id.clone(),
+                        request_id: Uuid::new_v4().to_string(),
+                        direction: Direction::ClientToServer as i32,
+                        payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
+                            timestamp: chrono::Utc::now().timestamp(),
+                        })),
+                        trace_id: String::new(),
+                    };
+                    if tx.send(heartbeat).await.is_err() {
+                        debug!("Heartbeat channel closed, exit heartbeat task");
+                        break;
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    debug!("Heartbeat task cancelled");
                     break;
                 }
             }
         }
-        Ok(())
+    }
+
+    // 新增：带 CancellationToken 的配置同步任务
+    async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: String, group_id: String, trace_enabled: bool) {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let config_sync_msg = TunnelMessage {
+                        client_id: client_id.clone(),
+                        request_id: Uuid::new_v4().to_string(),
+                        direction: Direction::ClientToServer as i32,
+                        payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
+                            client_id: client_id.clone(),
+                            group: group_id.clone(),
+                            config_version: "".to_string(),
+                        })),
+                        trace_id: String::new(),
+                    };
+                    if tx.send(config_sync_msg).await.is_err() {
+                        debug!("Config sync channel closed, exit config sync task");
+                        break;
+                    }
+                    if trace_enabled {
+                        debug!("Sent config sync request via tunnel");
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    debug!("Config sync task cancelled");
+                    break;
+                }
+            }
+        }
     }
 
     async fn handle_tunnel_message(&self, msg: TunnelMessage, tx: &mpsc::Sender<TunnelMessage>) {
@@ -448,78 +550,6 @@ impl TunnelClient {
             }
         }
     }
-
-    // 添加心跳机制
-    async fn start_heartbeat(&self, tx: mpsc::Sender<TunnelMessage>) {
-        let client_id = self.client_id.clone();
-        let trace_enabled = self.trace_enabled;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                let heartbeat = TunnelMessage {
-                    client_id: client_id.clone(),
-                    request_id: Uuid::new_v4().to_string(),
-                    direction: Direction::ClientToServer as i32,
-                    payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
-                        timestamp: chrono::Utc::now().timestamp(),
-                    })),
-                    trace_id: String::new(),
-                };
-                if tx.send(heartbeat).await.is_err() {
-                    error!("Failed to send heartbeat");
-                    break;
-                }
-                if trace_enabled {
-                    debug!("Sent heartbeat to server");
-                }
-            }
-        });
-    }
-
-    // 通过tunnel连接进行配置同步
-    async fn start_config_sync_via_tunnel(&self, tx: mpsc::Sender<TunnelMessage>) {
-        let client_id = self.client_id.clone();
-        let group_id = self.group_id.clone();
-        let trace_enabled = self.trace_enabled;
-        tokio::spawn(async move {
-            // 立即发送一次配置同步请求
-            let _config_sync_msg = TunnelMessage {
-                client_id: client_id.clone(),
-                request_id: Uuid::new_v4().to_string(),
-                direction: Direction::ClientToServer as i32,
-                payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
-                    client_id: client_id.clone(),
-                    group: group_id.clone(),
-                    config_version: "".to_string(),
-                })),
-                trace_id: String::new(),
-            };
-            // 定期配置同步
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                let config_sync_msg = TunnelMessage {
-                    client_id: client_id.clone(),
-                    request_id: Uuid::new_v4().to_string(),
-                    direction: Direction::ClientToServer as i32,
-                    payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
-                        client_id: client_id.clone(),
-                        group: group_id.clone(),
-                        config_version: "".to_string(),
-                    })),
-                    trace_id: String::new(),
-                };
-                if let Err(e) = tx.send(config_sync_msg).await {
-                    error!("Failed to send config sync: {}", e);
-                    break;
-                }
-                if trace_enabled {
-                    debug!("Sent config sync request via tunnel");
-                }
-            }
-        });
-    }
 }
 
 #[tokio::main]
@@ -538,45 +568,45 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
     debug!("Loaded config: {:?}", config);
-    // 加载 client 配置
     info!("Loaded client config: {:?}", config);
 
-    // 使用配置中的 server_addr/server_port/client_group_id
     let server_addr = format!("http://{}:{}", config.server_addr, config.server_port);
     let client_group_id = config.client_group_id.clone();
     let trace_enabled = config.trace_enabled.unwrap_or(false);
+    let http_port = config.http_entry_port.unwrap_or(8003);
+    let http_addr = format!("0.0.0.0:{}", http_port);
 
-    let client_id = format!("client-{}", Uuid::new_v4());
-    let group_id = client_group_id.clone();
-    info!("Starting tunnel client {} in group {}", client_id, group_id);
+    // HTTP入口监听只启动一次，使用动态 tunnel_tx、pending_requests
+    let tunnel_tx_holder = StdArc::new(RwLock::new(None));
+    let pending_requests_holder = StdArc::new(RwLock::new(None));
+    let client_id_holder = StdArc::new(RwLock::new(None));
 
-    // 自动重连 loop
-    loop {
-        let (tx, rx) = mpsc::channel(128);
-        let client = TunnelClient::new(client_id.clone(), group_id.clone(), server_addr.clone(), trace_enabled, tx.clone());
-        // 打印所有 upstreams（可选）
-        let rules_engine = client.rules_engine.lock().await;
-        rules_engine.debug_print_upstreams();
-        drop(rules_engine);
-        // 启动本地 HTTP 入口监听（每次重连都用新的 tx、pending_requests、client_id）
-        let tunnel_tx = client.tx.clone();
-        let pending_requests = client.pending_requests.clone();
-        let client_id = client.client_id.clone();
-        let http_port = config.http_entry_port.unwrap_or(8003);
-        let http_addr = format!("0.0.0.0:{}", http_port);
-        let http_handle = tokio::spawn(async move {
+    // 启动 HTTP 入口监听，只启动一次
+    {
+        let tunnel_tx_holder = tunnel_tx_holder.clone();
+        let pending_requests_holder = pending_requests_holder.clone();
+        let client_id_holder = client_id_holder.clone();
+        tokio::spawn(async move {
             let make_svc = make_service_fn(move |_| {
-                let tunnel_tx = tunnel_tx.clone();
-                let pending_requests = pending_requests.clone();
-                let client_id = client_id.clone();
+                let tunnel_tx_holder = tunnel_tx_holder.clone();
+                let pending_requests_holder = pending_requests_holder.clone();
+                let client_id_holder = client_id_holder.clone();
                 async move {
                     Ok::<_, hyper::Error>(service_fn(move |req| {
-                        proxy::handle_http_entry(
-                            req,
-                            client_id.clone(),
-                            tunnel_tx.clone(),
-                            pending_requests.clone(),
-                        )
+                        let tunnel_tx_holder = tunnel_tx_holder.clone();
+                        let pending_requests_holder = pending_requests_holder.clone();
+                        let client_id_holder = client_id_holder.clone();
+                        async move {
+                            let tunnel_tx = tunnel_tx_holder.read().await.clone().unwrap();
+                            let pending_requests = pending_requests_holder.read().await.clone().unwrap();
+                            let client_id = client_id_holder.read().await.clone().unwrap();
+                            proxy::handle_http_entry(
+                                req,
+                                client_id,
+                                tunnel_tx,
+                                pending_requests,
+                            ).await
+                        }
                     }))
                 }
             });
@@ -586,19 +616,42 @@ async fn main() -> anyhow::Result<()> {
                 error!("Client HTTP entry server error: {}", e);
             }
         });
-        // tunnel 连接
+    }
+
+    // main loop，每次重建所有资源
+    loop {
+        // 1. 新建 channel
+        let (tx, rx) = mpsc::channel(128);
+        // 2. 新建 TunnelClient
+        let client_id = format!("client-{}", Uuid::new_v4());
+        let group_id = client_group_id.clone();
+        let tunnel_client = Arc::new(TunnelClient::new(client_id.clone(), group_id.clone(), server_addr.clone(), trace_enabled, tx.clone()));
+        // 3. 更新 HTTP入口监听用的 tunnel_tx、pending_requests、client_id
+        {
+            let mut t = tunnel_tx_holder.write().await;
+            *t = Some(tx.clone());
+            let mut p = pending_requests_holder.write().await;
+            *p = Some(tunnel_client.pending_requests.clone());
+            let mut c = client_id_holder.write().await;
+            *c = Some(client_id.clone());
+        }
+        // 4. 打印 upstreams（可选）
+        let rules_engine = tunnel_client.rules_engine.lock().await;
+        rules_engine.debug_print_upstreams();
+        drop(rules_engine);
+        // 5. 建立 gRPC client
+        let mut rx = rx;
+        info!("==== [MAIN] Creating new gRPC client connection ====");
         match TunnelServiceClient::connect(server_addr.clone()).await {
             Ok(grpc_client) => {
-                if let Err(e) = client.connect_with_retry(grpc_client, rx).await {
-                    eprintln!("Tunnel connection lost: {e}, retrying in 5s...");
+                if let Err(e) = tunnel_client.connect_with_retry(grpc_client, &mut rx).await {
+                    error!("Tunnel connection lost: {e}, retrying in 5s...");
                 }
             }
             Err(e) => {
-                eprintln!("Failed to connect to server: {e}, retrying in 5s...");
+                error!("Failed to connect to server: {e}, retrying in 5s...");
             }
         }
-        // 关闭 HTTP 入口监听
-        http_handle.abort();
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 } 
