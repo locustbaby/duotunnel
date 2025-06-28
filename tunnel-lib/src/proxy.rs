@@ -10,6 +10,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 use std::sync::Arc;
 use url;
+use url::Url;
+use tracing::error;
 
 /// 通用 tunnel 代理转发逻辑，client/server 入口 handler 可复用
 pub async fn forward_via_tunnel(
@@ -131,17 +133,27 @@ pub async fn forward_to_backend_http_like(
             body: b"Invalid method".to_vec(),
         },
     };
-    // 拼接 URL
-    let url = if req.url.starts_with("http://") || req.url.starts_with("https://") {
-        req.url.clone()
-    } else if !req.host.is_empty() {
-        format!("http://{}{}", req.host, req.url)
-    } else if target_url.starts_with("http://") || target_url.starts_with("https://") {
-        format!("{}{}", target_url, req.url)
-    } else if target_url.ends_with(":443") {
-        format!("https://{}{}", target_url, req.url)
+    // 拼接 URL（用 url crate 优化）
+    let url = if let Ok(parsed) = Url::parse(&req.url) {
+        parsed.to_string()
     } else {
-        format!("http://{}{}", target_url, req.url)
+        // 构造 base_url
+        let base_url = if !req.host.is_empty() {
+            format!("http://{}", req.host)
+        } else if target_url.starts_with("http://") || target_url.starts_with("https://") {
+            target_url.to_string()
+        } else if target_url.ends_with(":443") {
+            format!("https://{}", target_url)
+        } else {
+            format!("http://{}", target_url)
+        };
+        match Url::parse(&base_url).and_then(|base| base.join(&req.url)) {
+            Ok(url) => url.to_string(),
+            Err(e) => {
+                error!("Failed to join base_url and req.url: {}", e);
+                format!("{}{}", base_url, req.url)
+            }
+        }
     };
     // 构建 headers，自动设置 Host
     let mut headers = req.headers.clone();

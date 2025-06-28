@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc as StdArc;
 use tokio::sync::RwLock;
+use hyper::Uri;
+use url::Url;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -303,7 +305,7 @@ impl TunnelClient {
                     // 处理来自 server 的 HTTP 请求（反向代理）
                     if msg.direction == Direction::ServerToClient as i32 {
                         let host = req.host.clone();
-                        let path = req.path.clone();
+                        let path = req.url.parse::<Uri>().map(|u| u.path().to_string()).unwrap_or_else(|_| "/".to_string());
                         tracing::info!(
                             event = "client_received_tunnel_request",
                             trace_id = %trace_id,
@@ -387,10 +389,11 @@ impl TunnelClient {
 
     async fn handle_tunnel_http_request(&self, req: HttpRequest, _request_id: String, trace_id: String) -> HttpResponse {
         let host = req.host.as_str();
-        let path = req.url.split('?').next().unwrap_or("/");
+        // 用 hyper::Uri 解析 path
+        let path = req.url.parse::<Uri>().map(|u| u.path().to_string()).unwrap_or_else(|_| "/".to_string());
 
         let rules_engine = self.rules_engine.lock().await;
-        let maybe_rule = rules_engine.match_http_rule(host, path);
+        let maybe_rule = rules_engine.match_http_rule(host, &path);
         match maybe_rule {
             Some(rule) => {
                 info!("Processing tunnel request: {} {} host={} matched_rule=host:{} path_prefix:{} upstream:{} proxy_pass:{}", req.method, req.url, host, rule.match_host, rule.match_path_prefix, rule.action_upstream, rule.action_proxy_pass);
@@ -404,7 +407,7 @@ impl TunnelClient {
                     if let Some(backend) = rules_engine.pick_backend(&rule.action_upstream) {
                         let mut req = req.clone();
                         // 解析 backend host
-                        let backend_host = match url::Url::parse(&backend) {
+                        let backend_host = match Url::parse(&backend) {
                             Ok(url) => url.host_str().unwrap_or("").to_string(),
                             Err(_) => String::new(),
                         };
@@ -415,13 +418,16 @@ impl TunnelClient {
                             backend_host.as_str()
                         };
                         set_host_header(&mut req.headers, set_host);
-                        let full_url = if backend.ends_with('/') {
-                            format!("{}{}", backend.trim_end_matches('/'), req.url)
-                        } else {
-                            format!("{}{}", backend, req.url)
+                        // 用 url::Url::join 拼接 backend 和 req.url
+                        let full_url = match Url::parse(&backend).and_then(|b| b.join(&req.url)) {
+                            Ok(url) => url.to_string(),
+                            Err(e) => {
+                                error!("Failed to join backend and req.url: {}", e);
+                                backend.clone()
+                            }
                         };
                         info!("Forwarding to backend URL: {}", full_url);
-                        return self.forward_to_backend(&req, &backend, trace_id.clone()).await;
+                        return self.forward_to_backend(&req, &full_url, trace_id.clone()).await;
                     }
                 }
             }
@@ -444,14 +450,14 @@ impl TunnelClient {
                 body: b"Invalid method".to_vec(),
             },
         };
-        let url = if target_url.ends_with('/') {
-            format!("{}{}", target_url.trim_end_matches('/'), req.url)
-        } else {
-            format!("{}{}", target_url, req.url)
+        let url = match Url::parse(target_url).and_then(|base| base.join(&req.url)) {
+            Ok(url) => url.to_string(),
+            Err(e) => {
+                error!("Failed to join target_url and req.url: {}", e);
+                format!("{}{}", target_url, req.url)
+            }
         };
-        if self.trace_enabled {
-            debug!("Forwarding HTTP(S) request to: {}", url);
-        }
+        debug!("Forwarding HTTP(S) request to: {}", url);
         let mut builder = HyperRequest::builder()
             .method(method)
             .uri(&url);
