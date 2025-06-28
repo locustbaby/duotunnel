@@ -4,7 +4,7 @@ config_version = "v1.0.0"
 tunnel_port = 50001
 http_entry_port = 8001
 grpc_entry_port = 8002
-log_level = "debug"
+log_level = "info"
 trace_enabled = false
 
 # ========== 2. Forward Upstreams 定义 ==========
@@ -45,41 +45,41 @@ match_service = "com.example.MyService"
 action_client_group = "group-a"
 
 # ========== 5. Client Group 配置（下发给 client） ==========
-[client_groups.group-a]
+[reverse_proxy.client_groups.group-a]
 config_version = "v1.0.0"
 
-[client_groups.group-a.upstreams.local_service]
+[reverse_proxy.client_groups.group-a.upstreams.local_service]
 servers = [
     { address = "http://echo.free.beeceptor.com", resolve = true }
     # { address = "https://google.com", resolve = true }
 ]
 lb_policy = "round_robin"
 
-[[client_groups.group-a.rules.http]]
+[[reverse_proxy.client_groups.group-a.rules.http]]
 match_host = "www.google.com"
 action_upstream = "local_service"
 # action_set_host = "www.google.com"
 
-# 也可以配置HTTP服务
-[client_groups.group-a.upstreams.http_service]
-servers = [
-    { address = "http://127.0.0.1:8080", resolve = false }
-]
-lb_policy = "round_robin"
+# # 也可以配置HTTP服务
+# [client_groups.group-a.upstreams.http_service]
+# servers = [
+#     { address = "http://127.0.0.1:8080", resolve = false }
+# ]
+# lb_policy = "round_robin"
 
-[[client_groups.group-a.rules.http]]
-match_host = "localhost"
-action_upstream = "http_service"
+# [[client_groups.group-a.rules.http]]
+# match_host = "localhost"
+# action_upstream = "http_service"
 
-[client_groups.group-b]
-config_version = "v1.0.0"
+# [client_groups.group-b]
+# config_version = "v1.0.0"
 
-[client_groups.group-b.upstreams.local_service]
-servers = [
-    { address = "127.0.0.1:9100", resolve = false }
-]
-lb_policy = "round_robin"
+# [client_groups.group-b.upstreams.local_service]
+# servers = [
+#     { address = "127.0.0.1:9100", resolve = false }
+# ]
+# lb_policy = "round_robin"
 
-[[client_groups.group-b.rules.http]]
-match_host = "b.com"
-action_upstream = "local_service" 
+# [[client_groups.group-b.rules.http]]
+# match_host = "b.com"
+# action_upstream = "local_service" 

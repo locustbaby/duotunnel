@@ -6,7 +6,6 @@ pub struct ServerConfig {
     pub server: ServerSection,
     pub forward: ForwardSection,
     pub reverse_proxy: ReverseProxySection,
-    pub client_groups: HashMap<String, ClientGroupConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,6 +47,7 @@ pub struct ForwardRules {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReverseProxySection {
     pub rules: ReverseProxyRules,
+    pub client_groups: HashMap<String, ClientGroupConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

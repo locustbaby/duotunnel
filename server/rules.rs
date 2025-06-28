@@ -49,7 +49,7 @@ impl RulesEngine {
         self.config.forward.upstreams.get(name)
     }
     pub fn get_group(&self, group: &str) -> Option<&ClientGroupConfig> {
-        self.config.client_groups.get(group)
+        self.config.reverse_proxy.client_groups.get(group)
     }
 }
 
