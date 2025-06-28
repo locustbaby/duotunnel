@@ -120,7 +120,7 @@ impl TunnelService for MyTunnelServer {
             let mut client_id = String::new();
             let mut client_tx: Option<mpsc::Sender<TunnelMessage>> = None;
             while let Some(message) = stream.next().await {
-                info!(target: "server::proxy_stream", ?message, "Received tunnel message from client");
+                debug!(target: "server::proxy_stream", ?message, "Received tunnel message from client");
                 match message {
                     Ok(msg) => {
                         client_id = msg.client_id.clone();

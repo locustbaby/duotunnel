@@ -46,7 +46,7 @@ impl RulesEngine {
     }
 
     pub fn get_upstream(&self, name: &str) -> Option<&Upstream> {
-        self.config.upstreams.get(name)
+        self.config.forward.upstreams.get(name)
     }
     pub fn get_group(&self, group: &str) -> Option<&ClientGroupConfig> {
         self.config.client_groups.get(group)

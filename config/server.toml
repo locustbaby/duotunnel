@@ -7,20 +7,20 @@ grpc_entry_port = 8002
 log_level = "info"
 trace_enabled = false
 
-# ========== 2. Upstreams 全局定义 ==========
-[upstreams.backend]
+# ========== 2. Forward Upstreams 定义 ==========
+[forward.upstreams.backend]
 servers = [
     { address = "https://echo.free.beeceptor.com", resolve = true }
 ]
 lb_policy = "round_robin"
 
-[upstreams.grpc_backend]
+[forward.upstreams.grpc_backend]
 servers = [
     { address = "127.0.0.1:9002", resolve = false }
 ]
 lb_policy = "round_robin"
 
-# ========== 3. Forward Proxy 配置 ==========
+# ========== 3. Forward Request from Client Proxy 配置 ==========
 [[forward.rules.http]]
 match_host = "echo.free.beeceptor.com"
 action_upstream = "backend"

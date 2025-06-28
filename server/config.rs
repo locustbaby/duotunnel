@@ -4,7 +4,6 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub server: ServerSection,
-    pub upstreams: HashMap<String, Upstream>,
     pub forward: ForwardSection,
     pub reverse_proxy: ReverseProxySection,
     pub client_groups: HashMap<String, ClientGroupConfig>,
@@ -34,6 +33,7 @@ pub struct ServerAddr {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ForwardSection {
+    pub upstreams: HashMap<String, Upstream>,
     pub rules: ForwardRules,
 }
 
