@@ -29,6 +29,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, debug, warn};
 use tracing_subscriber;
 use tunnel_lib::http_forward::forward_http_to_backend;
+use tunnel_lib::response::{self, error_response, ProxyErrorKind};
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
@@ -217,11 +218,13 @@ impl TunnelService for MyTunnelServer {
                                 // 查找 forward 规则
                                 let host = req.host.as_str();
                                 let path = req.url.split('?').next().unwrap_or("/");
-                                let mut response = HttpResponse {
-                                    status_code: 404,
-                                    headers: HashMap::new(),
-                                    body: b"Not Found".to_vec(),
-                                };
+                                let mut response = error_response(
+                                    ProxyErrorKind::NoMatchRules,
+                                    None,
+                                    Some(&msg.trace_id),
+                                    Some(&msg.request_id),
+                                    Some(&msg.client_id),
+                                );
                                 if let Some(rule) = rules_engine.match_forward_rule(host, path, None) {
                                     if let Some(ref upstream_name) = rule.action_upstream {
                                         if let Some(upstream) = rules_engine.get_upstream(upstream_name) {
@@ -418,9 +421,11 @@ async fn reverse_proxy_handler(
                 .unwrap()),
         }
     } else {
-        Ok(HyperResponse::builder()
-            .status(404)
-            .body(Body::from("No route found"))
+        let err_resp = response::resp_404(None, None, Some("server"));
+        Ok::<_, hyper::Error>(HyperResponse::builder()
+            .status(err_resp.status_code as u16)
+            .header("content-type", "application/json")
+            .body(Body::from(err_resp.body))
             .unwrap())
     }
 }
@@ -496,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
                                    req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or(""));
                             let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
                             let path = req.uri().path();
-                            // 1. reverse_proxy 优先
+                            // 只匹配 reverse_proxy 规则
                             if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, path, None) {
                                 debug!("Matched reverse_proxy rule: {:?}", rule);
                                 if let Some(group) = &rule.action_client_group {
@@ -504,13 +509,13 @@ async fn main() -> anyhow::Result<()> {
                                     return proxy_handler.forward_via_tunnel(req, group).await;
                                 }
                             }
-                            // 2. forward 规则
-                            if let Some(rule) = rules_engine.match_forward_rule(host, path, None) {
-                                if let Some(upstream_name) = &rule.action_upstream {
-                                    return proxy_handler.handle_proxy_pass(req, upstream_name).await;
-                                }
-                            }
-                            Ok::<_, hyper::Error>(HyperResponse::new(Body::from("No matching rule")))
+                            // 未命中 reverse_proxy，直接 404
+                            let err_resp = response::resp_404(None, None, Some("server"));
+                            Ok::<_, hyper::Error>(HyperResponse::builder()
+                                .status(err_resp.status_code as u16)
+                                .header("content-type", "application/json")
+                                .body(Body::from(err_resp.body))
+                                .unwrap())
                         }
                     }))
                 }

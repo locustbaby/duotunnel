@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, info_span, Instrument};
 use tunnel_lib::http_forward::{build_http_tunnel_message, forward_http_to_backend, set_host_header};
+use tunnel_lib::response::{error_response, ProxyErrorKind};
 
 // Global round-robin index for each upstream
 lazy_static! {
@@ -346,10 +347,22 @@ pub async fn handle_grpc_request(
             .unwrap());
                     }
     } else {
-        return Ok(HyperResponse::builder()
-            .status(502)
-                        .body(Body::from("gRPC upstream not found"))
-            .unwrap());
+        return Ok({
+            let err_resp = error_response(
+                ProxyErrorKind::NoUpstream,
+                None,
+                None,
+                None,
+                None,
+            );
+            let mut builder = HyperResponse::builder()
+                .status(err_resp.status_code as u16)
+                .header("content-type", "application/json");
+            for (k, v) in err_resp.headers.iter() {
+                builder = builder.header(k, v);
+            }
+            builder.body(Body::from(err_resp.body)).unwrap()
+        });
     }
             }
         }
