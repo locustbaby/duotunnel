@@ -4,3 +4,4 @@ pub mod tunnel {
 
 pub mod http_forward;
 pub mod response; 
+pub mod proxy;

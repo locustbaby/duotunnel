@@ -16,13 +16,14 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, info_span, Instrument};
 use tunnel_lib::http_forward::{build_http_tunnel_message, forward_http_to_backend, set_host_header};
 use tunnel_lib::response::{error_response, ProxyErrorKind};
+use dashmap::DashMap;
 
 // Global round-robin index for each upstream
 lazy_static! {
     static ref UPSTREAM_INDEX: Mutex<std::collections::HashMap<String, usize>> = Mutex::new(std::collections::HashMap::new());
 }
 
-fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
+pub fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
     let len = upstream.servers.len();
     if len == 0 {
         return None;
@@ -54,7 +55,7 @@ pub async fn start_http_entry(rules_engine: Arc<RulesEngine>, proxy_handler: Arc
 
 pub struct ProxyHandler {
     client_registry: Arc<ManagedClientRegistry>,
-    pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    pending_reverse_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
     pub trace_enabled: bool,
 }
@@ -63,7 +64,7 @@ impl ProxyHandler {
     pub fn new(trace_enabled: bool) -> Self {
         Self {
             client_registry: Arc::new(ManagedClientRegistry::new()),
-            pending_reverse_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_reverse_requests: Arc::new(DashMap::new()),
             connected_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             trace_enabled,
         }
@@ -71,7 +72,7 @@ impl ProxyHandler {
 
     pub fn with_dependencies(
         client_registry: Arc<ManagedClientRegistry>,
-        pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+        pending_reverse_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
         connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
         trace_enabled: bool,
     ) -> Self {
@@ -207,9 +208,9 @@ impl ProxyHandler {
                     &trace_id,
                 );
                 let (tx, rx) = oneshot::channel();
-                self.pending_reverse_requests.lock().await.insert(request_id.clone(), tx);
+                self.pending_reverse_requests.insert(request_id.clone(), tx);
                 if let Err(e) = client_tx.send(tunnel_msg).await {
-                    self.pending_reverse_requests.lock().await.remove(&request_id);
+                    self.pending_reverse_requests.remove(&request_id);
                     return Ok(HyperResponse::builder()
                         .status(502)
                         .body(Body::from(format!("Failed to send tunnel message: {}", e)))
@@ -224,11 +225,34 @@ impl ProxyHandler {
                         Ok(response_builder.body(Body::from(http_resp.body)).unwrap())
                     }
                     Ok(Err(_)) => {
-                        Ok(HyperResponse::builder().status(502).body(Body::from("Tunnel response failed")).unwrap())
+                        self.pending_reverse_requests.remove(&request_id);
+                        let err_resp = error_response(
+                            ProxyErrorKind::Timeout,
+                            None,
+                            Some(&trace_id),
+                            Some(&request_id),
+                            Some(&client),
+                        );
+                        let mut builder = HyperResponse::builder().status(err_resp.status_code as u16);
+                        for (k, v) in err_resp.headers.iter() {
+                            builder = builder.header(k, v);
+                        }
+                        Ok(builder.body(Body::from(err_resp.body)).unwrap())
                     }
                     Err(_) => {
-                        self.pending_reverse_requests.lock().await.remove(&request_id);
-                        Ok(HyperResponse::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
+                        self.pending_reverse_requests.remove(&request_id);
+                        let err_resp = error_response(
+                            ProxyErrorKind::Timeout,
+                            None,
+                            Some(&trace_id),
+                            Some(&request_id),
+                            Some(&client),
+                        );
+                        let mut builder = HyperResponse::builder().status(err_resp.status_code as u16);
+                        for (k, v) in err_resp.headers.iter() {
+                            builder = builder.header(k, v);
+                        }
+                        Ok(builder.body(Body::from(err_resp.body)).unwrap())
                     }
                 }
             },

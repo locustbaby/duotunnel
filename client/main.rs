@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 use hyper::Uri;
 use url::Url;
 use dashmap::DashMap;
+use serde_json;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -525,6 +526,62 @@ impl TunnelClient {
             }
         }
     }
+
+    async fn connect_with_retry_with_token(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>, token: CancellationToken) -> Result<()> {
+        self.register_group(&mut grpc_client).await?;
+        loop {
+            let child_token = token.child_token();
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), self.client_id.clone()));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), self.client_id.clone(), self.group_id.clone(), self.trace_enabled));
+            let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
+            let response = grpc_client.proxy(Request::new(outbound)).await;
+            match response {
+                Ok(resp) => {
+                    let mut inbound = resp.into_inner();
+                    info!("Tunnel connection established successfully");
+                    while let Some(message) = inbound.next().await {
+                        match message {
+                            Ok(msg) => {
+                                self.handle_tunnel_message(msg, &self.tx).await;
+                            }
+                            Err(e) => {
+                                use tonic::Code;
+                                let mut should_break_outer = false;
+                                match e.code() {
+                                    Code::Unknown | Code::Unavailable => {
+                                        should_break_outer = true;
+                                    }
+                                    _ => {}
+                                }
+                                let msg = e.message().to_ascii_lowercase();
+                                if msg.contains("broken pipe") || msg.contains("connection refused") {
+                                    should_break_outer = true;
+                                }
+                                let err_str = e.to_string().to_ascii_lowercase();
+                                if err_str.contains("broken pipe") || err_str.contains("connection refused") {
+                                    should_break_outer = true;
+                                }
+                                error!("Error receiving message: {}", e);
+                                if should_break_outer {
+                                    return Err(anyhow::anyhow!("Critical tunnel error: {}", e));
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Tunnel stream error: {}", e);
+                }
+            }
+            token.cancel();
+            let _ = heartbeat_handle.await;
+            let _ = config_sync_handle.await;
+            info!("Tunnel stream closed, will reconnect");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
 }
 
 #[tokio::main]
@@ -555,26 +612,47 @@ async fn main() -> anyhow::Result<()> {
     let tunnel_tx_holder = StdArc::new(RwLock::new(None));
     let pending_requests_holder = StdArc::new(RwLock::new(None));
     let client_id_holder = StdArc::new(RwLock::new(None));
+    let token_holder = StdArc::new(RwLock::new(None::<CancellationToken>));
 
     // 启动 HTTP 入口监听，只启动一次
     {
         let tunnel_tx_holder = tunnel_tx_holder.clone();
         let pending_requests_holder = pending_requests_holder.clone();
         let client_id_holder = client_id_holder.clone();
+        let token_holder = token_holder.clone();
         tokio::spawn(async move {
             let make_svc = make_service_fn(move |_| {
                 let tunnel_tx_holder = tunnel_tx_holder.clone();
                 let pending_requests_holder = pending_requests_holder.clone();
                 let client_id_holder = client_id_holder.clone();
+                let token_holder = token_holder.clone();
                 async move {
                     Ok::<_, hyper::Error>(service_fn(move |req| {
                         let tunnel_tx_holder = tunnel_tx_holder.clone();
                         let pending_requests_holder = pending_requests_holder.clone();
                         let client_id_holder = client_id_holder.clone();
+                        let token_holder = token_holder.clone();
                         async move {
                             let tunnel_tx = tunnel_tx_holder.read().await.clone().unwrap();
                             let pending_requests = pending_requests_holder.read().await.clone().unwrap();
-                            let client_id = client_id_holder.read().await.clone().unwrap();
+                            let client_id: String = client_id_holder.read().await.clone().unwrap();
+                            let token: Option<CancellationToken> = token_holder.read().await.clone();
+                            if let Some(token) = token {
+                                if token.is_cancelled() {
+                                    let resp = tunnel_lib::response::error_response(
+                                        tunnel_lib::response::ProxyErrorKind::NoUpstream,
+                                        Some("Connection closed, please retry"),
+                                        None,
+                                        None,
+                                        Some(client_id.as_str()),
+                                    );
+                                    return Ok(HyperResponse::builder()
+                                        .status(502)
+                                        .header("content-type", "application/json")
+                                        .body(Body::from(resp.body))
+                                        .unwrap());
+                                }
+                            }
                             proxy::handle_http_entry(
                                 req,
                                 client_id,
@@ -601,7 +679,7 @@ async fn main() -> anyhow::Result<()> {
         let client_id = format!("client-{}", Uuid::new_v4());
         let group_id = client_group_id.clone();
         let tunnel_client = Arc::new(TunnelClient::new(client_id.clone(), group_id.clone(), server_addr.clone(), trace_enabled, tx.clone()));
-        // 3. 更新 HTTP入口监听用的 tunnel_tx、pending_requests、client_id
+        // 3. 更新 HTTP入口监听用的 tunnel_tx、pending_requests、client_id、token
         {
             let mut t = tunnel_tx_holder.write().await;
             *t = Some(tx.clone());
@@ -609,6 +687,8 @@ async fn main() -> anyhow::Result<()> {
             *p = Some(tunnel_client.pending_requests.clone());
             let mut c = client_id_holder.write().await;
             *c = Some(client_id.clone());
+            let mut token_w = token_holder.write().await;
+            *token_w = None; // 先清空
         }
         // 4. 打印 upstreams（可选）
         let rules_engine = tunnel_client.rules_engine.lock().await;
@@ -619,13 +699,43 @@ async fn main() -> anyhow::Result<()> {
         info!("==== [MAIN] Creating new gRPC client connection ====");
         match TunnelServiceClient::connect(server_addr.clone()).await {
             Ok(grpc_client) => {
-                if let Err(e) = tunnel_client.connect_with_retry(grpc_client, &mut rx).await {
+                // 新建 token
+                let token = CancellationToken::new();
+                {
+                    let mut token_w = token_holder.write().await;
+                    *token_w = Some(token.clone());
+                }
+                if let Err(e) = tunnel_client.connect_with_retry_with_token(grpc_client, &mut rx, token.clone()).await {
                     error!("Tunnel connection lost: {e}, retrying in 5s...");
                 }
             }
             Err(e) => {
                 error!("Failed to connect to server: {e}, retrying in 5s...");
             }
+        }
+        // 清理 token/资源
+        {
+            let mut token_w = token_holder.write().await;
+            *token_w = None;
+            let mut t = tunnel_tx_holder.write().await;
+            *t = None;
+            let mut p = pending_requests_holder.write().await;
+            if let Some(pending_requests) = p.as_ref() {
+                let client_id: String = client_id_holder.read().await.clone().unwrap();
+                let keys: Vec<_> = pending_requests.iter().map(|entry| entry.key().clone()).collect();
+                for request_id in keys {
+                    if let Some((_, sender)) = pending_requests.remove(&request_id) {
+                        let resp = tunnel_lib::response::resp_502(
+                            Some("Tunnel closed"),
+                            None,
+                            Some(client_id.as_str()),
+                        );
+                        let _ = sender.send(resp);
+                    }
+                }
+            }
+            let mut c = client_id_holder.write().await;
+            *c = None;
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }

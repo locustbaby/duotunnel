@@ -67,7 +67,18 @@ pub async fn forward_http_via_tunnel(
         }
         Err(_) => {
             pending_map.remove(&request_id);
-            Ok(hyper::Response::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
+            let err_resp = error_response(
+                ProxyErrorKind::Timeout,
+                None,
+                Some(&trace_id),
+                Some(&request_id),
+                Some(client_id),
+            );
+            let mut builder = hyper::Response::builder().status(err_resp.status_code as u16);
+            for (k, v) in err_resp.headers.iter() {
+                builder = builder.header(k, v);
+            }
+            Ok(builder.body(Body::from(err_resp.body)).unwrap())
         }
     }
 }

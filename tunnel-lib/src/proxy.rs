@@ -3,8 +3,10 @@ use tokio::sync::{mpsc, oneshot};
 use std::sync::Arc;
 use dashmap::DashMap;
 use crate::tunnel::{TunnelMessage, HttpResponse, Direction};
+use async_trait::async_trait;
 
 /// Aggregated context for HTTP tunnel entry handling.
+#[derive(Clone)]
 pub struct HttpTunnelContext {
     pub client_id: String,
     pub tunnel_tx: Arc<mpsc::Sender<TunnelMessage>>,

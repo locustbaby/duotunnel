@@ -30,23 +30,29 @@ use tracing::{info, error, debug, warn};
 use tracing_subscriber;
 use tunnel_lib::http_forward::forward_http_to_backend;
 use tunnel_lib::response::{self, error_response, ProxyErrorKind};
+use tunnel_lib::proxy::{ProxyTarget, HttpTunnelContext, http_entry_handler};
+use dashmap::DashMap;
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
     pub rules_engine: Arc<RulesEngine>,
     pub client_registry: Arc<ManagedClientRegistry>,
-    pending_reverse_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
+    token_map: Arc<DashMap<String, CancellationToken>>,
     http_client: Arc<HyperClient<hyper::client::HttpConnector>>,
 }
 
 impl MyTunnelServer {
-    fn new_with_config(config: &crate::config::ServerConfig, http_client: Arc<HyperClient<hyper::client::HttpConnector>>) -> Self {
+    fn new_with_config(config: &crate::config::ServerConfig, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>, token_map: Arc<DashMap<String, CancellationToken>>) -> Self {
         let rules_engine = RulesEngine::new(config.clone());
         Self {
             client_registry: Arc::new(ManagedClientRegistry::new()),
-            pending_reverse_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_requests,
             connected_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            token_map,
             rules_engine: Arc::new(rules_engine),
             http_client,
         }
@@ -56,7 +62,9 @@ impl MyTunnelServer {
 impl Default for MyTunnelServer {
     fn default() -> Self {
         let http_client = Arc::new(HyperClient::new());
-        Self::new_with_config(&ServerConfig::load("../config/server.toml").unwrap(), http_client)
+        let pending_requests = Arc::new(DashMap::new());
+        let token_map = Arc::new(DashMap::new());
+        Self::new_with_config(&ServerConfig::load("../config/server.toml").unwrap(), http_client, pending_requests, token_map)
     }
 }
 
@@ -111,26 +119,26 @@ impl TunnelService for MyTunnelServer {
     ) -> Result<Response<Self::ProxyStream>, Status> {
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(128);
-        // clone 需要的 Arc 字段，避免 &self 被 move 进 tokio::spawn
-        let pending_reverse_requests = self.pending_reverse_requests.clone();
+        let pending_requests = self.pending_requests.clone();
         let connected_clients = self.connected_clients.clone();
         let rules_engine = self.rules_engine.clone();
         let client_registry = self.client_registry.clone();
         let http_client = self.http_client.clone();
+        let token_map = self.token_map.clone();
         tokio::spawn(async move {
             let mut client_id = String::new();
             let mut client_tx: Option<mpsc::Sender<TunnelMessage>> = None;
+            let mut token = CancellationToken::new();
             while let Some(message) = stream.next().await {
                 debug!(target: "server::proxy_stream", ?message, "Received tunnel message from client");
                 match message {
                     Ok(msg) => {
                         client_id = msg.client_id.clone();
-                        // 存储客户端连接（只在第一次收到消息时）
                         if client_tx.is_none() {
                             let (ctx, crx) = mpsc::channel(128);
                             client_tx = Some(ctx.clone());
+                            token_map.insert(client_id.clone(), token.clone());
                             connected_clients.lock().await.insert(client_id.clone(), ctx);
-                            // 启动客户端消息分发器
                             let tx_clone = tx.clone();
                             tokio::spawn(async move {
                                 let mut receiver = crx;
@@ -141,12 +149,13 @@ impl TunnelService for MyTunnelServer {
                                 }
                             });
                         }
-                        // 处理消息
                         match msg.payload {
                             Some(tunnel_message::Payload::HttpResponse(resp)) => {
                                 if msg.direction == Direction::ClientToServer as i32 {
-                                    if let Some(sender) = pending_reverse_requests.lock().await.remove(&msg.request_id) {
+                                    if let Some((_, sender)) = pending_requests.remove(&msg.request_id) {
                                         let _ = sender.send(resp);
+                                    } else {
+                                        warn!("No pending sender for request_id={}", msg.request_id);
                                     }
                                 } else {
                                     warn!("Ignore HttpResponse with wrong direction: {}", msg.direction);
@@ -259,8 +268,15 @@ impl TunnelService for MyTunnelServer {
                             None => {}
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if let Some(token) = token_map.get(client_id.as_str()) {
+                            token.cancel();
+                        }
+                        connected_clients.lock().await.remove(&client_id);
+                        token_map.remove(&client_id);
+                        break;
                     }
+                }
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -438,6 +454,96 @@ fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
     }
 }
 
+// ServerProxyTarget 实现
+pub struct ServerProxyTarget {
+    pub rules_engine: Arc<RulesEngine>,
+    pub client_registry: Arc<ManagedClientRegistry>,
+    pub connected_clients: Arc<TokioMutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
+    pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
+    pub token_map: Arc<DashMap<String, CancellationToken>>,
+}
+
+#[async_trait]
+impl ProxyTarget for ServerProxyTarget {
+    async fn handle(
+        &self,
+        req: HyperRequest<Body>,
+        ctx: &HttpTunnelContext,
+    ) -> Result<HyperResponse<Body>, hyper::Error> {
+        let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+        let path = req.uri().path();
+        if let Some(rule) = self.rules_engine.match_reverse_proxy_rule(host, path, None) {
+            if let Some(group) = &rule.action_client_group {
+                let healthy_clients = self.client_registry.get_clients_in_group(group);
+                if healthy_clients.is_empty() {
+                    let err_resp = response::resp_502(None, None, Some("server"));
+                    return Ok(HyperResponse::builder()
+                        .status(err_resp.status_code as u16)
+                        .header("content-type", "application/json")
+                        .body(Body::from(err_resp.body))
+                        .unwrap());
+                }
+                let mut found = None;
+                let clients = self.connected_clients.lock().await;
+                for client_id in &healthy_clients {
+                    if let Some(token) = self.token_map.get(client_id.as_str()) {
+                        if !token.is_cancelled() {
+                            if let Some(sender) = clients.get(client_id.as_str()) {
+                                if !sender.is_closed() {
+                                    found = Some((client_id, sender));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((client_id, sender)) = found {
+                    // access log
+                    let trace_id = req.headers()
+                        .get("x-trace-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    tracing::info!(
+                        event = "access",
+                        trace_id = %trace_id,
+                        host = %host,
+                        path = %path,
+                        group = %group,
+                        selected_client = %client_id,
+                        healthy_clients = ?healthy_clients,
+                        message = "access log"
+                    );
+                    use tunnel_lib::http_forward::forward_http_via_tunnel;
+                    use uuid::Uuid;
+                    let request_id = Uuid::new_v4().to_string();
+                    return forward_http_via_tunnel(
+                        req,
+                        &client_id,
+                        sender,
+                        self.pending_requests.clone(),
+                        request_id,
+                        tunnel_lib::tunnel::Direction::ServerToClient,
+                    ).await;
+                } else {
+                    let err_resp = response::resp_502(None, None, Some("server"));
+                    return Ok(HyperResponse::builder()
+                        .status(err_resp.status_code as u16)
+                        .header("content-type", "application/json")
+                        .body(Body::from(err_resp.body))
+                        .unwrap());
+                }
+            }
+        }
+        let err_resp = response::resp_404(None, None, Some("server"));
+        Ok(HyperResponse::builder()
+            .status(err_resp.status_code as u16)
+            .header("content-type", "application/json")
+            .body(Body::from(err_resp.body))
+            .unwrap())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = ServerConfig::load("../config/server.toml")?;
@@ -465,63 +571,51 @@ async fn main() -> anyhow::Result<()> {
     info!("Loaded config with {} HTTP rules, {} gRPC rules", http_rule_count, grpc_rule_count);
     
     let http_client = Arc::new(HyperClient::new());
-    let tunnel_server = MyTunnelServer::new_with_config(&config, http_client.clone());
+    let pending_requests = Arc::new(DashMap::new());
+    let token_map = Arc::new(DashMap::new());
+    let tunnel_server = MyTunnelServer::new_with_config(&config, http_client.clone(), pending_requests.clone(), token_map.clone());
     let rules_engine = tunnel_server.rules_engine.clone();
     let client_registry = tunnel_server.client_registry.clone();
-    let pending_reverse_requests = tunnel_server.pending_reverse_requests.clone();
     let connected_clients = tunnel_server.connected_clients.clone();
     let http_client = tunnel_server.http_client.clone();
-
-    let proxy_handler = Arc::new(ProxyHandler::with_dependencies(
-        client_registry.clone(),
-        pending_reverse_requests.clone(),
-        connected_clients.clone(),
-        config.server.trace_enabled.unwrap_or(true),
-    ));
 
     // HTTP 入口监听
     let http_port = config.server.http_entry_port;
     let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
-    let rules_engine_http = rules_engine.clone();
-    let proxy_handler_http = proxy_handler.clone();
+    let target = Arc::new(ServerProxyTarget {
+        rules_engine: rules_engine.clone(),
+        client_registry: client_registry.clone(),
+        connected_clients: connected_clients.clone(),
+        pending_requests: pending_requests.clone(),
+        token_map: token_map.clone(),
+    });
+    let (dummy_tx, _dummy_rx) = mpsc::channel(1);
+    let pending_requests = Arc::new(DashMap::new());
+    let ctx = HttpTunnelContext {
+        client_id: "server".to_string(),
+        tunnel_tx: Arc::new(dummy_tx),
+        pending_requests: pending_requests.clone(),
+        direction: tunnel_lib::tunnel::Direction::ServerToClient,
+    };
     tokio::spawn({
-        let rules_engine = rules_engine_http.clone();
-        let proxy_handler = proxy_handler_http.clone();
+        let target = target.clone();
+        let ctx = ctx.clone();
         async move {
             let make_svc = make_service_fn(move |_| {
-                let rules_engine = rules_engine.clone();
-                let proxy_handler = proxy_handler.clone();
+                let ctx = ctx.clone();
+                let target = target.clone();
                 async move {
                     Ok::<_, hyper::Error>(service_fn(move |req| {
-                        let rules_engine = rules_engine.clone();
-                        let proxy_handler = proxy_handler.clone();
+                        let ctx = ctx.clone();
+                        let target = target.clone();
                         async move {
-                            debug!("HTTP request received: {} {} (Host: {})", 
-                                   req.method(), req.uri().path(), 
-                                   req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or(""));
-                            let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
-                            let path = req.uri().path();
-                            // 只匹配 reverse_proxy 规则
-                            if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, path, None) {
-                                debug!("Matched reverse_proxy rule: {:?}", rule);
-                                if let Some(group) = &rule.action_client_group {
-                                    debug!("Forwarding to client group: {}", group);
-                                    return proxy_handler.forward_via_tunnel(req, group).await;
-                                }
-                            }
-                            // 未命中 reverse_proxy，直接 404
-                            let err_resp = response::resp_404(None, None, Some("server"));
-                            Ok::<_, hyper::Error>(HyperResponse::builder()
-                                .status(err_resp.status_code as u16)
-                                .header("content-type", "application/json")
-                                .body(Body::from(err_resp.body))
-                                .unwrap())
+                            http_entry_handler(req, &ctx, &*target).await
                         }
                     }))
                 }
             });
             let server = HyperServer::bind(&http_addr).serve(make_svc);
-            info!("HTTP entry listening on http://{}", http_addr);
+            info!("HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
             if let Err(e) = server.await {
                 error!("HTTP entry server error: {}", e);
             }

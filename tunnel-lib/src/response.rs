@@ -7,6 +7,7 @@ pub enum ProxyErrorKind {
     NoUpstream,
     Internal,
     BadRequest,
+    Timeout,
     // 可扩展更多类型
 }
 
@@ -17,6 +18,7 @@ impl ProxyErrorKind {
             ProxyErrorKind::NoUpstream => 502,
             ProxyErrorKind::Internal => 500,
             ProxyErrorKind::BadRequest => 400,
+            ProxyErrorKind::Timeout => 504,
         }
     }
     pub fn message(&self) -> &'static str {
@@ -25,6 +27,7 @@ impl ProxyErrorKind {
             ProxyErrorKind::NoUpstream => "No upstream available",
             ProxyErrorKind::Internal => "Internal server error",
             ProxyErrorKind::BadRequest => "Bad request",
+            ProxyErrorKind::Timeout => "Tunnel request timeout",
         }
     }
     pub fn error_type(&self) -> &'static str {
@@ -33,6 +36,7 @@ impl ProxyErrorKind {
             ProxyErrorKind::NoUpstream => "no_upstream",
             ProxyErrorKind::Internal => "internal_error",
             ProxyErrorKind::BadRequest => "bad_request",
+            ProxyErrorKind::Timeout => "timeout",
         }
     }
 }
