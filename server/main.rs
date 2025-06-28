@@ -214,8 +214,29 @@ impl TunnelService for MyTunnelServer {
                                     host = %req.host,
                                     message = "Server received HTTP request from tunnel"
                                 );
-                                // 调用本地 forward 规则处理
-                                let response = handle_forward_proxy_from_client(req.clone(), &rules_engine, &msg.request_id, http_client.clone()).await;
+                                // 查找 forward 规则
+                                let host = req.host.as_str();
+                                let path = req.url.split('?').next().unwrap_or("/");
+                                let mut response = HttpResponse {
+                                    status_code: 404,
+                                    headers: HashMap::new(),
+                                    body: b"Not Found".to_vec(),
+                                };
+                                if let Some(rule) = rules_engine.match_forward_rule(host, path, None) {
+                                    if let Some(ref upstream_name) = rule.action_upstream {
+                                        if let Some(upstream) = rules_engine.get_upstream(upstream_name) {
+                                            if let Some(backend) = pick_backend(upstream) {
+                                                let set_host = rule.action_set_host.as_deref().unwrap_or("");
+                                                response = tunnel_lib::proxy::forward_to_backend_http_like(
+                                                    req,
+                                                    &backend,
+                                                    http_client.clone(),
+                                                    set_host
+                                                ).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 let response_msg = TunnelMessage {
                                     client_id: msg.client_id.clone(),
                                     request_id: msg.request_id.clone(),
@@ -402,41 +423,6 @@ async fn reverse_proxy_handler(
             .body(Body::from("No route found"))
             .unwrap())
     }
-}
-
-async fn handle_forward_proxy_from_client(
-    req: HttpRequest,
-    rules_engine: &Arc<RulesEngine>,
-    _request_id: &str,
-    http_client: Arc<HyperClient<hyper::client::HttpConnector>>,
-) -> HttpResponse {
-    let host = req.host.as_str();
-    let path = req.url.split('?').next().unwrap_or("/");
-    
-    info!("Processing forward proxy request from client: {} {} (Host: {})", req.method, req.url, host);
-    
-    // 查找匹配的规则
-    if let Some(rule) = rules_engine.match_forward_rule(host, path, None) {
-        if let Some(ref upstream_name) = rule.action_upstream {
-            let set_host = rule.action_set_host.as_deref().unwrap_or("");
-            return forward_to_backend_server(&req, upstream_name, http_client.clone(), set_host).await;
-        }
-    }
-    
-    // 默认处理：直接代理
-    if req.url.starts_with("http://") || req.url.starts_with("https://") {
-        forward_to_backend_server(&req, &req.url, http_client.clone(), &req.host).await
-    } else {
-        HttpResponse {
-            status_code: 404,
-            headers: HashMap::new(),
-            body: b"Not Found".to_vec(),
-        }
-    }
-}
-
-async fn forward_to_backend_server(req: &HttpRequest, target_url: &str, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, action_set_host: &str) -> HttpResponse {
-    forward_to_backend_http_like(req, target_url, http_client, action_set_host).await
 }
 
 fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
