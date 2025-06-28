@@ -436,6 +436,7 @@ fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = ServerConfig::load("../config/server.toml")?;
+    config.validate_rules()?;
     let log_level = config.server.log_level.as_str();
     let filter = match log_level {
         "debug" => tracing::Level::DEBUG,

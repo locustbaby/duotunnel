@@ -35,9 +35,9 @@ action_upstream = "grpc_backend"
 match_host = "www.google.com"
 action_client_group = "group-a"
 
-[[reverse_proxy.rules.http]]
-match_host = "b.com"
-action_client_group = "group-b"
+# [[reverse_proxy.rules.http]]
+# match_host = "www.google.com"
+# action_client_group = "group-b"
 
 [[reverse_proxy.rules.grpc]]
 match_host = "grpc.google.com"
@@ -60,6 +60,10 @@ match_host = "www.google.com"
 action_upstream = "local_service"
 # action_set_host = "www.google.com"
 
+[[reverse_proxy.client_groups.group-b.rules.http]]
+match_host = "www.google.com"
+action_upstream = "local_service"
+
 # # 也可以配置HTTP服务
 # [client_groups.group-a.upstreams.http_service]
 # servers = [
@@ -71,14 +75,14 @@ action_upstream = "local_service"
 # match_host = "localhost"
 # action_upstream = "http_service"
 
-# [client_groups.group-b]
-# config_version = "v1.0.0"
+[reverse_proxy.client_groups.group-b]
+config_version = "v1.0.0"
 
-# [client_groups.group-b.upstreams.local_service]
-# servers = [
-#     { address = "127.0.0.1:9100", resolve = false }
-# ]
-# lb_policy = "round_robin"
+[reverse_proxy.client_groups.group-b.upstreams.local_service]
+servers = [
+    { address = "127.0.0.1:9100", resolve = false }
+]
+lb_policy = "round_robin"
 
 # [[client_groups.group-b.rules.http]]
 # match_host = "b.com"

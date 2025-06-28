@@ -68,13 +68,11 @@ impl ClientRulesEngine {
             };
             new_upstreams.insert(upstream.name, up);
         }
-        // debug 打印 old/new 内容
-        debug!("old_http_rules = {:?}", old_http);
-        debug!("new_http_rules = {:?}", new_http);
-        debug!("old_grpc_rules = {:?}", old_grpc);
-        debug!("new_grpc_rules = {:?}", new_grpc);
-        debug!("old_upstreams = {:?}", old_upstreams);
-        debug!("new_upstreams = {:?}", new_upstreams);
+        // 聚合 debug 日志，减少遮盖力
+        debug!(
+            "rules_update: old_http_rules={:?}, new_http_rules={:?}, old_grpc_rules={:?}, new_grpc_rules={:?}, old_upstreams={:?}, new_upstreams={:?}",
+            old_http, new_http, old_grpc, new_grpc, old_upstreams, new_upstreams
+        );
         // 只有内容变化时才更新和打印日志
         if old_http != new_http || old_grpc != new_grpc || old_upstreams != new_upstreams {
             self.http_rules = new_http;
@@ -103,12 +101,7 @@ impl ClientRulesEngine {
     }
 
     pub fn debug_print_upstreams(&self) {
-        for (name, upstream) in &self.upstreams {
-            println!("upstream: {}", name);
-            for server in &upstream.servers {
-                println!("  server: {} (resolve: {})", server.address, server.resolve);
-            }
-        }
+        println!("{:#?}", self.upstreams);
     }
 }
 
@@ -170,39 +163,12 @@ impl TunnelClient {
         let response = grpc_client.config_sync(Request::new(config_req)).await?;
         let resp = response.into_inner();
         info!("Synced config version: {}, got {} rules, {} upstreams", resp.config_version, resp.rules.len(), resp.upstreams.len());
-        debug!("Received config rules: {:?}", resp.rules);
-        debug!("Received config upstreams: {:?}", resp.upstreams);
+        debug!(
+            "Received config rules: {:?}, upstreams: {:?}",
+            resp.rules, resp.upstreams
+        );
         self.rules_engine.lock().await.update_rules(resp.rules, resp.upstreams).await;
         Ok(())
-    }
-
-    async fn start_config_sync(&self) {
-        let client_id = self.client_id.clone();
-        let group_id = self.group_id.clone();
-        
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                
-                // 通过tunnel连接发送配置同步请求
-                let config_sync_msg = TunnelMessage {
-                    client_id: client_id.clone(),
-                    request_id: Uuid::new_v4().to_string(),
-                    direction: Direction::ClientToServer as i32,
-                    payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
-                        client_id: client_id.clone(),
-                        group: group_id.clone(),
-                        config_version: "".to_string(),
-                    })),
-                    trace_id: String::new(),
-                };
-                
-                // 这里需要通过tunnel连接发送，而不是重新连接
-                // 暂时跳过，避免中断连接
-                debug!("Config sync via tunnel (not implemented yet)");
-            }
-        });
     }
 
     async fn connect_with_retry(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>) -> Result<()> {
@@ -317,9 +283,7 @@ impl TunnelClient {
                         debug!("Config sync channel closed, exit config sync task");
                         break;
                     }
-                    if trace_enabled {
-                        debug!("Sent config sync request via tunnel");
-                    }
+                    debug!("Sent config sync request via tunnel");
                 }
                 _ = cancel_token.cancelled() => {
                     debug!("Config sync task cancelled");
@@ -382,8 +346,10 @@ impl TunnelClient {
                 }
                 Some(tunnel_message::Payload::ConfigSyncResponse(resp)) => {
                     let mut rules_engine = self.rules_engine.lock().await;
-                    debug!("Received tunnel config rules: {:?}", resp.rules);
-                    debug!("Received tunnel config upstreams: {:?}", resp.upstreams);
+                    debug!(
+                        "configsync_response: old_rules={:?}, new_rules={:?}, old_upstreams={:?}, new_upstreams={:?}",
+                        rules_engine.http_rules, resp.rules, rules_engine.upstreams, resp.upstreams
+                    );
                     let old_rules = rules_engine.http_rules.clone();
                     let old_upstreams = rules_engine.upstreams.clone();
                     let old_rules_count = old_rules.len();
