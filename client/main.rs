@@ -436,7 +436,7 @@ impl TunnelClient {
             }
         }
         // 没有匹配规则，直接返回 404
-        return tunnel_lib::proxy::resp_404(
+        return tunnel_lib::response::resp_404(
             Some(&trace_id),
             Some(&_request_id),
             Some(&self.client_id),
@@ -516,7 +516,7 @@ impl TunnelClient {
                         message = "HTTP(S) request to backend failed"
                     );
                 }
-                return tunnel_lib::proxy::resp_500(
+                return tunnel_lib::response::resp_500(
                     Some("Internal server error"),
                     Some(&trace_id),
                     None,

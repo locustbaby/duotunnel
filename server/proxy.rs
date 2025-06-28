@@ -126,7 +126,7 @@ impl ProxyHandler {
             }
             Err(e) => {
                 tracing::error!("Proxy request failed: {}", e);
-                let err_resp = tunnel_lib::proxy::resp_502(
+                let err_resp = tunnel_lib::response::resp_502(
                     None, // trace_id
                     None, // request_id
                     Some("server"),
