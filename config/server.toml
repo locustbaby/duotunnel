@@ -4,7 +4,7 @@ config_version = "v1.0.0"
 tunnel_port = 50001
 http_entry_port = 8001
 grpc_entry_port = 8002
-log_level = "info"
+log_level = "debug"
 trace_enabled = false
 
 # ========== 2. Forward Upstreams 定义 ==========

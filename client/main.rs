@@ -211,7 +211,7 @@ impl TunnelClient {
         loop {
             let cancel_token = CancellationToken::new();
             let child_token = cancel_token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone()));
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), self.client_id.clone()));
             let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), self.client_id.clone(), self.group_id.clone(), self.trace_enabled));
             // 每次重连时取出 rx 的所有权
             let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
@@ -268,15 +268,14 @@ impl TunnelClient {
         }
     }
 
-    // 新增：带 CancellationToken 的心跳任务
-    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>) {
-        let client_id = "heartbeat-client".to_string(); // 可传参
+    // 新增：带 CancellationToken 和 client_id 的心跳任务
+    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: String) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let heartbeat = TunnelMessage {
-                        client_id: client_id.clone(),
+                        client_id: client_id.clone(), // 用真实 client_id
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
                         payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
@@ -297,14 +296,14 @@ impl TunnelClient {
         }
     }
 
-    // 新增：带 CancellationToken 的配置同步任务
+    // 新增：带 CancellationToken 和 client_id 的配置同步任务
     async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: String, group_id: String, trace_enabled: bool) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let config_sync_msg = TunnelMessage {
-                        client_id: client_id.clone(),
+                        client_id: client_id.clone(), // 用真实 client_id
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
                         payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
