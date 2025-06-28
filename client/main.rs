@@ -435,9 +435,12 @@ impl TunnelClient {
                 info!("Processing tunnel request: {} {} host={} no_match", req.method, req.url, host);
             }
         }
-        // 默认转发到本地服务
-        let local_url = format!("http://127.0.0.1:3000{}", req.path);
-        self.forward_to_backend(&req, &local_url, trace_id).await
+        // 没有匹配规则，直接返回 404
+        return tunnel_lib::proxy::resp_404(
+            Some(&trace_id),
+            Some(&_request_id),
+            Some(&self.client_id),
+        );
     }
 
     async fn forward_to_backend(&self, req: &HttpRequest, target_url: &str, trace_id: String) -> HttpResponse {
@@ -513,11 +516,12 @@ impl TunnelClient {
                         message = "HTTP(S) request to backend failed"
                     );
                 }
-                HttpResponse {
-                    status_code: 500,
-                    headers: HashMap::new(),
-                    body: b"Request failed".to_vec(),
-                }
+                return tunnel_lib::proxy::resp_500(
+                    Some("Internal server error"),
+                    Some(&trace_id),
+                    None,
+                    Some(&self.client_id),
+                );
             }
         }
     }

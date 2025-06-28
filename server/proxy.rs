@@ -125,10 +125,16 @@ impl ProxyHandler {
                 Ok(response)
             }
             Err(e) => {
-                println!("Proxy request failed: {}", e);
+                tracing::error!("Proxy request failed: {}", e);
+                let err_resp = tunnel_lib::proxy::resp_502(
+                    None, // trace_id
+                    None, // request_id
+                    Some("server"),
+                );
                 Ok(HyperResponse::builder()
-                    .status(502)
-                    .body(Body::from("Proxy request failed"))
+                    .status(err_resp.status_code as u16)
+                    .header("content-type", "application/json")
+                    .body(Body::from(err_resp.body))
                     .unwrap())
             }
         }
