@@ -20,13 +20,14 @@ use tracing::Instrument;
 use hyper_tls::HttpsConnector;
 use hyper::client::HttpConnector;
 mod proxy;
-use tunnel_lib::proxy::set_host_header;
+use tunnel_lib::http_forward::set_host_header;
 use tokio_util::sync::CancellationToken;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc as StdArc;
 use tokio::sync::RwLock;
 use hyper::Uri;
 use url::Url;
+use dashmap::DashMap;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -112,7 +113,7 @@ struct TunnelClient {
     group_id: String,
     server_addr: String,
     tx: mpsc::Sender<TunnelMessage>,
-    pending_requests: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     rules_engine: Arc<Mutex<ClientRulesEngine>>,
     trace_enabled: bool,
     http_client: hyper::Client<HttpConnector>,
@@ -129,7 +130,7 @@ impl TunnelClient {
             group_id,
             server_addr,
             tx,
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_requests: Arc::new(DashMap::new()),
             rules_engine: Arc::new(Mutex::new(ClientRulesEngine::new())),
             trace_enabled,
             http_client,
@@ -341,8 +342,7 @@ impl TunnelClient {
                         status_code = resp.status_code,
                         message = "client received tunnel response from server"
                     );
-                    let mut pending = self.pending_requests.lock().await;
-                    if let Some(sender) = pending.remove(&msg.request_id) {
+                    if let Some((_, sender)) = self.pending_requests.remove(&msg.request_id) {
                         let _ = sender.send(resp);
                     }
                 }

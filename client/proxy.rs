@@ -2,16 +2,17 @@ use hyper::{Body, Request as HyperRequest, Response as HyperResponse};
 use tokio::sync::{mpsc, oneshot};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
+use dashmap::DashMap;
 use uuid::Uuid;
 use tracing::info;
 use tunnel_lib::tunnel::{TunnelMessage, HttpResponse};
+use tunnel_lib::http_forward::{forward_http_via_tunnel, set_host_header};
 
 pub async fn handle_http_entry(
     req: HyperRequest<Body>,
     client_id: String,
     tunnel_tx: mpsc::Sender<TunnelMessage>,
-    pending_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
 ) -> Result<HyperResponse<Body>, hyper::Error> {
     let request_id = Uuid::new_v4().to_string();
     let method = req.method().to_string();
@@ -30,7 +31,7 @@ pub async fn handle_http_entry(
         request_id = %request_id,
         message = "Forwarding HTTP request to server via tunnel"
     );
-    tunnel_lib::proxy::forward_via_tunnel(
+    tunnel_lib::http_forward::forward_http_via_tunnel(
         req,
         &client_id,
         &tunnel_tx,

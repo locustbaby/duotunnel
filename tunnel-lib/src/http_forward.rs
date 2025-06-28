@@ -1,63 +1,57 @@
 use crate::tunnel::*;
-use hyper::{Request as HyperRequest, Body, Client, Method, Response as HyperResponse};
+use hyper::{Request as HyperRequest, Body, Client, Method};
 use hyper::client::HttpConnector;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
-use std::sync::Mutex;
 use tokio::sync::mpsc;
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
 use std::sync::Arc;
-use url;
 use url::Url;
 use tracing::error;
-use serde_json;
 use crate::response::{ProxyErrorKind, error_response, resp_404, resp_502, resp_500};
+use dashmap::DashMap;
 
-/// 通用 tunnel 代理转发逻辑，client/server 入口 handler 可复用
-pub async fn forward_via_tunnel(
-    req: HyperRequest<Body>,
+/// Forward an HTTP request via the tunnel, used by both client and server HTTP handlers.
+/// Handles request serialization, tunnel message sending, and response mapping.
+pub async fn forward_http_via_tunnel(
+    http_req: HyperRequest<Body>,
     client_id: &str,
-    tunnel_tx: &mpsc::Sender<TunnelMessage>,
-    pending_requests: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    tunnel_sender: &mpsc::Sender<TunnelMessage>,
+    pending_map: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     request_id: String,
     direction: Direction,
 ) -> Result<hyper::Response<Body>, hyper::Error> {
-    let (parts, body) = req.into_parts();
+    let (parts, body) = http_req.into_parts();
     let host = parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
-    let path = parts.uri.path();
     let trace_id = parts.headers
         .get("x-trace-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
-    let http_req = HttpRequest {
+    let http_request = HttpRequest {
         method: parts.method.to_string(),
         url: parts.uri.to_string(),
         host: host.to_string(),
-        path: path.to_string(),
+        path: parts.uri.path().to_string(),
         query: parts.uri.query().unwrap_or("").to_string(),
         headers: parts.headers.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
         body: body_bytes.to_vec(),
         original_dst: "".to_string(),
     };
-    let tunnel_msg = TunnelMessage {
-        client_id: client_id.to_string(),
-        request_id: request_id.clone(),
-        direction: direction as i32,
-        payload: Some(crate::tunnel::tunnel_message::Payload::HttpRequest(http_req)),
-        trace_id: trace_id.clone(),
-    };
+    let tunnel_msg = build_http_tunnel_message(
+        client_id,
+        &request_id,
+        direction,
+        http_request,
+        &trace_id,
+    );
     let (tx, rx) = oneshot::channel();
-    {
-        let mut pending = pending_requests.lock().await;
-        pending.insert(request_id.clone(), tx);
-    }
-    if let Err(e) = tunnel_tx.send(tunnel_msg).await {
-        let mut pending = pending_requests.lock().await;
-        pending.remove(&request_id);
+    pending_map.insert(request_id.clone(), tx);
+    if let Err(e) = tunnel_sender.send(tunnel_msg).await {
+        pending_map.remove(&request_id);
         return Ok(hyper::Response::builder().status(502).body(Body::from(format!("Tunnel send error: {}", e))).unwrap());
     }
     match timeout(Duration::from_secs(30), rx).await {
@@ -72,31 +66,29 @@ pub async fn forward_via_tunnel(
             Ok(hyper::Response::builder().status(502).body(Body::from("Tunnel response failed")).unwrap())
         }
         Err(_) => {
-            let mut pending = pending_requests.lock().await;
-            pending.remove(&request_id);
+            pending_map.remove(&request_id);
             Ok(hyper::Response::builder().status(504).body(Body::from("Tunnel request timeout")).unwrap())
         }
     }
 }
 
-/// 辅助函数：从 HyperRequest parts 和 body 构建 HttpRequest
-pub fn build_http_request_from_parts(req: &hyper::Request<hyper::Body>, body: Vec<u8>) -> crate::tunnel::HttpRequest {
-    let parts = req;
-    let host = parts.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+/// Build an HttpRequest from a HyperRequest and body bytes.
+pub fn http_request_from_hyper(req: &hyper::Request<hyper::Body>, body: Vec<u8>) -> crate::tunnel::HttpRequest {
+    let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
     crate::tunnel::HttpRequest {
-        method: parts.method().to_string(),
-        url: parts.uri().to_string(),
+        method: req.method().to_string(),
+        url: req.uri().to_string(),
         host: host.to_string(),
-        path: parts.uri().path().to_string(),
-        query: parts.uri().query().unwrap_or("").to_string(),
-        headers: parts.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
+        path: req.uri().path().to_string(),
+        query: req.uri().query().unwrap_or("").to_string(),
+        headers: req.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
         body,
         original_dst: "".to_string(),
     }
 }
 
-/// 辅助函数：构建 TunnelMessage
-pub fn build_tunnel_message(
+/// Build a TunnelMessage for HTTP forwarding.
+pub fn build_http_tunnel_message(
     client_id: &str,
     request_id: &str,
     direction: crate::tunnel::Direction,
@@ -112,19 +104,19 @@ pub fn build_tunnel_message(
     }
 }
 
-/// 通用：根据 action_set_host 字段安全地替换/设置 Host 头
+/// Set or override the Host header in a header map.
 pub fn set_host_header(headers: &mut HashMap<String, String>, set_host: &str) {
     if !set_host.is_empty() {
         headers.insert("host".to_string(), set_host.to_string());
     }
 }
 
-/// 通用 HTTP/HTTPS 代理转发方法，自动设置 Host 头
-pub async fn forward_to_backend_http_like(
+/// Forward an HTTP/HTTPS request to a backend, setting Host as needed.
+pub async fn forward_http_to_backend(
     req: &crate::tunnel::HttpRequest,
-    target_url: &str,
+    backend_url: &str,
     http_client: Arc<Client<HttpConnector, Body>>,
-    action_set_host: &str,
+    override_host: &str,
 ) -> crate::tunnel::HttpResponse {
     let client = &*http_client;
     let method = match req.method.parse::<Method>() {
@@ -135,19 +127,18 @@ pub async fn forward_to_backend_http_like(
             body: b"Invalid method".to_vec(),
         },
     };
-    // 拼接 URL（用 url crate 优化）
+    // Compose URL using url crate
     let url = if let Ok(parsed) = Url::parse(&req.url) {
         parsed.to_string()
     } else {
-        // 构造 base_url
         let base_url = if !req.host.is_empty() {
             format!("http://{}", req.host)
-        } else if target_url.starts_with("http://") || target_url.starts_with("https://") {
-            target_url.to_string()
-        } else if target_url.ends_with(":443") {
-            format!("https://{}", target_url)
+        } else if backend_url.starts_with("http://") || backend_url.starts_with("https://") {
+            backend_url.to_string()
+        } else if backend_url.ends_with(":443") {
+            format!("https://{}", backend_url)
         } else {
-            format!("http://{}", target_url)
+            format!("http://{}", backend_url)
         };
         match Url::parse(&base_url).and_then(|base| base.join(&req.url)) {
             Ok(url) => url.to_string(),
@@ -157,15 +148,14 @@ pub async fn forward_to_backend_http_like(
             }
         }
     };
-    // 构建 headers，自动设置 Host
+    // Build headers, set Host
     let mut headers = req.headers.clone();
-    // 解析 backend host
-    let backend_host = match url::Url::parse(&url) {
+    let backend_host = match Url::parse(&url) {
         Ok(url) => url.host_str().unwrap_or("").to_string(),
         Err(_) => String::new(),
     };
-    let set_host = if !action_set_host.is_empty() {
-        action_set_host
+    let set_host = if !override_host.is_empty() {
+        override_host
     } else {
         backend_host.as_str()
     };
@@ -200,7 +190,7 @@ pub async fn forward_to_backend_http_like(
                 body: body_bytes,
             }
         }
-        Err(e) => {
+        Err(_e) => {
             resp_500(
                 Some("Request failed"),
                 None, // trace_id

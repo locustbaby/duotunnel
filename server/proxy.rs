@@ -14,6 +14,7 @@ use uuid::Uuid;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, info_span, Instrument};
+use tunnel_lib::http_forward::{build_http_tunnel_message, forward_http_to_backend, set_host_header};
 
 // Global round-robin index for each upstream
 lazy_static! {
@@ -197,7 +198,7 @@ impl ProxyHandler {
                     body: body_bytes.to_vec(),
                     original_dst: "".to_string(),
                 };
-                let tunnel_msg = tunnel_lib::proxy::build_tunnel_message(
+                let tunnel_msg = tunnel_lib::http_forward::build_http_tunnel_message(
                     &client,
                     &request_id,
                     tunnel_lib::tunnel::Direction::ServerToClient,

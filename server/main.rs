@@ -28,7 +28,7 @@ use crate::proxy::{ProxyHandler};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, debug, warn};
 use tracing_subscriber;
-use tunnel_lib::proxy::forward_to_backend_http_like;
+use tunnel_lib::http_forward::forward_http_to_backend;
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
@@ -227,7 +227,7 @@ impl TunnelService for MyTunnelServer {
                                         if let Some(upstream) = rules_engine.get_upstream(upstream_name) {
                                             if let Some(backend) = pick_backend(upstream) {
                                                 let set_host = rule.action_set_host.as_deref().unwrap_or("");
-                                                response = tunnel_lib::proxy::forward_to_backend_http_like(
+                                                response = forward_http_to_backend(
                                                     req,
                                                     &backend,
                                                     http_client.clone(),
