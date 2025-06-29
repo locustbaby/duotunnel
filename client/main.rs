@@ -29,6 +29,8 @@ use hyper::Uri;
 use url::Url;
 use dashmap::DashMap;
 use serde_json;
+use tunnel_lib::proxy::{HttpTunnelContext, http_entry_handler};
+use proxy::ClientHttpEntryTarget;
 
 // 客户端本地规则引擎
 #[derive(Clone)]
@@ -619,52 +621,35 @@ async fn main() -> anyhow::Result<()> {
         let tunnel_tx_holder = tunnel_tx_holder.clone();
         let pending_requests_holder = pending_requests_holder.clone();
         let client_id_holder = client_id_holder.clone();
-        let token_holder = token_holder.clone();
         tokio::spawn(async move {
+            let tunnel_tx = tunnel_tx_holder.clone();
+            let client_id = client_id_holder.clone();
+            let target = Arc::new(ClientHttpEntryTarget {
+                tunnel_tx,
+                pending_requests: pending_requests_holder.clone(),
+                client_id,
+            });
+            let ctx = HttpTunnelContext {
+                client_id: "client".to_string(), // 仅作标识
+                tunnel_tx: Arc::new(mpsc::channel(1).0), // dummy
+                pending_requests: Arc::new(DashMap::new()),
+                direction: tunnel_lib::tunnel::Direction::ClientToServer,
+            };
             let make_svc = make_service_fn(move |_| {
-                let tunnel_tx_holder = tunnel_tx_holder.clone();
-                let pending_requests_holder = pending_requests_holder.clone();
-                let client_id_holder = client_id_holder.clone();
-                let token_holder = token_holder.clone();
+                let ctx = ctx.clone();
+                let target = target.clone();
                 async move {
                     Ok::<_, hyper::Error>(service_fn(move |req| {
-                        let tunnel_tx_holder = tunnel_tx_holder.clone();
-                        let pending_requests_holder = pending_requests_holder.clone();
-                        let client_id_holder = client_id_holder.clone();
-                        let token_holder = token_holder.clone();
+                        let ctx = ctx.clone();
+                        let target = target.clone();
                         async move {
-                            let tunnel_tx = tunnel_tx_holder.read().await.clone().unwrap();
-                            let pending_requests = pending_requests_holder.read().await.clone().unwrap();
-                            let client_id: String = client_id_holder.read().await.clone().unwrap();
-                            let token: Option<CancellationToken> = token_holder.read().await.clone();
-                            if let Some(token) = token {
-                                if token.is_cancelled() {
-                                    let resp = tunnel_lib::response::error_response(
-                                        tunnel_lib::response::ProxyErrorKind::NoUpstream,
-                                        Some("Connection closed, please retry"),
-                                        None,
-                                        None,
-                                        Some(client_id.as_str()),
-                                    );
-                                    return Ok(HyperResponse::builder()
-                                        .status(502)
-                                        .header("content-type", "application/json")
-                                        .body(Body::from(resp.body))
-                                        .unwrap());
-                                }
-                            }
-                            proxy::handle_http_entry(
-                                req,
-                                client_id,
-                                tunnel_tx,
-                                pending_requests,
-                            ).await
+                            http_entry_handler(req, &ctx, &*target).await
                         }
                     }))
                 }
             });
             let server = hyper::Server::bind(&http_addr.parse().unwrap()).serve(make_svc);
-            info!("Client HTTP entry listening on http://{}", http_addr);
+            info!("Client HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
             if let Err(e) = server.await {
                 error!("Client HTTP entry server error: {}", e);
             }
@@ -720,11 +705,11 @@ async fn main() -> anyhow::Result<()> {
             let mut t = tunnel_tx_holder.write().await;
             *t = None;
             let mut p = pending_requests_holder.write().await;
-            if let Some(pending_requests) = p.as_ref() {
+            if let Some(pending_requests_arc) = p.as_ref() {
                 let client_id: String = client_id_holder.read().await.clone().unwrap();
-                let keys: Vec<_> = pending_requests.iter().map(|entry| entry.key().clone()).collect();
+                let keys: Vec<_> = pending_requests_arc.iter().map(|entry| entry.key().clone()).collect();
                 for request_id in keys {
-                    if let Some((_, sender)) = pending_requests.remove(&request_id) {
+                    if let Some((_, sender)) = pending_requests_arc.remove(&request_id) {
                         let resp = tunnel_lib::response::resp_502(
                             Some("Tunnel closed"),
                             None,
@@ -734,6 +719,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            *p = None;
             let mut c = client_id_holder.write().await;
             *c = None;
         }
