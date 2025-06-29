@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
             });
             if let Err(e) = graceful.await {
                 error!("Client HTTP entry server error: {}", e);
+                std::process::exit(1);
             }
         });
     }
