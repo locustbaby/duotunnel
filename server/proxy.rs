@@ -4,17 +4,14 @@ use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server as 
 use hyper::service::{make_service_fn, service_fn};
 use std::collections::HashMap;
 
-use tunnel_lib::tunnel::HttpRequest;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 use crate::registry::ManagedClientRegistry;
-use tunnel_lib::tunnel::{TunnelMessage, HttpResponse, Direction};
+use tunnel_lib::tunnel::{TunnelMessage, HttpResponse};
 use tokio::sync::{oneshot, mpsc};
 use uuid::Uuid;
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, error, info, info_span, Instrument};
-use tunnel_lib::http_forward::{build_http_tunnel_message, forward_http_to_backend, set_host_header};
 use tunnel_lib::response::{error_response, ProxyErrorKind};
 use dashmap::DashMap;
 

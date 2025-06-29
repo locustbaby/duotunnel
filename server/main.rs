@@ -16,15 +16,13 @@ use anyhow::Result;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server as HyperServer, Method, Client as HyperClient};
+use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server as HyperServer, Client as HyperClient};
 use hyper::service::{make_service_fn, service_fn};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tonic::{transport::Server, Request, Response, Status};
-use uuid::Uuid;
 use std::net::SocketAddr;
-use crate::proxy::{ProxyHandler};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, debug, warn};
 use tracing_subscriber;
@@ -128,7 +126,7 @@ impl TunnelService for MyTunnelServer {
         tokio::spawn(async move {
             let mut client_id = String::new();
             let mut client_tx: Option<mpsc::Sender<TunnelMessage>> = None;
-            let mut token = CancellationToken::new();
+            let token = CancellationToken::new();
             while let Some(message) = stream.next().await {
                 debug!(target: "server::proxy_stream", ?message, "Received tunnel message from client");
                 match message {

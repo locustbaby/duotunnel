@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use once_cell::sync::Lazy;
 use crate::config::{ServerConfig, Upstream, Rule, ClientGroupConfig};
 
 pub struct RulesEngine {
