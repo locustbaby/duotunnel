@@ -34,6 +34,7 @@ use dashmap::DashMap;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use crate::utils::pick_backend;
+use tokio::task::JoinSet;
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
@@ -589,28 +590,29 @@ async fn main() -> anyhow::Result<()> {
         pending_requests: pending_requests.clone(),
         direction: tunnel_lib::tunnel::Direction::ServerToClient,
     };
-    tokio::spawn({
+    let mut join_set = JoinSet::new();
+
+    // HTTP 入口监听
+    join_set.spawn(async move {
         let target = target.clone();
         let ctx = ctx.clone();
-        async move {
-            let make_svc = make_service_fn(move |_| {
-                let ctx = ctx.clone();
-                let target = target.clone();
-                async move {
-                    Ok::<_, hyper::Error>(service_fn(move |req| {
-                        let ctx = ctx.clone();
-                        let target = target.clone();
-                        async move {
-                            http_entry_handler::<ServerHttpEntryTarget>(req, &ctx, &*target).await
-                        }
-                    }))
-                }
-            });
-            let server = HyperServer::bind(&http_addr).serve(make_svc);
-            info!("HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
-            if let Err(e) = server.await {
-                error!("HTTP entry server error: {}", e);
+        let make_svc = make_service_fn(move |_| {
+            let ctx = ctx.clone();
+            let target = target.clone();
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |req| {
+                    let ctx = ctx.clone();
+                    let target = target.clone();
+                    async move {
+                        http_entry_handler::<ServerHttpEntryTarget>(req, &ctx, &*target).await
+                    }
+                }))
             }
+        });
+        let server = HyperServer::bind(&http_addr).serve(make_svc);
+        info!("HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
+        if let Err(e) = server.await {
+            error!("HTTP entry server error: {}", e);
         }
     });
 
@@ -618,33 +620,31 @@ async fn main() -> anyhow::Result<()> {
     let grpc_port = config.server.grpc_entry_port;
     let grpc_addr: SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
     let rules_engine_grpc = rules_engine.clone();
-    tokio::spawn({
+    join_set.spawn(async move {
         let rules_engine = rules_engine_grpc.clone();
-        async move {
-            let make_svc = make_service_fn(move |_| {
-                let rules_engine = rules_engine.clone();
-                async move {
-                    Ok::<_, hyper::Error>(service_fn(move |req| {
-                        let rules_engine = rules_engine.clone();
-                        async move {
-                            let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
-                            let service = None;
-                            if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, "", service) {
-                                return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Reverse proxy to client group: {:?}", rule.action_client_group))));
-                            }
-                            if let Some(rule) = rules_engine.match_forward_rule(host, "", service) {
-                                return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Forward proxy to upstream: {:?}", rule.action_upstream))));
-                            }
-                            Ok::<_, hyper::Error>(HyperResponse::new(Body::from("No matching rule")))
+        let make_svc = make_service_fn(move |_| {
+            let rules_engine = rules_engine.clone();
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |req| {
+                    let rules_engine = rules_engine.clone();
+                    async move {
+                        let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+                        let service = None;
+                        if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, "", service) {
+                            return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Reverse proxy to client group: {:?}", rule.action_client_group))));
                         }
-                    }))
-                }
-            });
-            let server = HyperServer::bind(&grpc_addr).serve(make_svc);
-            info!("gRPC entry listening on http://{} (stub, not real gRPC)", grpc_addr);
-            if let Err(e) = server.await {
-                error!("gRPC entry server error: {}", e);
+                        if let Some(rule) = rules_engine.match_forward_rule(host, "", service) {
+                            return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Forward proxy to upstream: {:?}", rule.action_upstream))));
+                        }
+                        Ok::<_, hyper::Error>(HyperResponse::new(Body::from("No matching rule")))
+                    }
+                }))
             }
+        });
+        let server = HyperServer::bind(&grpc_addr).serve(make_svc);
+        info!("gRPC entry listening on http://{} (stub, not real gRPC)", grpc_addr);
+        if let Err(e) = server.await {
+            error!("gRPC entry server error: {}", e);
         }
     });
 
@@ -653,11 +653,18 @@ async fn main() -> anyhow::Result<()> {
     let tunnel_addr: SocketAddr = format!("0.0.0.0:{}", tunnel_port).parse()?;
     let svc = TunnelServiceServer::new(tunnel_server);
     info!("gRPC tunnel server listening on {} (tunnel control)", tunnel_addr);
-    Server::builder()
-        .add_service(svc)
-        .serve(tunnel_addr)
-        .await?;
+    join_set.spawn(async move {
+        if let Err(e) = Server::builder().add_service(svc).serve(tunnel_addr).await {
+            error!("Tunnel server error: {}", e);
+        }
+    });
 
+    // 等待所有任务完成
+    while let Some(res) = join_set.join_next().await {
+        if let Err(e) = res {
+            error!("A background task failed: {:?}", e);
+        }
+    }
     Ok(())
 }
 
