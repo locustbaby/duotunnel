@@ -655,6 +655,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // main loop，每次重建所有资源
+    let mut backoff: u32 = 0;
+    const MAX_BACKOFF_SECS: u64 = 10;
     loop {
         // 1. 新建 channel
         let (tx, rx) = mpsc::channel(128);
@@ -680,6 +682,7 @@ async fn main() -> anyhow::Result<()> {
         // 5. 建立 gRPC client
         let mut rx = rx;
         info!("==== [MAIN] Creating new gRPC client connection ====");
+        let mut success = false;
         match TunnelServiceClient::connect(server_addr.clone()).await {
             Ok(grpc_client) => {
                 // 新建 token
@@ -689,11 +692,14 @@ async fn main() -> anyhow::Result<()> {
                     *token_w = Some(token.clone());
                 }
                 if let Err(e) = tunnel_client.connect_with_retry_with_token(grpc_client, &mut rx, token.clone()).await {
-                    error!("Tunnel connection lost: {e}, retrying in 5s...");
+                    error!("Tunnel connection lost: {e}, will retry...");
+                } else {
+                    success = true;
                 }
+                backoff = 0; // 连接成功或正常断开都重置退避
             }
             Err(e) => {
-                error!("Failed to connect to server: {e}, retrying in 5s...");
+                error!("Failed to connect to server: {e}, will retry...");
             }
         }
         // 清理 token/资源
@@ -721,6 +727,14 @@ async fn main() -> anyhow::Result<()> {
             let mut c = client_id_holder.write().await;
             *c = None;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // 指数退避：首次失败立即重试，之后 1s、2s、4s、8s、10s（最大）
+        let sleep_secs = if backoff == 0 { 0 } else { 2u64.pow(backoff - 1).min(MAX_BACKOFF_SECS) };
+        if sleep_secs > 0 {
+            info!("Retrying in {}s...", sleep_secs);
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+        }
+        if backoff < 4 { // 2^3=8, 2^4=16>10, 所以最多退避到10s
+            backoff += 1;
+        }
     }
 } 
