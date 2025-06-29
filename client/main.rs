@@ -36,6 +36,7 @@ use crate::tunnel_client::TunnelClient;
 use tokio::signal;
 use backoff::{ExponentialBackoffBuilder, ExponentialBackoff};
 use backoff::backoff::Backoff;
+use tokio::task::JoinSet;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Loaded client config: {:?}", config);
 
     let server_addr = format!("http://{}:{}", config.server_addr, config.server_port);
-    let client_group_id = config.client_group_id.clone();
+    let client_group_id = Arc::new(config.client_group_id.clone());
     let trace_enabled = config.trace_enabled.unwrap_or(false);
     let http_port = config.http_entry_port.unwrap_or(8003);
     let http_addr = format!("0.0.0.0:{}", http_port);
@@ -69,8 +70,9 @@ async fn main() -> anyhow::Result<()> {
     // 优雅退出信号监听
     let shutdown_token = CancellationToken::new();
     let shutdown_token2 = shutdown_token.clone();
-    tokio::spawn(async move {
-        // 同时监听 ctrl-c 和 SIGTERM
+    let mut join_set = JoinSet::new();
+    // 信号监听任务
+    join_set.spawn(async move {
         let ctrl_c = async {
             signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
         };
@@ -96,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         let pending_requests_holder = pending_requests_holder.clone();
         let client_id_holder = client_id_holder.clone();
         let shutdown_token = shutdown_token.clone();
-        tokio::spawn(async move {
+        join_set.spawn(async move {
             let tunnel_tx = tunnel_tx_holder.clone();
             let client_id = client_id_holder.clone();
             let target = Arc::new(ClientHttpEntryTarget {
@@ -144,9 +146,15 @@ async fn main() -> anyhow::Result<()> {
         // 1. 新建 channel
         let (tx, rx) = mpsc::channel(128);
         // 2. 新建 TunnelClient
-        let client_id = format!("client-{}", Uuid::new_v4());
-        let group_id = client_group_id.clone();
-        let tunnel_client = Arc::new(TunnelClient::new(client_id.clone(), group_id.clone(), server_addr.clone(), trace_enabled, tx.clone()));
+        let client_id = Arc::new(format!("client-{}", Uuid::new_v4()));
+        let group_id = Arc::clone(&client_group_id);
+        let tunnel_client = Arc::new(TunnelClient::new(
+            Arc::clone(&client_id),
+            Arc::clone(&group_id),
+            server_addr.clone(),
+            trace_enabled,
+            tx.clone(),
+        ));
         // 3. 更新 HTTP入口监听用的 tunnel_tx、pending_requests、client_id、token
         {
             let mut t = tunnel_tx_holder.write().await;
@@ -154,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
             let mut p = pending_requests_holder.write().await;
             *p = Some(tunnel_client.pending_requests.clone());
             let mut c = client_id_holder.write().await;
-            *c = Some(client_id.clone());
+            *c = Some((*client_id).clone());
             let mut token_w = token_holder.write().await;
             *token_w = Some(shutdown_token.child_token());
         }
@@ -236,6 +244,12 @@ async fn main() -> anyhow::Result<()> {
         if shutdown_token.is_cancelled() {
             info!("Shutdown token cancelled, exiting main loop");
             break;
+        }
+    }
+    // 等待所有子任务退出
+    while let Some(res) = join_set.join_next().await {
+        if let Err(e) = res {
+            error!("Background task error: {e}");
         }
     }
     info!("Client exited gracefully");

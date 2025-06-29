@@ -21,8 +21,8 @@ use tunnel_lib::proxy::HttpTunnelContext;
 use crate::rules_engine::ClientRulesEngine;
 
 pub struct TunnelClient {
-    pub client_id: String,
-    pub group_id: String,
+    pub client_id: Arc<String>,
+    pub group_id: Arc<String>,
     pub server_addr: String,
     pub tx: mpsc::Sender<TunnelMessage>,
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
@@ -33,7 +33,7 @@ pub struct TunnelClient {
 }
 
 impl TunnelClient {
-    pub fn new(client_id: String, group_id: String, server_addr: String, trace_enabled: bool, tx: mpsc::Sender<TunnelMessage>) -> Self {
+    pub fn new(client_id: Arc<String>, group_id: Arc<String>, server_addr: String, trace_enabled: bool, tx: mpsc::Sender<TunnelMessage>) -> Self {
         let http_client = hyper::Client::new();
         let https_connector = HttpsConnector::new();
         let https_client = hyper::Client::builder().build::<_, hyper::Body>(https_connector);
@@ -52,24 +52,24 @@ impl TunnelClient {
 
     pub async fn register_group(&self, grpc_client: &mut TunnelServiceClient<tonic::transport::Channel>) -> anyhow::Result<()> {
         let register_req = RegisterRequest {
-            client_id: self.client_id.clone(),
-            group: self.group_id.clone(),
+            client_id: (*self.client_id).clone(),
+            group: (*self.group_id).clone(),
             version: "v1.0.0".to_string(),
         };
         let response = grpc_client.register(Request::new(register_req)).await?;
         let resp = response.into_inner();
         if resp.success {
-            info!("Successfully registered to group '{}': {}", self.group_id, resp.message);
+            info!("Successfully registered to group '{}': {}", (*self.group_id), resp.message);
         } else {
-            error!("Failed to register to group '{}': {}", self.group_id, resp.message);
+            error!("Failed to register to group '{}': {}", (*self.group_id), resp.message);
         }
         Ok(())
     }
 
     pub async fn sync_config(&self, grpc_client: &mut TunnelServiceClient<tonic::transport::Channel>) -> anyhow::Result<()> {
         let config_req = ConfigSyncRequest {
-            client_id: self.client_id.clone(),
-            group: self.group_id.clone(),
+            client_id: (*self.client_id).clone(),
+            group: (*self.group_id).clone(),
             config_version: "".to_string(),
         };
         let response = grpc_client.config_sync(Request::new(config_req)).await?;
@@ -88,8 +88,8 @@ impl TunnelClient {
         loop {
             let cancel_token = CancellationToken::new();
             let child_token = cancel_token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), self.client_id.clone()));
-            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), self.client_id.clone(), self.group_id.clone(), self.trace_enabled));
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id)));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), self.trace_enabled));
             let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
             let response = grpc_client.proxy(Request::new(outbound)).await;
             match response {
@@ -144,8 +144,8 @@ impl TunnelClient {
         self.register_group(&mut grpc_client).await?;
         loop {
             let child_token = token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), self.client_id.clone()));
-            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), self.client_id.clone(), self.group_id.clone(), self.trace_enabled));
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id)));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), self.trace_enabled));
             let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
             let response = grpc_client.proxy(Request::new(outbound)).await;
             match response {
@@ -196,13 +196,13 @@ impl TunnelClient {
         }
     }
 
-    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: String) {
+    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let heartbeat = TunnelMessage {
-                        client_id: client_id.clone(),
+                        client_id: (*client_id).clone(),
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
                         payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
@@ -223,18 +223,18 @@ impl TunnelClient {
         }
     }
 
-    async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: String, group_id: String, trace_enabled: bool) {
+    async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>, trace_enabled: bool) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let config_sync_msg = TunnelMessage {
-                        client_id: client_id.clone(),
+                        client_id: (*client_id).clone(),
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
                         payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
-                            client_id: client_id.clone(),
-                            group: group_id.clone(),
+                            client_id: (*client_id).clone(),
+                            group: (*group_id).clone(),
                             config_version: "".to_string(),
                         })),
                         trace_id: String::new(),
@@ -274,7 +274,7 @@ impl TunnelClient {
                         );
                         let response = self.handle_tunnel_http_request(req, request_id.clone(), trace_id.clone()).await;
                         let response_msg = TunnelMessage {
-                            client_id: self.client_id.clone(),
+                            client_id: (*self.client_id).clone(),
                             request_id: request_id.clone(),
                             direction: Direction::ClientToServer as i32,
                             payload: Some(tunnel_message::Payload::HttpResponse(response)),
@@ -388,7 +388,7 @@ impl TunnelClient {
         return tunnel_lib::response::resp_404(
             Some(&trace_id),
             Some(&_request_id),
-            Some(&self.client_id),
+            Some(&(*self.client_id)),
         );
     }
 
@@ -469,7 +469,7 @@ impl TunnelClient {
                     Some("Internal server error"),
                     Some(&trace_id),
                     None,
-                    Some(&self.client_id),
+                    Some(&(*self.client_id)),
                 );
             }
         }
