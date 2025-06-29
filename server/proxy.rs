@@ -14,22 +14,11 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tunnel_lib::response::{error_response, ProxyErrorKind};
 use dashmap::DashMap;
+use crate::utils::pick_backend;
 
 // Global round-robin index for each upstream
 lazy_static! {
     static ref UPSTREAM_INDEX: Mutex<std::collections::HashMap<String, usize>> = Mutex::new(std::collections::HashMap::new());
-}
-
-pub fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
-    let len = upstream.servers.len();
-    if len == 0 {
-        return None;
-    }
-    let mut idx_map = UPSTREAM_INDEX.lock().unwrap();
-    let idx = idx_map.entry(format!("upstream-{}", upstream.servers[0].address)).or_insert(0);
-    let server = &upstream.servers[*idx % len];
-    *idx = (*idx + 1) % len;
-    Some(server.address.clone())
 }
 
 pub async fn start_http_entry(rules_engine: Arc<RulesEngine>, proxy_handler: Arc<ProxyHandler>) {

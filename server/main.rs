@@ -2,6 +2,7 @@ mod config;
 mod proxy;
 mod registry;
 mod rules;
+mod utils;
 
 use crate::config::ServerConfig;
 use crate::rules::RulesEngine;
@@ -32,6 +33,7 @@ use tunnel_lib::proxy::{HttpEntryProxyTarget, HttpTunnelContext, http_entry_hand
 use dashmap::DashMap;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+use crate::utils::pick_backend;
 
 #[derive(Clone)]
 pub struct MyTunnelServer {
@@ -441,14 +443,6 @@ async fn reverse_proxy_handler(
             .header("content-type", "application/json")
             .body(Body::from(err_resp.body))
             .unwrap())
-    }
-}
-
-fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
-    if !upstream.servers.is_empty() {
-        Some(upstream.servers[0].address.clone())
-    } else {
-        None
     }
 }
 
