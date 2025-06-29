@@ -3,10 +3,12 @@ mod proxy;
 mod registry;
 mod rules;
 mod utils;
+mod tunnel_server;
 
 use crate::config::ServerConfig;
 use crate::rules::RulesEngine;
 use crate::registry::ManagedClientRegistry;
+use crate::tunnel_server::TunnelServer;
 
 
 use tunnel_lib::tunnel::tunnel_service_server::{TunnelService, TunnelServiceServer};
