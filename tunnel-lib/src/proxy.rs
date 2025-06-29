@@ -15,9 +15,8 @@ pub struct HttpTunnelContext {
     // 可扩展: trace_id, timeout, user_info, etc.
 }
 
-/// Trait for proxy target, allowing custom target logic for server/client.
-#[async_trait::async_trait]
-pub trait ProxyTarget: Send + Sync + 'static {
+#[async_trait]
+pub trait HttpEntryProxyTarget: Send + Sync + 'static {
     async fn handle(
         &self,
         req: HyperRequest<Body>,
@@ -26,7 +25,7 @@ pub trait ProxyTarget: Send + Sync + 'static {
 }
 
 /// Generic HTTP entry handler, delegating to the provided ProxyTarget implementation.
-pub async fn http_entry_handler<T: ProxyTarget>(
+pub async fn http_entry_handler<T: HttpEntryProxyTarget>(
     req: HyperRequest<Body>,
     ctx: &HttpTunnelContext,
     target: &T,

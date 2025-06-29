@@ -30,7 +30,7 @@ use tracing::{info, error, debug, warn};
 use tracing_subscriber;
 use tunnel_lib::http_forward::forward_http_to_backend;
 use tunnel_lib::response::{self, error_response, ProxyErrorKind};
-use tunnel_lib::proxy::{ProxyTarget, HttpTunnelContext, http_entry_handler};
+use tunnel_lib::proxy::{HttpEntryProxyTarget, HttpTunnelContext, http_entry_handler};
 use dashmap::DashMap;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -454,8 +454,8 @@ fn pick_backend(upstream: &crate::config::Upstream) -> Option<String> {
     }
 }
 
-// ServerProxyTarget 实现
-pub struct ServerProxyTarget {
+/// 服务器端 HTTP 入口 ProxyTarget 实现
+pub struct ServerHttpEntryTarget {
     pub rules_engine: Arc<RulesEngine>,
     pub client_registry: Arc<ManagedClientRegistry>,
     pub connected_clients: Arc<TokioMutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
@@ -464,7 +464,7 @@ pub struct ServerProxyTarget {
 }
 
 #[async_trait]
-impl ProxyTarget for ServerProxyTarget {
+impl HttpEntryProxyTarget for ServerHttpEntryTarget {
     async fn handle(
         &self,
         req: HyperRequest<Body>,
@@ -582,7 +582,7 @@ async fn main() -> anyhow::Result<()> {
     // HTTP 入口监听
     let http_port = config.server.http_entry_port;
     let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
-    let target = Arc::new(ServerProxyTarget {
+    let target = Arc::new(ServerHttpEntryTarget {
         rules_engine: rules_engine.clone(),
         client_registry: client_registry.clone(),
         connected_clients: connected_clients.clone(),
@@ -609,7 +609,7 @@ async fn main() -> anyhow::Result<()> {
                         let ctx = ctx.clone();
                         let target = target.clone();
                         async move {
-                            http_entry_handler(req, &ctx, &*target).await
+                            http_entry_handler::<ServerHttpEntryTarget>(req, &ctx, &*target).await
                         }
                     }))
                 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use tracing::info;
 use tunnel_lib::tunnel::{TunnelMessage, HttpResponse};
 use tunnel_lib::http_forward::{forward_http_via_tunnel, set_host_header};
-use tunnel_lib::proxy::{ProxyTarget, HttpTunnelContext};
+use tunnel_lib::proxy::{HttpEntryProxyTarget, HttpTunnelContext};
 use tunnel_lib::response::{self, ProxyErrorKind, error_response};
 use async_trait::async_trait;
 
@@ -19,7 +19,7 @@ pub struct ClientHttpEntryTarget {
 }
 
 #[async_trait]
-impl ProxyTarget for ClientHttpEntryTarget {
+impl HttpEntryProxyTarget for ClientHttpEntryTarget {
     async fn handle(
         &self,
         req: HyperRequest<Body>,
