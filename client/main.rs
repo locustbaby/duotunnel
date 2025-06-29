@@ -34,6 +34,8 @@ use crate::rules_engine::ClientRulesEngine;
 mod tunnel_client;
 use crate::tunnel_client::TunnelClient;
 use tokio::signal;
+use backoff::{ExponentialBackoffBuilder, ExponentialBackoff};
+use backoff::backoff::Backoff;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -133,8 +135,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // main loop，每次重建所有资源
-    let mut backoff: u32 = 0;
-    const MAX_BACKOFF_SECS: u64 = 10;
+    let mut backoff = ExponentialBackoffBuilder::default()
+        .with_max_interval(std::time::Duration::from_secs(10))
+        .with_max_elapsed_time(None)
+        .build();
+    let mut first_attempt = true;
     loop {
         // 1. 新建 channel
         let (tx, rx) = mpsc::channel(128);
@@ -183,7 +188,8 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                 }
-                backoff = 0; // 连接成功或正常断开都重置退避
+                backoff.reset();
+                first_attempt = true;
             }
             Err(e) => {
                 error!("Failed to connect to server: {e}, will retry...");
@@ -214,14 +220,18 @@ async fn main() -> anyhow::Result<()> {
             let mut c = client_id_holder.write().await;
             *c = None;
         }
-        // 指数退避：首次失败立即重试，之后 1s、2s、4s、8s、10s（最大）
-        let sleep_secs = if backoff == 0 { 0 } else { 2u64.pow(backoff - 1).min(MAX_BACKOFF_SECS) };
-        if sleep_secs > 0 {
-            info!("Retrying in {}s...", sleep_secs);
-            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-        }
-        if backoff < 4 { // 2^3=8, 2^4=16>10, 所以最多退避到10s
-            backoff += 1;
+        // 使用 backoff crate 退避，带 jitter
+        if !success {
+            if first_attempt {
+                first_attempt = false;
+                // 立即重试
+            } else if let Some(sleep_dur) = backoff.next_backoff() {
+                info!("Retrying in {:?}...", sleep_dur);
+                tokio::time::sleep(sleep_dur).await;
+            } else {
+                backoff.reset();
+                first_attempt = true;
+            }
         }
         if shutdown_token.is_cancelled() {
             info!("Shutdown token cancelled, exiting main loop");
