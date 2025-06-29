@@ -1,14 +1,12 @@
 use hyper::{Body, Request as HyperRequest, Response as HyperResponse};
 use tokio::sync::{mpsc, oneshot, RwLock};
-use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use uuid::Uuid;
-use tracing::info;
 use tunnel_lib::tunnel::{TunnelMessage, HttpResponse};
-use tunnel_lib::http_forward::{forward_http_via_tunnel, set_host_header};
+use tunnel_lib::http_forward::forward_http_via_tunnel;
 use tunnel_lib::proxy::{HttpEntryProxyTarget, HttpTunnelContext};
-use tunnel_lib::response::{self, ProxyErrorKind, error_response};
+use tunnel_lib::response::{ProxyErrorKind, error_response};
 use async_trait::async_trait;
 
 /// Client 端 HTTP 入口 ProxyTarget 实现
