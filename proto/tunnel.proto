@@ -35,14 +35,15 @@ enum Direction {
 }
 
 message HttpRequest {
-  string method = 1;
-  string url = 2;
-  string host = 3;
-  string path = 4;
-  string query = 5;
-  map<string, string> headers = 6;
-  bytes body = 7;
-  string original_dst = 8;
+  string stream_id = 1;
+  string method = 2;
+  string url = 3;
+  string host = 4;
+  string path = 5;
+  string query = 6;
+  map<string, string> headers = 7;
+  bytes body = 8;
+  string original_dst = 9;
 }
 
 message HttpResponse {
@@ -52,13 +53,14 @@ message HttpResponse {
 }
 
 message GrpcRequest {
-  string service = 1;
-  string method = 2;
-  string host = 3;
-  map<string, string> headers = 4;
-  map<string, string> metadata = 5;
-  bytes body = 6;
-  string original_dst = 7;
+  string stream_id = 1;
+  string service = 2;
+  string method = 3;
+  string host = 4;
+  map<string, string> headers = 5;
+  map<string, string> metadata = 6;
+  bytes body = 7;
+  string original_dst = 8;
 }
 
 message GrpcResponse {
@@ -73,7 +75,17 @@ message Heartbeat {
 
 message ConnectRequest {
   string client_id = 1;
-  int64 timestamp = 2;
+  string stream_id = 2;
+  StreamType stream_type = 3;
+  int64 timestamp = 4;
+}
+
+enum StreamType {
+  STREAM_TYPE_UNSPECIFIED = 0;
+  CONTROL = 1;
+  HTTP = 2;
+  GRPC = 3;
+  WEBSOCKET = 4;
 }
 
 message ConnectResponse {
@@ -141,6 +153,8 @@ message HeartbeatRequest {
   string client_id = 1;
   string group = 2;
   int64 timestamp = 3;
+  StreamType stream_type = 4; // 新增: 支持多协议/多路复用健康检查
+  string stream_id = 5;       // 新增: 支持多路复用健康检查
 }
 
 message HeartbeatResponse {

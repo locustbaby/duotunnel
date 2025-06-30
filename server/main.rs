@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         connected_clients: connected_clients.clone(),
         pending_requests: pending_requests.clone(),
         token_map: token_map.clone(),
+        client_streams: tunnel_server.client_streams.clone(),
     });
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
     let pending_requests = Arc::new(DashMap::new());
@@ -76,23 +77,23 @@ async fn main() -> anyhow::Result<()> {
     join_set.spawn(async move {
         let target = target.clone();
         let ctx = ctx.clone();
-        let make_svc = make_service_fn(move |_| {
-            let ctx = ctx.clone();
-            let target = target.clone();
-            async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| {
-                    let ctx = ctx.clone();
-                    let target = target.clone();
-                    async move {
-                        http_entry_handler::<ServerHttpEntryTarget>(req, &ctx, &*target).await
-                    }
-                }))
-            }
-        });
-        let server = HyperServer::bind(&http_addr).serve(make_svc);
-        info!("HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
-        if let Err(e) = server.await {
-            error!("HTTP entry server error: {}", e);
+            let make_svc = make_service_fn(move |_| {
+                let ctx = ctx.clone();
+                let target = target.clone();
+                async move {
+                    Ok::<_, hyper::Error>(service_fn(move |req| {
+                        let ctx = ctx.clone();
+                        let target = target.clone();
+                        async move {
+                            http_entry_handler::<ServerHttpEntryTarget>(req, &ctx, &*target).await
+                        }
+                    }))
+                }
+            });
+            let server = HyperServer::bind(&http_addr).serve(make_svc);
+            info!("HTTP entry listening on http://{} (tunnel-lib handler)", http_addr);
+            if let Err(e) = server.await {
+                error!("HTTP entry server error: {}", e);
         }
     });
 
@@ -102,29 +103,29 @@ async fn main() -> anyhow::Result<()> {
     let rules_engine_grpc = rules_engine.clone();
     join_set.spawn(async move {
         let rules_engine = rules_engine_grpc.clone();
-        let make_svc = make_service_fn(move |_| {
-            let rules_engine = rules_engine.clone();
-            async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| {
-                    let rules_engine = rules_engine.clone();
-                    async move {
-                        let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
-                        let service = None;
-                        if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, "", service) {
-                            return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Reverse proxy to client group: {:?}", rule.action_client_group))));
+            let make_svc = make_service_fn(move |_| {
+                let rules_engine = rules_engine.clone();
+                async move {
+                    Ok::<_, hyper::Error>(service_fn(move |req| {
+                        let rules_engine = rules_engine.clone();
+                        async move {
+                            let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+                            let service = None;
+                            if let Some(rule) = rules_engine.match_reverse_proxy_rule(host, "", service) {
+                                return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Reverse proxy to client group: {:?}", rule.action_client_group))));
+                            }
+                            if let Some(rule) = rules_engine.match_forward_rule(host, "", service) {
+                                return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Forward proxy to upstream: {:?}", rule.action_upstream))));
+                            }
+                            Ok::<_, hyper::Error>(HyperResponse::new(Body::from("No matching rule")))
                         }
-                        if let Some(rule) = rules_engine.match_forward_rule(host, "", service) {
-                            return Ok::<_, hyper::Error>(HyperResponse::new(Body::from(format!("Forward proxy to upstream: {:?}", rule.action_upstream))));
-                        }
-                        Ok::<_, hyper::Error>(HyperResponse::new(Body::from("No matching rule")))
-                    }
-                }))
-            }
-        });
-        let server = HyperServer::bind(&grpc_addr).serve(make_svc);
-        info!("gRPC entry listening on http://{} (stub, not real gRPC)", grpc_addr);
-        if let Err(e) = server.await {
-            error!("gRPC entry server error: {}", e);
+                    }))
+                }
+            });
+            let server = HyperServer::bind(&grpc_addr).serve(make_svc);
+            info!("gRPC entry listening on http://{} (stub, not real gRPC)", grpc_addr);
+            if let Err(e) = server.await {
+                error!("gRPC entry server error: {}", e);
         }
     });
 
@@ -146,4 +147,4 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
-} 
+}

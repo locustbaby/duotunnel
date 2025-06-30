@@ -22,6 +22,7 @@ pub async fn forward_http_via_tunnel(
     pending_map: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     request_id: String,
     direction: Direction,
+    stream_id: String,
 ) -> Result<hyper::Response<Body>, hyper::Error> {
     let (parts, body) = http_req.into_parts();
     let host = parts.headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
@@ -32,6 +33,7 @@ pub async fn forward_http_via_tunnel(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let body_bytes = hyper::body::to_bytes(body).await.unwrap_or_default();
     let http_request = HttpRequest {
+        stream_id: stream_id.clone(),
         method: parts.method.to_string(),
         url: parts.uri.to_string(),
         host: host.to_string(),
@@ -84,9 +86,10 @@ pub async fn forward_http_via_tunnel(
 }
 
 /// Build an HttpRequest from a HyperRequest and body bytes.
-pub fn http_request_from_hyper(req: &hyper::Request<hyper::Body>, body: Vec<u8>) -> crate::tunnel::HttpRequest {
+pub fn http_request_from_hyper(req: &hyper::Request<hyper::Body>, body: Vec<u8>, stream_id: String) -> crate::tunnel::HttpRequest {
     let host = req.headers().get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
     crate::tunnel::HttpRequest {
+        stream_id,
         method: req.method().to_string(),
         url: req.uri().to_string(),
         host: host.to_string(),

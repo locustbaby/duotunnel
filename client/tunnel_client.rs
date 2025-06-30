@@ -19,6 +19,7 @@ use std::sync::Arc as StdArc;
 use dashmap::DashMap;
 use tunnel_lib::proxy::HttpTunnelContext;
 use crate::rules_engine::ClientRulesEngine;
+use tunnel_lib::tunnel::{TunnelMessage, ConnectRequest, StreamType, Direction};
 
 pub struct TunnelClient {
     pub client_id: Arc<String>,
@@ -146,6 +147,26 @@ impl TunnelClient {
             let child_token = token.child_token();
             let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id)));
             let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), self.trace_enabled));
+            let stream_id = Uuid::new_v4().to_string();
+            let stream_type = StreamType::Http;
+            let connect_msg = TunnelMessage {
+                client_id: (*self.client_id).clone(),
+                request_id: Uuid::new_v4().to_string(),
+                direction: Direction::ClientToServer as i32,
+                payload: Some(tunnel_message::Payload::ConnectRequest(
+                    ConnectRequest {
+                        client_id: (*self.client_id).clone(),
+                        stream_id: stream_id.clone(),
+                        stream_type: stream_type as i32,
+                        timestamp: chrono::Utc::now().timestamp(),
+                    }
+                )),
+                trace_id: String::new(),
+            };
+            if let Err(e) = self.tx.send(connect_msg).await {
+                error!("Failed to send ConnectRequest: {}", e);
+                return Err(anyhow::anyhow!("Failed to send ConnectRequest: {}", e));
+            }
             let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
             let response = grpc_client.proxy(Request::new(outbound)).await;
             match response {

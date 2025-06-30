@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let pending_requests_holder = StdArc::new(RwLock::new(None));
     let client_id_holder = StdArc::new(RwLock::new(None));
     let token_holder = StdArc::new(RwLock::new(None::<CancellationToken>));
+    let stream_id_holder = StdArc::new(RwLock::new(None));
 
     // 优雅退出信号监听
     let shutdown_token = CancellationToken::new();
@@ -97,14 +98,17 @@ async fn main() -> anyhow::Result<()> {
         let tunnel_tx_holder = tunnel_tx_holder.clone();
         let pending_requests_holder = pending_requests_holder.clone();
         let client_id_holder = client_id_holder.clone();
+        let stream_id_holder = stream_id_holder.clone();
         let shutdown_token = shutdown_token.clone();
         join_set.spawn(async move {
             let tunnel_tx = tunnel_tx_holder.clone();
             let client_id = client_id_holder.clone();
+            let stream_id = stream_id_holder.clone();
             let target = Arc::new(ClientHttpEntryTarget {
                 tunnel_tx,
                 pending_requests: pending_requests_holder.clone(),
                 client_id,
+                stream_id,
             });
             let ctx = HttpTunnelContext {
                 client_id: "client".to_string(), // 仅作标识
@@ -182,6 +186,12 @@ async fn main() -> anyhow::Result<()> {
                 {
                     let mut token_w = token_holder.write().await;
                     *token_w = Some(token.clone());
+                }
+                // 新建 stream_id
+                let stream_id = Uuid::new_v4().to_string();
+                {
+                    let mut s = stream_id_holder.write().await;
+                    *s = Some(stream_id.clone());
                 }
                 let tunnel_fut = tunnel_client.connect_with_retry_with_token(grpc_client, &mut rx, token.clone());
                 tokio::select! {

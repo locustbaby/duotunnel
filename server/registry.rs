@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
-use tunnel_lib::tunnel::{TunnelMessage, HttpResponse, HttpRequest};
+use tunnel_lib::tunnel::{TunnelMessage, HttpResponse, HttpRequest, StreamType};
 use tracing;
 use function_name::named;
+use dashmap::DashMap;
 
 #[derive(Clone, Debug)]
 pub struct ClientInfo {
@@ -15,12 +16,15 @@ pub struct ClientInfo {
 pub struct ManagedClientRegistry {
     // client_id -> ClientInfo
     clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
+    // 健康检查: (client_id, group, stream_type, stream_id) -> last_heartbeat
+    health_map: Arc<DashMap<(String, String, StreamType, String), u64>>,
 }
 
 impl ManagedClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
+            health_map: Arc::new(DashMap::new()),
         }
     }
 
@@ -170,5 +174,36 @@ impl ManagedClientRegistry {
         tracing::info!(target: module_path!(), "[{}] {}: client_id={}, existed={}, before={:?}, after={:?}", function_name!(), "remove_client", client_id, existed, before, after);
         tracing::info!(target: module_path!(), "[{}] Removed client {}", function_name!(), client_id);
         tracing::info!(target: module_path!(), "[{}] All clients after remove: {:?}", function_name!(), *clients);
+    }
+
+    /// 更新多维健康检查心跳
+    pub fn update_heartbeat_multi(&self, client_id: &str, group: &str, stream_type: StreamType, stream_id: &str) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        self.health_map.insert((client_id.to_string(), group.to_string(), stream_type, stream_id.to_string()), now);
+    }
+
+    /// 检查多维健康状态
+    pub fn is_healthy_multi(&self, client_id: &str, group: &str, stream_type: StreamType, stream_id: &str, timeout_secs: u64) -> bool {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if let Some(ts) = self.health_map.get(&(client_id.to_string(), group.to_string(), stream_type, stream_id.to_string())) {
+            now - *ts < timeout_secs
+        } else {
+            false
+        }
+    }
+
+    /// 获取 group 下所有健康的 (client_id, stream_type, stream_id)
+    pub fn get_healthy_streams_in_group(&self, group: &str, stream_type: Option<StreamType>, timeout_secs: u64) -> Vec<(String, StreamType, String)> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        self.health_map.iter()
+            .filter(|entry| {
+                let (_cid, grp, stype, _sid) = entry.key();
+                grp == group && (stream_type.is_none() || *stype == stream_type.unwrap()) && now - *entry.value() < timeout_secs
+            })
+            .map(|entry| {
+                let (cid, _grp, stype, sid) = entry.key();
+                (cid.clone(), *stype, sid.clone())
+            })
+            .collect()
     }
 } 

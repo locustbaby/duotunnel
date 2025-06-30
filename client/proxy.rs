@@ -14,6 +14,7 @@ pub struct ClientHttpEntryTarget {
     pub tunnel_tx: Arc<RwLock<Option<mpsc::Sender<TunnelMessage>>>>,
     pub pending_requests: Arc<RwLock<Option<Arc<DashMap<String, oneshot::Sender<HttpResponse>>>>>>,
     pub client_id: Arc<RwLock<Option<String>>>,
+    pub stream_id: Arc<RwLock<Option<String>>>,
 }
 
 #[async_trait]
@@ -27,6 +28,7 @@ impl HttpEntryProxyTarget for ClientHttpEntryTarget {
         let tunnel_tx = self.tunnel_tx.read().await.clone();
         let pending_requests_opt = self.pending_requests.read().await.clone();
         let client_id = self.client_id.read().await.clone().unwrap_or_else(|| "unknown".to_string());
+        let stream_id = self.stream_id.read().await.clone().unwrap_or_else(|| "default-stream".to_string());
         if let Some(tunnel_tx) = tunnel_tx {
             if let Some(pending_requests) = pending_requests_opt {
                 // 正常转发
@@ -38,6 +40,7 @@ impl HttpEntryProxyTarget for ClientHttpEntryTarget {
                     pending_requests,
                     request_id,
                     tunnel_lib::tunnel::Direction::ClientToServer,
+                    stream_id,
                 ).await;
             } else {
                 // pending_requests 尚未初始化，优雅返回 502

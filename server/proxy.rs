@@ -18,6 +18,7 @@ pub struct ServerHttpEntryTarget {
     pub connected_clients: Arc<TokioMutex<std::collections::HashMap<String, mpsc::Sender<TunnelMessage>>>>,
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     pub token_map: Arc<DashMap<String, CancellationToken>>,
+    pub client_streams: Arc<DashMap<String, String>>,
 }
 
 #[async_trait]
@@ -74,6 +75,9 @@ impl HttpEntryProxyTarget for ServerHttpEntryTarget {
                     use tunnel_lib::http_forward::forward_http_via_tunnel;
                     use uuid::Uuid;
                     let request_id = Uuid::new_v4().to_string();
+                    let stream_id = self.client_streams.get(client_id.as_str())
+                        .map(|entry| entry.value().clone())
+                        .unwrap_or_else(|| "default-stream".to_string());
                     return forward_http_via_tunnel(
                         req,
                         &client_id,
@@ -81,6 +85,7 @@ impl HttpEntryProxyTarget for ServerHttpEntryTarget {
                         self.pending_requests.clone(),
                         request_id,
                         tunnel_lib::tunnel::Direction::ServerToClient,
+                        stream_id,
                     ).await;
                 } else {
                     let err_resp = response::resp_502(None, None, Some("server"));
