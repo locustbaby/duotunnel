@@ -19,7 +19,7 @@ use std::sync::Arc as StdArc;
 use dashmap::DashMap;
 use tunnel_lib::proxy::HttpTunnelContext;
 use crate::rules_engine::ClientRulesEngine;
-use tunnel_lib::tunnel::{TunnelMessage, ConnectRequest, StreamType, Direction};
+use tunnel_lib::tunnel::{TunnelMessage, StreamType, Direction};
 
 pub struct TunnelClient {
     pub client_id: Arc<String>,
@@ -51,22 +51,6 @@ impl TunnelClient {
         }
     }
 
-    pub async fn register_group(&self, grpc_client: &mut TunnelServiceClient<tonic::transport::Channel>) -> anyhow::Result<()> {
-        let register_req = RegisterRequest {
-            client_id: (*self.client_id).clone(),
-            group: (*self.group_id).clone(),
-            version: "v1.0.0".to_string(),
-        };
-        let response = grpc_client.register(Request::new(register_req)).await?;
-        let resp = response.into_inner();
-        if resp.success {
-            info!("Successfully registered to group '{}': {}", (*self.group_id), resp.message);
-        } else {
-            error!("Failed to register to group '{}': {}", (*self.group_id), resp.message);
-        }
-        Ok(())
-    }
-
     pub async fn sync_config(&self, grpc_client: &mut TunnelServiceClient<tonic::transport::Channel>) -> anyhow::Result<()> {
         let config_req = ConfigSyncRequest {
             client_id: (*self.client_id).clone(),
@@ -84,78 +68,22 @@ impl TunnelClient {
         Ok(())
     }
 
-    pub async fn connect_with_retry(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>) -> anyhow::Result<()> {
-        self.register_group(&mut grpc_client).await?;
-        loop {
-            let cancel_token = CancellationToken::new();
-            let child_token = cancel_token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id)));
-            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), self.trace_enabled));
-            let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
-            let response = grpc_client.proxy(Request::new(outbound)).await;
-            match response {
-                Ok(resp) => {
-                    let mut inbound = resp.into_inner();
-                    info!("Tunnel connection established successfully");
-                    while let Some(message) = inbound.next().await {
-                        match message {
-                            Ok(msg) => {
-                                self.handle_tunnel_message(msg, &self.tx).await;
-                            }
-                            Err(e) => {
-                                use tonic::Code;
-                                let mut should_break_outer = false;
-                                match e.code() {
-                                    Code::Unknown | Code::Unavailable => {
-                                        should_break_outer = true;
-                                    }
-                                    _ => {}
-                                }
-                                let msg = e.message().to_ascii_lowercase();
-                                if msg.contains("broken pipe") || msg.contains("connection refused") {
-                                    should_break_outer = true;
-                                }
-                                let err_str = e.to_string().to_ascii_lowercase();
-                                if err_str.contains("broken pipe") || err_str.contains("connection refused") {
-                                    should_break_outer = true;
-                                }
-                                error!("Error receiving message: {}", e);
-                                if should_break_outer {
-                                    return Err(anyhow::anyhow!("Critical tunnel error: {}", e));
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Tunnel stream error: {}", e);
-                }
-            }
-            cancel_token.cancel();
-            let _ = heartbeat_handle.await;
-            let _ = config_sync_handle.await;
-            info!("Tunnel stream closed, will reconnect");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-    }
-
     pub async fn connect_with_retry_with_token(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>, token: CancellationToken) -> anyhow::Result<()> {
-        self.register_group(&mut grpc_client).await?;
         loop {
             let child_token = token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id)));
-            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), self.trace_enabled));
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id)));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id)));
             let stream_id = Uuid::new_v4().to_string();
             let stream_type = StreamType::Http;
             let connect_msg = TunnelMessage {
                 client_id: (*self.client_id).clone(),
                 request_id: Uuid::new_v4().to_string(),
                 direction: Direction::ClientToServer as i32,
-                payload: Some(tunnel_message::Payload::ConnectRequest(
-                    ConnectRequest {
+                payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::StreamOpen(
+                    StreamOpenRequest {
                         client_id: (*self.client_id).clone(),
+                        group: (*self.group_id).clone(),
+                        version: "v1.0.0".to_string(),
                         stream_id: stream_id.clone(),
                         stream_type: stream_type as i32,
                         timestamp: chrono::Utc::now().timestamp(),
@@ -164,8 +92,8 @@ impl TunnelClient {
                 trace_id: String::new(),
             };
             if let Err(e) = self.tx.send(connect_msg).await {
-                error!("Failed to send ConnectRequest: {}", e);
-                return Err(anyhow::anyhow!("Failed to send ConnectRequest: {}", e));
+                error!("Failed to send StreamOpenRequest: {}", e);
+                return Err(anyhow::anyhow!("Failed to send StreamOpenRequest: {}", e));
             }
             let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
             let response = grpc_client.proxy(Request::new(outbound)).await;
@@ -217,8 +145,9 @@ impl TunnelClient {
         }
     }
 
-    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>) {
+    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await;
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -226,13 +155,20 @@ impl TunnelClient {
                         client_id: (*client_id).clone(),
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
-                        payload: Some(tunnel_message::Payload::Heartbeat(Heartbeat {
-                            timestamp: chrono::Utc::now().timestamp(),
-                        })),
+                        payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::StreamOpen(
+                            StreamOpenRequest {
+                                client_id: (*client_id).clone(),
+                                group: (*group_id).clone(),
+                                version: "v1.0.0".to_string(),
+                                stream_id: Uuid::new_v4().to_string(),
+                                stream_type: StreamType::Http as i32,
+                                timestamp: chrono::Utc::now().timestamp(),
+                            }
+                        )),
                         trace_id: String::new(),
                     };
                     if tx.send(heartbeat).await.is_err() {
-                        debug!("Heartbeat channel closed, exit heartbeat task");
+                        debug!("StreamOpenRequest channel closed, exit heartbeat task");
                         break;
                     }
                 }
@@ -244,7 +180,7 @@ impl TunnelClient {
         }
     }
 
-    async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>, trace_enabled: bool) {
+    async fn config_sync_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -253,21 +189,23 @@ impl TunnelClient {
                         client_id: (*client_id).clone(),
                         request_id: Uuid::new_v4().to_string(),
                         direction: Direction::ClientToServer as i32,
-                        payload: Some(tunnel_message::Payload::ConfigSync(ConfigSyncRequest {
-                            client_id: (*client_id).clone(),
-                            group: (*group_id).clone(),
-                            config_version: "".to_string(),
-                        })),
+                        payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::ConfigSync(
+                            ConfigSyncRequest {
+                                client_id: (*client_id).clone(),
+                                group: (*group_id).clone(),
+                                config_version: "".to_string(),
+                            }
+                        )),
                         trace_id: String::new(),
                     };
                     if tx.send(config_sync_msg).await.is_err() {
-                        debug!("Config sync channel closed, exit config sync task");
+                        debug!("ConfigSyncRequest channel closed, exit config sync task");
                         break;
                     }
-                    debug!("Sent config sync request via tunnel");
+                    debug!("Sent ConfigSyncRequest via tunnel");
                 }
                 _ = cancel_token.cancelled() => {
-                    debug!("Config sync task cancelled");
+                    debug!("ConfigSyncRequest task cancelled");
                     break;
                 }
             }
@@ -280,7 +218,7 @@ impl TunnelClient {
         let span = tracing::info_span!("client_handle_tunnel", trace_id = %trace_id, request_id = %request_id);
         async {
             match msg.payload {
-                Some(tunnel_message::Payload::HttpRequest(req)) => {
+                Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpRequest(req)) => {
                     // 处理来自 server 的 HTTP 请求（反向代理）
                     if msg.direction == Direction::ServerToClient as i32 {
                         let host = req.host.clone();
@@ -298,7 +236,7 @@ impl TunnelClient {
                             client_id: (*self.client_id).clone(),
                             request_id: request_id.clone(),
                             direction: Direction::ClientToServer as i32,
-                            payload: Some(tunnel_message::Payload::HttpResponse(response)),
+                            payload: Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpResponse(response)),
                             trace_id: trace_id.clone(),
                         };
                         if let Err(e) = tx.send(response_msg).await {
@@ -312,7 +250,7 @@ impl TunnelClient {
                         }
                     }
                 }
-                Some(tunnel_message::Payload::HttpResponse(resp)) => {
+                Some(tunnel_lib::tunnel::tunnel_message::Payload::HttpResponse(resp)) => {
                     tracing::info!(
                         event = "client_received_tunnel_response",
                         trace_id = %trace_id,
@@ -324,7 +262,7 @@ impl TunnelClient {
                         let _ = sender.send(resp);
                     }
                 }
-                Some(tunnel_message::Payload::ConfigSyncResponse(resp)) => {
+                Some(tunnel_lib::tunnel::tunnel_message::Payload::ConfigSyncResponse(resp)) => {
                     let mut rules_engine = self.rules_engine.lock().await;
                     debug!(
                         "configsync_response: old_rules={:?}, new_rules={:?}, old_upstreams={:?}, new_upstreams={:?}",
@@ -350,12 +288,21 @@ impl TunnelClient {
                     }
                     rules_engine.update_rules(resp.rules, resp.upstreams).await;
                 }
-                Some(tunnel_message::Payload::Heartbeat(_)) => {
+                Some(tunnel_lib::tunnel::tunnel_message::Payload::StreamOpen(
+                    StreamOpenRequest {
+                        client_id: _,
+                        group: _,
+                        version: _,
+                        stream_id: _,
+                        stream_type: _,
+                        timestamp: _,
+                    }
+                )) => {
                     tracing::info!(
-                        event = "client_received_heartbeat",
+                        event = "client_received_stream_open_request",
                         trace_id = %trace_id,
                         request_id = %request_id,
-                        message = "Received heartbeat from server"
+                        message = "Received StreamOpenRequest from server"
                     );
                 }
                 _ => {}

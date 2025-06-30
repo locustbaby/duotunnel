@@ -17,17 +17,15 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tunnel_lib::tunnel::StreamType;
 use lazy_static;
-use tunnel_lib::tunnel::HeartbeatRequest;
 
 #[derive(Clone)]
 pub struct TunnelServer {
     pub rules_engine: Arc<RulesEngine>,
     pub client_registry: Arc<ManagedClientRegistry>,
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
-    pub connected_clients: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<TunnelMessage>>>>,
+    pub connected_streams: Arc<DashMap<(String, String), mpsc::Sender<TunnelMessage>>>,
     pub token_map: Arc<DashMap<String, CancellationToken>>,
     pub http_client: Arc<HyperClient<hyper::client::HttpConnector>>,
-    pub client_streams: Arc<DashMap<String, String>>,
 }
 
 impl TunnelServer {
@@ -36,11 +34,10 @@ impl TunnelServer {
         Self {
             client_registry: Arc::new(ManagedClientRegistry::new()),
             pending_requests,
-            connected_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            connected_streams: Arc::new(DashMap::new()),
             token_map,
             rules_engine: Arc::new(rules_engine),
             http_client,
-            client_streams: Arc::new(DashMap::new()),
         }
     }
 }
@@ -75,16 +72,7 @@ impl TunnelService for TunnelServer {
             while let Some(msg) = stream.next().await {
                 match msg {
                     Ok(tunnel_msg) => {
-                        if let Some(tunnel_lib::tunnel::tunnel_message::Payload::Heartbeat(_)) = tunnel_msg.payload {
-                            client_registry.update_heartbeat_multi(&tunnel_msg.client_id, "", StreamType::Unspecified, "");
-                        }
                         match tunnel_msg.payload {
-                            Some(tunnel_lib::tunnel::tunnel_message::Payload::ConnectRequest(connect_req)) => {
-                                client_registry.register_client(&connect_req.client_id, "default-group");
-                            }
-                            Some(tunnel_lib::tunnel::tunnel_message::Payload::Heartbeat(_)) => {
-                                client_registry.update_heartbeat(&tunnel_msg.client_id);
-                            }
                             Some(tunnel_lib::tunnel::tunnel_message::Payload::ConfigSync(config_req)) => {
                                 let (rules, upstreams) = if let Some(group) = rules_engine.get_group(&config_req.group) {
                                     (group.rules.http.clone(), group.upstreams.clone())
@@ -110,12 +98,11 @@ impl TunnelService for TunnelServer {
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<TunnelMessage, Status>>(128);
         let pending_requests = self.pending_requests.clone();
-        let connected_clients = self.connected_clients.clone();
         let rules_engine = self.rules_engine.clone();
         let client_registry = self.client_registry.clone();
         let http_client = self.http_client.clone();
         let token_map = self.token_map.clone();
-        let client_streams = self.client_streams.clone();
+        let connected_streams = self.connected_streams.clone();
         let token = CancellationToken::new();
         tokio::spawn(async move {
             let mut client_id = String::new();
@@ -127,17 +114,11 @@ impl TunnelService for TunnelServer {
                 match message {
                     Ok(msg) => {
                         client_id = msg.client_id.clone();
-                        if let Some(tunnel_message::Payload::ConnectRequest(ref connect_req)) = msg.payload {
-                            stream_id = connect_req.stream_id.clone();
-                            stream_type = StreamType::from_i32(connect_req.stream_type).unwrap_or(StreamType::Unspecified);
-                            STREAMS.insert((client_id.clone(), stream_id.clone(), stream_type), tx.clone());
-                            client_streams.insert(client_id.clone(), stream_id.clone());
-                        }
                         if client_tx.is_none() {
                             let (ctx, mut crx) = mpsc::channel::<TunnelMessage>(128);
                             client_tx = Some(ctx.clone());
                             token_map.insert(client_id.clone(), token.clone());
-                            connected_clients.lock().await.insert(client_id.clone(), ctx);
+                            connected_streams.insert((client_id.clone(), stream_id.clone()), ctx.clone());
                             let tx_clone = tx.clone();
                             tokio::spawn(async move {
                                 while let Some(tunnel_msg) = crx.recv().await {
@@ -146,9 +127,6 @@ impl TunnelService for TunnelServer {
                                     }
                                 }
                             });
-                        }
-                        if let Some(tunnel_message::Payload::Heartbeat(_)) = msg.payload {
-                            client_registry.update_heartbeat_multi(&client_id, &group, stream_type, &stream_id);
                         }
                         match msg.payload {
                             Some(tunnel_message::Payload::HttpResponse(resp)) => {
@@ -236,6 +214,32 @@ impl TunnelService for TunnelServer {
                                     let _ = tx.send(response_msg).await;
                                 }
                             }
+                            Some(tunnel_message::Payload::StreamOpen(ref req)) => {
+                                // 注册/更新 client 到 group
+                                client_registry.register_client(&req.client_id, &req.group);
+                                // 注册/更新 stream 到 connected_streams
+                                stream_id = req.stream_id.clone();
+                                group = req.group.clone();
+                                stream_type = StreamType::from_i32(req.stream_type).unwrap_or(StreamType::Unspecified);
+                                connected_streams.insert((req.client_id.clone(), req.stream_id.clone()), client_tx.as_ref().unwrap().clone());
+                                // 更新多维健康检查
+                                client_registry.update_heartbeat_multi(&req.client_id, &req.group, stream_type, &req.stream_id);
+                                // 回复 StreamOpenResponse
+                                let response = TunnelMessage {
+                                    client_id: req.client_id.clone(),
+                                    request_id: msg.request_id.clone(),
+                                    direction: Direction::ServerToClient as i32,
+                                    payload: Some(tunnel_message::Payload::StreamOpenResponse(StreamOpenResponse {
+                                        success: true,
+                                        message: "stream registered/heartbeat ok".to_string(),
+                                        timestamp: chrono::Utc::now().timestamp(),
+                                    })),
+                                    trace_id: msg.trace_id.clone(),
+                                };
+                                if let Some(tx) = client_tx.as_ref() {
+                                    let _ = tx.send(response).await;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -243,28 +247,13 @@ impl TunnelService for TunnelServer {
                         if let Some(token) = token_map.get(client_id.as_str()) {
                             token.cancel();
                         }
-                        connected_clients.lock().await.remove(&client_id);
-                        token_map.remove(&client_id);
+                        connected_streams.remove(&(client_id.clone(), stream_id.clone()));
                         break;
                     }
                 }
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
-    }
-
-    async fn register(
-        &self,
-        request: Request<RegisterRequest>,
-    ) -> Result<Response<RegisterResponse>, Status> {
-        let req = request.into_inner();
-        self.client_registry.register_client(&req.client_id, &req.group);
-        let response = RegisterResponse {
-            success: true,
-            message: "Registration successful".to_string(),
-            config_version: "v1.0.0".to_string(),
-        };
-        Ok(Response::new(response))
     }
 
     async fn config_sync(
@@ -301,20 +290,6 @@ impl TunnelService for TunnelServer {
             config_version: "v1.0.0".to_string(),
             rules: proto_rules,
             upstreams: proto_upstreams,
-        };
-        Ok(Response::new(response))
-    }
-
-    async fn heartbeat(
-        &self,
-        request: Request<HeartbeatRequest>,
-    ) -> Result<Response<HeartbeatResponse>, Status> {
-        let req = request.into_inner();
-        self.client_registry.update_heartbeat_multi(&req.client_id, &req.group, req.stream_type(), &req.stream_id);
-        let response = HeartbeatResponse {
-            success: true,
-            message: "Heartbeat received".to_string(),
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
         };
         Ok(Response::new(response))
     }

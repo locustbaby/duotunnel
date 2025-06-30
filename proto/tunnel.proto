@@ -5,9 +5,7 @@ package tunnel;
 service TunnelService {
   rpc ControlStream(stream TunnelMessage) returns (stream TunnelMessage);
   rpc Proxy(stream TunnelMessage) returns (stream TunnelMessage);
-  rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc ConfigSync(ConfigSyncRequest) returns (ConfigSyncResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
 message TunnelMessage {
@@ -19,14 +17,13 @@ message TunnelMessage {
     HttpResponse http_response = 5;
     GrpcRequest grpc_request = 6;
     GrpcResponse grpc_response = 7;
-    Heartbeat heartbeat = 8;
-    ConnectRequest connect_request = 9;
-    ConnectResponse connect_response = 10;
-    ErrorMessage error_message = 11;
-    ConfigSyncRequest config_sync = 12;
-    ConfigSyncResponse config_sync_response = 13;
+    ConfigSyncRequest config_sync = 8;
+    ConfigSyncResponse config_sync_response = 9;
+    StreamOpenRequest stream_open = 10;
+    StreamOpenResponse stream_open_response = 11;
+    ErrorMessage error_message = 12;
   }
-  string trace_id = 14;
+  string trace_id = 15;
 }
 
 enum Direction {
@@ -69,49 +66,6 @@ message GrpcResponse {
   bytes body = 3;
 }
 
-message Heartbeat {
-  int64 timestamp = 1;
-}
-
-message ConnectRequest {
-  string client_id = 1;
-  string stream_id = 2;
-  StreamType stream_type = 3;
-  int64 timestamp = 4;
-}
-
-enum StreamType {
-  STREAM_TYPE_UNSPECIFIED = 0;
-  CONTROL = 1;
-  HTTP = 2;
-  GRPC = 3;
-  WEBSOCKET = 4;
-}
-
-message ConnectResponse {
-  bool success = 1;
-  string message = 2;
-  int64 timestamp = 3;
-}
-
-message ErrorMessage {
-  int32 code = 1;
-  string message = 2;
-  string request_id = 3;
-}
-
-message RegisterRequest {
-  string client_id = 1;
-  string group = 2;
-  string version = 3;
-}
-
-message RegisterResponse {
-  bool success = 1;
-  string message = 2;
-  string config_version = 3;
-}
-
 message ConfigSyncRequest {
   string client_id = 1;
   string group = 2;
@@ -149,16 +103,31 @@ message UpstreamServer {
   bool resolve = 2;
 }
 
-message HeartbeatRequest {
+message StreamOpenRequest {
   string client_id = 1;
   string group = 2;
-  int64 timestamp = 3;
-  StreamType stream_type = 4; // 新增: 支持多协议/多路复用健康检查
-  string stream_id = 5;       // 新增: 支持多路复用健康检查
+  string version = 3;
+  string stream_id = 4;
+  StreamType stream_type = 5;
+  int64 timestamp = 6;
 }
 
-message HeartbeatResponse {
+message StreamOpenResponse {
   bool success = 1;
   string message = 2;
   int64 timestamp = 3;
+}
+
+message ErrorMessage {
+  int32 code = 1;
+  string message = 2;
+  string request_id = 3;
+}
+
+enum StreamType {
+  STREAM_TYPE_UNSPECIFIED = 0;
+  CONTROL = 1;
+  HTTP = 2;
+  GRPC = 3;
+  WEBSOCKET = 4;
 } 
