@@ -215,8 +215,6 @@ impl TunnelService for TunnelServer {
                                 }
                             }
                             Some(tunnel_message::Payload::StreamOpen(ref req)) => {
-                                // 注册/更新 client 到 group
-                                client_registry.register_client(&req.client_id, &req.group);
                                 // 注册/更新 stream 到 connected_streams
                                 stream_id = req.stream_id.clone();
                                 group = req.group.clone();

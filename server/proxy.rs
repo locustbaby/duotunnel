@@ -31,7 +31,7 @@ impl HttpEntryProxyTarget for ServerHttpEntryTarget {
         let path = req.uri().path();
         if let Some(rule) = self.rules_engine.match_reverse_proxy_rule(host, path, None) {
             if let Some(group) = &rule.action_client_group {
-                let healthy_clients = self.client_registry.get_clients_in_group(group);
+                let healthy_clients = self.client_registry.get_clients_in_group(group, 60);
                 if healthy_clients.is_empty() {
                     let err_resp = response::resp_502(None, None, Some("server"));
                     return Ok(HyperResponse::builder()

@@ -7,203 +7,63 @@ use tracing;
 use function_name::named;
 use dashmap::DashMap;
 
-#[derive(Clone, Debug)]
-pub struct ClientInfo {
-    pub group: String,
-    pub last_heartbeat: u64, // timestamp
-}
+pub type LastHeartbeat = u64;
+pub type StreamKey = (String, String); // (client_id, stream_id)
 
 pub struct ManagedClientRegistry {
-    // client_id -> ClientInfo
-    clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
-    // 健康检查: (client_id, group, stream_type, stream_id) -> last_heartbeat
-    health_map: Arc<DashMap<(String, String, StreamType, String), u64>>,
+    // group_id -> stream_type -> (client_id, stream_id) -> last_heartbeat
+    pub groups: Arc<DashMap<String, DashMap<StreamType, DashMap<StreamKey, LastHeartbeat>>>>,
 }
 
 impl ManagedClientRegistry {
     pub fn new() -> Self {
         Self {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            health_map: Arc::new(DashMap::new()),
+            groups: Arc::new(DashMap::new()),
         }
     }
 
-    /// 注册 client 到指定 group
-    #[named]
-    pub fn register_client(&self, client_id: &str, group: &str) -> bool {
-        let mut clients = self.clients.lock().unwrap();
-        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        let existed = clients.contains_key(client_id);
-        clients.insert(client_id.to_string(), ClientInfo {
-            group: group.to_string(),
-            last_heartbeat: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        });
-        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        tracing::info!(target: module_path!(), "[{}] {}: client_id={}, group={}, existed={}, before={:?}, after={:?}", function_name!(), "register_client", client_id, group, existed, before, after);
-        true
-    }
-
-    /// 更新 client 心跳时间
-    pub fn update_heartbeat(&self, client_id: &str) {
-        let mut clients = self.clients.lock().unwrap();
-        let before = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect::<Vec<_>>();
-        if let Some(client_info) = clients.get_mut(client_id) {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            let old_group = client_info.group.clone();
-            client_info.last_heartbeat = now;
-            let after_group = client_info.group.clone();
-            if old_group != after_group {
-                tracing::info!("[update_heartbeat] client {} group changed: from {} to {}", client_id, old_group, after_group);
-            }
-        }
-        // 不再打印BEFORE/AFTER，只有变化时才打印
-    }
-
-    /// 获取指定 group 下的所有健康 client
-    pub fn get_clients_in_group(&self, group: &str) -> Vec<String> {
-        let clients = self.clients.lock().unwrap();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        
-        clients.iter()
-            .filter(|(_, info)| {
-                info.group == group && self.is_client_healthy_internal(info.last_heartbeat, now)
-            })
-            .map(|(client_id, _)| client_id.clone())
-            .collect()
-    }
-
-    /// 检查 client 是否健康（60秒内有心跳）
-    pub fn is_client_healthy(&self, client_id: &str) -> bool {
-        let clients = self.clients.lock().unwrap();
-        if let Some(client_info) = clients.get(client_id) {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            self.is_client_healthy_internal(client_info.last_heartbeat, now)
-        } else {
-            false
-        }
-    }
-
-    fn is_client_healthy_internal(&self, last_heartbeat: u64, now: u64) -> bool {
-        now - last_heartbeat < 60 // 60秒超时
-    }
-
-    /// 选择 group 下的一个健康 client（简单轮询）
-    pub fn select_client_in_group(&self, group: &str) -> Option<String> {
-        let healthy_clients = self.get_clients_in_group(group);
-        let clients = self.clients.lock().unwrap();
-        tracing::info!("[select_client_in_group] group={}, healthy_clients={:?}, all_clients={:?}", group, healthy_clients, clients.iter().map(|(id, info)| (id, &info.group)).collect::<Vec<_>>());
-        if healthy_clients.is_empty() {
-            None
-        } else {
-            // 简单选择第一个，后续可实现轮询
-            Some(healthy_clients[0].clone())
-        }
-    }
-
-    /// 清理不健康的 client
-    #[named]
-    pub fn cleanup_unhealthy_clients(&self) {
-        let mut clients = self.clients.lock().unwrap();
-        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut removed = Vec::new();
-        let mut retain_vec = Vec::new();
-        for (client_id, info) in clients.iter() {
-            let healthy = self.is_client_healthy_internal(info.last_heartbeat, now);
-            if healthy {
-                retain_vec.push((client_id.clone(), info.clone()));
-            } else {
-                removed.push(client_id.clone());
-            }
-        }
-        clients.clear();
-        for (id, info) in retain_vec {
-            clients.insert(id, info);
-        }
-        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        tracing::info!(target: module_path!(), "[{}] {}: removed_clients={:?}, before={:?}, after={:?}", function_name!(), "cleanup_unhealthy_clients", removed, before, after);
-        tracing::info!(target: module_path!(), "[{}] All clients after cleanup: {:?}", function_name!(), *clients);
-    }
-
-    /// 获取所有 client (id, group) 列表
-    pub fn get_all_clients(&self) -> Vec<(String, String)> {
-        let clients = self.clients.lock().unwrap();
-        clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect()
-    }
-
-    /// 发送消息到指定 client
-    pub async fn send_to_client(&self, client_id: &str, _msg: TunnelMessage) -> Result<(mpsc::Sender<TunnelMessage>, oneshot::Receiver<HttpResponse>), String> {
-        // 这是一个简化的实现，实际应该维护到客户端的连接映射
-        // 这里返回一个模拟的通道对，实际实现需要更复杂的连接管理
-        let (_tx, _rx) = mpsc::channel::<TunnelMessage>(128);
-        let (_resp_tx, _resp_rx) = oneshot::channel::<HttpResponse>();
-        
-        // 在实际实现中，这里应该查找活跃的客户端连接并发送消息
-        // 目前返回错误，因为我们还没有完整的连接管理
-        Err(format!("Client {} not connected", client_id))
-    }
-
-    /// 发送消息到指定 group
-    pub async fn send_to_group(&self, _group_id: &str, _msg: HttpRequest) -> Result<(mpsc::Sender<TunnelMessage>, oneshot::Receiver<HttpResponse>), Box<dyn std::error::Error + Send + Sync>> {
-        // 这是一个简化的实现，实际应该维护到客户端的连接映射
-        let (_tx, _rx) = mpsc::channel::<TunnelMessage>(128);
-        let (_resp_tx, resp_rx) = oneshot::channel::<HttpResponse>();
-        
-        // TODO: 实现实际的 group 消息发送逻辑
-        Ok((_tx, resp_rx))
-    }
-
-    /// 根据请求查找对应的 group
-    pub fn find_group_for_request(&self, host: &str, _path: &str) -> Option<String> {
-        let clients = self.clients.lock().unwrap();
-        clients.iter()
-            .filter(|(_, info)| {
-                info.group == host && self.is_client_healthy_internal(info.last_heartbeat, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs())
-            })
-            .map(|(client_id, _)| client_id.clone())
-            .next()
-    }
-
-    #[named]
-    pub fn remove_client(&self, client_id: &str) {
-        let mut clients = self.clients.lock().unwrap();
-        let before: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        let existed = clients.contains_key(client_id);
-        clients.remove(client_id);
-        let after: Vec<_> = clients.iter().map(|(id, info)| (id.clone(), info.group.clone())).collect();
-        tracing::info!(target: module_path!(), "[{}] {}: client_id={}, existed={}, before={:?}, after={:?}", function_name!(), "remove_client", client_id, existed, before, after);
-        tracing::info!(target: module_path!(), "[{}] Removed client {}", function_name!(), client_id);
-        tracing::info!(target: module_path!(), "[{}] All clients after remove: {:?}", function_name!(), *clients);
-    }
-
-    /// 更新多维健康检查心跳
+    /// 注册/心跳：更新 group/stream_type 下 (client_id, stream_id) 的 last_heartbeat
     pub fn update_heartbeat_multi(&self, client_id: &str, group: &str, stream_type: StreamType, stream_id: &str) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        self.health_map.insert((client_id.to_string(), group.to_string(), stream_type, stream_id.to_string()), now);
-    }
-
-    /// 检查多维健康状态
-    pub fn is_healthy_multi(&self, client_id: &str, group: &str, stream_type: StreamType, stream_id: &str, timeout_secs: u64) -> bool {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        if let Some(ts) = self.health_map.get(&(client_id.to_string(), group.to_string(), stream_type, stream_id.to_string())) {
-            now - *ts < timeout_secs
-        } else {
-            false
-        }
+        let stream_map = self.groups.entry(group.to_string()).or_insert_with(DashMap::new);
+        let client_map = stream_map.entry(stream_type).or_insert_with(DashMap::new);
+        client_map.insert((client_id.to_string(), stream_id.to_string()), now);
+        tracing::info!(
+            "[client stream heartbeat] group={}, stream_type={:?}, client_id={}, stream_id={} last_heartbeat={}",
+            group, stream_type, client_id, stream_id, now
+        );
     }
 
     /// 获取 group 下所有健康的 (client_id, stream_type, stream_id)
     pub fn get_healthy_streams_in_group(&self, group: &str, stream_type: Option<StreamType>, timeout_secs: u64) -> Vec<(String, StreamType, String)> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        self.health_map.iter()
-            .filter(|entry| {
-                let (_cid, grp, stype, _sid) = entry.key();
-                grp == group && (stream_type.is_none() || *stype == stream_type.unwrap()) && now - *entry.value() < timeout_secs
-            })
-            .map(|entry| {
-                let (cid, _grp, stype, sid) = entry.key();
-                (cid.clone(), *stype, sid.clone())
-            })
-            .collect()
+        let mut result = Vec::new();
+        if let Some(stream_map) = self.groups.get(group) {
+            let stream_types: Vec<StreamType> = if let Some(st) = stream_type {
+                vec![st]
+            } else {
+                stream_map.iter().map(|entry| *entry.key()).collect()
+            };
+            for st in stream_types {
+                if let Some(client_map) = stream_map.get(&st) {
+                    for entry in client_map.iter() {
+                        let ((client_id, stream_id), last_heartbeat) = entry.pair();
+                        if now - *last_heartbeat < timeout_secs {
+                            result.push((client_id.clone(), st, stream_id.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// 获取 group 下所有 client_id（去重）
+    pub fn get_clients_in_group(&self, group: &str, timeout_secs: u64) -> Vec<String> {
+        let mut set = std::collections::HashSet::new();
+        for (client_id, _, _) in self.get_healthy_streams_in_group(group, None, timeout_secs) {
+            set.insert(client_id);
+        }
+        set.into_iter().collect()
     }
 } 
