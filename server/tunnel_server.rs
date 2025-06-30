@@ -17,25 +17,22 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tunnel_lib::tunnel::StreamType;
 use lazy_static;
+use tracing;
 
 #[derive(Clone)]
 pub struct TunnelServer {
     pub rules_engine: Arc<RulesEngine>,
     pub client_registry: Arc<ManagedClientRegistry>,
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
-    pub connected_streams: Arc<DashMap<(String, String), mpsc::Sender<TunnelMessage>>>,
-    pub token_map: Arc<DashMap<String, CancellationToken>>,
     pub http_client: Arc<HyperClient<hyper::client::HttpConnector>>,
 }
 
 impl TunnelServer {
-    pub fn new_with_config(config: &crate::config::ServerConfig, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>, token_map: Arc<DashMap<String, CancellationToken>>) -> Self {
+    pub fn new_with_config(config: &crate::config::ServerConfig, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>) -> Self {
         let rules_engine = RulesEngine::new(config.clone());
         Self {
             client_registry: Arc::new(ManagedClientRegistry::new()),
             pending_requests,
-            connected_streams: Arc::new(DashMap::new()),
-            token_map,
             rules_engine: Arc::new(rules_engine),
             http_client,
         }
@@ -46,8 +43,7 @@ impl Default for TunnelServer {
     fn default() -> Self {
         let http_client = Arc::new(HyperClient::new());
         let pending_requests = Arc::new(DashMap::new());
-        let token_map = Arc::new(DashMap::new());
-        Self::new_with_config(&crate::config::ServerConfig::load("../config/server.toml").unwrap(), http_client, pending_requests, token_map)
+        Self::new_with_config(&crate::config::ServerConfig::load("../config/server.toml").unwrap(), http_client, pending_requests)
     }
 }
 
@@ -101,34 +97,61 @@ impl TunnelService for TunnelServer {
         let rules_engine = self.rules_engine.clone();
         let client_registry = self.client_registry.clone();
         let http_client = self.http_client.clone();
-        let token_map = self.token_map.clone();
-        let connected_streams = self.connected_streams.clone();
         let token = CancellationToken::new();
         tokio::spawn(async move {
             let mut client_id = String::new();
             let mut group = String::new();
             let mut stream_id = String::new();
             let mut stream_type = StreamType::Unspecified;
-            let mut client_tx: Option<mpsc::Sender<TunnelMessage>> = None;
             while let Some(message) = stream.next().await {
                 match message {
                     Ok(msg) => {
                         client_id = msg.client_id.clone();
-                        if client_tx.is_none() {
-                            let (ctx, mut crx) = mpsc::channel::<TunnelMessage>(128);
-                            client_tx = Some(ctx.clone());
-                            token_map.insert(client_id.clone(), token.clone());
-                            connected_streams.insert((client_id.clone(), stream_id.clone()), ctx.clone());
-                            let tx_clone = tx.clone();
-                            tokio::spawn(async move {
-                                while let Some(tunnel_msg) = crx.recv().await {
-                                    if let Err(_) = tx_clone.send(Ok(tunnel_msg)).await {
-                                        break;
-                                    }
-                                }
-                            });
-                        }
                         match msg.payload {
+                            Some(tunnel_message::Payload::StreamOpen(ref req)) => {
+                                // 注册/更新 stream 到 connected_streams
+                                stream_id = req.stream_id.clone();
+                                group = req.group.clone();
+                                stream_type = StreamType::from_i32(req.stream_type).unwrap_or(StreamType::Unspecified);
+                                let (ctx, mut crx) = mpsc::channel::<TunnelMessage>(128);
+                                client_registry.sync_stream(
+                                    &req.client_id,
+                                    &req.group,
+                                    &req.stream_id,
+                                    stream_type,
+                                    ctx.clone(),
+                                    token.clone(),
+                                );
+                                tracing::info!(
+                                    event = "client_sync",
+                                    client_id = %req.client_id,
+                                    group = %req.group,
+                                    stream_id = %req.stream_id,
+                                    stream_type = ?stream_type,
+                                    message = "Client sync for stream"
+                                );
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some(tunnel_msg) = crx.recv().await {
+                                        if let Err(_) = tx_clone.send(Ok(tunnel_msg)).await {
+                                            break;
+                                        }
+                                    }
+                                });
+                                // 回复 StreamOpenResponse
+                                let response = TunnelMessage {
+                                    client_id: req.client_id.clone(),
+                                    request_id: msg.request_id.clone(),
+                                    direction: Direction::ServerToClient as i32,
+                                    payload: Some(tunnel_message::Payload::StreamOpenResponse(StreamOpenResponse {
+                                        success: true,
+                                        message: "stream registered/heartbeat ok".to_string(),
+                                        timestamp: chrono::Utc::now().timestamp(),
+                                    })),
+                                    trace_id: msg.trace_id.clone(),
+                                };
+                                let _ = ctx.send(response).await;
+                            }
                             Some(tunnel_message::Payload::HttpResponse(resp)) => {
                                 if msg.direction == Direction::ClientToServer as i32 {
                                     if let Some((_, sender)) = pending_requests.remove(&msg.request_id) {
@@ -172,7 +195,7 @@ impl TunnelService for TunnelServer {
                                             payload: Some(tunnel_message::Payload::ConfigSyncResponse(config_response)),
                                             trace_id: String::new(),
                                         };
-                                        if let Some(tx) = client_tx.as_ref() {
+                                        if let Some((tx, _, _)) = client_registry.get_stream_info(&config_req.group, stream_type, &msg.client_id, &stream_id) {
                                             let _ = tx.send(response_msg).await;
                                         }
                                     }
@@ -210,42 +233,22 @@ impl TunnelService for TunnelServer {
                                     payload: Some(tunnel_message::Payload::HttpResponse(response)),
                                     trace_id: msg.trace_id.clone(),
                                 };
-                                if let Some(tx) = client_tx.as_ref() {
+                                if let Some((tx, _, _)) = client_registry.get_stream_info(&group, stream_type, &client_id, &stream_id) {
                                     let _ = tx.send(response_msg).await;
-                                }
-                            }
-                            Some(tunnel_message::Payload::StreamOpen(ref req)) => {
-                                // 注册/更新 stream 到 connected_streams
-                                stream_id = req.stream_id.clone();
-                                group = req.group.clone();
-                                stream_type = StreamType::from_i32(req.stream_type).unwrap_or(StreamType::Unspecified);
-                                connected_streams.insert((req.client_id.clone(), req.stream_id.clone()), client_tx.as_ref().unwrap().clone());
-                                // 更新多维健康检查
-                                client_registry.update_heartbeat_multi(&req.client_id, &req.group, stream_type, &req.stream_id);
-                                // 回复 StreamOpenResponse
-                                let response = TunnelMessage {
-                                    client_id: req.client_id.clone(),
-                                    request_id: msg.request_id.clone(),
-                                    direction: Direction::ServerToClient as i32,
-                                    payload: Some(tunnel_message::Payload::StreamOpenResponse(StreamOpenResponse {
-                                        success: true,
-                                        message: "stream registered/heartbeat ok".to_string(),
-                                        timestamp: chrono::Utc::now().timestamp(),
-                                    })),
-                                    trace_id: msg.trace_id.clone(),
-                                };
-                                if let Some(tx) = client_tx.as_ref() {
-                                    let _ = tx.send(response).await;
                                 }
                             }
                             _ => {}
                         }
                     }
                     Err(_) => {
-                        if let Some(token) = token_map.get(client_id.as_str()) {
+                        if let Some((_, token, _)) = client_registry.get_stream_info(&group, stream_type, &client_id, &stream_id) {
                             token.cancel();
                         }
-                        connected_streams.remove(&(client_id.clone(), stream_id.clone()));
+                        if let Some(stream_map) = client_registry.connected_streams.get(&group) {
+                            if let Some(client_map) = stream_map.get(&stream_type) {
+                                client_map.remove(&(client_id.clone(), stream_id.clone()));
+                            }
+                        }
                         break;
                     }
                 }

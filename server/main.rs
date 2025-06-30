@@ -45,8 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let rules_engine = Arc::new(RulesEngine::new(config.clone()));
     let http_client = Arc::new(HyperClient::new());
     let pending_requests = Arc::new(DashMap::new());
-    let token_map = Arc::new(DashMap::new());
-    let tunnel_server = TunnelServer::new_with_config(&config, http_client.clone(), pending_requests.clone(), token_map.clone());
+    let tunnel_server = TunnelServer::new_with_config(&config, http_client.clone(), pending_requests.clone());
     let rules_engine = tunnel_server.rules_engine.clone();
     let client_registry = tunnel_server.client_registry.clone();
     let http_client = tunnel_server.http_client.clone();
@@ -57,9 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let target = Arc::new(ServerHttpEntryTarget {
         rules_engine: rules_engine.clone(),
         client_registry: client_registry.clone(),
-        connected_streams: tunnel_server.connected_streams.clone(),
         pending_requests: pending_requests.clone(),
-        token_map: token_map.clone(),
     });
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
     let pending_requests = Arc::new(DashMap::new());

@@ -71,9 +71,9 @@ impl TunnelClient {
     pub async fn connect_with_retry_with_token(&self, mut grpc_client: TunnelServiceClient<tonic::transport::Channel>, rx: &mut mpsc::Receiver<TunnelMessage>, token: CancellationToken) -> anyhow::Result<()> {
         loop {
             let child_token = token.child_token();
-            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id)));
-            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id)));
             let stream_id = Uuid::new_v4().to_string();
+            let heartbeat_handle = tokio::spawn(Self::heartbeat_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id), stream_id.clone()));
+            let config_sync_handle = tokio::spawn(Self::config_sync_task(child_token.clone(), self.tx.clone(), Arc::clone(&self.client_id), Arc::clone(&self.group_id)));
             let stream_type = StreamType::Http;
             let connect_msg = TunnelMessage {
                 client_id: (*self.client_id).clone(),
@@ -145,7 +145,7 @@ impl TunnelClient {
         }
     }
 
-    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>) {
+    async fn heartbeat_task(cancel_token: CancellationToken, tx: mpsc::Sender<TunnelMessage>, client_id: Arc<String>, group_id: Arc<String>, stream_id: String) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await;
         loop {
@@ -160,7 +160,7 @@ impl TunnelClient {
                                 client_id: (*client_id).clone(),
                                 group: (*group_id).clone(),
                                 version: "v1.0.0".to_string(),
-                                stream_id: Uuid::new_v4().to_string(),
+                                stream_id: stream_id.clone(),
                                 stream_type: StreamType::Http as i32,
                                 timestamp: chrono::Utc::now().timestamp(),
                             }

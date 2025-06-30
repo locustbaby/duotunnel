@@ -35,9 +35,9 @@ action_upstream = "grpc_backend"
 match_host = "www.google.com"
 action_client_group = "group-a"
 
-# [[reverse_proxy.rules.http]]
-# match_host = "www.google.com"
-# action_client_group = "group-b"
+[[reverse_proxy.rules.http]]
+match_host = "www.google.com"
+action_client_group = "group-b"
 
 [[reverse_proxy.rules.grpc]]
 match_host = "grpc.google.com"
