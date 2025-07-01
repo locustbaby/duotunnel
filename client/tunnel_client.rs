@@ -12,8 +12,9 @@ use uuid::Uuid;
 use tracing::{info, error, debug};
 use chrono;
 use tracing::Instrument;
-use hyper_tls::HttpsConnector;
+use hyper_rustls::{HttpsConnectorBuilder, HttpsConnector};
 use hyper::client::HttpConnector;
+use hyper::Client;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc as StdArc;
 use dashmap::DashMap;
@@ -29,15 +30,17 @@ pub struct TunnelClient {
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
     pub rules_engine: Arc<Mutex<ClientRulesEngine>>,
     pub trace_enabled: bool,
-    pub http_client: hyper::Client<HttpConnector>,
-    pub https_client: hyper::Client<HttpsConnector<HttpConnector>>,
+    pub https_client: Arc<Client<HttpsConnector<HttpConnector>>>,
 }
 
 impl TunnelClient {
     pub fn new(client_id: Arc<String>, group_id: Arc<String>, server_addr: String, trace_enabled: bool, tx: mpsc::Sender<TunnelMessage>) -> Self {
-        let http_client = hyper::Client::new();
-        let https_connector = HttpsConnector::new();
-        let https_client = hyper::Client::builder().build::<_, hyper::Body>(https_connector);
+        let https = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        let https_client = Arc::new(Client::builder().build::<_, hyper::Body>(https));
         Self {
             client_id,
             group_id,
@@ -46,7 +49,6 @@ impl TunnelClient {
             pending_requests: Arc::new(DashMap::new()),
             rules_engine: Arc::new(Mutex::new(ClientRulesEngine::new())),
             trace_enabled,
-            http_client,
             https_client,
         }
     }

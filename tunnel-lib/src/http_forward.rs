@@ -1,6 +1,7 @@
 use crate::tunnel::*;
 use hyper::{Request as HyperRequest, Body, Client, Method};
 use hyper::client::HttpConnector;
+use hyper::client::connect::Connect;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tokio::sync::mpsc;
@@ -126,70 +127,49 @@ pub fn set_host_header(headers: &mut HashMap<String, String>, set_host: &str) {
 }
 
 /// Forward an HTTP/HTTPS request to a backend, setting Host as needed.
-pub async fn forward_http_to_backend(
+pub async fn forward_http_to_backend<C>(
     req: &crate::tunnel::HttpRequest,
     backend_url: &str,
-    http_client: Arc<Client<HttpConnector, Body>>,
+    https_client: Arc<Client<C, Body>>,
     override_host: &str,
-) -> crate::tunnel::HttpResponse {
-    let client = &*http_client;
-    let method = match req.method.parse::<Method>() {
+) -> crate::tunnel::HttpResponse
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
+    let client = &*https_client;
+    let method = match req.method.parse::<hyper::Method>() {
         Ok(m) => m,
         Err(_) => return crate::tunnel::HttpResponse {
             status_code: 400,
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
             body: b"Invalid method".to_vec(),
         },
     };
-    // Compose URL using url crate
-    let url = if let Ok(parsed) = Url::parse(&req.url) {
-        parsed.to_string()
-    } else {
-        let base_url = if !req.host.is_empty() {
-            format!("http://{}", req.host)
-        } else if backend_url.starts_with("http://") || backend_url.starts_with("https://") {
-            backend_url.to_string()
-        } else if backend_url.ends_with(":443") {
-            format!("https://{}", backend_url)
-        } else {
-            format!("http://{}", backend_url)
-        };
-        match Url::parse(&base_url).and_then(|base| base.join(&req.url)) {
-            Ok(url) => url.to_string(),
-            Err(e) => {
-                error!("Failed to join base_url and req.url: {}", e);
-                format!("{}{}", base_url, req.url)
-            }
+    let url = match Url::parse(backend_url).and_then(|base| base.join(&req.url)) {
+        Ok(url) => url.to_string(),
+        Err(e) => {
+            tracing::error!("Failed to join backend_url and req.url: {}", e);
+            format!("{}{}", backend_url, req.url)
         }
     };
-    // Build headers, set Host
-    let mut headers = req.headers.clone();
-    let backend_host = match Url::parse(&url) {
-        Ok(url) => url.host_str().unwrap_or("").to_string(),
-        Err(_) => String::new(),
-    };
-    let set_host = if !override_host.is_empty() {
-        override_host
-    } else {
-        backend_host.as_str()
-    };
-    set_host_header(&mut headers, set_host);
-    let mut builder = HyperRequest::builder().method(method).uri(&url);
-    for (k, v) in headers.iter() {
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(&url);
+    for (k, v) in req.headers.iter() {
         builder = builder.header(k, v);
     }
     let hyper_req = match builder.body(Body::from(req.body.clone())) {
         Ok(req) => req,
         Err(_) => return crate::tunnel::HttpResponse {
             status_code: 400,
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
             body: b"Invalid request".to_vec(),
         },
     };
     match client.request(hyper_req).await {
         Ok(resp) => {
             let status = resp.status().as_u16() as i32;
-            let headers: HashMap<String, String> = resp
+            let headers: std::collections::HashMap<String, String> = resp
                 .headers()
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
@@ -204,13 +184,13 @@ pub async fn forward_http_to_backend(
                 body: body_bytes,
             }
         }
-        Err(_e) => {
-            resp_500(
-                Some("Request failed"),
-                None, // trace_id
-                None, // request_id
-                None, // identity
-            )
+        Err(e) => {
+            tracing::error!("HTTP(S) request to backend failed: {}", e);
+            crate::tunnel::HttpResponse {
+                status_code: 502,
+                headers: std::collections::HashMap::new(),
+                body: b"Bad Gateway".to_vec(),
+            }
         }
     }
 } 

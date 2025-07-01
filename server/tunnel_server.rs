@@ -18,32 +18,40 @@ use futures::StreamExt;
 use tunnel_lib::tunnel::StreamType;
 use lazy_static;
 use tracing;
+use hyper_rustls::{HttpsConnectorBuilder, HttpsConnector};
+use hyper::client::HttpConnector;
+use hyper::Client;
 
 #[derive(Clone)]
 pub struct TunnelServer {
     pub rules_engine: Arc<RulesEngine>,
     pub client_registry: Arc<ManagedClientRegistry>,
     pub pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>,
-    pub http_client: Arc<HyperClient<hyper::client::HttpConnector>>,
+    pub https_client: Arc<Client<HttpsConnector<HttpConnector>>>,
 }
 
 impl TunnelServer {
-    pub fn new_with_config(config: &crate::config::ServerConfig, http_client: Arc<HyperClient<hyper::client::HttpConnector>>, pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>) -> Self {
+    pub fn new_with_config(config: &crate::config::ServerConfig, https_client: Arc<Client<HttpsConnector<HttpConnector>>>, pending_requests: Arc<DashMap<String, oneshot::Sender<HttpResponse>>>) -> Self {
         let rules_engine = RulesEngine::new(config.clone());
         Self {
             client_registry: Arc::new(ManagedClientRegistry::new()),
             pending_requests,
             rules_engine: Arc::new(rules_engine),
-            http_client,
+            https_client,
         }
     }
 }
 
 impl Default for TunnelServer {
     fn default() -> Self {
-        let http_client = Arc::new(HyperClient::new());
+        let https = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        let https_client = Arc::new(Client::builder().build::<_, hyper::Body>(https));
         let pending_requests = Arc::new(DashMap::new());
-        Self::new_with_config(&crate::config::ServerConfig::load("../config/server.toml").unwrap(), http_client, pending_requests)
+        Self::new_with_config(&crate::config::ServerConfig::load("../config/server.toml").unwrap(), https_client, pending_requests)
     }
 }
 
@@ -96,7 +104,7 @@ impl TunnelService for TunnelServer {
         let pending_requests = self.pending_requests.clone();
         let rules_engine = self.rules_engine.clone();
         let client_registry = self.client_registry.clone();
-        let http_client = self.http_client.clone();
+        let https_client = self.https_client.clone();
         let token = CancellationToken::new();
         tokio::spawn(async move {
             let mut client_id = String::new();
@@ -219,7 +227,7 @@ impl TunnelService for TunnelServer {
                                                 response = forward_http_to_backend(
                                                     req,
                                                     &backend,
-                                                    http_client.clone(),
+                                                    https_client.clone(),
                                                     set_host
                                                 ).await;
                                             }

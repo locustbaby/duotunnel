@@ -22,6 +22,9 @@ use crate::utils::pick_backend;
 use tokio::task::JoinSet;
 use crate::proxy::ServerHttpEntryTarget;
 use tunnel_lib::proxy::{HttpTunnelContext, http_entry_handler};
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper::client::HttpConnector;
+use hyper::Client;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,12 +46,17 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting tunnel server...");
     
     let rules_engine = Arc::new(RulesEngine::new(config.clone()));
-    let http_client = Arc::new(HyperClient::new());
+    let https = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    let https_client = Arc::new(Client::builder().build::<_, hyper::Body>(https));
     let pending_requests = Arc::new(DashMap::new());
-    let tunnel_server = TunnelServer::new_with_config(&config, http_client.clone(), pending_requests.clone());
+    let tunnel_server = TunnelServer::new_with_config(&config, https_client.clone(), pending_requests.clone());
     let rules_engine = tunnel_server.rules_engine.clone();
     let client_registry = tunnel_server.client_registry.clone();
-    let http_client = tunnel_server.http_client.clone();
+    let https_client = tunnel_server.https_client.clone();
 
     // HTTP 入口监听
     let http_port = config.server.http_entry_port;

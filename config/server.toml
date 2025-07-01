@@ -10,7 +10,7 @@ trace_enabled = false
 # ========== 2. Forward Upstreams 定义 ==========
 [forward.upstreams.backend]
 servers = [
-    { address = "https://echo.free.beeceptor.com", resolve = true }
+    { address = "http://echo.free.beeceptor.com", resolve = true }
 ]
 lb_policy = "round_robin"
 
@@ -36,7 +36,7 @@ match_host = "www.google.com"
 action_client_group = "group-a"
 
 [[reverse_proxy.rules.http]]
-match_host = "www.google.com"
+match_host = "www2.google.com"
 action_client_group = "group-b"
 
 [[reverse_proxy.rules.grpc]]

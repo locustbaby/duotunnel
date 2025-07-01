@@ -17,7 +17,7 @@ use tracing::{info, error, debug};
 use tracing_subscriber;
 use chrono;
 use tracing::Instrument;
-use hyper_tls::HttpsConnector;
+use hyper_rustls::{HttpsConnectorBuilder, HttpsConnector};
 use hyper::client::HttpConnector;
 mod proxy;
 use tunnel_lib::http_forward::set_host_header;
