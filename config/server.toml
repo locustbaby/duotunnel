@@ -30,7 +30,7 @@ match_host = "grpc.backend.com"
 match_service = "com.example.BackendService"
 action_upstream = "grpc_backend"
 
-# ========== 4. Reverse Proxy (Tunnel/Client Group) 配置 ==========
+# ========== 4. Reverse Proxy (Tunnel/Client Group) for Server to Client 配置 ==========
 [[reverse_proxy.rules.http]]
 match_host = "www.google.com"
 action_client_group = "group-a"
@@ -44,7 +44,7 @@ match_host = "grpc.google.com"
 match_service = "com.example.MyService"
 action_client_group = "group-a"
 
-# ========== 5. Client Group 配置（下发给 client） ==========
+# ========== 5. Client Group 配置（下发给 client）client to outside ==========
 [reverse_proxy.client_groups.group-a]
 config_version = "v1.0.0"
 
