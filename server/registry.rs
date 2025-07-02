@@ -65,4 +65,34 @@ impl ManagedClientRegistry {
         let (tx, token, last_heartbeat) = entry.value();
         Some((tx.clone(), token.clone(), *last_heartbeat))
     }
+
+    /// 返回一个 Future，可由 main.rs 的 JoinSet 统一 spawn
+    pub async fn cleanup_task(self: Arc<Self>, scan_interval_secs: u64, timeout_secs: u64, shutdown_token: CancellationToken) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let now = chrono::Utc::now().timestamp() as u64;
+                    for group_entry in self.connected_streams.iter() {
+                        let group = group_entry.key();
+                        for stream_type_entry in group_entry.value().iter() {
+                            let stream_type = stream_type_entry.key();
+                            let client_map = stream_type_entry.value();
+                            client_map.retain(|(client_id, stream_id), (_tx, token, last_heartbeat)| {
+                                let healthy = now - *last_heartbeat < timeout_secs && !token.is_cancelled();
+                                if !healthy {
+                                    tracing::info!(%group, ?stream_type, %client_id, %stream_id, "stream expired, removing");
+                                }
+                                healthy
+                            });
+                        }
+                    }
+                }
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("Cleanup task received shutdown signal, exiting");
+                    break;
+                }
+            }
+        }
+    }
 } 

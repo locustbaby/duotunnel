@@ -75,6 +75,13 @@ async fn main() -> anyhow::Result<()> {
         direction: tunnel_lib::tunnel::Direction::ServerToClient,
     };
     let mut join_set = JoinSet::new();
+    let shutdown_token = CancellationToken::new();
+    // 启动健康检查清理任务
+    let cleanup_registry = client_registry.clone();
+    let cleanup_token = shutdown_token.clone();
+    join_set.spawn(async move {
+        cleanup_registry.cleanup_task(30, 60, cleanup_token).await;
+    });
 
     // HTTP 入口监听
     join_set.spawn(async move {
