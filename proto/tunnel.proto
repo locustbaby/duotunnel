@@ -11,7 +11,7 @@ service TunnelService {
 message TunnelMessage {
   string client_id = 1;
   string request_id = 2;
-  Direction direction = 3;  // 请求方向
+  Direction direction = 3;  // Request direction
   oneof payload {
     HttpRequest http_request = 4;
     HttpResponse http_response = 5;
@@ -27,8 +27,8 @@ message TunnelMessage {
 }
 
 enum Direction {
-  CLIENT_TO_SERVER = 0;  // client 发起，server 处理
-  SERVER_TO_CLIENT = 1;  // server 发起，client 处理
+  CLIENT_TO_SERVER = 0;  // client initiates, server processes
+  SERVER_TO_CLIENT = 1;  // server initiates, client processes
 }
 
 message HttpRequest {
@@ -130,4 +130,4 @@ enum StreamType {
   HTTP = 2;
   GRPC = 3;
   WEBSOCKET = 4;
-} 
+}

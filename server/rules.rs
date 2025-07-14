@@ -9,19 +9,19 @@ impl RulesEngine {
         Self { config }
     }
 
-    /// 匹配 reverse_proxy 规则（入口请求 -> client group）
+    /// Match reverse_proxy rules (entry request -> client group)
     pub fn match_reverse_proxy_rule(&self, host: &str, path: &str, service: Option<&str>) -> Option<&Rule> {
         let rules = &self.config.reverse_proxy.rules;
         Self::find_matching_rule(&rules.http, &rules.grpc, host, path, service)
     }
 
-    /// 匹配 forward 规则（client tunnel 请求 -> 本地 upstream）
+    /// Match forward rules (client tunnel request -> local upstream)
     pub fn match_forward_rule(&self, host: &str, path: &str, service: Option<&str>) -> Option<&Rule> {
         let rules = &self.config.forward.rules;
         Self::find_matching_rule(&rules.http, &rules.grpc, host, path, service)
     }
 
-    /// 匹配 client group 下发规则（client 本地分发）
+    /// Match client group distribution rules (client local distribution)
     pub fn match_client_group_rule<'a>(group: &'a ClientGroupConfig, host: &'a str, path: &'a str, service: Option<&'a str>) -> Option<&'a Rule> {
         let rules = &group.rules;
         Self::find_matching_rule(&rules.http, &rules.grpc, host, path, service)
@@ -69,4 +69,4 @@ impl Rule {
     pub fn is_forward_proxy_rule(&self) -> bool {
         self.action_upstream.is_some()
     }
-} 
+}

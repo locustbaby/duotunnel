@@ -1,4 +1,4 @@
-# ========== 1. Server 基础配置 ==========
+# ========== 1. Server Basic Configuration ==========
 [server]
 config_version = "v1.0.0"
 tunnel_port = 50001
@@ -7,7 +7,7 @@ grpc_entry_port = 8002
 log_level = "info"
 trace_enabled = false
 
-# ========== 2. Forward Upstreams 定义 ==========
+# ========== 2. Forward Upstreams Definition ==========
 [forward.upstreams.backend]
 servers = [
     { address = "https://echo.free.beeceptor.com", resolve = true }
@@ -20,7 +20,7 @@ servers = [
 ]
 lb_policy = "round_robin"
 
-# ========== 3. Forward Request from Client Proxy 配置 ==========
+# ========== 3. Forward Request from Client Proxy Configuration ==========
 [[forward.rules.http]]
 match_host = "echo.free.beeceptor.com"
 action_upstream = "backend"
@@ -30,7 +30,7 @@ match_host = "grpc.backend.com"
 match_service = "com.example.BackendService"
 action_upstream = "grpc_backend"
 
-# ========== 4. Reverse Proxy (Tunnel/Client Group) for Server to Client 配置 ==========
+# ========== 4. Reverse Proxy (Tunnel/Client Group) for Server to Client Configuration ==========
 [[reverse_proxy.rules.http]]
 match_host = "www.google.com"
 action_client_group = "group-a"
@@ -44,7 +44,7 @@ match_host = "grpc.google.com"
 match_service = "com.example.MyService"
 action_client_group = "group-a"
 
-# ========== 5. Client Group 配置（下发给 client）client to outside ==========
+# ========== 5. Client Group Configuration (Distributed to client) client to outside ==========
 [reverse_proxy.client_groups.group-a]
 config_version = "v1.0.0"
 
@@ -64,7 +64,7 @@ action_upstream = "local_service"
 match_host = "www.google.com"
 action_upstream = "local_service"
 
-# # 也可以配置HTTP服务
+# # You can also configure HTTP services
 # [client_groups.group-a.upstreams.http_service]
 # servers = [
 #     { address = "http://127.0.0.1:8080", resolve = false }
@@ -86,4 +86,4 @@ lb_policy = "round_robin"
 
 # [[client_groups.group-b.rules.http]]
 # match_host = "b.com"
-# action_upstream = "local_service" 
+# action_upstream = "local_service"
