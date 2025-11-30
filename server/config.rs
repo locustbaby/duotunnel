@@ -16,6 +16,134 @@ pub struct ServerSection {
     pub grpc_entry_port: u16,
     pub log_level: String,
     pub trace_enabled: Option<bool>,
+    #[serde(default)]
+    pub performance: PerformanceConfig,
+}
+
+/// 性能配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PerformanceConfig {
+    /// Channel 容量配置
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+    
+    /// 请求超时时间 (秒)
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    
+    /// 背压配置
+    #[serde(default)]
+    pub backpressure: BackpressureConfig,
+    
+    /// 健康检查配置
+    #[serde(default)]
+    pub health_check: HealthCheckConfig,
+    
+    /// Pending 请求清理配置
+    #[serde(default)]
+    pub pending_cleanup: PendingCleanupConfig,
+}
+
+/// 背压配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackpressureConfig {
+    /// 是否启用背压
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    
+    /// 单个客户端最大并发请求数
+    #[serde(default = "default_max_pending_per_client")]
+    pub max_pending_per_client: usize,
+    
+    /// 全局最大并发请求数
+    #[serde(default = "default_max_pending_global")]
+    pub max_pending_global: usize,
+}
+
+/// 健康检查配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthCheckConfig {
+    /// 心跳间隔 (秒)
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    
+    /// Stream 超时时间 (秒)
+    #[serde(default = "default_stream_timeout_secs")]
+    pub stream_timeout_secs: u64,
+    
+    /// 清理任务扫描间隔 (秒)
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+}
+
+/// Pending 请求清理配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PendingCleanupConfig {
+    /// 是否启用自动清理
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    
+    /// 清理间隔 (秒)
+    #[serde(default = "default_pending_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+    
+    /// Pending 请求超时时间 (秒)
+    #[serde(default = "default_pending_timeout_secs")]
+    pub pending_timeout_secs: u64,
+}
+
+// 默认值函数
+fn default_channel_capacity() -> usize { 10000 }
+fn default_request_timeout_secs() -> u64 { 30 }
+fn default_true() -> bool { true }
+fn default_max_pending_per_client() -> usize { 1000 }
+fn default_max_pending_global() -> usize { 10000 }
+fn default_heartbeat_interval_secs() -> u64 { 15 }
+fn default_stream_timeout_secs() -> u64 { 60 }
+fn default_cleanup_interval_secs() -> u64 { 30 }
+fn default_pending_cleanup_interval_secs() -> u64 { 60 }
+fn default_pending_timeout_secs() -> u64 { 60 }
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: default_channel_capacity(),
+            request_timeout_secs: default_request_timeout_secs(),
+            backpressure: BackpressureConfig::default(),
+            health_check: HealthCheckConfig::default(),
+            pending_cleanup: PendingCleanupConfig::default(),
+        }
+    }
+}
+
+impl Default for BackpressureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            max_pending_per_client: default_max_pending_per_client(),
+            max_pending_global: default_max_pending_global(),
+        }
+    }
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            stream_timeout_secs: default_stream_timeout_secs(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+        }
+    }
+}
+
+impl Default for PendingCleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            cleanup_interval_secs: default_pending_cleanup_interval_secs(),
+            pending_timeout_secs: default_pending_timeout_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

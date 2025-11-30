@@ -13,6 +13,51 @@ pub struct ClientConfig {
     pub upstreams: Option<HashMap<String, Upstream>>,
     pub log_level: String,
     pub trace_enabled: Option<bool>,
+    #[serde(default)]
+    pub performance: ClientPerformanceConfig,
+}
+
+/// 客户端性能配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClientPerformanceConfig {
+    /// Channel 容量
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+    
+    /// 请求超时时间 (秒)
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    
+    /// 心跳间隔 (秒)
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    
+    /// 配置同步间隔 (秒)
+    #[serde(default = "default_config_sync_interval_secs")]
+    pub config_sync_interval_secs: u64,
+    
+    /// 重连间隔 (秒)
+    #[serde(default = "default_reconnect_interval_secs")]
+    pub reconnect_interval_secs: u64,
+}
+
+// 默认值函数
+fn default_channel_capacity() -> usize { 10000 }
+fn default_request_timeout_secs() -> u64 { 30 }
+fn default_heartbeat_interval_secs() -> u64 { 15 }
+fn default_config_sync_interval_secs() -> u64 { 30 }
+fn default_reconnect_interval_secs() -> u64 { 2 }
+
+impl Default for ClientPerformanceConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: default_channel_capacity(),
+            request_timeout_secs: default_request_timeout_secs(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            config_sync_interval_secs: default_config_sync_interval_secs(),
+            reconnect_interval_secs: default_reconnect_interval_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]

@@ -7,10 +7,45 @@ grpc_entry_port = 8002
 log_level = "info"
 trace_enabled = false
 
+# ========== 1.1 Performance Configuration ==========
+[server.performance]
+# Channel 容量 (默认: 10000, 旧版本: 128)
+# 影响: 最大并发请求数 = channel_capacity / 平均响应时间(秒)
+# 例如: 10000 / 0.1s = 100,000 QPS
+channel_capacity = 100000
+
+# 请求超时时间 (秒, 默认: 30)
+request_timeout_secs = 30
+
+# 背压配置 (防止过载)
+[server.performance.backpressure]
+enabled = false
+# 单个客户端最大并发请求数 (默认: 1000)
+max_pending_per_client = 100000
+# 全局最大并发请求数 (默认: 10000)
+max_pending_global = 1000000
+
+# 健康检查配置
+[server.performance.health_check]
+# 心跳间隔 (秒, 默认: 15)
+heartbeat_interval_secs = 15
+# Stream 超时时间 (秒, 默认: 60)
+stream_timeout_secs = 60
+# 清理任务扫描间隔 (秒, 默认: 30)
+cleanup_interval_secs = 30
+
+# Pending 请求清理配置 (防止内存泄漏)
+[server.performance.pending_cleanup]
+enabled = true
+# 清理间隔 (秒, 默认: 60)
+cleanup_interval_secs = 60
+# Pending 请求超时时间 (秒, 默认: 60)
+pending_timeout_secs = 60
+
 # ========== 2. Forward Upstreams Definition ==========
 [forward.upstreams.backend]
 servers = [
-    { address = "https://echo.free.beeceptor.com", resolve = true }
+    { address = "http://localhost:8080", resolve = true }
 ]
 lb_policy = "round_robin"
 
@@ -50,7 +85,7 @@ config_version = "v1.0.0"
 
 [reverse_proxy.client_groups.group-a.upstreams.local_service]
 servers = [
-    { address = "https://echo.free.beeceptor.com", resolve = true }
+    { address = "http://127.0.0.1:8080", resolve = false }
     # { address = "https://google.com", resolve = true }
 ]
 lb_policy = "round_robin"
@@ -64,16 +99,16 @@ action_upstream = "local_service"
 match_host = "www.google.com"
 action_upstream = "local_service"
 
-# # You can also configure HTTP services
-# [client_groups.group-a.upstreams.http_service]
-# servers = [
-#     { address = "http://127.0.0.1:8080", resolve = false }
-# ]
-# lb_policy = "round_robin"
+# You can also configure HTTP services
+[reverse_proxy.client_groups.group-a.upstreams.http_service]
+servers = [
+    { address = "http://127.0.0.1:8080", resolve = false }
+]
+lb_policy = "round_robin"
 
-# [[client_groups.group-a.rules.http]]
-# match_host = "localhost"
-# action_upstream = "http_service"
+[[reverse_proxy.client_groups.group-a.rules.http]]
+match_host = "localhost"
+action_upstream = "http_service"
 
 [reverse_proxy.client_groups.group-b]
 config_version = "v1.0.0"

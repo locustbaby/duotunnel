@@ -1,3 +1,7 @@
+# Tunnel
+
+> **架构文档**: 详见 `BEST_PRACTICE_DESIGN.md` - 最佳实践方案
+
 # Tunnel: High-Performance Multi-Protocol Dynamic Tunnel Gateway
 
 ## Project Overview

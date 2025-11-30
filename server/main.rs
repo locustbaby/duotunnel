@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         pending_requests: pending_requests.clone(),
     });
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
-    let pending_requests = Arc::new(DashMap::new());
+// FIXED:     let pending_requests = Arc::new(DashMap::new());
     let ctx = HttpTunnelContext {
         client_id: "server".to_string(),
         tunnel_tx: Arc::new(dummy_tx),
