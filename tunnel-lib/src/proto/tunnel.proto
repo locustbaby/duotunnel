@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package tunnel;
+
+// --- A. Control Stream Messages ---
+// Used for configuration sync, heartbeat, global errors, etc., sent on a dedicated, persistent QUIC stream.
+
+message ControlMessage {
+  // Core control message for configuration sync, heartbeat, tunnel connection initialization, etc.
+  oneof payload {
+    ConfigSyncRequest config_sync = 1;
+    ConfigSyncResponse config_sync_response = 2;
+    // KeepAlive keep_alive = 3; // Consider adding heartbeat
+    ErrorMessage error_message = 4;
+  }
+}
+
+message ConfigSyncRequest {
+  string client_id = 1;
+  string group = 2;
+  string config_version = 3;
+}
+
+message ConfigSyncResponse {
+  string config_version = 1;
+  repeated Rule rules = 2;
+  repeated Upstream upstreams = 3;
+}
+
+message Rule {
+  string rule_id = 1;
+  string type = 2; // http/grpc/tcp
+  string match_host = 3;
+  string match_path_prefix = 4;
+  map<string, string> match_header = 5;
+  string action_proxy_pass = 6; // Upstream name (e.g., "backend") or direct address (e.g., "192.168.1.10:80")
+  string action_set_host = 7;   // Modify Host header to this value
+}
+
+message Upstream {
+  string name = 1;
+  repeated UpstreamServer servers = 2;
+  string lb_policy = 3;
+}
+
+message UpstreamServer {
+  string address = 1;
+  bool resolve = 2;
+}
+
+message ErrorMessage {
+  int32 code = 1;
+  string message = 2;
+  string request_id = 3;
+}
+
+// --- B. Data Stream Routing Header ---
+// This is the first message sent on each new QUIC bidirectional stream.
+
+message DataStreamHeader {
+  // Routing information
+  string request_id = 1;             // Used to track the entire request chain
+  string type = 2;                   // Protocol type: "http", "grpc", "tcp"
+  string host = 3;                   // Host header value for rule matching
+
+  // Reserved fields (for future extension)
+  map<string, string> metadata = 4;
+}
+

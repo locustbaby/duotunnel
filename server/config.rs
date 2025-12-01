@@ -1,132 +1,210 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use std::fs;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
-    pub server: ServerSection,
-    pub forward: ForwardSection,
-    pub reverse_proxy: ReverseProxySection,
+    pub server: ServerBasicConfig,
+    #[serde(default)]
+    pub server_egress_upstream: Option<ServerEgressUpstream>,
+    #[serde(default)]
+    pub tunnel_management: Option<TunnelManagement>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ServerSection {
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerBasicConfig {
     pub config_version: String,
     pub tunnel_port: u16,
-    pub http_entry_port: u16,
-    pub grpc_entry_port: u16,
+    #[serde(default)]
+    pub http_entry_port: Option<u16>,
+    #[serde(default)]
+    pub grpc_entry_port: Option<u16>,
+    #[serde(default)]
+    pub wss_entry_port: Option<u16>,
     pub log_level: String,
-    pub trace_enabled: Option<bool>,
+    pub trace_enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Upstream {
-    pub servers: Vec<ServerAddr>,
-    pub lb_policy: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ServerAddr {
-    pub address: String,
-    pub resolve: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ForwardSection {
-    pub upstreams: HashMap<String, Upstream>,
-    pub rules: ForwardRules,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ForwardRules {
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerEgressUpstream {
     #[serde(default)]
-    pub http: Vec<Rule>,
+    pub upstreams: HashMap<String, UpstreamConfig>,
     #[serde(default)]
-    pub grpc: Vec<Rule>,
+    pub rules: EgressRules,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReverseProxySection {
-    pub rules: ReverseProxyRules,
-    pub client_groups: HashMap<String, ClientGroupConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ReverseProxyRules {
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct EgressRules {
     #[serde(default)]
-    pub http: Vec<Rule>,
+    pub http: Vec<EgressRule>,
     #[serde(default)]
-    pub grpc: Vec<Rule>,
+    pub grpc: Vec<GrpcEgressRule>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Rule {
-    pub match_host: Option<String>,
-    pub match_path_prefix: Option<String>,
-    pub match_service: Option<String>,
-    pub action_upstream: Option<String>,      // forward 用
-    pub action_client_group: Option<String>,  // reverse_proxy 用
-    pub action_set_host: Option<String>,      // 新增：支持 Host 头替换
+#[derive(Debug, Deserialize, Clone)]
+pub struct EgressRule {
+    pub match_host: String,
+    pub action_upstream: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ClientGroupConfig {
+#[derive(Debug, Deserialize, Clone)]
+pub struct GrpcEgressRule {
+    pub match_host: String,
+    pub match_service: String,
+    pub action_upstream: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TunnelManagement {
+    #[serde(default)]
+    pub server_ingress_routing: Option<ServerIngressRouting>,
+    #[serde(default)]
+    pub client_configs: Option<ClientConfigs>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerIngressRouting {
+    #[serde(default)]
+    pub rules: IngressRules,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct IngressRules {
+    #[serde(default)]
+    pub http: Vec<IngressRule>,
+    #[serde(default)]
+    pub grpc: Vec<GrpcIngressRule>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct IngressRule {
+    pub match_host: String,
+    pub action_client_group: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GrpcIngressRule {
+    pub match_host: String,
+    pub match_service: String,
+    pub action_client_group: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClientConfigs {
+    #[serde(default)]
+    pub client_egress_routings: HashMap<String, ClientEgressRouting>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClientEgressRouting {
     pub config_version: String,
-    pub upstreams: HashMap<String, Upstream>,
-    pub rules: ClientGroupRules,
+    #[serde(default)]
+    pub upstreams: HashMap<String, UpstreamConfig>,
+    #[serde(default)]
+    pub rules: ClientEgressRules,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ClientGroupRules {
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ClientEgressRules {
     #[serde(default)]
-    pub http: Vec<Rule>,
+    pub http: Vec<ClientEgressRule>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClientEgressRule {
+    pub match_host: String,
+    pub action_upstream: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UpstreamConfig {
+    pub servers: Vec<UpstreamServerConfig>,
     #[serde(default)]
-    pub grpc: Vec<Rule>,
+    pub lb_policy: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UpstreamServerConfig {
+    pub address: String,
+    #[serde(default)]
+    pub resolve: bool,
 }
 
 impl ServerConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: ServerConfig = toml::from_str(&content)?;
+        let content = fs::read_to_string(path)?;
+        let config: ServerConfig = serde_yaml::from_str(&content)?;
         Ok(config)
     }
-
-    /// 校验所有 http 规则，保证同一 host 只能有唯一规则，不能路由到多个 backend/client group。
-    pub fn validate_rules(&self) -> anyhow::Result<()> {
-        use std::collections::HashSet;
-        // forward.rules.http
-        let mut forward_hosts = HashSet::new();
-        for rule in &self.forward.rules.http {
-            let host = rule.match_host.clone().unwrap_or_default();
-            if !host.is_empty() && !forward_hosts.insert(host.clone()) {
-                anyhow::bail!("Duplicate match_host in forward.rules.http: {}", host);
-            }
-        }
-        // reverse_proxy.rules.http
-        let mut reverse_hosts = HashSet::new();
-        for rule in &self.reverse_proxy.rules.http {
-            let host = rule.match_host.clone().unwrap_or_default();
-            if !host.is_empty() && !reverse_hosts.insert(host.clone()) {
-                anyhow::bail!("Duplicate match_host in reverse_proxy.rules.http: {}", host);
-            }
-        }
-        // forward 和 reverse_proxy 不能有相同 host
-        for host in &forward_hosts {
-            if reverse_hosts.contains(host) {
-                anyhow::bail!("match_host '{}' appears in both forward and reverse_proxy rules", host);
-            }
-        }
-        // client_groups
-        for (group, group_cfg) in &self.reverse_proxy.client_groups {
-            let mut group_hosts = HashSet::new();
-            for rule in &group_cfg.rules.http {
-                let host = rule.match_host.clone().unwrap_or_default();
-                if !host.is_empty() && !group_hosts.insert(host.clone()) {
-                    anyhow::bail!("Duplicate match_host in client_group '{}': {}", group, host);
-                }
-            }
-        }
-        Ok(())
+    
+    /// Get bind address from server config
+    pub fn bind_addr(&self) -> String {
+        format!("0.0.0.0:{}", self.server.tunnel_port)
     }
+    
+    /// Convert to legacy format for compatibility
+    pub fn rules(&self) -> Vec<RuleConfig> {
+        // Extract rules from server_egress_upstream and tunnel_management
+        let mut rules = Vec::new();
+        
+        if let Some(ref egress) = self.server_egress_upstream {
+            for (idx, rule) in egress.rules.http.iter().enumerate() {
+                rules.push(RuleConfig {
+                    rule_id: format!("egress_http_{}", idx),
+                    rule_type: "http".to_string(),
+                    match_host: rule.match_host.clone(),
+                    match_path_prefix: String::new(),
+                    match_header: HashMap::new(),
+                    action_proxy_pass: rule.action_upstream.clone(),
+                    action_set_host: String::new(),
+                });
+            }
+        }
+        
+        rules
+    }
+    
+    /// Convert to legacy format for compatibility
+    pub fn upstreams(&self) -> Vec<UpstreamConfigLegacy> {
+        let mut upstreams = Vec::new();
+        
+        if let Some(ref egress) = self.server_egress_upstream {
+            for (name, upstream) in &egress.upstreams {
+                upstreams.push(UpstreamConfigLegacy {
+                    name: name.clone(),
+                    servers: upstream.servers.clone(),
+                    lb_policy: upstream.lb_policy.clone(),
+                });
+            }
+        }
+        
+        upstreams
+    }
+}
+
+// Legacy structs for compatibility with existing code
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuleConfig {
+    pub rule_id: String,
+    #[serde(rename = "type")]
+    pub rule_type: String,
+    #[serde(default)]
+    pub match_host: String,
+    #[serde(default)]
+    pub match_path_prefix: String,
+    #[serde(default)]
+    pub match_header: HashMap<String, String>,
+    pub action_proxy_pass: String,
+    #[serde(default)]
+    pub action_set_host: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UpstreamConfigLegacy {
+    pub name: String,
+    pub servers: Vec<UpstreamServerConfig>,
+    #[serde(default)]
+    pub lb_policy: String,
 }
 
  

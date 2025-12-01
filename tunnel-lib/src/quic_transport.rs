@@ -1,0 +1,193 @@
+use anyhow::{Result, anyhow};
+use quinn::{Endpoint, ServerConfig, ClientConfig, Connection, SendStream, RecvStream};
+use rustls::{Certificate, PrivateKey};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::convert::TryInto;
+use tracing::{info, debug, error};
+
+/// Generate self-signed certificate for QUIC server
+pub fn generate_self_signed_cert() -> Result<(Vec<Certificate>, PrivateKey)> {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let key_der = cert.serialize_private_key_der();
+    let cert_der = cert.serialize_der()?;
+    let key = PrivateKey(key_der);
+    let cert = Certificate(cert_der);
+    Ok((vec![cert], key))
+}
+
+/// Create QUIC server configuration with self-signed certificate
+pub fn create_server_config() -> Result<ServerConfig> {
+    let (certs, key) = generate_self_signed_cert()?;
+    
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    
+    server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
+    
+    let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+    
+    // Configure transport parameters
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_concurrent_bidi_streams(100_u32.into());
+    transport_config.max_concurrent_uni_streams(100_u32.into());
+    // Set keep-alive interval to 20 seconds (less than idle timeout)
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
+    // Set max idle timeout to 60 seconds to prevent premature connection closure
+    // This must be greater than keep_alive_interval
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    
+    server_config.transport_config(Arc::new(transport_config));
+    
+    Ok(server_config)
+}
+
+/// Create QUIC client configuration (accepts self-signed certificates)
+pub fn create_client_config() -> Result<ClientConfig> {
+    let mut client_crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_no_client_auth();
+    
+    client_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
+    
+    let mut client_config = ClientConfig::new(Arc::new(client_crypto));
+    
+    // Configure transport parameters
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_concurrent_bidi_streams(100_u32.into());
+    transport_config.max_concurrent_uni_streams(100_u32.into());
+    // Set keep-alive interval to 20 seconds (less than idle timeout)
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
+    // Set max idle timeout to 60 seconds to prevent premature connection closure
+    // This must be greater than keep_alive_interval
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    
+    client_config.transport_config(Arc::new(transport_config));
+    
+    Ok(client_config)
+}
+
+/// Custom certificate verifier that accepts any certificate (for testing)
+struct SkipServerVerification;
+
+impl rustls::client::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
+/// QUIC Server wrapper
+pub struct QuicServer {
+    endpoint: Endpoint,
+}
+
+impl QuicServer {
+    /// Create and bind a new QUIC server
+    pub async fn bind(addr: SocketAddr) -> Result<Self> {
+        let server_config = create_server_config()?;
+        let endpoint = Endpoint::server(server_config, addr)?;
+        info!("QUIC server listening on {}", addr);
+        Ok(Self { endpoint })
+    }
+
+    /// Accept incoming QUIC connection
+    pub async fn accept(&self) -> Option<Connection> {
+        match self.endpoint.accept().await {
+            Some(connecting) => {
+                match connecting.await {
+                    Ok(connection) => {
+                        debug!("Accepted QUIC connection from {}", connection.remote_address());
+                        Some(connection)
+                    }
+                    Err(e) => {
+                        error!("Failed to complete QUIC connection: {}", e);
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    }
+}
+
+/// QUIC Client wrapper
+pub struct QuicClient {
+    endpoint: Endpoint,
+}
+
+impl QuicClient {
+    /// Create a new QUIC client
+    pub fn new() -> Result<Self> {
+        let client_config = create_client_config()?;
+        let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+        endpoint.set_default_client_config(client_config);
+        Ok(Self { endpoint })
+    }
+
+    /// Connect to a QUIC server
+    pub async fn connect(&self, addr: SocketAddr, server_name: &str) -> Result<Connection> {
+        debug!("Connecting to QUIC server at {}", addr);
+        let connection = self.endpoint.connect(addr, server_name)?.await?;
+        info!("Connected to QUIC server at {}", addr);
+        Ok(connection)
+    }
+}
+
+/// Helper functions for QUIC streams
+pub mod stream {
+    use super::*;
+    use bytes::{BytesMut, BufMut};
+
+    /// Open a bidirectional stream
+    pub async fn open_bi(conn: &Connection) -> Result<(SendStream, RecvStream)> {
+        Ok(conn.open_bi().await?)
+    }
+
+    /// Accept a bidirectional stream
+    pub async fn accept_bi(conn: &Connection) -> Result<(SendStream, RecvStream)> {
+        match conn.accept_bi().await {
+            Ok(streams) => Ok(streams),
+            Err(e) => Err(anyhow!("Failed to accept bidirectional stream: {}", e)),
+        }
+    }
+
+    /// Send length-prefixed data over a stream
+    pub async fn send_data(send: &mut SendStream, data: &[u8]) -> Result<()> {
+        let len = data.len() as u32;
+        let mut buf = BytesMut::with_capacity(4 + data.len());
+        buf.put_u32(len);
+        buf.put_slice(data);
+        send.write_all(&buf).await?;
+        Ok(())
+    }
+
+    /// Receive length-prefixed data from a stream
+    pub async fn recv_data(recv: &mut RecvStream) -> Result<Vec<u8>> {
+        // Read length prefix (4 bytes)
+        let mut len_buf = [0u8; 4];
+        recv.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        // Read data
+        let mut data = vec![0u8; len];
+        recv.read_exact(&mut data).await?;
+        Ok(data)
+    }
+
+    /// Finish sending on a stream
+    pub async fn finish(send: &mut SendStream) -> Result<()> {
+        send.finish().await?;
+        Ok(())
+    }
+}

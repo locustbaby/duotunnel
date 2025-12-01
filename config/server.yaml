@@ -1,0 +1,99 @@
+# ====================================================================
+# SECTION 1: SERVER BASIC CONFIGURATION
+# ====================================================================
+server:
+  config_version: "v1.0.0"
+  tunnel_port: 10086
+  # Optional: Set to enable HTTP listener
+  http_entry_port: 8001
+  # Optional: Set to enable gRPC listener
+  # grpc_entry_port: 8002
+  # Optional: Set to enable WSS listener
+  # wss_entry_port: 8443
+  log_level: "info"
+  trace_enabled: false
+
+# ====================================================================
+# SECTION 2: SERVER EGRESS UPSTREAM
+# Upstreams are external services reachable by the server.
+# ====================================================================
+server_egress_upstream:
+  upstreams:
+    backend:
+      servers:
+        - address: "http://localhost:8080"
+          resolve: true
+      lb_policy: "round_robin"
+    
+    grpc_backend:
+      servers:
+        - address: "127.0.0.1:9002"
+          resolve: false
+      lb_policy: "round_robin"
+  
+  # Rules: Matches client-initiated traffic, forwards to external Upstream.
+  rules:
+    http:
+      - match_host: "echo.free.beeceptor.com"
+        action_upstream: "backend"
+    
+    grpc:
+      - match_host: "grpc.backend.com"
+        match_service: "com.example.BackendService"
+        action_upstream: "grpc_backend"
+
+# ====================================================================
+# SECTION 3: TUNNEL MANAGEMENT
+# Contains all rules related to tunnel traffic flow and client configuration.
+# ====================================================================
+tunnel_management:
+  # --- 3.1 SERVER_LISTEN_ROUTING ---
+  # Purpose: Server listens externally, routes traffic INTO the tunnel (External Inbound).
+  server_ingress_routing:
+    rules:
+      http:
+        - match_host: "www.google.com"
+          action_client_group: "group-a"
+        - match_host: "www2.google.com"
+          action_client_group: "group-b"
+      
+      grpc:
+        - match_host: "grpc.google.com"
+          match_service: "com.example.MyService"
+          action_client_group: "group-a"
+  
+  # --- 3.2 CLIENT_ROUTINGS ---
+  # Purpose: Configuration payload distributed to the Client Group for local forwarding.
+  client_configs:
+    client_egress_routings:
+      group-a:
+        config_version: "v1.0.0"
+        upstreams:
+          local_service: # Client's local service (e.g., http://127.0.0.1:8080)
+            servers:
+              - address: "https://www.google.com"
+                resolve: false
+            lb_policy: "round_robin"
+          
+          http_service:
+            servers:
+              - address: "http://127.0.0.1:8080"
+                resolve: false
+            lb_policy: "round_robin"
+        
+        rules: # Client's rules for traffic received from the tunnel (forwards to local service)
+          http:
+            - match_host: "www.google.com"
+              action_upstream: "local_service"
+            - match_host: "localhost"
+              action_upstream: "http_service"
+      
+      group-b:
+        config_version: "v1.0.0"
+        upstreams:
+          local_service:
+            servers:
+              - address: "127.0.0.1:9100"
+                resolve: false
+            lb_policy: "round_robin"
+
