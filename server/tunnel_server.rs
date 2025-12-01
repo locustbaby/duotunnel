@@ -69,7 +69,7 @@ impl TunnelService for TunnelServer {
         request: Request<tonic::Streaming<TunnelMessage>>,
     ) -> Result<Response<Self::ControlStreamStream>, Status> {
         let mut stream = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<TunnelMessage, Status>>(10000);
+        let (tx, rx) = mpsc::channel::<Result<TunnelMessage, Status>>(32);
         let client_registry = self.client_registry.clone();
         let rules_engine = self.rules_engine.clone();
         tokio::spawn(async move {
@@ -100,7 +100,7 @@ impl TunnelService for TunnelServer {
         request: Request<tonic::Streaming<TunnelMessage>>,
     ) -> Result<Response<Self::ProxyStream>, Status> {
         let mut stream = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<TunnelMessage, Status>>(10000);
+        let (tx, rx) = mpsc::channel::<Result<TunnelMessage, Status>>(128);
         let pending_requests = self.pending_requests.clone();
         let rules_engine = self.rules_engine.clone();
         let client_registry = self.client_registry.clone();

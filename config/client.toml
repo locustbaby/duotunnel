@@ -10,27 +10,9 @@ server_port = 50001
 # client group id
 client_group_id = "group-a"
 
-# 可选:认证 token
+# 可选：认证 token
 auth_token = "your-token-here"
 
 # 本地监听端口
 http_entry_port = 8003
 grpc_entry_port = 8004
-
-# ========== Performance Configuration ==========
-[performance]
-# Channel 容量 (默认: 10000, 旧版本: 128)
-channel_capacity = 100000
-
-# 请求超时时间 (秒, 默认: 30)
-request_timeout_secs = 30
-
-# 心跳间隔 (秒, 默认: 15)
-# 建议: 15s 心跳 + 60s 超时 = 4 次心跳容错
-heartbeat_interval_secs = 15
-
-# 配置同步间隔 (秒, 默认: 30)
-config_sync_interval_secs = 30
-
-# 重连间隔 (秒, 默认: 2)
-reconnect_interval_secs = 2

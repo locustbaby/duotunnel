@@ -2,7 +2,7 @@ use tunnel_lib::tunnel::tunnel_service_client::TunnelServiceClient;
 use tunnel_lib::tunnel::*;
 use tonic::Request;
 use tokio_stream::StreamExt;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +22,6 @@ use tunnel_lib::proxy::HttpTunnelContext;
 use crate::rules_engine::ClientRulesEngine;
 use tunnel_lib::tunnel::{TunnelMessage, StreamType, Direction};
 
-#[derive(Clone)]
 pub struct TunnelClient {
     pub client_id: Arc<String>,
     pub group_id: Arc<String>,
@@ -98,44 +97,16 @@ impl TunnelClient {
                 error!("Failed to send StreamOpenRequest: {}", e);
                 return Err(anyhow::anyhow!("Failed to send StreamOpenRequest: {}", e));
             }
-            let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(10000).1));
+            let outbound = tokio_stream::wrappers::ReceiverStream::new(std::mem::replace(rx, mpsc::channel(128).1));
             let response = grpc_client.proxy(Request::new(outbound)).await;
             match response {
                 Ok(resp) => {
                     let mut inbound = resp.into_inner();
                     info!("Tunnel connection established successfully");
-                    
-                    // Create semaphore for concurrent request limiting (max 1000 concurrent)
-                    let semaphore = Arc::new(Semaphore::new(1000));
-                    
                     while let Some(message) = inbound.next().await {
                         match message {
                             Ok(msg) => {
-                                // Acquire permit for concurrent processing
-                                let permit = match semaphore.clone().try_acquire_owned() {
-                                    Ok(p) => p,
-                                    Err(_) => {
-                                        // If semaphore is full, wait for a permit
-                                        match semaphore.clone().acquire_owned().await {
-                                            Ok(p) => p,
-                                            Err(e) => {
-                                                error!("Failed to acquire semaphore permit: {}", e);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                };
-                                
-                                // Clone necessary data for spawned task
-                                let client = self.clone();
-                                let tx = self.tx.clone();
-                                
-                                // Spawn concurrent task to handle message
-                                tokio::spawn(async move {
-                                    client.handle_tunnel_message(msg, &tx).await;
-                                    // Permit is automatically dropped here
-                                    drop(permit);
-                                });
+                                self.handle_tunnel_message(msg, &self.tx).await;
                             }
                             Err(e) => {
                                 use tonic::Code;
