@@ -70,6 +70,25 @@ async fn main() -> Result<()> {
     
     let tls_connector = Arc::new(tokio_rustls::TlsConnector::from(Arc::new(tls_config)));
     
+    // Create Hyper HTTP client (with built-in connection pooling)
+    let http_connector = hyper::client::HttpConnector::new();
+    let http_client = Arc::new(
+        hyper::Client::builder()
+            .build(http_connector)
+    );
+    
+    // Create Hyper HTTPS client (with built-in connection pooling)
+    let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    let https_client = Arc::new(
+        hyper::Client::builder()
+            .build(https_connector)
+    );
+    
     // Initialize state
     let state = Arc::new(ClientState {
         rules: Arc::new(dashmap::DashMap::new()),
@@ -80,6 +99,8 @@ async fn main() -> Result<()> {
         connection_pool: Arc::new(dashmap::DashMap::new()),
         quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
         sessions: Arc::new(dashmap::DashMap::new()),
+        http_client,
+        https_client,
     });
 
     // Create shutdown channel

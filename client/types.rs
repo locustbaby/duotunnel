@@ -6,6 +6,9 @@ use tokio::sync::Mutex;
 use tokio_rustls;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
+use hyper::{Body, Client};
+use hyper::client::HttpConnector;
+use hyper_rustls::HttpsConnector;
 
 /// Pooled connection entry
 pub enum PooledConnection {
@@ -109,5 +112,9 @@ pub struct ClientState {
     pub quic_connection: Arc<tokio::sync::RwLock<Option<Arc<quinn::Connection>>>>,
     /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<Mutex<SessionState>>>>,
+    /// Hyper HTTP client (with connection pooling)
+    pub http_client: Arc<Client<HttpConnector, Body>>,
+    /// Hyper HTTPS client (with connection pooling)
+    pub https_client: Arc<Client<HttpsConnector<HttpConnector>, Body>>,
 }
 

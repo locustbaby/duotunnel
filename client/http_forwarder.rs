@@ -2,13 +2,15 @@ use anyhow::{Result, Context};
 use bytes::BytesMut;
 use hyper::{Body, Client};
 use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnectorBuilder;
+use hyper_rustls::HttpsConnector;
 use httparse::{Request, Status};
 use std::str::FromStr;
 use tracing::debug;
 
-/// Forward HTTP request using Hyper client
+/// Forward HTTP request using Hyper client (with connection pooling)
 pub async fn forward_http_request(
+    http_client: &Client<HttpConnector, Body>,
+    https_client: &Client<HttpsConnector<HttpConnector>, Body>,
     request_bytes: &[u8],
     target_uri: &str,
     is_ssl: bool,
@@ -87,25 +89,12 @@ pub async fn forward_http_request(
     
     debug!("Sending HTTP request: {} {} (SSL: {})", hyper_request.method(), hyper_request.uri(), is_ssl);
     
-    // 4. Send request using Hyper client (HTTP or HTTPS)
+    // 4. Send request using Hyper client (HTTP or HTTPS) - clients have built-in connection pooling
     let response = if is_ssl {
-        // Use HTTPS client with rustls
-        let https_connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build();
-        let client: Client<_, Body> = Client::builder()
-            .build(https_connector);
-        client.request(hyper_request).await
+        https_client.request(hyper_request).await
             .with_context(|| "Failed to send HTTPS request")?
     } else {
-        // Use HTTP client
-        let http_connector = HttpConnector::new();
-        let client: Client<_, Body> = Client::builder()
-            .build(http_connector);
-        client.request(hyper_request).await
+        http_client.request(hyper_request).await
             .with_context(|| "Failed to send HTTP request")?
     };
     

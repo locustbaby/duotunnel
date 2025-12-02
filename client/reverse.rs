@@ -141,8 +141,10 @@ async fn handle_reverse_stream(
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
         request_id, final_target_addr, is_target_ssl);
     
-    // 4. Forward HTTP request using Hyper client
+    // 4. Forward HTTP request using Hyper client (with connection pooling)
     let response_bytes = match forward_http_request(
+        &state.http_client,
+        &state.https_client,
         &request_buffer,
         &final_target_addr,
         is_target_ssl,
