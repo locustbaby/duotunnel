@@ -17,6 +17,7 @@ mod routing;
 mod reverse;
 mod control;
 mod forward;
+mod warmup;
 
 use types::ClientState;
 use control::handle_control_stream;

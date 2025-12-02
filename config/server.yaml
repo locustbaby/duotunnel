@@ -71,8 +71,8 @@ tunnel_management:
         upstreams:
           local_service: # Client's local service (e.g., http://127.0.0.1:8080)
             servers:
-              # - address: "https://echo.free.beeceptor.com"
-              - address: "https://www.google.com"
+              - address: "https://echo.free.beeceptor.com"
+              # - address: "https://www.google.com"
                 resolve: false
             lb_policy: "round_robin"
           

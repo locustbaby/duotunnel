@@ -276,6 +276,16 @@ async fn handle_config_sync_response(
         
         info!("Updated config: {} rules, {} upstreams (version: {}, hash: {})", 
             resp.rules.len(), resp.upstreams.len(), resp.config_version, &resp.config_hash[..8]);
+        
+        // Warmup connection pools for all upstream targets
+        let rules: Vec<_> = state.rules.iter().map(|r| r.value().clone()).collect();
+        let upstreams: Vec<_> = state.upstreams.iter().map(|u| u.value().clone()).collect();
+        let http_client = state.http_client.clone();
+        let https_client = state.https_client.clone();
+        
+        tokio::spawn(async move {
+            crate::warmup::warmup_connection_pools(&http_client, &https_client, &rules, &upstreams).await;
+        });
     } else {
         debug!("Config hash unchanged: {}", if current_hash.is_empty() { "empty" } else { &current_hash[..8] });
     }
@@ -327,6 +337,16 @@ async fn handle_incremental_update(
         update.added_rules.len(), update.updated_rules.len(), update.deleted_rule_ids.len(),
         update.added_upstreams.len(), update.updated_upstreams.len(), update.deleted_upstream_names.len(),
         &update.config_hash[..8]);
+    
+    // Warmup connection pools for updated/added upstream targets
+    let rules: Vec<_> = state.rules.iter().map(|r| r.value().clone()).collect();
+    let upstreams: Vec<_> = state.upstreams.iter().map(|u| u.value().clone()).collect();
+    let http_client = state.http_client.clone();
+    let https_client = state.https_client.clone();
+    
+    tokio::spawn(async move {
+        crate::warmup::warmup_connection_pools(&http_client, &https_client, &rules, &upstreams).await;
+    });
 }
 
 /// Send unregister request for graceful shutdown
