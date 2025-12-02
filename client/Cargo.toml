@@ -8,7 +8,7 @@ name = "client"
 path = "main.rs"
 
 [dependencies]
-tunnel-lib = { path = "../tunnel-lib" }
+tunnel-lib = { path = "../tunnel-lib", features = ["warmup"] }
 tokio = { version = "1", features = ["full"] }
 quinn = "0.10"
 rustls = "0.21"
@@ -30,4 +30,8 @@ hyper = { version = "0.14", features = ["client", "http1", "http2", "runtime"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2"] }
 http-body-util = "0.1"
 hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http1", "http2"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls", "native-tls-vendored"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+prost = "0.13"
+futures-util = "0.3"
  

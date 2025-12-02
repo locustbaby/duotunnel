@@ -4,15 +4,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, error, warn};
 use tunnel_lib::quic_transport::QuicClient;
-use rustls;
-use tokio_rustls;
-use webpki_roots;
 
 mod config;
 mod http_handler;
 mod http_forwarder;
+mod wss_forwarder;
+mod grpc_forwarder;
 mod types;
-mod pool;
 mod routing;
 mod reverse;
 mod control;
@@ -52,25 +50,6 @@ async fn main() -> Result<()> {
     let server_addr_str = config.server_addr();
     info!("Server address: {}", server_addr_str);
 
-    // Create TLS connector (reused for all HTTPS connections)
-    let mut root_certs = rustls::RootCertStore::empty();
-    root_certs.add_trust_anchors(
-        webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        })
-    );
-    
-    let tls_config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_certs)
-        .with_no_client_auth();
-    
-    let tls_connector = Arc::new(tokio_rustls::TlsConnector::from(Arc::new(tls_config)));
-    
     // Create Hyper HTTP client (with built-in connection pooling)
     let http_connector = hyper::client::HttpConnector::new();
     let http_client = Arc::new(
@@ -96,8 +75,6 @@ async fn main() -> Result<()> {
         upstreams: Arc::new(dashmap::DashMap::new()),
         config_version: Arc::new(tokio::sync::RwLock::new("0".to_string())),
         config_hash: Arc::new(tokio::sync::RwLock::new(String::new())),
-        tls_connector,
-        connection_pool: Arc::new(dashmap::DashMap::new()),
         quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
         sessions: Arc::new(dashmap::DashMap::new()),
         http_client,

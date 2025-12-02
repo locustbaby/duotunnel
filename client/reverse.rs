@@ -7,6 +7,8 @@ use bytes::BytesMut;
 use crate::types::ClientState;
 use crate::routing::{match_rule_by_type_and_host, resolve_upstream};
 use crate::http_forwarder::forward_http_request;
+use crate::wss_forwarder::forward_wss_request;
+use crate::grpc_forwarder::forward_grpc_request;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 
@@ -141,17 +143,51 @@ async fn handle_reverse_stream(
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
         request_id, final_target_addr, is_target_ssl);
     
-    // 4. Forward HTTP request using Hyper client (with connection pooling)
-    let response_bytes = match forward_http_request(
-        &state.http_client,
-        &state.https_client,
-        &request_buffer,
-        &final_target_addr,
-        is_target_ssl,
-    ).await {
+    // 4. Forward request based on protocol type
+    let protocol_type_enum = match routing_info.r#type.as_str() {
+        "http" => ProtocolType::Http11,
+        "wss" => ProtocolType::WssFrame,
+        "grpc" => ProtocolType::Grpc,
+        _ => {
+            error!("[{}] Unknown protocol type: {}", request_id, routing_info.r#type);
+            return Err(anyhow::anyhow!("Unknown protocol type: {}", routing_info.r#type));
+        }
+    };
+    
+    let response_bytes = match routing_info.r#type.as_str() {
+        "http" => {
+            forward_http_request(
+                &state.http_client,
+                &state.https_client,
+                &request_buffer,
+                &final_target_addr,
+                is_target_ssl,
+            ).await
+        }
+        "wss" => {
+            forward_wss_request(
+                &state.https_client,
+                &request_buffer,
+                &final_target_addr,
+                is_target_ssl,
+            ).await
+        }
+        "grpc" => {
+            forward_grpc_request(
+                &request_buffer,
+                &final_target_addr,
+                is_target_ssl,
+            ).await
+        }
+        _ => {
+            anyhow::bail!("Unsupported protocol type: {}", routing_info.r#type);
+        }
+    };
+    
+    let response_bytes = match response_bytes {
         Ok(bytes) => bytes,
         Err(e) => {
-            error!("[{}] Failed to forward HTTP request: {}", request_id, e);
+            error!("[{}] Failed to forward {} request: {}", request_id, routing_info.r#type, e);
             
             // Send error response frame to server
             let error_response = format!(
@@ -166,7 +202,7 @@ async fn handle_reverse_stream(
             
             let error_frame = TunnelFrame::new(
                 session_id,
-                ProtocolType::Http11,
+                protocol_type_enum,
                 true, // END_OF_STREAM
                 error_response.into_bytes(),
             );
@@ -197,7 +233,7 @@ async fn handle_reverse_stream(
         
         let response_frame = TunnelFrame::new(
             session_id,
-            ProtocolType::Http11,
+            protocol_type_enum,
             is_last, // END_OF_STREAM flag on last frame
             chunk,
         );
