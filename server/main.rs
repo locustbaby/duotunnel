@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
         ingress_rules,
         client_configs,
         config_version: config.server.config_version.clone(),
+        sessions: Arc::new(dashmap::DashMap::new()),
     });
 
     // 1. Start QUIC Server (always required)

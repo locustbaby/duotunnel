@@ -1,7 +1,6 @@
 use anyhow::Result;
 use prost::Message;
 use quinn::{RecvStream, SendStream};
-use tokio::io::AsyncWriteExt;
 
 /// Helper functions for reading/writing Protobuf messages over QUIC streams
 
@@ -56,19 +55,53 @@ pub async fn read_control_message(
     read_protobuf_message(recv).await
 }
 
-/// Write DataStreamHeader to a data stream
-pub async fn write_data_stream_header(
-    send: &mut SendStream,
-    header: &crate::proto::tunnel::DataStreamHeader,
-) -> Result<()> {
-    write_protobuf_message(send, header).await
+// DataStreamHeader functions removed - replaced by frame protocol
+// First frame now contains routing information in payload
+
+/// Routing information for the first frame
+#[derive(Debug, Clone)]
+pub struct RoutingInfo {
+    pub r#type: String,  // "http", "grpc", "wss"
+    pub host: String,
 }
 
-/// Read DataStreamHeader from a data stream
-pub async fn read_data_stream_header(
-    recv: &mut RecvStream,
-) -> Result<crate::proto::tunnel::DataStreamHeader> {
-    read_protobuf_message(recv).await
+impl RoutingInfo {
+    /// Encode routing info to bytes (format: "type\0host\0")
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(self.r#type.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(self.host.as_bytes());
+        buf.push(0);
+        buf
+    }
+
+    /// Decode routing info from bytes
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        let parts: Vec<&[u8]> = data.split(|&b| b == 0).collect();
+        if parts.len() < 2 {
+            return Err(anyhow::anyhow!("Invalid routing info format"));
+        }
+        let r#type = String::from_utf8(parts[0].to_vec())?;
+        let host = String::from_utf8(parts[1].to_vec())?;
+        Ok(Self { r#type, host })
+    }
+}
+
+/// Create the first frame with routing information
+pub fn create_routing_frame(session_id: u64, routing_info: &RoutingInfo) -> TunnelFrame {
+    let protocol_type = match routing_info.r#type.as_str() {
+        "http" => ProtocolType::Http11,
+        "grpc" => ProtocolType::Grpc,
+        "wss" => ProtocolType::WssFrame,
+        _ => ProtocolType::Http11, // Default
+    };
+    TunnelFrame::new(
+        session_id,
+        protocol_type,
+        false, // Not end of stream
+        routing_info.encode(),
+    )
 }
 
 /// Write Heartbeat to a control stream
@@ -146,9 +179,13 @@ pub async fn read_incremental_update(
     read_protobuf_message(recv).await
 }
 
+// Re-export frame types
+pub use crate::frame::{TunnelFrame, ProtocolType};
+pub use crate::frame::{read_frame, write_frame};
+
 // Re-export protobuf types for convenience (used by client and server)
 pub use crate::proto::tunnel::{
-    ControlMessage, ConfigSyncRequest, ConfigSyncResponse, DataStreamHeader, ErrorMessage,
+    ControlMessage, ConfigSyncRequest, ConfigSyncResponse, ErrorMessage,
     Rule, Upstream, UpstreamServer, Heartbeat, ConfigPushNotification,
     ConfigHashRequest, ConfigHashResponse, IncrementalConfigUpdate,
 };

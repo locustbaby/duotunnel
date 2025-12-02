@@ -1,4 +1,4 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -6,9 +6,11 @@ use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tracing::{info, error, debug, warn};
 use quinn::Connection;
 use uuid::Uuid;
+use bytes::BytesMut;
 use crate::types::ClientState;
-use crate::http_handler;
-use tunnel_lib::protocol::write_data_stream_header;
+use crate::http_handler::read_complete_http_request;
+use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
+use tunnel_lib::frame::TunnelFrame as Frame;
 
 /// Run forward tunnel (Legacy - Listen Local -> Forward to Server)
 pub async fn run_forward_tunnel(
@@ -36,62 +38,124 @@ pub async fn run_forward_tunnel(
 
 async fn handle_forward_connection(
     mut socket: TcpStream,
-    peer_addr: SocketAddr,
+    _peer_addr: SocketAddr,
     connection: Arc<Connection>,
-    state: Arc<ClientState>,
+    _state: Arc<ClientState>,
 ) -> Result<()> {
-    // 1. Parse HTTP headers and modify if needed
-    let rules: Vec<_> = state.rules.iter().map(|r| r.value().clone()).collect();
-    let upstreams: Vec<_> = state.upstreams.iter().map(|u| u.value().clone()).collect();
+    let request_id = Uuid::new_v4().to_string();
+    let stream_start = std::time::Instant::now();
     
-    let (modified_request_bytes, original_host, modified_host, final_target_addr, is_target_ssl) =
-        http_handler::parse_and_modify_http_request(
-            &mut socket,
-            &rules,
-            &upstreams,
-            peer_addr.ip().to_string(),
-        )
-        .await
-        .context("Failed to parse HTTP request")?;
+    // 1. Read complete HTTP request from local client
+    let complete_request = read_complete_http_request(&mut socket).await?;
+    info!("[{}] Read complete HTTP request ({} bytes)", request_id, complete_request.len());
     
-    debug!("Final target: {}, SSL: {}", final_target_addr, is_target_ssl);
+    // 2. Parse HTTP headers to extract Host
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
     
-    // 2. Open a new QUIC bidirectional stream
+    let parse_result = req.parse(&complete_request)?;
+    match parse_result {
+        httparse::Status::Complete(_) => {
+            debug!("[{}] Parsed HTTP request: {} {}", 
+                request_id, req.method.unwrap_or(""), req.path.unwrap_or(""));
+        }
+        httparse::Status::Partial => {
+            anyhow::bail!("Incomplete HTTP headers");
+        }
+    }
+    
+    // Extract Host header
+    let host = req.headers.iter()
+        .find(|h| h.name.eq_ignore_ascii_case("host"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "localhost".to_string());
+    
+    debug!("[{}] Request Host: {}", request_id, host);
+    
+    // 3. Open QUIC bidirectional stream to server
     let (mut send, mut recv) = connection.open_bi().await?;
     
-    // 3. Create and send DataStreamHeader
-    let request_id = Uuid::new_v4().to_string();
-    let header = http_handler::create_data_stream_header(
-        request_id.clone(),
-        modified_host.unwrap_or_else(|| original_host.unwrap_or_default()),
-    );
+    // 4. Create Session ID and routing frame
+    let session_id = Frame::session_id_from_uuid(&request_id);
     
-    write_data_stream_header(&mut send, &header).await?;
-    debug!("Sent DataStreamHeader for request_id: {}", request_id);
-    
-    // 4. Send modified HTTP request bytes
-    send.write_all(&modified_request_bytes).await?;
-    
-    // 5. Bidirectional copy: remaining data from socket <-> QUIC stream
-    let (mut ri, mut wi) = socket.split();
-    
-    let client_to_server = async {
-        tokio::io::copy(&mut ri, &mut send).await?;
-        send.finish().await?;
-        Ok::<_, anyhow::Error>(())
+    let routing_info = RoutingInfo {
+        r#type: "http".to_string(),
+        host: host.clone(),
     };
     
-    let server_to_client = async {
-        tokio::io::copy(&mut recv, &mut wi).await?;
-        Ok::<_, anyhow::Error>(())
-    };
+    // Send routing frame (first frame)
+    let routing_frame = create_routing_frame(session_id, &routing_info);
+    write_frame(&mut send, &routing_frame).await?;
+    info!("[{}] Sent routing frame to server: session_id={}, host={}", 
+        request_id, session_id, host);
     
-    tokio::try_join!(client_to_server, server_to_client)?;
+    // 5. Split request into frames and send to server
+    const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
+    let request_bytes = complete_request.to_vec();
+    let mut offset = 0;
+    
+    while offset < request_bytes.len() {
+        let chunk_size = std::cmp::min(MAX_FRAME_SIZE, request_bytes.len() - offset);
+        let chunk = request_bytes[offset..offset + chunk_size].to_vec();
+        let is_last = offset + chunk_size >= request_bytes.len();
+        
+        let data_frame = TunnelFrame::new(
+            session_id,
+            ProtocolType::Http11,
+            is_last, // END_OF_STREAM flag on last frame
+            chunk,
+        );
+        
+        write_frame(&mut send, &data_frame).await?;
+        offset += chunk_size;
+    }
+    
+    info!("[{}] Sent {} request frames (total {} bytes) to server", 
+        request_id, (request_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, request_bytes.len());
+    
+    // 6. Receive response frames and reassemble (with timeout)
+    let mut response_buffer = BytesMut::new();
+    let mut session_complete = false;
+    const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60); // 60s timeout
+    
+    while !session_complete {
+        match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(RESPONSE_TIMEOUT)).await {
+            Ok(frame) => {
+                if frame.session_id != session_id {
+                    warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
+                        request_id, frame.session_id, session_id);
+                    continue;
+                }
+                
+                response_buffer.extend_from_slice(&frame.payload);
+                session_complete = frame.end_of_stream;
+                
+                if session_complete {
+                    info!("[{}] Received complete response ({} bytes)", request_id, response_buffer.len());
+                }
+            }
+            Err(e) => {
+                if e.to_string().contains("timeout") {
+                    error!("[{}] Response timeout after {:?}", request_id, RESPONSE_TIMEOUT);
+                } else {
+                    error!("[{}] Error reading frame: {}", request_id, e);
+                }
+                return Err(e);
+            }
+        }
+    }
+    
+    // 7. Send response to local client
+    socket.write_all(&response_buffer).await?;
+    socket.flush().await?;
+    info!("[{}] Sent response to local client ({} bytes) in {:?}", 
+        request_id, response_buffer.len(), stream_start.elapsed());
     
     Ok(())
 }
 
-/// Start HTTP listener (uses existing HTTP handler)
+/// Start HTTP listener (uses frame protocol)
 pub async fn start_http_listener(
     port: u16,
     state: Arc<ClientState>,
@@ -142,4 +206,3 @@ pub async fn start_wss_listener(
     warn!("WSS listener not yet implemented");
     Ok(())
 }
-

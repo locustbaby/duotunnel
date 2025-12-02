@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, error, debug, warn};
@@ -10,8 +9,8 @@ use bytes::BytesMut;
 use httparse::Request;
 use crate::types::ServerState;
 use crate::client_mgr::select_client_from_group;
-use tunnel_lib::protocol::write_data_stream_header;
-use tunnel_lib::proto::tunnel::DataStreamHeader;
+use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
+use tunnel_lib::frame::TunnelFrame as Frame;
 
 /// Start HTTP listener
 pub async fn start_http_listener(port: u16, state: Arc<ServerState>) -> Result<()> {
@@ -37,55 +36,22 @@ pub async fn start_http_listener(port: u16, state: Arc<ServerState>) -> Result<(
     }
 }
 
-/// Handle HTTP request from external client
+/// Handle HTTP request from external client using frame protocol
 async fn handle_http_request(
     mut stream: TcpStream,
-    peer_addr: SocketAddr,
+    _peer_addr: SocketAddr,
     state: Arc<ServerState>,
 ) -> Result<()> {
-    // 1. Read HTTP request headers
-    let mut buffer = BytesMut::new();
-    let mut header_end = false;
+    // 1. Read complete HTTP request (headers + body)
+    let request_start = std::time::Instant::now();
+    let complete_request = read_complete_http_request(&mut stream).await?;
+    info!("Read complete HTTP request ({} bytes) in {:?}", complete_request.len(), request_start.elapsed());
     
-    while !header_end {
-        let mut buf = vec![0u8; 4096];
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            anyhow::bail!("Connection closed before headers");
-        }
-        
-        buffer.extend_from_slice(&buf[..n]);
-        
-        // Check for end of headers
-        if buffer.len() >= 4 {
-            for i in 0..=buffer.len().saturating_sub(4) {
-                if &buffer[i..i+4] == b"\r\n\r\n" {
-                    header_end = true;
-                    break;
-                }
-            }
-        }
-        
-        // Safety limit
-        if buffer.len() > 8192 {
-            anyhow::bail!("HTTP headers too large");
-        }
-    }
-    
-    // Find the end of headers
-    let header_end_pos = buffer.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(buffer.len());
-    
-    let header_bytes = buffer.split_to(header_end_pos);
-    let remaining_body = buffer;
-    
-    // Parse HTTP headers
+    // 2. Parse HTTP headers to extract Host
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = Request::new(&mut headers);
     
-    let parse_result = req.parse(&header_bytes)?;
+    let parse_result = req.parse(&complete_request)?;
     match parse_result {
         httparse::Status::Complete(_) => {
             debug!("Parsed HTTP request: {} {}", req.method.unwrap_or(""), req.path.unwrap_or(""));
@@ -104,7 +70,7 @@ async fn handle_http_request(
     let host = host.ok_or_else(|| anyhow::anyhow!("Missing Host header"))?;
     debug!("HTTP request Host: {}", host);
     
-    // 2. Match ingress routing rule
+    // 3. Match ingress routing rule
     let matched_rule = state.ingress_rules.iter()
         .find(|r| r.match_host.eq_ignore_ascii_case(&host));
     
@@ -119,11 +85,11 @@ async fn handle_http_request(
         }
     };
     
-    // 3. Select a client from the group
+    // 4. Select a client from the group
     info!("Selecting client from group '{}' for host '{}'", client_group, host);
     let client_id = select_client_from_group(&state, &client_group)?;
     
-    // 4. Get Connection from registry
+    // 5. Get Connection from registry
     let client_conn = state.clients.get(&client_id)
         .ok_or_else(|| {
             error!("Client '{}' not found in clients registry", client_id);
@@ -133,8 +99,7 @@ async fn handle_http_request(
     
     info!("Selected client '{}' from group '{}', opening QUIC stream...", client_id, client_group);
     
-    // 5. Open QUIC bidirectional stream
-    // 5. Open QUIC bidirectional stream
+    // 6. Open QUIC bidirectional stream
     let (mut send, mut recv) = match client_conn.open_bi().await {
         Ok(streams) => {
             info!("Successfully opened QUIC bidirectional stream to client '{}'", client_id);
@@ -164,58 +129,232 @@ async fn handle_http_request(
         }
     };
     
-    // 6. Create and send DataStreamHeader
+    // 7. Create Session ID and routing frame
     let request_id = Uuid::new_v4().to_string();
-    let header = DataStreamHeader {
-        request_id: request_id.clone(),
+    let session_id = Frame::session_id_from_uuid(&request_id);
+    
+    let routing_info = RoutingInfo {
         r#type: "http".to_string(),
         host: host.clone(),
-        metadata: HashMap::new(),
     };
     
-    let header_send_start = std::time::Instant::now();
-    write_data_stream_header(&mut send, &header).await?;
-    info!("[{}] Sent DataStreamHeader to client {}: request_id={}, host={}", 
-        request_id, client_id, request_id, host);
+    // Send routing frame (first frame)
+    let routing_frame = create_routing_frame(session_id, &routing_info);
+    write_frame(&mut send, &routing_frame).await?;
+    info!("[{}] Sent routing frame to client {}: session_id={}, host={}", 
+        request_id, client_id, session_id, host);
     
-    // 7. Send HTTP request headers and body
-    info!("[{}] Sending HTTP headers ({} bytes) and body ({} bytes) to client...", 
-        request_id, header_bytes.len(), remaining_body.len());
-    send.write_all(&header_bytes).await?;
-    if !remaining_body.is_empty() {
-        send.write_all(&remaining_body).await?;
+    // 8. Split request into frames (max 64KB per frame to avoid QUIC limits)
+    const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
+    let request_bytes = complete_request.to_vec();
+    let mut offset = 0;
+    
+    while offset < request_bytes.len() {
+        let chunk_size = std::cmp::min(MAX_FRAME_SIZE, request_bytes.len() - offset);
+        let chunk = request_bytes[offset..offset + chunk_size].to_vec();
+        let is_last = offset + chunk_size >= request_bytes.len();
+        
+        let data_frame = TunnelFrame::new(
+            session_id,
+            ProtocolType::Http11,
+            is_last, // END_OF_STREAM flag on last frame
+            chunk,
+        );
+        
+        write_frame(&mut send, &data_frame).await?;
+        offset += chunk_size;
     }
-    // Flush to ensure data is sent immediately
-    send.flush().await?;
-    info!("[{}] Sent HTTP headers and body to client in {:?}, starting bidirectional copy...", 
-        request_id, header_send_start.elapsed());
     
-    // 8. Bidirectional copy: External client <-> QUIC stream
-    let copy_start = std::time::Instant::now();
-    info!("[{}] Starting bidirectional copy: External client <-> QUIC stream", request_id);
-    let (mut ri, mut wi) = stream.split();
+    info!("[{}] Sent {} frames (total {} bytes) to client", 
+        request_id, (request_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, request_bytes.len());
     
-    let request_id_clone = request_id.clone();
-    let client_to_quic = async move {
-        let bytes_copied = tokio::io::copy(&mut ri, &mut send).await?;
-        info!("[{}] External client -> QUIC: copied {} bytes in {:?}", 
-            request_id_clone, bytes_copied, copy_start.elapsed());
-        send.finish().await?;
-        info!("[{}] QUIC stream send side finished", request_id_clone);
-        Ok::<_, anyhow::Error>(())
-    };
+    // 9. Receive response frames and reassemble (with timeout)
+    let mut response_buffer = BytesMut::new();
+    let mut session_complete = false;
+    const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60); // 60s timeout
     
-    let request_id_clone2 = request_id.clone();
-    let quic_to_client = async move {
-        let bytes_copied = tokio::io::copy(&mut recv, &mut wi).await?;
-        info!("[{}] QUIC -> External client: copied {} bytes in {:?}", 
-            request_id_clone2, bytes_copied, copy_start.elapsed());
-        Ok::<_, anyhow::Error>(())
-    };
+    while !session_complete {
+        match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(RESPONSE_TIMEOUT)).await {
+            Ok(frame) => {
+                if frame.session_id != session_id {
+                    warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
+                        request_id, frame.session_id, session_id);
+                    continue;
+                }
+                
+                response_buffer.extend_from_slice(&frame.payload);
+                session_complete = frame.end_of_stream;
+                
+                if session_complete {
+                    info!("[{}] Received complete response ({} bytes)", request_id, response_buffer.len());
+                }
+            }
+            Err(e) => {
+                if e.to_string().contains("timeout") {
+                    error!("[{}] Response timeout after {:?}", request_id, RESPONSE_TIMEOUT);
+                } else {
+                    error!("[{}] Error reading frame: {}", request_id, e);
+                }
+                return Err(e);
+            }
+        }
+    }
     
-    tokio::try_join!(client_to_quic, quic_to_client)?;
-    info!("[{}] Bidirectional copy completed in {:?}", request_id, copy_start.elapsed());
+    // 10. Send response to external client
+    stream.write_all(&response_buffer).await?;
+    stream.flush().await?;
+    info!("[{}] Sent response to external client ({} bytes) in {:?}", 
+        request_id, response_buffer.len(), request_start.elapsed());
     
     Ok(())
 }
 
+/// Read complete HTTP request (headers + body) from a stream
+async fn read_complete_http_request(
+    socket: &mut TcpStream,
+) -> Result<BytesMut> {
+    let mut buffer = BytesMut::new();
+    
+    // Step 1: Read headers
+    let mut header_end = false;
+    while !header_end {
+        let mut buf = vec![0u8; 4096];
+        let n = socket.read(&mut buf).await?;
+        if n == 0 {
+            anyhow::bail!("Connection closed before headers");
+        }
+        
+        buffer.extend_from_slice(&buf[..n]);
+        
+        // Check for end of headers
+        if buffer.len() >= 4 {
+            for i in 0..=buffer.len().saturating_sub(4) {
+                if &buffer[i..i+4] == b"\r\n\r\n" {
+                    header_end = true;
+                    break;
+                }
+            }
+        }
+        
+        // Safety limit
+        if buffer.len() > 8192 {
+            anyhow::bail!("HTTP headers too large");
+        }
+    }
+    
+    // Find header end position
+    let header_end_pos = buffer.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(buffer.len());
+    
+    let header_bytes = &buffer[..header_end_pos];
+    
+    // Step 2: Parse headers to determine body length
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = Request::new(&mut headers);
+    
+    let parse_result = req.parse(header_bytes)?;
+    match parse_result {
+        httparse::Status::Complete(_) => {}
+        httparse::Status::Partial => {
+            anyhow::bail!("Incomplete HTTP headers");
+        }
+    }
+    
+    // Step 3: Determine body length
+    let body_length = determine_body_length(&req.headers)?;
+    
+    // Step 4: Read body if needed
+    if let Some(len) = body_length {
+        // Content-Length specified
+        let remaining_in_buffer = buffer.len() - header_end_pos;
+        if remaining_in_buffer < len {
+            let needed = len - remaining_in_buffer;
+            let mut body_buf = vec![0u8; needed];
+            socket.read_exact(&mut body_buf).await?;
+            buffer.extend_from_slice(&body_buf);
+        }
+    } else {
+        // Transfer-Encoding: chunked
+        read_chunked_body(socket, &mut buffer).await?;
+    }
+    
+    Ok(buffer)
+}
+
+/// Determine body length from HTTP headers
+fn determine_body_length(headers: &[httparse::Header]) -> Result<Option<usize>> {
+    // Check for Transfer-Encoding: chunked
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            let value = std::str::from_utf8(header.value)?;
+            if value.eq_ignore_ascii_case("chunked") {
+                return Ok(None); // Chunked encoding
+            }
+        }
+    }
+    
+    // Check for Content-Length
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let value = std::str::from_utf8(header.value)?;
+            let len = value.parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {} ({})", value, e))?;
+            return Ok(Some(len));
+        }
+    }
+    
+    // No body (GET requests typically)
+    Ok(Some(0))
+}
+
+/// Read chunked body
+async fn read_chunked_body(socket: &mut TcpStream, buffer: &mut BytesMut) -> Result<()> {
+    // Read chunked data
+    // Format: <chunk-size>\r\n<chunk-data>\r\n...
+    // Last chunk: 0\r\n\r\n
+    
+    loop {
+        // Read chunk size line
+        let mut chunk_size_line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            socket.read_exact(&mut byte).await?;
+            chunk_size_line.push(byte[0]);
+            
+            if chunk_size_line.len() >= 2 && chunk_size_line[chunk_size_line.len()-2..] == [b'\r', b'\n'] {
+                break;
+            }
+        }
+        
+        // Parse chunk size (hex)
+        let size_str = std::str::from_utf8(&chunk_size_line[..chunk_size_line.len()-2])?;
+        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
+            .map_err(|e| anyhow::anyhow!("Invalid chunk size: {} ({})", size_str, e))?;
+        
+        if chunk_size == 0 {
+            // Last chunk, read trailing \r\n
+            let mut trailer = [0u8; 2];
+            socket.read_exact(&mut trailer).await?;
+            if trailer != [b'\r', b'\n'] {
+                warn!("Invalid chunked encoding trailer");
+            }
+            break;
+        }
+        
+        // Read chunk data
+        let mut chunk_data = vec![0u8; chunk_size];
+        socket.read_exact(&mut chunk_data).await?;
+        buffer.extend_from_slice(&chunk_data);
+        
+        // Read trailing \r\n
+        let mut trailer = [0u8; 2];
+        socket.read_exact(&mut trailer).await?;
+        if trailer != [b'\r', b'\n'] {
+            warn!("Invalid chunked encoding trailer after chunk data");
+        }
+    }
+    
+    Ok(())
+}

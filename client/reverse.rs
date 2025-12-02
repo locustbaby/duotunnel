@@ -1,13 +1,16 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::sync::Arc;
-use tokio::io;
-use tracing::{info, error, debug, warn};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{info, error, warn};
 use quinn::{Connection, SendStream, RecvStream};
+use uuid::Uuid;
+use bytes::BytesMut;
 use crate::types::ClientState;
 use crate::pool::{get_or_create_connection, return_connection_to_pool};
 use crate::routing::{match_rule_by_type_and_host, resolve_upstream, parse_target_addr};
 use crate::types::PooledConnection;
-use tunnel_lib::protocol::{read_data_stream_header, write_data_stream_header};
+use crate::http_handler::read_complete_http_response;
+use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 
 /// Handle reverse streams initiated by Server (Server -> Client -> Upstream)
@@ -59,233 +62,317 @@ pub async fn handle_reverse_streams(
     Ok(())
 }
 
-/// Handle a single reverse stream from Server
+/// Handle a single reverse stream from Server using frame protocol
 async fn handle_reverse_stream(
     mut send: SendStream,
     mut recv: RecvStream,
     state: Arc<ClientState>,
 ) -> Result<()> {
-    // 1. Read DataStreamHeader
-    info!("Reading DataStreamHeader from reverse stream...");
-    let header_start = std::time::Instant::now();
-    let header = read_data_stream_header(&mut recv).await?;
+    let request_id = Uuid::new_v4().to_string();
+    let stream_start = std::time::Instant::now();
+    
+    // 1. Read first frame (routing frame)
+    info!("[{}] Reading routing frame from reverse stream...", request_id);
+    let routing_frame = read_frame(&mut recv).await?;
+    
+    // Parse routing information from first frame payload
+    let routing_info = RoutingInfo::decode(&routing_frame.payload)?;
     info!(
-        "[{}] Received reverse DataStreamHeader: type={}, host={} (read in {:?})",
-        header.request_id, header.r#type, header.host, header_start.elapsed()
+        "[{}] Received routing frame: type={}, host={}, session_id={}",
+        request_id, routing_info.r#type, routing_info.host, routing_frame.session_id
     );
     
-    // 2. Match rules based on type and host
+    let session_id = routing_frame.session_id;
+    
+    // 2. Read all request frames and reassemble (with timeout)
+    let mut request_buffer = BytesMut::new();
+    let mut session_complete = false;
+    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30); // 30s timeout
+    
+    while !session_complete {
+        match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(REQUEST_TIMEOUT)).await {
+            Ok(frame) => {
+                if frame.session_id != session_id {
+                    warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
+                        request_id, frame.session_id, session_id);
+                    continue;
+                }
+                
+                request_buffer.extend_from_slice(&frame.payload);
+                session_complete = frame.end_of_stream;
+                
+                if session_complete {
+                    info!("[{}] Received complete request ({} bytes)", request_id, request_buffer.len());
+                }
+            }
+            Err(e) => {
+                if e.to_string().contains("timeout") {
+                    error!("[{}] Request timeout after {:?}", request_id, REQUEST_TIMEOUT);
+                } else {
+                    error!("[{}] Error reading frame: {}", request_id, e);
+                }
+                return Err(e);
+            }
+        }
+    }
+    
+    // 3. Match rules based on type and host
     let rules: Vec<Rule> = state.rules.iter().map(|r| r.value().clone()).collect();
     let upstreams: Vec<Upstream> = state.upstreams.iter().map(|u| u.value().clone()).collect();
     
     info!("[{}] Matching rules for type={}, host={} (total rules: {}, total upstreams: {})", 
-        header.request_id, header.r#type, header.host, rules.len(), upstreams.len());
-    info!("[{}] Available rules: {:?}", 
-        header.request_id, 
-        rules.iter().map(|r| format!("{}:{}->{}", r.r#type, r.match_host, r.action_proxy_pass)).collect::<Vec<_>>());
-    info!("[{}] Available upstreams: {:?}", 
-        header.request_id,
-        upstreams.iter().map(|u| {
-            let addresses: Vec<String> = u.servers.iter().map(|s| s.address.clone()).collect();
-            format!("{}:[{}]", u.name, addresses.join(","))
-        }).collect::<Vec<_>>());
+        request_id, routing_info.r#type, routing_info.host, rules.len(), upstreams.len());
     
-    let matched_rule = match_rule_by_type_and_host(&rules, &header.r#type, &header.host)?;
+    let matched_rule = match_rule_by_type_and_host(&rules, &routing_info.r#type, &routing_info.host)?;
     
     let (final_target_addr, is_target_ssl) = if let Some(rule) = matched_rule {
         info!("[{}] Matched rule: {} -> {} (action_proxy_pass)", 
-            header.request_id, header.host, rule.action_proxy_pass);
+            request_id, routing_info.host, rule.action_proxy_pass);
         
         // Resolve upstream or use direct address
         let resolved = resolve_upstream(&rule.action_proxy_pass, &upstreams)?;
         info!("[{}] Resolved upstream '{}' to address: {} (SSL: {})", 
-            header.request_id, rule.action_proxy_pass, resolved.0, resolved.1);
+            request_id, rule.action_proxy_pass, resolved.0, resolved.1);
         resolved
     } else {
-        error!("[{}] No matching rule for type={}, host={} (available rules: {:?})", 
-            header.request_id, header.r#type, header.host, 
-            rules.iter().map(|r| format!("{}:{}", r.r#type, r.match_host)).collect::<Vec<_>>());
-        return Err(anyhow::anyhow!("No matching rule for type={}, host={}", header.r#type, header.host));
+        error!("[{}] No matching rule for type={}, host={}", 
+            request_id, routing_info.r#type, routing_info.host);
+        return Err(anyhow::anyhow!("No matching rule for type={}, host={}", 
+            routing_info.r#type, routing_info.host));
     };
     
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
-        header.request_id, final_target_addr, is_target_ssl);
+        request_id, final_target_addr, is_target_ssl);
     
-    // 3. Connect to upstream (preserve protocol, don't parse HTTP)
-    // Parse address to extract hostname and port
+    // 4. Connect to upstream
     let (hostname, port) = parse_target_addr(&final_target_addr, is_target_ssl)?;
     
-    // 4. Get or create connection from pool
+    // 5. Get or create connection from pool
     let pool_key = format!("{}:{}:{}", hostname, port, is_target_ssl);
-    let upstream_stream = match get_or_create_connection(
+    let mut upstream_stream = match get_or_create_connection(
         &state,
         &pool_key,
         &hostname,
         port,
         is_target_ssl,
-        &header.request_id,
-        &header.r#type,
+        &request_id,
+        &routing_info.r#type,
     ).await {
         Ok(stream) => stream,
         Err(e) => {
             error!("[{}] Failed to connect to upstream {}: {}", 
-                header.request_id, final_target_addr, e);
-            // Try to send error response back to server before closing
-            if let Err(send_err) = send.finish().await {
-                warn!("[{}] Failed to finish QUIC send stream after upstream error: {}", 
-                    header.request_id, send_err);
-            }
+                request_id, final_target_addr, e);
             return Err(e);
         }
     };
     
-    // 5. Bidirectional copy: QUIC stream <-> Upstream stream
-    // Note: Due to tokio::io::split consuming the stream, connections cannot be reused after use
-    // The connection pool infrastructure is in place, but true reuse requires HTTP parsing
-    // For now, connections are consumed after use
-    match copy_bidirectional_and_return(recv, send, upstream_stream, &header.request_id, &state, &pool_key).await {
-        Ok(_conn) => {
-            // This branch is currently unreachable due to split consuming the connection
-            // Future: If we implement HTTP parsing, we can detect request/response boundaries
-            // and reuse connections without splitting
-            unreachable!("Connection reuse not yet implemented")
+    // 6. Send complete HTTP request to upstream
+    match &mut upstream_stream {
+        PooledConnection::Tcp(ref mut tcp_stream) => {
+            tcp_stream.write_all(&request_buffer).await?;
+            tcp_stream.flush().await?;
         }
-        Err(e) => {
-            // Connection consumed or error occurred
-            // Note: Even successful copies consume the connection due to split
-            if e.to_string().contains("consumed after split") {
-                debug!("[{}] Connection consumed after use (expected)", header.request_id);
-            } else {
-                warn!("[{}] Bidirectional copy error: {}", header.request_id, e);
-                // Don't return error for copy failures - connection might have been interrupted
-                // This is normal when server or client closes connection
+        PooledConnection::Tls(ref mut tls_stream) => {
+            tls_stream.write_all(&request_buffer).await?;
+            tls_stream.flush().await?;
+        }
+    }
+    
+    info!("[{}] Sent request to upstream ({} bytes)", request_id, request_buffer.len());
+    
+    // 7. Read complete HTTP response from upstream
+    let response_buffer = match &mut upstream_stream {
+        PooledConnection::Tcp(ref mut tcp_stream) => {
+            read_complete_http_response(tcp_stream).await?
+        }
+        PooledConnection::Tls(ref mut tls_stream) => {
+            // For TLS, we need to read manually since we can't use the helper directly
+            // For now, use a simple approach: read until connection closes or Content-Length
+            read_complete_http_response_tls(tls_stream).await?
+        }
+    };
+    
+    info!("[{}] Received response from upstream ({} bytes)", request_id, response_buffer.len());
+    
+    // 8. Split response into frames and send back to server
+    const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
+    let response_bytes = response_buffer.to_vec();
+    let mut offset = 0;
+    
+    while offset < response_bytes.len() {
+        let chunk_size = std::cmp::min(MAX_FRAME_SIZE, response_bytes.len() - offset);
+        let chunk = response_bytes[offset..offset + chunk_size].to_vec();
+        let is_last = offset + chunk_size >= response_bytes.len();
+        
+        let response_frame = TunnelFrame::new(
+            session_id,
+            ProtocolType::Http11,
+            is_last, // END_OF_STREAM flag on last frame
+            chunk,
+        );
+        
+        write_frame(&mut send, &response_frame).await?;
+        offset += chunk_size;
+    }
+    
+    info!("[{}] Sent {} response frames (total {} bytes) to server in {:?}", 
+        request_id, (response_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, 
+        response_bytes.len(), stream_start.elapsed());
+    
+    // 9. Try to return connection to pool (if possible)
+    // Note: Currently connections are consumed, but we can try to return them
+    // In the future, with proper HTTP parsing, we can reuse connections
+    return_connection_to_pool(&state, &pool_key, upstream_stream).await;
+    
+    Ok(())
+}
+
+/// Read complete HTTP response from TLS stream
+async fn read_complete_http_response_tls(
+    tls_stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+) -> Result<BytesMut> {
+    let mut buffer = BytesMut::new();
+    
+    // Step 1: Read headers
+    let mut header_end = false;
+    while !header_end {
+        let mut buf = vec![0u8; 4096];
+        let n = tls_stream.read(&mut buf).await?;
+        if n == 0 {
+            anyhow::bail!("Connection closed before headers");
+        }
+        
+        buffer.extend_from_slice(&buf[..n]);
+        
+        // Check for end of headers
+        if buffer.len() >= 4 {
+            for i in 0..=buffer.len().saturating_sub(4) {
+                if &buffer[i..i+4] == b"\r\n\r\n" {
+                    header_end = true;
+                    break;
+                }
             }
+        }
+        
+        // Safety limit
+        if buffer.len() > 8192 {
+            anyhow::bail!("HTTP headers too large");
+        }
+    }
+    
+    // Find header end position
+    let header_end_pos = buffer.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(buffer.len());
+    
+    let header_bytes = &buffer[..header_end_pos];
+    
+    // Step 2: Parse headers to determine body length
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut resp = httparse::Response::new(&mut headers);
+    
+    let parse_result = resp.parse(header_bytes)?;
+    match parse_result {
+        httparse::Status::Complete(_) => {}
+        httparse::Status::Partial => {
+            anyhow::bail!("Incomplete HTTP headers");
+        }
+    }
+    
+    // Step 3: Determine body length
+    let body_length = determine_response_body_length(&resp.headers)?;
+    
+    // Step 4: Read body if needed
+    if let Some(len) = body_length {
+        // Content-Length specified
+        let remaining_in_buffer = buffer.len() - header_end_pos;
+        if remaining_in_buffer < len {
+            let needed = len - remaining_in_buffer;
+            let mut body_buf = vec![0u8; needed];
+            tls_stream.read_exact(&mut body_buf).await?;
+            buffer.extend_from_slice(&body_buf);
+        }
+    } else {
+        // Transfer-Encoding: chunked or connection close
+        read_chunked_body_tls(tls_stream, &mut buffer).await?;
+    }
+    
+    Ok(buffer)
+}
+
+/// Determine response body length from HTTP headers
+fn determine_response_body_length(headers: &[httparse::Header]) -> Result<Option<usize>> {
+    // Check for Transfer-Encoding: chunked
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            let value = std::str::from_utf8(header.value)?;
+            if value.eq_ignore_ascii_case("chunked") {
+                return Ok(None); // Chunked encoding
+            }
+        }
+    }
+    
+    // Check for Content-Length
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let value = std::str::from_utf8(header.value)?;
+            let len = value.parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {} ({})", value, e))?;
+            return Ok(Some(len));
+        }
+    }
+    
+    // For responses, if no Content-Length and no Transfer-Encoding,
+    // body ends when connection closes (for HTTP/1.1)
+    Ok(None)
+}
+
+/// Read chunked body from TLS stream
+async fn read_chunked_body_tls(
+    tls_stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    buffer: &mut BytesMut,
+) -> Result<()> {
+    loop {
+        // Read chunk size line
+        let mut chunk_size_line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            tls_stream.read_exact(&mut byte).await?;
+            chunk_size_line.push(byte[0]);
+            
+            if chunk_size_line.len() >= 2 && chunk_size_line[chunk_size_line.len()-2..] == [b'\r', b'\n'] {
+                break;
+            }
+        }
+        
+        // Parse chunk size (hex)
+        let size_str = std::str::from_utf8(&chunk_size_line[..chunk_size_line.len()-2])?;
+        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
+            .map_err(|e| anyhow::anyhow!("Invalid chunk size: {} ({})", size_str, e))?;
+        
+        if chunk_size == 0 {
+            // Last chunk, read trailing \r\n
+            let mut trailer = [0u8; 2];
+            tls_stream.read_exact(&mut trailer).await?;
+            if trailer != [b'\r', b'\n'] {
+                warn!("Invalid chunked encoding trailer");
+            }
+            break;
+        }
+        
+        // Read chunk data
+        let mut chunk_data = vec![0u8; chunk_size];
+        tls_stream.read_exact(&mut chunk_data).await?;
+        buffer.extend_from_slice(&chunk_data);
+        
+        // Read trailing \r\n
+        let mut trailer = [0u8; 2];
+        tls_stream.read_exact(&mut trailer).await?;
+        if trailer != [b'\r', b'\n'] {
+            warn!("Invalid chunked encoding trailer after chunk data");
         }
     }
     
     Ok(())
 }
-
-/// Bidirectional copy between QUIC stream and upstream stream (TLS or TCP)
-/// Note: Due to tokio::io::split consuming the stream, we cannot reuse connections after split
-/// This function will consume the connection, so connection pooling is limited
-async fn copy_bidirectional_and_return(
-    mut recv: RecvStream,
-    mut send: SendStream,
-    upstream_stream: PooledConnection,
-    request_id: &str,
-    _state: &ClientState,
-    _pool_key: &str,
-) -> Result<PooledConnection> {
-    debug!("[{}] Starting bidirectional copy: QUIC stream <-> Upstream socket (raw data forwarding, no HTTP parsing)", 
-        request_id);
-    
-    let copy_start = std::time::Instant::now();
-    
-    // Note: tokio::io::split consumes the stream, so we cannot reuse connections
-    // For true connection reuse, we would need HTTP parsing to detect request/response boundaries
-    // For now, connections are consumed after use
-    
-    match upstream_stream {
-        PooledConnection::Tcp(tcp_stream) => {
-            let (mut upstream_read, mut upstream_write) = tokio::io::split(tcp_stream);
-            
-            let request_id_clone = request_id.to_string();
-            let quic_to_upstream = async move {
-                debug!("[{}] Starting QUIC -> Upstream copy...", request_id_clone);
-                match io::copy(&mut recv, &mut upstream_write).await {
-                    Ok(bytes_copied) => {
-                        debug!("[{}] QUIC -> Upstream: copied {} bytes in {:?}", 
-                            request_id_clone, bytes_copied, copy_start.elapsed());
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    Err(e) => {
-                        // Connection might be closed by peer, this is normal
-                        debug!("[{}] QUIC -> Upstream copy ended: {}", request_id_clone, e);
-                        Ok::<(), anyhow::Error>(()) // Don't propagate error
-                    }
-                }
-            };
-            
-            let request_id_clone2 = request_id.to_string();
-            let upstream_to_quic = async move {
-                debug!("[{}] Starting Upstream -> QUIC copy...", request_id_clone2);
-                match io::copy(&mut upstream_read, &mut send).await {
-                    Ok(bytes_copied) => {
-                        debug!("[{}] Upstream -> QUIC: copied {} bytes in {:?}", 
-                            request_id_clone2, bytes_copied, copy_start.elapsed());
-                    }
-                    Err(e) => {
-                        // Connection might be closed by peer, this is normal
-                        debug!("[{}] Upstream -> QUIC copy ended: {}", request_id_clone2, e);
-                    }
-                }
-                // Try to finish send stream gracefully
-                if let Err(e) = send.finish().await {
-                    debug!("[{}] QUIC stream finish error (might be already closed): {}", request_id_clone2, e);
-                }
-                Ok::<_, anyhow::Error>(())
-            };
-            
-            // Use select instead of try_join to handle partial failures gracefully
-            tokio::select! {
-                _ = quic_to_upstream => {},
-                _ = upstream_to_quic => {},
-            }
-            
-            info!("[{}] Bidirectional copy completed in {:?}", request_id, copy_start.elapsed());
-            
-            // Connection consumed after split, cannot reuse
-            Err(anyhow::anyhow!("Connection consumed after split, cannot reuse"))
-        }
-        PooledConnection::Tls(tls_stream) => {
-            let (mut upstream_read, mut upstream_write) = tokio::io::split(tls_stream);
-            
-            let request_id_clone = request_id.to_string();
-            let quic_to_upstream = async move {
-                debug!("[{}] Starting QUIC -> Upstream copy...", request_id_clone);
-                match io::copy(&mut recv, &mut upstream_write).await {
-                    Ok(bytes_copied) => {
-                        debug!("[{}] QUIC -> Upstream: copied {} bytes in {:?}", 
-                            request_id_clone, bytes_copied, copy_start.elapsed());
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    Err(e) => {
-                        debug!("[{}] QUIC -> Upstream copy ended: {}", request_id_clone, e);
-                        Ok::<(), anyhow::Error>(())
-                    }
-                }
-            };
-            
-            let request_id_clone2 = request_id.to_string();
-            let upstream_to_quic = async move {
-                debug!("[{}] Starting Upstream -> QUIC copy...", request_id_clone2);
-                match io::copy(&mut upstream_read, &mut send).await {
-                    Ok(bytes_copied) => {
-                        debug!("[{}] Upstream -> QUIC: copied {} bytes in {:?}", 
-                            request_id_clone2, bytes_copied, copy_start.elapsed());
-                    }
-                    Err(e) => {
-                        debug!("[{}] Upstream -> QUIC copy ended: {}", request_id_clone2, e);
-                    }
-                }
-                if let Err(e) = send.finish().await {
-                    debug!("[{}] QUIC stream finish error (might be already closed): {}", request_id_clone2, e);
-                }
-                Ok::<_, anyhow::Error>(())
-            };
-            
-            // Use select instead of try_join to handle partial failures gracefully
-            tokio::select! {
-                _ = quic_to_upstream => {},
-                _ = upstream_to_quic => {},
-            }
-            
-            info!("[{}] Bidirectional copy completed in {:?}", request_id, copy_start.elapsed());
-            
-            // Connection consumed after split, cannot reuse
-            Err(anyhow::anyhow!("Connection consumed after split, cannot reuse"))
-        }
-    }
-}
-

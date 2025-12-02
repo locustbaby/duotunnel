@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tracing::{info, error, warn};
 use tunnel_lib::quic_transport::QuicClient;
 use rustls;
@@ -21,7 +20,7 @@ mod forward;
 use types::ClientState;
 use control::handle_control_stream;
 use reverse::handle_reverse_streams;
-use forward::{run_forward_tunnel, start_http_listener, start_grpc_listener, start_wss_listener};
+use forward::{start_http_listener, start_grpc_listener, start_wss_listener};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -79,6 +78,7 @@ async fn main() -> Result<()> {
         tls_connector,
         connection_pool: Arc::new(dashmap::DashMap::new()),
         quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
+        sessions: Arc::new(dashmap::DashMap::new()),
     });
 
     // Create shutdown channel

@@ -1,36 +1,34 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::warn;
 use quinn::{SendStream, RecvStream};
 use crate::types::ServerState;
-use tunnel_lib::protocol::read_data_stream_header;
+// Forward tunnels from client are now handled using frame protocol
+// This handler is kept for backward compatibility but forward tunnels
+// should be initiated from server side (reverse tunnels)
 
 /// Handle data stream (Forward Tunnels from Client)
+/// Note: Forward tunnels are now handled using frame protocol
+/// This is a placeholder for backward compatibility
 pub async fn handle_data_stream(
-    mut send: SendStream,
-    mut recv: RecvStream,
+    _send: SendStream,
+    _recv: RecvStream,
     _state: Arc<ServerState>,
 ) -> Result<()> {
-    // 1. Read DataStreamHeader
-    let header = read_data_stream_header(&mut recv).await?;
-    debug!(
-        "Received DataStreamHeader: request_id={}, type={}, host={}",
-        header.request_id, header.r#type, header.host
-    );
+    // Forward tunnels (Client -> Server -> Target) are not currently implemented
+    // The new frame protocol is designed for reverse tunnels (Server -> Client -> Target)
+    // If forward tunnels are needed, they should be implemented using the frame protocol
+    // similar to how reverse tunnels work
     
-    // Note: This is a forward tunnel (Client -> Server -> Target)
-    // In the new design, Client sends type and host, Server needs to:
-    // 1. Match rules based on type and host to find upstream
-    // 2. Connect to upstream
-    // 3. Forward data
+    warn!("Forward tunnel handler: not implemented with frame protocol yet");
+    warn!("Forward tunnels should use reverse tunnel pattern (Server -> Client -> Target)");
     
-    // For now, this is a placeholder - forward tunnels need rule matching on server side
-    warn!("Forward tunnel handler: rule matching on server side not yet implemented");
-    
-    // TODO: Implement server-side rule matching for forward tunnels
-    // This would require server to have rules configured for matching client requests
-    // and routing them to upstreams
+    // TODO: If forward tunnels are needed, implement using frame protocol:
+    // 1. Read routing frame from client
+    // 2. Read request frames and reassemble
+    // 3. Match rules and connect to upstream
+    // 4. Send request to upstream
+    // 5. Read response and send back as frames
     
     Ok(())
 }
-
