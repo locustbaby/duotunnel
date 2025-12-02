@@ -10,6 +10,7 @@ use webpki_roots;
 
 mod config;
 mod http_handler;
+mod http_forwarder;
 mod types;
 mod pool;
 mod routing;

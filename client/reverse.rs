@@ -1,15 +1,12 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, error, warn};
 use quinn::{Connection, SendStream, RecvStream};
 use uuid::Uuid;
 use bytes::BytesMut;
 use crate::types::ClientState;
-use crate::pool::{get_or_create_connection, return_connection_to_pool};
-use crate::routing::{match_rule_by_type_and_host, resolve_upstream, parse_target_addr};
-use crate::types::PooledConnection;
-use crate::http_handler::read_complete_http_response;
+use crate::routing::{match_rule_by_type_and_host, resolve_upstream};
+use crate::http_forwarder::forward_http_request;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 
@@ -144,59 +141,51 @@ async fn handle_reverse_stream(
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
         request_id, final_target_addr, is_target_ssl);
     
-    // 4. Connect to upstream
-    let (hostname, port) = parse_target_addr(&final_target_addr, is_target_ssl)?;
-    
-    // 5. Get or create connection from pool
-    let pool_key = format!("{}:{}:{}", hostname, port, is_target_ssl);
-    let mut upstream_stream = match get_or_create_connection(
-        &state,
-        &pool_key,
-        &hostname,
-        port,
+    // 4. Forward HTTP request using Hyper client
+    let response_bytes = match forward_http_request(
+        &request_buffer,
+        &final_target_addr,
         is_target_ssl,
-        &request_id,
-        &routing_info.r#type,
     ).await {
-        Ok(stream) => stream,
+        Ok(bytes) => bytes,
         Err(e) => {
-            error!("[{}] Failed to connect to upstream {}: {}", 
-                request_id, final_target_addr, e);
+            error!("[{}] Failed to forward HTTP request: {}", request_id, e);
+            
+            // Send error response frame to server
+            let error_response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\n\
+                Content-Length: {}\r\n\
+                Content-Type: text/plain\r\n\
+                \r\n\
+                {}",
+                e.to_string().len(),
+                e
+            );
+            
+            let error_frame = TunnelFrame::new(
+                session_id,
+                ProtocolType::Http11,
+                true, // END_OF_STREAM
+                error_response.into_bytes(),
+            );
+            
+            if let Err(send_err) = write_frame(&mut send, &error_frame).await {
+                error!("[{}] Failed to send error response frame: {}", request_id, send_err);
+            }
+            
+            // Finish the send stream
+            if let Err(finish_err) = send.finish().await {
+                error!("[{}] Failed to finish send stream: {}", request_id, finish_err);
+            }
+            
             return Err(e);
         }
     };
     
-    // 6. Send complete HTTP request to upstream
-    match &mut upstream_stream {
-        PooledConnection::Tcp(ref mut tcp_stream) => {
-            tcp_stream.write_all(&request_buffer).await?;
-            tcp_stream.flush().await?;
-        }
-        PooledConnection::Tls(ref mut tls_stream) => {
-            tls_stream.write_all(&request_buffer).await?;
-            tls_stream.flush().await?;
-        }
-    }
+    info!("[{}] Received response from upstream ({} bytes)", request_id, response_bytes.len());
     
-    info!("[{}] Sent request to upstream ({} bytes)", request_id, request_buffer.len());
-    
-    // 7. Read complete HTTP response from upstream
-    let response_buffer = match &mut upstream_stream {
-        PooledConnection::Tcp(ref mut tcp_stream) => {
-            read_complete_http_response(tcp_stream).await?
-        }
-        PooledConnection::Tls(ref mut tls_stream) => {
-            // For TLS, we need to read manually since we can't use the helper directly
-            // For now, use a simple approach: read until connection closes or Content-Length
-            read_complete_http_response_tls(tls_stream).await?
-        }
-    };
-    
-    info!("[{}] Received response from upstream ({} bytes)", request_id, response_buffer.len());
-    
-    // 8. Split response into frames and send back to server
+    // 5. Split response into frames and send back to server
     const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
-    let response_bytes = response_buffer.to_vec();
     let mut offset = 0;
     
     while offset < response_bytes.len() {
@@ -211,7 +200,11 @@ async fn handle_reverse_stream(
             chunk,
         );
         
-        write_frame(&mut send, &response_frame).await?;
+        if let Err(e) = write_frame(&mut send, &response_frame).await {
+            error!("[{}] Failed to write response frame: {}", request_id, e);
+            return Err(e.into());
+        }
+        
         offset += chunk_size;
     }
     
@@ -219,160 +212,12 @@ async fn handle_reverse_stream(
         request_id, (response_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, 
         response_bytes.len(), stream_start.elapsed());
     
-    // 9. Try to return connection to pool (if possible)
-    // Note: Currently connections are consumed, but we can try to return them
-    // In the future, with proper HTTP parsing, we can reuse connections
-    return_connection_to_pool(&state, &pool_key, upstream_stream).await;
-    
-    Ok(())
-}
-
-/// Read complete HTTP response from TLS stream
-async fn read_complete_http_response_tls(
-    tls_stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-) -> Result<BytesMut> {
-    let mut buffer = BytesMut::new();
-    
-    // Step 1: Read headers
-    let mut header_end = false;
-    while !header_end {
-        let mut buf = vec![0u8; 4096];
-        let n = tls_stream.read(&mut buf).await?;
-        if n == 0 {
-            anyhow::bail!("Connection closed before headers");
-        }
-        
-        buffer.extend_from_slice(&buf[..n]);
-        
-        // Check for end of headers
-        if buffer.len() >= 4 {
-            for i in 0..=buffer.len().saturating_sub(4) {
-                if &buffer[i..i+4] == b"\r\n\r\n" {
-                    header_end = true;
-                    break;
-                }
-            }
-        }
-        
-        // Safety limit
-        if buffer.len() > 8192 {
-            anyhow::bail!("HTTP headers too large");
-        }
-    }
-    
-    // Find header end position
-    let header_end_pos = buffer.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(buffer.len());
-    
-    let header_bytes = &buffer[..header_end_pos];
-    
-    // Step 2: Parse headers to determine body length
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut resp = httparse::Response::new(&mut headers);
-    
-    let parse_result = resp.parse(header_bytes)?;
-    match parse_result {
-        httparse::Status::Complete(_) => {}
-        httparse::Status::Partial => {
-            anyhow::bail!("Incomplete HTTP headers");
-        }
-    }
-    
-    // Step 3: Determine body length
-    let body_length = determine_response_body_length(&resp.headers)?;
-    
-    // Step 4: Read body if needed
-    if let Some(len) = body_length {
-        // Content-Length specified
-        let remaining_in_buffer = buffer.len() - header_end_pos;
-        if remaining_in_buffer < len {
-            let needed = len - remaining_in_buffer;
-            let mut body_buf = vec![0u8; needed];
-            tls_stream.read_exact(&mut body_buf).await?;
-            buffer.extend_from_slice(&body_buf);
-        }
-    } else {
-        // Transfer-Encoding: chunked or connection close
-        read_chunked_body_tls(tls_stream, &mut buffer).await?;
-    }
-    
-    Ok(buffer)
-}
-
-/// Determine response body length from HTTP headers
-fn determine_response_body_length(headers: &[httparse::Header]) -> Result<Option<usize>> {
-    // Check for Transfer-Encoding: chunked
-    for header in headers {
-        if header.name.eq_ignore_ascii_case("transfer-encoding") {
-            let value = std::str::from_utf8(header.value)?;
-            if value.eq_ignore_ascii_case("chunked") {
-                return Ok(None); // Chunked encoding
-            }
-        }
-    }
-    
-    // Check for Content-Length
-    for header in headers {
-        if header.name.eq_ignore_ascii_case("content-length") {
-            let value = std::str::from_utf8(header.value)?;
-            let len = value.parse::<usize>()
-                .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {} ({})", value, e))?;
-            return Ok(Some(len));
-        }
-    }
-    
-    // For responses, if no Content-Length and no Transfer-Encoding,
-    // body ends when connection closes (for HTTP/1.1)
-    Ok(None)
-}
-
-/// Read chunked body from TLS stream
-async fn read_chunked_body_tls(
-    tls_stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-    buffer: &mut BytesMut,
-) -> Result<()> {
-    loop {
-        // Read chunk size line
-        let mut chunk_size_line = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            tls_stream.read_exact(&mut byte).await?;
-            chunk_size_line.push(byte[0]);
-            
-            if chunk_size_line.len() >= 2 && chunk_size_line[chunk_size_line.len()-2..] == [b'\r', b'\n'] {
-                break;
-            }
-        }
-        
-        // Parse chunk size (hex)
-        let size_str = std::str::from_utf8(&chunk_size_line[..chunk_size_line.len()-2])?;
-        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
-            .map_err(|e| anyhow::anyhow!("Invalid chunk size: {} ({})", size_str, e))?;
-        
-        if chunk_size == 0 {
-            // Last chunk, read trailing \r\n
-            let mut trailer = [0u8; 2];
-            tls_stream.read_exact(&mut trailer).await?;
-            if trailer != [b'\r', b'\n'] {
-                warn!("Invalid chunked encoding trailer");
-            }
-            break;
-        }
-        
-        // Read chunk data
-        let mut chunk_data = vec![0u8; chunk_size];
-        tls_stream.read_exact(&mut chunk_data).await?;
-        buffer.extend_from_slice(&chunk_data);
-        
-        // Read trailing \r\n
-        let mut trailer = [0u8; 2];
-        tls_stream.read_exact(&mut trailer).await?;
-        if trailer != [b'\r', b'\n'] {
-            warn!("Invalid chunked encoding trailer after chunk data");
-        }
+    // 6. Finish the send stream (critical fix for "stream finished early" bug)
+    if let Err(e) = send.finish().await {
+        error!("[{}] Failed to finish send stream: {}", request_id, e);
+        return Err(e.into());
     }
     
     Ok(())
 }
+

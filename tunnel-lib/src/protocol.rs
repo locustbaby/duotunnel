@@ -63,15 +63,21 @@ pub async fn read_control_message(
 pub struct RoutingInfo {
     pub r#type: String,  // "http", "grpc", "wss"
     pub host: String,
+    pub method: String,   // HTTP method (GET, POST, etc.)
+    pub path: String,    // HTTP path (including query string)
 }
 
 impl RoutingInfo {
-    /// Encode routing info to bytes (format: "type\0host\0")
+    /// Encode routing info to bytes (format: "type\0host\0method\0path\0")
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(self.r#type.as_bytes());
         buf.push(0);
         buf.extend_from_slice(self.host.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(self.method.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(self.path.as_bytes());
         buf.push(0);
         buf
     }
@@ -79,12 +85,25 @@ impl RoutingInfo {
     /// Decode routing info from bytes
     pub fn decode(data: &[u8]) -> Result<Self> {
         let parts: Vec<&[u8]> = data.split(|&b| b == 0).collect();
-        if parts.len() < 2 {
+        if parts.len() < 4 {
+            // Try to decode old format (backward compatibility)
+            if parts.len() >= 2 {
+                let r#type = String::from_utf8(parts[0].to_vec())?;
+                let host = String::from_utf8(parts[1].to_vec())?;
+                return Ok(Self {
+                    r#type,
+                    host,
+                    method: String::new(),
+                    path: String::new(),
+                });
+            }
             return Err(anyhow::anyhow!("Invalid routing info format"));
         }
         let r#type = String::from_utf8(parts[0].to_vec())?;
         let host = String::from_utf8(parts[1].to_vec())?;
-        Ok(Self { r#type, host })
+        let method = String::from_utf8(parts[2].to_vec())?;
+        let path = String::from_utf8(parts[3].to_vec())?;
+        Ok(Self { r#type, host, method, path })
     }
 }
 

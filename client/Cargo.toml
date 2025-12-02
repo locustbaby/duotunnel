@@ -26,4 +26,8 @@ httparse = "1.1"
 bytes = "1.5"
 dashmap = "6.1.0"
 futures = "0.3"
+hyper = { version = "0.14", features = ["client", "http1", "http2", "runtime"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2"] }
+http-body-util = "0.1"
+hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http1", "http2"] }
  

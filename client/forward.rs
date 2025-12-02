@@ -79,9 +79,15 @@ async fn handle_forward_connection(
     // 4. Create Session ID and routing frame
     let session_id = Frame::session_id_from_uuid(&request_id);
     
+    // Extract method and path from HTTP request
+    let method = req.method.unwrap_or("GET").to_string();
+    let path = req.path.unwrap_or("/").to_string();
+    
     let routing_info = RoutingInfo {
         r#type: "http".to_string(),
         host: host.clone(),
+        method,
+        path,
     };
     
     // Send routing frame (first frame)
