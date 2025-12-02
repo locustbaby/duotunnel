@@ -14,6 +14,7 @@ mod client_mgr;
 mod http;
 mod data_stream;
 mod listeners;
+mod egress_forwarder;
 
 use types::{ServerState, IngressRule};
 use connection::accept_loop;
@@ -60,6 +61,37 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_default();
 
+    // Extract egress routing rules and upstreams
+    let (egress_rules_http, egress_rules_grpc, egress_upstreams) = if let Some(ref egress) = config.server_egress_upstream {
+        let rules_http: Vec<types::EgressRule> = egress.rules.http.iter().map(|r| types::EgressRule {
+            match_host: r.match_host.clone(),
+            action_upstream: r.action_upstream.clone(),
+        }).collect();
+        
+        let rules_grpc: Vec<types::GrpcEgressRule> = egress.rules.grpc.iter().map(|r| types::GrpcEgressRule {
+            match_host: r.match_host.clone(),
+            match_service: r.match_service.clone(),
+            action_upstream: r.action_upstream.clone(),
+        }).collect();
+        
+        let mut upstreams_map = HashMap::new();
+        for (name, upstream_config) in &egress.upstreams {
+            if let Some(server) = upstream_config.servers.first() {
+                let address = server.address.clone();
+                let is_ssl = address.starts_with("https://");
+                upstreams_map.insert(name.clone(), types::EgressUpstream {
+                    name: name.clone(),
+                    address: address.clone(),
+                    is_ssl,
+                });
+            }
+        }
+        
+        (rules_http, rules_grpc, upstreams_map)
+    } else {
+        (Vec::new(), Vec::new(), HashMap::new())
+    };
+
     // Extract client-specific configurations (client_egress_routings)
     let mut client_configs: HashMap<String, (Vec<Rule>, Vec<Upstream>, String)> = HashMap::new();
     
@@ -104,16 +136,73 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Create Hyper HTTP client (with built-in connection pooling)
+    let http_connector = hyper::client::HttpConnector::new();
+    let http_client = Arc::new(
+        hyper::Client::builder()
+            .build(http_connector)
+    );
+
+    // Create Hyper HTTPS client (with built-in connection pooling)
+    let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    let https_client = Arc::new(
+        hyper::Client::builder()
+            .build(https_connector)
+    );
+
     // Initialize server state
     let state = Arc::new(ServerState {
         clients: dashmap::DashMap::new(),
         client_groups: dashmap::DashMap::new(),
         group_clients: dashmap::DashMap::new(),
         ingress_rules,
+        egress_rules_http,
+        egress_rules_grpc,
+        egress_upstreams,
         client_configs,
         config_version: config.server.config_version.clone(),
         sessions: Arc::new(dashmap::DashMap::new()),
+        http_client,
+        https_client,
     });
+
+    // Warmup connection pools for egress upstreams
+    if let Some(ref egress) = config.server_egress_upstream {
+        use tunnel_lib::proto::tunnel::{Rule, Upstream, UpstreamServer};
+        let rules: Vec<Rule> = egress.rules.http.iter().enumerate()
+            .map(|(idx, r)| Rule {
+                rule_id: format!("egress_http_{}", idx),
+                r#type: "http".to_string(),
+                match_host: r.match_host.clone(),
+                match_path_prefix: String::new(),
+                match_header: HashMap::new(),
+                action_proxy_pass: r.action_upstream.clone(),
+                action_set_host: String::new(),
+            })
+            .collect();
+        
+        let upstreams: Vec<Upstream> = egress.upstreams.iter()
+            .map(|(name, u)| Upstream {
+                name: name.clone(),
+                servers: u.servers.iter().map(|s| UpstreamServer {
+                    address: s.address.clone(),
+                    resolve: s.resolve,
+                }).collect(),
+                lb_policy: u.lb_policy.clone(),
+            })
+            .collect();
+        
+        let http_client_clone = state.http_client.clone();
+        let https_client_clone = state.https_client.clone();
+        tokio::spawn(async move {
+            tunnel_lib::warmup::warmup_connection_pools(&http_client_clone, &https_client_clone, &rules, &upstreams).await;
+        });
+    }
 
     // 1. Start QUIC Server (always required)
     let server_addr: std::net::SocketAddr = bind_addr.parse()?;

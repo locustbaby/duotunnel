@@ -1721,6 +1721,8 @@ dependencies = [
  "clap",
  "dashmap",
  "httparse",
+ "hyper 0.14.32",
+ "hyper-rustls",
  "quinn",
  "rustls 0.21.12",
  "serde",

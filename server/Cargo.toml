@@ -8,7 +8,7 @@ name = "server"
 path = "main.rs"
 
 [dependencies]
-tunnel-lib = { path = "../tunnel-lib" }
+tunnel-lib = { path = "../tunnel-lib", features = ["warmup"] }
 tokio = { version = "1", features = ["full"] }
 quinn = "0.10"
 rustls = "0.21"
@@ -25,4 +25,6 @@ dashmap = "6.1.0" # Keep dashmap for managing connected clients
 bytes = "1.5"
 httparse = "1.1"
 uuid = { version = "1", features = ["v4"] }
+hyper = { version = "0.14", features = ["client", "http1", "http2", "runtime"] }
+hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http1", "http2"] }
  

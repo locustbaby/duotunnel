@@ -5,6 +5,9 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
+use hyper::{Body, Client};
+use hyper::client::HttpConnector;
+use hyper_rustls::HttpsConnector;
 
 /// Session state for frame reassembly
 pub struct SessionState {
@@ -53,17 +56,46 @@ pub struct ServerState {
     pub group_clients: DashMap<String, Vec<String>>,
     /// Server ingress routing rules (for routing external requests to client groups)
     pub ingress_rules: Vec<IngressRule>,
+    /// Server egress routing rules (for routing client-initiated requests to upstreams)
+    pub egress_rules_http: Vec<EgressRule>,
+    pub egress_rules_grpc: Vec<GrpcEgressRule>,
+    /// Server egress upstreams
+    pub egress_upstreams: HashMap<String, EgressUpstream>,
     /// Client-specific configurations: Map client_group -> (rules, upstreams, config_version)
     pub client_configs: HashMap<String, (Vec<Rule>, Vec<Upstream>, String)>,
     /// Config version
     pub config_version: String,
     /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<Mutex<SessionState>>>>,
+    /// Hyper HTTP client (with connection pooling)
+    pub http_client: Arc<Client<HttpConnector, Body>>,
+    /// Hyper HTTPS client (with connection pooling)
+    pub https_client: Arc<Client<HttpsConnector<HttpConnector>, Body>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct IngressRule {
     pub match_host: String,
     pub action_client_group: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EgressRule {
+    pub match_host: String,
+    pub action_upstream: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrpcEgressRule {
+    pub match_host: String,
+    pub match_service: String,
+    pub action_upstream: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EgressUpstream {
+    pub name: String,
+    pub address: String,
+    pub is_ssl: bool,
 }
 

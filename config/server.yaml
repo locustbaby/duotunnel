@@ -21,7 +21,7 @@ server_egress_upstream:
   upstreams:
     backend:
       servers:
-        - address: "http://localhost:8080"
+        - address: "https://www.google.com"
           resolve: true
       lb_policy: "round_robin"
     
@@ -34,7 +34,8 @@ server_egress_upstream:
   # Rules: Matches client-initiated traffic, forwards to external Upstream.
   rules:
     http:
-      - match_host: "echo.free.beeceptor.com"
+      # - match_host: "echo.free.beeceptor.com"
+      - match_host: "www.google.com"
         action_upstream: "backend"
     
     grpc:
@@ -71,8 +72,8 @@ tunnel_management:
         upstreams:
           local_service: # Client's local service (e.g., http://127.0.0.1:8080)
             servers:
-              - address: "https://echo.free.beeceptor.com"
-              # - address: "https://www.google.com"
+              # - address: "https://echo.free.beeceptor.com"
+              - address: "https://www.google.com"
                 resolve: false
             lb_policy: "round_robin"
           
