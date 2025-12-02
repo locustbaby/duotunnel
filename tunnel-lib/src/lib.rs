@@ -1,5 +1,6 @@
 pub mod quic_transport;
 pub mod protocol;
+pub mod hash;
 
 // Include generated protobuf code
 // prost generates code based on the package name in the proto file

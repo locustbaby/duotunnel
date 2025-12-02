@@ -10,21 +10,67 @@ message ControlMessage {
   oneof payload {
     ConfigSyncRequest config_sync = 1;
     ConfigSyncResponse config_sync_response = 2;
-    // KeepAlive keep_alive = 3; // Consider adding heartbeat
+    Heartbeat heartbeat = 3;
     ErrorMessage error_message = 4;
+    ConfigPushNotification config_push = 5;
+    ConfigHashRequest hash_request = 6;
+    ConfigHashResponse hash_response = 7;
+    IncrementalConfigUpdate incremental_update = 8;
+    UnregisterRequest unregister = 9;
   }
+}
+
+message UnregisterRequest {
+  string client_id = 1;
+  string reason = 2;
+}
+
+message Heartbeat {
+  int64 timestamp = 1;
+}
+
+message ConfigPushNotification {
+  string config_version = 1;
+  string client_group = 2;
+}
+
+// Lightweight hash check request (15s interval)
+message ConfigHashRequest {
+  string client_id = 1;
+  string group = 2;
+  string current_hash = 3;  // Client's current config hash
+}
+
+// Lightweight hash check response
+message ConfigHashResponse {
+  string config_hash = 1;   // Server's current config hash
+  bool needs_update = 2;    // True if hashes don't match
+}
+
+// Incremental config update (server push)
+message IncrementalConfigUpdate {
+  string config_hash = 1;           // New hash after applying changes
+  repeated Rule added_rules = 2;    // New rules to add
+  repeated Rule updated_rules = 3;  // Existing rules to update
+  repeated string deleted_rule_ids = 4;  // Rule IDs to delete
+  repeated Upstream added_upstreams = 5;
+  repeated Upstream updated_upstreams = 6;
+  repeated string deleted_upstream_names = 7;
 }
 
 message ConfigSyncRequest {
   string client_id = 1;
   string group = 2;
-  string config_version = 3;
+  string config_version = 3;  // Keep for backward compatibility
+  string current_hash = 4;    // Client's current config hash
+  bool request_full = 5;      // True for full sync (5min), false for hash check
 }
 
 message ConfigSyncResponse {
   string config_version = 1;
-  repeated Rule rules = 2;
-  repeated Upstream upstreams = 3;
+  string config_hash = 2;     // Hash of the config
+  repeated Rule rules = 3;
+  repeated Upstream upstreams = 4;
 }
 
 message Rule {
@@ -66,4 +112,5 @@ message DataStreamHeader {
   // Reserved fields (for future extension)
   map<string, string> metadata = 4;
 }
+
 

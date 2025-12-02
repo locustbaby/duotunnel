@@ -71,8 +71,84 @@ pub async fn read_data_stream_header(
     read_protobuf_message(recv).await
 }
 
+/// Write Heartbeat to a control stream
+pub async fn write_heartbeat(
+    send: &mut SendStream,
+    message: &crate::proto::tunnel::Heartbeat,
+) -> Result<()> {
+    write_protobuf_message(send, message).await
+}
+
+/// Read Heartbeat from a control stream
+pub async fn read_heartbeat(
+    recv: &mut RecvStream,
+) -> Result<crate::proto::tunnel::Heartbeat> {
+    read_protobuf_message(recv).await
+}
+
+/// Write ConfigPushNotification to a control stream
+pub async fn write_config_push(
+    send: &mut SendStream,
+    message: &crate::proto::tunnel::ConfigPushNotification,
+) -> Result<()> {
+    write_protobuf_message(send, message).await
+}
+
+/// Read ConfigPushNotification from a control stream
+pub async fn read_config_push(
+    recv: &mut RecvStream,
+) -> Result<crate::proto::tunnel::ConfigPushNotification> {
+    read_protobuf_message(recv).await
+}
+
+/// Write ConfigHashRequest to a control stream
+pub async fn write_hash_request(
+    send: &mut SendStream,
+    message: &crate::proto::tunnel::ConfigHashRequest,
+) -> Result<()> {
+    write_protobuf_message(send, message).await
+}
+
+/// Read ConfigHashRequest from a control stream
+pub async fn read_hash_request(
+    recv: &mut RecvStream,
+) -> Result<crate::proto::tunnel::ConfigHashRequest> {
+    read_protobuf_message(recv).await
+}
+
+/// Write ConfigHashResponse to a control stream
+pub async fn write_hash_response(
+    send: &mut SendStream,
+    message: &crate::proto::tunnel::ConfigHashResponse,
+) -> Result<()> {
+    write_protobuf_message(send, message).await
+}
+
+/// Read ConfigHashResponse from a control stream
+pub async fn read_hash_response(
+    recv: &mut RecvStream,
+) -> Result<crate::proto::tunnel::ConfigHashResponse> {
+    read_protobuf_message(recv).await
+}
+
+/// Write IncrementalConfigUpdate to a control stream
+pub async fn write_incremental_update(
+    send: &mut SendStream,
+    message: &crate::proto::tunnel::IncrementalConfigUpdate,
+) -> Result<()> {
+    write_protobuf_message(send, message).await
+}
+
+/// Read IncrementalConfigUpdate from a control stream
+pub async fn read_incremental_update(
+    recv: &mut RecvStream,
+) -> Result<crate::proto::tunnel::IncrementalConfigUpdate> {
+    read_protobuf_message(recv).await
+}
+
 // Re-export protobuf types for convenience (used by client and server)
 pub use crate::proto::tunnel::{
     ControlMessage, ConfigSyncRequest, ConfigSyncResponse, DataStreamHeader, ErrorMessage,
-    Rule, Upstream, UpstreamServer,
+    Rule, Upstream, UpstreamServer, Heartbeat, ConfigPushNotification,
+    ConfigHashRequest, ConfigHashResponse, IncrementalConfigUpdate,
 };
