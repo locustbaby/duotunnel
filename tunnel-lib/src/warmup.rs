@@ -8,10 +8,9 @@ use crate::proto::tunnel::{Rule, Upstream};
 #[cfg(feature = "warmup")]
 /// Warm up connection pool for all upstream targets (HTTP, HTTPS, WSS, gRPC)
 /// 
-/// This function accepts Hyper clients for HTTP/HTTPS and handles WSS/gRPC internally
+/// This function accepts a unified Hyper client for HTTP/HTTPS and handles WSS/gRPC internally
 pub async fn warmup_connection_pools(
-    http_client: &hyper::Client<hyper::client::HttpConnector, hyper::Body>,
-    https_client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
     rules: &[Rule],
     upstreams: &[Upstream],
 ) {
@@ -67,12 +66,11 @@ pub async fn warmup_connection_pools(
     
     // Warmup HTTP/HTTPS targets
     for (target_addr, is_ssl) in http_targets {
-        let http_clone = http_client.clone();
-        let https_clone = https_client.clone();
+        let client_clone = client.clone();
         let target_addr = target_addr.clone();
         
         let task = tokio::spawn(async move {
-            warmup_http_target(&http_clone, &https_clone, &target_addr, is_ssl).await;
+            warmup_http_target(&client_clone, &target_addr, is_ssl).await;
         });
         
         warmup_tasks.push(task);
@@ -80,11 +78,11 @@ pub async fn warmup_connection_pools(
     
     // Warmup WSS targets
     for (target_addr, is_ssl) in wss_targets {
-        let https_clone = https_client.clone();
+        let client_clone = client.clone();
         let target_addr = target_addr.clone();
         
         let task = tokio::spawn(async move {
-            warmup_wss_target(&https_clone, &target_addr, is_ssl).await;
+            warmup_wss_target(&client_clone, &target_addr, is_ssl).await;
         });
         
         warmup_tasks.push(task);
@@ -118,10 +116,9 @@ pub async fn warmup_connection_pools(
 #[cfg(feature = "warmup")]
 /// Warmup HTTP/HTTPS target by sending a lightweight request
 async fn warmup_http_target(
-    http_client: &hyper::Client<hyper::client::HttpConnector, hyper::Body>,
-    https_client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
     target_addr: &str,
-    is_ssl: bool,
+    _is_ssl: bool,  // No longer needed, client handles both
 ) {
     use hyper::{Body, Method, Request};
     
@@ -147,12 +144,8 @@ async fn warmup_http_target(
         }
     };
     
-    // Send request using appropriate client
-    let result = if is_ssl {
-        https_client.request(request).await
-    } else {
-        http_client.request(request).await
-    };
+    // Send request using unified client (handles both HTTP and HTTPS)
+    let result = client.request(request).await;
     
     match result {
         Ok(response) => {
@@ -185,7 +178,7 @@ async fn warmup_http_target(
 /// For WSS, we pre-establish the underlying TCP/TLS connection
 /// The actual WebSocket handshake will happen on first real request
 async fn warmup_wss_target(
-    https_client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
     target_addr: &str,
     is_ssl: bool,
 ) {
@@ -221,7 +214,7 @@ async fn warmup_wss_target(
     };
     
     // Send request to establish connection in pool
-    match https_client.request(request).await {
+    match client.request(request).await {
         Ok(response) => {
             // Consume response to complete connection establishment
             let body = response.into_body();

@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::AsyncWriteExt;
 use tracing::{info, error, debug, warn};
 use quinn::Connection;
 use uuid::Uuid;
@@ -11,30 +11,6 @@ use crate::types::ClientState;
 use crate::http_handler::read_complete_http_request;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
 use tunnel_lib::frame::TunnelFrame as Frame;
-
-/// Run forward tunnel (Legacy - Listen Local -> Forward to Server)
-pub async fn run_forward_tunnel(
-    local_port: u16,
-    connection: Arc<Connection>,
-    state: Arc<ClientState>,
-) -> Result<()> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], local_port));
-    let listener = TcpListener::bind(addr).await?;
-    info!("Listening on 0.0.0.0:{}", local_port);
-
-    loop {
-        let (socket, peer_addr) = listener.accept().await?;
-        debug!("Accepted connection from {}", peer_addr);
-        let connection = connection.clone();
-        let state = state.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = handle_forward_connection(socket, peer_addr, connection, state).await {
-                error!("Connection handling error: {}", e);
-            }
-        });
-    }
-}
 
 async fn handle_forward_connection(
     mut socket: TcpStream,

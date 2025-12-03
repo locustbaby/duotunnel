@@ -9,11 +9,10 @@ use tracing::debug;
 
 /// Forward HTTP request using Hyper client (with connection pooling)
 pub async fn forward_http_request(
-    http_client: &Client<HttpConnector, Body>,
-    https_client: &Client<HttpsConnector<HttpConnector>, Body>,
+    client: &Client<HttpsConnector<HttpConnector>, Body>,
     request_bytes: &[u8],
     target_uri: &str,
-    is_ssl: bool,
+    _is_ssl: bool,  // No longer needed, client handles both
 ) -> Result<Vec<u8>> {
     // 1. Parse HTTP request from bytes
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -87,16 +86,11 @@ pub async fn forward_http_request(
     let body = Body::from(body_bytes.to_vec());
     let hyper_request = builder.body(body)?;
     
-    debug!("Sending HTTP request: {} {} (SSL: {})", hyper_request.method(), hyper_request.uri(), is_ssl);
+    debug!("Sending HTTP request: {} {}", hyper_request.method(), hyper_request.uri());
     
-    // 4. Send request using Hyper client (HTTP or HTTPS) - clients have built-in connection pooling
-    let response = if is_ssl {
-        https_client.request(hyper_request).await
-            .with_context(|| "Failed to send HTTPS request")?
-    } else {
-        http_client.request(hyper_request).await
-            .with_context(|| "Failed to send HTTP request")?
-    };
+    // 4. Send request using unified client (handles both HTTP and HTTPS with connection pooling)
+    let response = client.request(hyper_request).await
+        .with_context(|| "Failed to send HTTP/HTTPS request")?;
     
     debug!("Received HTTP response: {}", response.status());
     

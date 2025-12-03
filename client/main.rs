@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{info, error, warn};
-use tunnel_lib::quic_transport::QuicClient;
+use tracing::info;
+use tokio::sync::broadcast;
 
 mod config;
 mod http_handler;
@@ -11,16 +11,22 @@ mod http_forwarder;
 mod wss_forwarder;
 mod grpc_forwarder;
 mod types;
-mod routing;
-mod reverse;
-mod control;
-mod forward;
-mod warmup;
+mod forwarder;
+mod client_listener;
+mod egress_pool;
+mod register;
+mod config_manager;
+mod quic_tunnel_manager;
+mod reverse_handler;
+mod listener_manager;
 
-use types::ClientState;
-use control::handle_control_stream;
-use reverse::handle_reverse_streams;
-use forward::{start_http_listener, start_grpc_listener, start_wss_listener};
+use types::{ClientState, ClientIdentity};
+use egress_pool::EgressPool;
+use quic_tunnel_manager::QuicTunnelManager;
+use listener_manager::ListenerManager;
+use config_manager::ConfigManager;
+use reverse_handler::ReverseRequestHandler;
+use forwarder::Forwarder;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -32,228 +38,132 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
     let config = config::ClientConfig::load(&args.config)?;
-    
-    // Initialize logging with configured log level
-    let log_level = config.log_level.to_lowercase();
+
+    initialize_logging(&config.log_level);
+
+    info!("=== Tunnel Client Starting ===");
+    info!("Config file: {}", args.config);
+    info!("Log level: {}", config.log_level);
+    info!("Server: {}", config.server_addr());
+    info!("Client group: {}", config.client_group_id);
+
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(16);
+
+    let identity = ClientIdentity {
+        client_id: config.client_id(),
+        group_id: config.client_group_id.clone(),
+        instance_id: uuid::Uuid::new_v4().to_string(),
+    };
+
+    info!("Client Identity: {:?}", identity);
+
+    let server_addr: SocketAddr = config.server_addr().parse()?;
+
+    info!("=== Step 1: Initializing EgressPool ===");
+    let egress_pool = Arc::new(EgressPool::new());
+
+    info!("=== Step 2: Initializing ClientState ===");
+    let state = initialize_client_state(egress_pool.clone());
+
+    info!("=== Step 3: Initializing Forwarder ===");
+    let forwarder = Arc::new(Forwarder::new(state.clone()));
+
+    info!("=== Step 4: Starting ListenerManager ===");
+    let listener_manager = ListenerManager::new(
+        config.http_entry_port,
+        config.grpc_entry_port,
+        config.wss_entry_port,
+        state.clone(),
+        forwarder.clone(),
+    );
+    let listener_handles = listener_manager.start_all().await?;
+
+    info!("=== Step 5: Starting QuicTunnelManager ===");
+    let quic_manager = QuicTunnelManager::new(
+        server_addr,
+        "localhost".to_string(),
+        identity.clone(),
+        state.clone(),
+        egress_pool.clone(),
+        forwarder.clone(),
+    );
+
+    let shutdown_rx_quic = shutdown_rx.resubscribe();
+    let quic_handle = tokio::spawn(async move {
+        if let Err(e) = quic_manager.run(shutdown_rx_quic).await {
+            tracing::error!("QUIC tunnel manager error: {}", e);
+        }
+    });
+
+    info!("=== Step 6: Starting ConfigManager ===");
+    let config_manager = ConfigManager::new(
+        identity.clone(),
+        state.clone(),
+        egress_pool.clone(),
+    );
+    let shutdown_rx_config = shutdown_rx.resubscribe();
+    let config_handle = tokio::spawn(async move {
+        if let Err(e) = config_manager.run(shutdown_rx_config).await {
+            tracing::error!("Config manager error: {}", e);
+        }
+    });
+
+    info!("=== Step 7: Starting ReverseRequestHandler ===");
+    let reverse_handler = ReverseRequestHandler::new(state.clone(), forwarder.clone());
+    let shutdown_rx_reverse = shutdown_rx.resubscribe();
+    let reverse_handle = tokio::spawn(async move {
+        if let Err(e) = reverse_handler.run(shutdown_rx_reverse).await {
+            tracing::error!("Reverse request handler error: {}", e);
+        }
+    });
+
+    info!("=== Tunnel Client Started Successfully ===");
+
+    tokio::signal::ctrl_c().await?;
+    info!("=== Received shutdown signal, initiating graceful shutdown ===");
+
+    let _ = shutdown_tx.send(());
+
+    for handle in listener_handles {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle
+        ).await;
+    }
+
+    config_handle.abort();
+    reverse_handle.abort();
+
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        quic_handle
+    ).await;
+
+    info!("=== Tunnel client shutdown complete ===");
+    Ok(())
+}
+
+fn initialize_logging(log_level: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new(&log_level)
+            tracing_subscriber::EnvFilter::new(log_level.to_lowercase())
         });
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .init();
+}
 
-    info!("Starting tunnel client...");
-    info!("Config file: {}", args.config);
-    info!("Log level: {}", config.log_level);
-    let server_addr_str = config.server_addr();
-    info!("Server address: {}", server_addr_str);
-
-    // Create Hyper HTTP client (with built-in connection pooling)
-    let http_connector = hyper::client::HttpConnector::new();
-    let http_client = Arc::new(
-        hyper::Client::builder()
-            .build(http_connector)
-    );
-    
-    // Create Hyper HTTPS client (with built-in connection pooling)
-    let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-    let https_client = Arc::new(
-        hyper::Client::builder()
-            .build(https_connector)
-    );
-    
-    // Initialize state
-    let state = Arc::new(ClientState {
+fn initialize_client_state(egress_pool: Arc<EgressPool>) -> Arc<ClientState> {
+    Arc::new(ClientState {
         rules: Arc::new(dashmap::DashMap::new()),
         upstreams: Arc::new(dashmap::DashMap::new()),
         config_version: Arc::new(tokio::sync::RwLock::new("0".to_string())),
         config_hash: Arc::new(tokio::sync::RwLock::new(String::new())),
         quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
         sessions: Arc::new(dashmap::DashMap::new()),
-        http_client,
-        https_client,
-    });
-
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-
-    // Start Listeners (HTTP, gRPC, WSS)
-    if let Some(http_port) = config.http_entry_port {
-        info!("Starting HTTP listener on port {}", http_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_http_listener(http_port, state_clone).await {
-                error!("HTTP listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(grpc_port) = config.grpc_entry_port {
-        info!("Starting gRPC listener on port {}", grpc_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_grpc_listener(grpc_port, state_clone).await {
-                error!("gRPC listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(wss_port) = config.wss_entry_port {
-        info!("Starting WSS listener on port {}", wss_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_wss_listener(wss_port, state_clone).await {
-                error!("WSS listener error: {}", e);
-            }
-        });
-    }
-    
-    // CONNECTION LOOP
-    let client_id = config.client_id();
-    let client_group_id = config.client_group_id.clone();
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    info!("Client Instance ID: {}", instance_id);
-    
-    let state_clone = state.clone();
-    let server_addr_str_clone = server_addr_str.clone(); // Renamed to avoid shadowing
-    let mut shutdown_rx_clone = shutdown_rx.resubscribe();
-    
-    tokio::spawn(async move {
-        let mut backoff = std::time::Duration::from_secs(1);
-        
-        loop {
-            // Check shutdown
-            if shutdown_rx_clone.try_recv().is_ok() {
-                break;
-            }
-            
-            info!("Connecting to server at {}...", server_addr_str_clone);
-            let client = match QuicClient::new() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Failed to create QUIC client: {}", e);
-                    tokio::time::sleep(backoff).await;
-                    continue;
-                }
-            };
-            
-            let server_addr: SocketAddr = match server_addr_str_clone.parse() {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("Invalid server address: {}", e);
-                    break; 
-                }
-            };
-            
-            match client.connect(server_addr, "localhost").await {
-                Ok(conn) => {
-                    info!("Connected to QUIC server");
-                    let conn = Arc::new(conn);
-                    
-                    // Update shared state
-                    {
-                        let mut lock = state_clone.quic_connection.write().await;
-                        *lock = Some(conn.clone());
-                    }
-                    
-                    backoff = std::time::Duration::from_secs(1);
-                    
-                    // Spawn Control Stream
-                    let conn_clone = conn.clone();
-                    let state_clone2 = state_clone.clone();
-                    let client_id = client_id.clone();
-                    let client_group_id = client_group_id.clone();
-                    let instance_id = instance_id.clone();
-                    let shutdown_rx_control = shutdown_rx_clone.resubscribe();
-                    
-                    let control_handle = tokio::spawn(async move {
-                        if let Err(e) = handle_control_stream(conn_clone, client_id, client_group_id, instance_id, state_clone2, shutdown_rx_control).await {
-                            error!("Control stream error: {}", e);
-                        }
-                    });
-                    
-                    // Spawn Reverse Stream
-                    let conn_clone = conn.clone();
-                    let state_clone2 = state_clone.clone();
-                    let reverse_handle = tokio::spawn(async move {
-                        if let Err(e) = handle_reverse_streams(conn_clone, state_clone2).await {
-                            error!("Reverse stream handler error: {}", e);
-                        }
-                    });
-                    
-                    // Wait for connection to close or critical error
-                    let reason = conn.closed().await;
-                    warn!("Connection closed: {:?}", reason);
-                    
-                    // Cleanup
-                    {
-                        let mut lock = state_clone.quic_connection.write().await;
-                        *lock = None;
-                    }
-                    
-                    // Abort handlers if they are still running (they should have exited due to connection close)
-                    control_handle.abort();
-                    reverse_handle.abort();
-                }
-                Err(e) => {
-                    error!("Failed to connect to server: {}", e);
-                }
-            }
-            
-            info!("Reconnecting in {:?}...", backoff);
-            tokio::time::sleep(backoff).await;
-            backoff = std::cmp::min(backoff * 2, std::time::Duration::from_secs(30));
-        }
-    });
-
-    // Start Listeners (HTTP, gRPC, WSS)
-    if let Some(http_port) = config.http_entry_port {
-        info!("Starting HTTP listener on port {}", http_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_http_listener(http_port, state_clone).await {
-                error!("HTTP listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(grpc_port) = config.grpc_entry_port {
-        info!("Starting gRPC listener on port {}", grpc_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_grpc_listener(grpc_port, state_clone).await {
-                error!("gRPC listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(wss_port) = config.wss_entry_port {
-        info!("Starting WSS listener on port {}", wss_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_wss_listener(wss_port, state_clone).await {
-                error!("WSS listener error: {}", e);
-            }
-        });
-    }
-
-
-    // Keep main alive
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
-    
-    // Send shutdown signal
-    let _ = shutdown_tx.send(());
-    
-    // Wait a bit for graceful shutdown messages to be sent
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    Ok(())
+        egress_pool,
+    })
 }

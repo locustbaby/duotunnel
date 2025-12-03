@@ -197,10 +197,9 @@ async fn main() -> Result<()> {
             })
             .collect();
         
-        let http_client_clone = state.http_client.clone();
         let https_client_clone = state.https_client.clone();
         tokio::spawn(async move {
-            tunnel_lib::warmup::warmup_connection_pools(&http_client_clone, &https_client_clone, &rules, &upstreams).await;
+            tunnel_lib::warmup::warmup_connection_pools(&https_client_clone, &rules, &upstreams).await;
         });
     }
 

@@ -3,9 +3,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
-use hyper::{Body, Client};
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
+
+/// Client Identity information
+#[derive(Debug, Clone)]
+pub struct ClientIdentity {
+    pub client_id: String,
+    pub group_id: String,
+    pub instance_id: String,
+}
 
 /// Session state for frame reassembly
 pub struct SessionState {
@@ -57,9 +62,6 @@ pub struct ClientState {
     pub quic_connection: Arc<tokio::sync::RwLock<Option<Arc<quinn::Connection>>>>,
     /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<tokio::sync::Mutex<SessionState>>>>,
-    /// Hyper HTTP client (with connection pooling)
-    pub http_client: Arc<Client<HttpConnector, Body>>,
-    /// Hyper HTTPS client (with connection pooling)
-    pub https_client: Arc<Client<HttpsConnector<HttpConnector>, Body>>,
+    /// Egress connection pool (manages HTTP/HTTPS clients for upstreams)
+    pub egress_pool: Arc<crate::egress_pool::EgressPool>,
 }
-
