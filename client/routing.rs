@@ -3,14 +3,18 @@ use tunnel_lib::proto::tunnel::{Rule, Upstream};
 
 /// Match rule by type and host
 pub fn match_rule_by_type_and_host<'a>(rules: &'a [Rule], rule_type: &str, host: &str) -> Result<Option<&'a Rule>> {
+    // Strip port from host for matching (Host header can include port like "hostname:8001")
+    let host_without_port = host.split(':').next().unwrap_or(host).trim();
+    
     for rule in rules {
         // Match type
         if rule.r#type != rule_type {
             continue;
         }
         
-        // Match host
-        if !rule.match_host.is_empty() && rule.match_host.eq_ignore_ascii_case(host) {
+        // Match host (compare hostname without port)
+        let rule_host_without_port = rule.match_host.split(':').next().unwrap_or(&rule.match_host).trim();
+        if !rule.match_host.is_empty() && rule_host_without_port.eq_ignore_ascii_case(host_without_port) {
             return Ok(Some(rule));
         }
     }

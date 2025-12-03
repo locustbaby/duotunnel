@@ -53,7 +53,7 @@ tunnel_management:
   server_ingress_routing:
     rules:
       http:
-        - match_host: "www.google.com"
+        - match_host: "test-tunnel-harbor-us-vdc.zilliz.cc"
           action_client_group: "group-a"
         - match_host: "www2.google.com"
           action_client_group: "group-b"
@@ -73,7 +73,7 @@ tunnel_management:
           local_service: # Client's local service (e.g., http://127.0.0.1:8080)
             servers:
               # - address: "https://echo.free.beeceptor.com"
-              - address: "https://www.google.com"
+              - address: "https://harbor-us-vdc.zilliz.cc"
                 resolve: false
             lb_policy: "round_robin"
           
@@ -85,6 +85,8 @@ tunnel_management:
         
         rules: # Client's rules for traffic received from the tunnel (forwards to local service)
           http:
+            - match_host: "test-tunnel-harbor-us-vdc.zilliz.cc"
+              action_upstream: "local_service"
             - match_host: "www.google.com"
               action_upstream: "local_service"
             - match_host: "localhost"

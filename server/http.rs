@@ -62,17 +62,21 @@ async fn handle_http_request(
     }
     
     // Extract Host header
-    let host = req.headers.iter()
+    let host_with_port = req.headers.iter()
         .find(|h| h.name.eq_ignore_ascii_case("host"))
         .and_then(|h| std::str::from_utf8(h.value).ok())
         .map(|s| s.to_string());
     
-    let host = host.ok_or_else(|| anyhow::anyhow!("Missing Host header"))?;
-    debug!("HTTP request Host: {}", host);
+    let host_with_port = host_with_port.ok_or_else(|| anyhow::anyhow!("Missing Host header"))?;
+    debug!("HTTP request Host: {}", host_with_port);
+    
+    // Strip port from host header for matching (Host header can include port like "hostname:8001")
+    let host = host_with_port.split(':').next().unwrap_or(&host_with_port).trim();
+    debug!("Extracted hostname (without port): {}", host);
     
     // 3. Match ingress routing rule
     let matched_rule = state.ingress_rules.iter()
-        .find(|r| r.match_host.eq_ignore_ascii_case(&host));
+        .find(|r| r.match_host.eq_ignore_ascii_case(host));
     
     let client_group = match matched_rule {
         Some(rule) => {
@@ -139,7 +143,7 @@ async fn handle_http_request(
     
     let routing_info = RoutingInfo {
         r#type: "http".to_string(),
-        host: host.clone(),
+        host: host_with_port.clone(), // Use original host with port for routing
         method,
         path,
     };
@@ -148,7 +152,7 @@ async fn handle_http_request(
     let routing_frame = create_routing_frame(session_id, &routing_info);
     write_frame(&mut send, &routing_frame).await?;
     info!("[{}] Sent routing frame to client {}: session_id={}, host={}", 
-        request_id, client_id, session_id, host);
+        request_id, client_id, session_id, host_with_port);
     
     // 8. Split request into frames (max 64KB per frame to avoid QUIC limits)
     const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
