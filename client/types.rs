@@ -63,5 +63,5 @@ pub struct ClientState {
     /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<tokio::sync::Mutex<SessionState>>>>,
     /// Egress connection pool (manages HTTP/HTTPS clients for upstreams)
-    pub egress_pool: Arc<crate::egress_pool::EgressPool>,
+    pub egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>,
 }

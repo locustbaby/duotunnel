@@ -10,16 +10,13 @@ mod config;
 mod types;
 mod connection;
 mod control;
-mod client_mgr;
-mod http;
 mod data_stream;
-mod listeners;
 mod egress_forwarder;
+mod ingress_handlers;
 
 use types::{ServerState, IngressRule};
 use connection::accept_loop;
-use http::start_http_listener;
-use listeners::{start_grpc_listener, start_wss_listener};
+use ingress_handlers::{HttpIngressHandler, GrpcIngressHandler, WssIngressHandler};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -136,24 +133,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Create Hyper HTTP client (with built-in connection pooling)
-    let http_connector = hyper::client::HttpConnector::new();
-    let http_client = Arc::new(
-        hyper::Client::builder()
-            .build(http_connector)
-    );
-
-    // Create Hyper HTTPS client (with built-in connection pooling)
-    let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-    let https_client = Arc::new(
-        hyper::Client::builder()
-            .build(https_connector)
-    );
+    // Create unified egress connection pool
+    let egress_pool = Arc::new(tunnel_lib::egress_pool::EgressPool::new());
 
     // Initialize server state
     let state = Arc::new(ServerState {
@@ -167,39 +148,35 @@ async fn main() -> Result<()> {
         client_configs,
         config_version: config.server.config_version.clone(),
         sessions: Arc::new(dashmap::DashMap::new()),
-        http_client,
-        https_client,
+        egress_pool,
     });
 
     // Warmup connection pools for egress upstreams
     if let Some(ref egress) = config.server_egress_upstream {
-        use tunnel_lib::proto::tunnel::{Rule, Upstream, UpstreamServer};
         let rules: Vec<Rule> = egress.rules.http.iter().enumerate()
             .map(|(idx, r)| Rule {
                 rule_id: format!("egress_http_{}", idx),
                 r#type: "http".to_string(),
                 match_host: r.match_host.clone(),
                 match_path_prefix: String::new(),
-                match_header: HashMap::new(),
+                match_header: std::collections::HashMap::new(),
                 action_proxy_pass: r.action_upstream.clone(),
                 action_set_host: String::new(),
             })
             .collect();
         
-        let upstreams: Vec<Upstream> = egress.upstreams.iter()
-            .map(|(name, u)| Upstream {
-                name: name.clone(),
-                servers: u.servers.iter().map(|s| UpstreamServer {
-                    address: s.address.clone(),
-                    resolve: s.resolve,
-                }).collect(),
-                lb_policy: u.lb_policy.clone(),
-            })
-            .collect();
+        let upstreams: Vec<Upstream> = egress.upstreams.iter().map(|(name, u)| Upstream {
+            name: name.clone(),
+            servers: u.servers.iter().map(|s| UpstreamServer {
+                address: s.address.clone(),
+                resolve: s.resolve,
+            }).collect(),
+            lb_policy: u.lb_policy.clone(),
+        }).collect();
         
-        let https_client_clone = state.https_client.clone();
+        let egress_pool_clone = state.egress_pool.clone();
         tokio::spawn(async move {
-            tunnel_lib::warmup::warmup_connection_pools(&https_client_clone, &rules, &upstreams).await;
+            egress_pool_clone.warmup_upstreams(&upstreams).await;
         });
     }
 
@@ -216,41 +193,30 @@ async fn main() -> Result<()> {
     });
     info!("✓ QUIC acceptor loop started");
 
-    // 2. Start HTTP listener if configured
-    if let Some(http_port) = config.server.http_entry_port {
-        info!("Starting HTTP listener on port {}...", http_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_http_listener(http_port, state_clone).await {
-                error!("HTTP listener error: {}", e);
-            }
-        });
-        info!("✓ HTTP listener task spawned (will listen on 0.0.0.0:{})", http_port);
-    } else {
-        info!("HTTP listener not configured (http_entry_port not set)");
-    }
-
-    // 3. Start gRPC listener if configured
-    if let Some(grpc_port) = config.server.grpc_entry_port {
-        info!("Starting gRPC listener on port {}", grpc_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_grpc_listener(grpc_port, state_clone).await {
-                error!("gRPC listener error: {}", e);
-            }
-        });
-    }
-
-    // 4. Start WSS listener if configured
-    if let Some(wss_port) = config.server.wss_entry_port {
-        info!("Starting WSS listener on port {}", wss_port);
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = start_wss_listener(wss_port, state_clone).await {
-                error!("WSS listener error: {}", e);
-            }
-        });
-    }
+    // Start ingress listeners using ListenerManager
+    let http_handler = config.server.http_entry_port.map(|_| {
+        Arc::new(HttpIngressHandler::new(state.clone()))
+    });
+    
+    let grpc_handler = config.server.grpc_entry_port.map(|_| {
+        Arc::new(GrpcIngressHandler::new(state.clone()))
+    });
+    
+    let wss_handler = config.server.wss_entry_port.map(|_| {
+        Arc::new(WssIngressHandler::new(state.clone()))
+    });
+    
+    let listener_manager = tunnel_lib::listener::ListenerManager::new(
+        config.server.http_entry_port,
+        config.server.grpc_entry_port,
+        config.server.wss_entry_port,
+    );
+    
+    let _listener_handles = listener_manager.start_all(
+        http_handler,
+        grpc_handler,
+        wss_handler,
+    ).await?;
 
     // Keep main alive
     tokio::signal::ctrl_c().await?;

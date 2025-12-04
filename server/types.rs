@@ -5,9 +5,6 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
-use hyper::{Body, Client};
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
 
 /// Session state for frame reassembly
 pub struct SessionState {
@@ -67,10 +64,8 @@ pub struct ServerState {
     pub config_version: String,
     /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<Mutex<SessionState>>>>,
-    /// Hyper HTTP client (with connection pooling)
-    pub http_client: Arc<Client<HttpConnector, Body>>,
-    /// Hyper HTTPS client (with connection pooling)
-    pub https_client: Arc<Client<HttpsConnector<HttpConnector>, Body>>,
+    /// Egress connection pool (unified HTTP/HTTPS client with connection pooling)
+    pub egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>,
 }
 
 #[derive(Debug, Clone)]

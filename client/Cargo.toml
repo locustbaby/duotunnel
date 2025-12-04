@@ -8,7 +8,7 @@ name = "client"
 path = "main.rs"
 
 [dependencies]
-tunnel-lib = { path = "../tunnel-lib", features = ["warmup"] }
+tunnel-lib = { path = "../tunnel-lib", features = ["warmup", "egress"] }
 tokio = { version = "1", features = ["full"] }
 quinn = "0.10"
 rustls = "0.21"
@@ -24,6 +24,8 @@ clap = { version = "4.4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 httparse = "1.1"
 bytes = "1.5"
+async-trait = "0.1"
+url = "2.5"
 dashmap = "6.1.0"
 futures = "0.3"
 hyper = { version = "0.14", features = ["client", "http1", "http2", "runtime"] }

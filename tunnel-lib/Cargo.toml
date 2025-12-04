@@ -18,6 +18,7 @@ bytes = "1.5"
 thiserror = "1.0"
 prost = "0.12"
 sha2 = "0.10"
+async-trait = "0.1"
 hyper = { version = "0.14", features = ["client", "http1", "http2", "runtime"], optional = true }
 hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http1", "http2"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["native-tls", "native-tls-vendored"], optional = true }
@@ -27,6 +28,7 @@ futures = { version = "0.3", optional = true }
 [features]
 default = []
 warmup = ["hyper", "hyper-rustls", "tokio-tungstenite", "tonic", "futures"]
+egress = ["hyper", "hyper-rustls", "futures"]
 
 [build-dependencies]
 prost-build = "0.12"

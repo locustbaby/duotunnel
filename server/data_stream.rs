@@ -108,8 +108,7 @@ pub async fn handle_data_stream(
     let response_bytes = match routing_info.r#type.as_str() {
         "http" => {
             forward_egress_http_request(
-                &state.http_client,
-                &state.https_client,
+                &state.egress_pool.client(),
                 &request_buffer,
                 &final_target_addr,
                 is_target_ssl,

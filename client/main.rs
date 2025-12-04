@@ -6,27 +6,20 @@ use tracing::info;
 use tokio::sync::broadcast;
 
 mod config;
-mod http_handler;
-mod http_forwarder;
-mod wss_forwarder;
-mod grpc_forwarder;
 mod types;
 mod forwarder;
-mod client_listener;
-mod egress_pool;
 mod register;
 mod config_manager;
 mod quic_tunnel_manager;
 mod reverse_handler;
-mod listener_manager;
+mod ingress_handlers;
 
 use types::{ClientState, ClientIdentity};
-use egress_pool::EgressPool;
 use quic_tunnel_manager::QuicTunnelManager;
-use listener_manager::ListenerManager;
 use config_manager::ConfigManager;
 use reverse_handler::ReverseRequestHandler;
 use forwarder::Forwarder;
+use ingress_handlers::{HttpIngressHandler, GrpcIngressHandler, WssIngressHandler};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -62,7 +55,7 @@ async fn main() -> Result<()> {
     let server_addr: SocketAddr = config.server_addr().parse()?;
 
     info!("=== Step 1: Initializing EgressPool ===");
-    let egress_pool = Arc::new(EgressPool::new());
+    let egress_pool = Arc::new(tunnel_lib::egress_pool::EgressPool::new());
 
     info!("=== Step 2: Initializing ClientState ===");
     let state = initialize_client_state(egress_pool.clone());
@@ -71,14 +64,30 @@ async fn main() -> Result<()> {
     let forwarder = Arc::new(Forwarder::new(state.clone()));
 
     info!("=== Step 4: Starting ListenerManager ===");
-    let listener_manager = ListenerManager::new(
+    
+    let http_handler = config.http_entry_port.map(|_| {
+        Arc::new(HttpIngressHandler::new(state.clone()))
+    });
+    
+    let grpc_handler = config.grpc_entry_port.map(|_| {
+        Arc::new(GrpcIngressHandler::new(state.clone()))
+    });
+    
+    let wss_handler = config.wss_entry_port.map(|_| {
+        Arc::new(WssIngressHandler::new(state.clone()))
+    });
+    
+    let listener_manager = tunnel_lib::listener::ListenerManager::new(
         config.http_entry_port,
         config.grpc_entry_port,
         config.wss_entry_port,
-        state.clone(),
-        forwarder.clone(),
     );
-    let listener_handles = listener_manager.start_all().await?;
+    
+    let listener_handles = listener_manager.start_all(
+        http_handler,
+        grpc_handler,
+        wss_handler,
+    ).await?;
 
     info!("=== Step 5: Starting QuicTunnelManager ===");
     let quic_manager = QuicTunnelManager::new(
@@ -156,7 +165,7 @@ fn initialize_logging(log_level: &str) {
         .init();
 }
 
-fn initialize_client_state(egress_pool: Arc<EgressPool>) -> Arc<ClientState> {
+fn initialize_client_state(egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>) -> Arc<ClientState> {
     Arc::new(ClientState {
         rules: Arc::new(dashmap::DashMap::new()),
         upstreams: Arc::new(dashmap::DashMap::new()),

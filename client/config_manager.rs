@@ -6,7 +6,7 @@ use quinn::{Connection, SendStream, RecvStream};
 use tunnel_lib::protocol::{write_control_message, read_control_message};
 use tunnel_lib::proto::tunnel::control_message::Payload;
 use crate::types::{ClientState, ClientIdentity};
-use crate::egress_pool::EgressPool;
+use tunnel_lib::egress_pool::EgressPool;
 use crate::register::RegisterManager;
 
 const HASH_CHECK_INTERVAL: Duration = Duration::from_secs(15);

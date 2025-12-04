@@ -3,7 +3,7 @@ use hyper::{Body, Client};
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use tracing::{info, debug};
-use tunnel_lib::proto::tunnel::Upstream;
+use crate::proto::tunnel::Upstream;
 
 /// Egress connection pool manager
 /// Manages HTTP/HTTPS clients for different upstream targets
@@ -17,7 +17,7 @@ impl EgressPool {
     pub fn new() -> Self {
         let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
-            .https_or_http()  // Supports both HTTP and HTTPS
+            .https_or_http()
             .enable_http1()
             .enable_http2()
             .build();
@@ -70,7 +70,6 @@ impl EgressPool {
             }
         }
         
-        // Wait for all warmup tasks with timeout
         let timeout = tokio::time::Duration::from_secs(10);
         match tokio::time::timeout(timeout, futures::future::join_all(warmup_tasks)).await {
             Ok(_) => {
@@ -97,19 +96,15 @@ async fn warmup_connection(
     use hyper::{Method, Request};
     use std::str::FromStr;
     
-    // Parse URI
     let uri = hyper::Uri::from_str(address)?;
     
-    // Create a lightweight HEAD request
     let request = Request::builder()
         .method(Method::HEAD)
         .uri(uri)
         .body(Body::empty())?;
     
-    // Send request
     let response = client.request(request).await?;
     
-    // Consume response body to complete connection
     use hyper::body::HttpBody;
     let mut body = response.into_body();
     while let Some(chunk) = body.data().await {

@@ -3,9 +3,8 @@ use std::sync::Arc;
 use tracing::{info, error, debug, warn};
 use quinn::Connection;
 use crate::types::ServerState;
-use crate::control::handle_control_stream;
+use crate::control::{handle_control_stream, find_client_id_by_addr, cleanup_client_registration};
 use crate::data_stream::handle_data_stream;
-use crate::client_mgr::{find_client_id_by_addr, cleanup_client_registration};
 
 /// Accept loop for QUIC server
 pub async fn accept_loop(server: tunnel_lib::quic_transport::QuicServer, state: Arc<ServerState>) {

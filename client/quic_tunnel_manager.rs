@@ -6,7 +6,7 @@ use tracing::{info, error, warn};
 use quinn::Connection;
 use tunnel_lib::quic_transport::QuicClient;
 use crate::types::{ClientState, ClientIdentity};
-use crate::egress_pool::EgressPool;
+use tunnel_lib::egress_pool::EgressPool;
 use crate::forwarder::Forwarder;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
