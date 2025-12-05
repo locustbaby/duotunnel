@@ -21,7 +21,6 @@ pub async fn accept_loop(server: tunnel_lib::quic_transport::QuicServer, state: 
     }
 }
 
-/// Handle a single QUIC connection
 pub async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<()> {
     let remote_addr = conn.remote_address();
     info!("New connection from {}", remote_addr);

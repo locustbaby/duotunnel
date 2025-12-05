@@ -8,8 +8,6 @@ use crate::types::ServerState;
 use crate::egress_forwarder::forward_egress_http_request;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
 
-/// Handle data stream (Forward Tunnels from Client)
-/// Client opens stream -> Server receives frames -> Server forwards to upstream
 pub async fn handle_data_stream(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -18,7 +16,7 @@ pub async fn handle_data_stream(
     let request_id = Uuid::new_v4().to_string();
     let stream_start = std::time::Instant::now();
     
-    // 1. Read first frame (routing frame) - client-initiated stream
+
     info!("[{}] Reading routing frame from client-initiated stream...", request_id);
     let routing_frame = read_frame(&mut recv).await?;
     
@@ -30,7 +28,7 @@ pub async fn handle_data_stream(
     
     let session_id = routing_frame.session_id;
     
-    // 2. Read all request frames and reassemble
+
     let mut request_buffer = BytesMut::new();
     let mut session_complete = false;
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -62,7 +60,7 @@ pub async fn handle_data_stream(
         }
     }
     
-    // 3. Match egress rules based on type and host
+
     let matched_upstream = if routing_info.r#type == "http" {
         state.egress_rules_http.iter()
             .find(|r| r.match_host.eq_ignore_ascii_case(&routing_info.host))
@@ -94,7 +92,7 @@ pub async fn handle_data_stream(
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
         request_id, final_target_addr, is_target_ssl);
     
-    // 4. Forward request based on protocol type
+
     let protocol_type_enum = match routing_info.r#type.as_str() {
         "http" => ProtocolType::Http11,
         "grpc" => ProtocolType::Grpc,
@@ -155,7 +153,7 @@ pub async fn handle_data_stream(
     
     info!("[{}] Received response from upstream ({} bytes)", request_id, response_bytes.len());
     
-    // 5. Split response into frames and send back to client
+
     const MAX_FRAME_SIZE: usize = 64 * 1024;
     let mut offset = 0;
     
@@ -183,7 +181,7 @@ pub async fn handle_data_stream(
         request_id, (response_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, 
         response_bytes.len(), stream_start.elapsed());
     
-    // 6. Finish the send stream
+
     if let Err(e) = send.finish() {
         error!("[{}] Failed to finish send stream: {}", request_id, e);
         return Err(e.into());

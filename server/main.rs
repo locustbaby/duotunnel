@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = config::ServerConfig::load(&args.config)?;
     
-    // Initialize logging with configured log level
+
     let log_level = config.server.log_level.to_lowercase();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let bind_addr = config.bind_addr();
     info!("QUIC tunnel bind address: {}", bind_addr);
 
-    // Extract ingress routing rules
+
     let ingress_rules: Vec<IngressRule> = config.tunnel_management
         .as_ref()
         .and_then(|tm| tm.server_ingress_routing.as_ref())
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_default();
 
-    // Extract egress routing rules and upstreams
+
     let (egress_rules_http, egress_rules_grpc, egress_upstreams) = if let Some(ref egress) = config.server_egress_upstream {
         let rules_http: Vec<types::EgressRule> = egress.rules.http.iter().map(|r| types::EgressRule {
             match_host: r.match_host.clone(),
@@ -93,13 +93,13 @@ async fn main() -> Result<()> {
         (Vec::new(), Vec::new(), HashMap::new())
     };
 
-    // Extract client-specific configurations (client_egress_routings)
+
     let mut client_configs: HashMap<String, (Vec<Rule>, Vec<Upstream>, String)> = HashMap::new();
     
     if let Some(ref tm) = config.tunnel_management {
         if let Some(ref client_configs_map) = tm.client_configs {
             for (group_id, client_routing) in &client_configs_map.client_egress_routings {
-                // Convert client rules
+
                 let client_rules: Vec<Rule> = client_routing.rules.http.iter().enumerate()
                     .map(|(idx, r)| Rule {
                         rule_id: format!("client_{}_{}", group_id, idx),
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
                     })
                     .collect();
                 
-                // Convert client upstreams
+
                 let client_upstreams: Vec<Upstream> = client_routing.upstreams.iter()
                     .map(|(name, u)| Upstream {
                         name: name.clone(),
@@ -137,10 +137,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Create unified egress connection pool
+
     let egress_pool = Arc::new(tunnel_lib::egress_pool::EgressPool::new());
 
-    // Initialize server state
+
     let state = Arc::new(ServerState {
         clients: dashmap::DashMap::new(),
         client_groups: dashmap::DashMap::new(),
@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
         egress_pool,
     });
 
-    // Warmup connection pools for egress upstreams
+
     if let Some(ref egress) = config.server_egress_upstream {
         let rules: Vec<Rule> = egress.rules.http.iter().enumerate()
             .map(|(idx, r)| Rule {
@@ -186,20 +186,20 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 1. Start QUIC Server (always required)
+
     let server_addr: std::net::SocketAddr = bind_addr.parse()?;
     info!("Binding QUIC server on {}...", server_addr);
     let quic_server = QuicServer::bind(server_addr).await?;
     info!("✓ QUIC server successfully bound and listening on {}", server_addr);
     
-    // Spawn QUIC acceptor
+
     let state_clone = state.clone();
     let quic_handle = tokio::spawn(async move {
         accept_loop(quic_server, state_clone).await;
     });
     info!("✓ QUIC acceptor loop started");
 
-    // Start ingress listeners using ListenerManager
+
     let http_handler = config.server.http_entry_port.map(|_| {
         Arc::new(HttpIngressHandler::new(state.clone()))
     });
@@ -226,11 +226,11 @@ async fn main() -> Result<()> {
 
     info!("=== Tunnel Server Started Successfully ===");
 
-    // Wait for shutdown signal
+
     tokio::signal::ctrl_c().await?;
     info!("=== Received shutdown signal, initiating graceful shutdown ===");
 
-    // Step 1: Stop accepting new connections (shutdown listeners)
+
     info!("Step 1/4: Shutting down ingress listeners");
     let listener_shutdown_timeout = std::time::Duration::from_secs(3);
     for (idx, handle) in listener_handles.into_iter().enumerate() {
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Step 2: Close all client connections gracefully
+
     info!("Step 2/4: Closing client connections");
     let client_count = state.clients.len();
     for entry in state.clients.iter() {
@@ -260,14 +260,14 @@ async fn main() -> Result<()> {
         info!("  ✓ Closed {} client connections", client_count);
     }
 
-    // Step 3: Wait for QUIC acceptor to finish
+
     info!("Step 3/4: Waiting for QUIC acceptor to complete");
     let quic_shutdown_timeout = std::time::Duration::from_secs(5);
     
-    // Give the acceptor a moment to process the connection closures
+
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     
-    // Abort the acceptor loop (it's an infinite loop)
+
     quic_handle.abort();
     
     match tokio::time::timeout(quic_shutdown_timeout, quic_handle).await {
@@ -285,10 +285,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Step 4: Final cleanup
+
     info!("Step 4/4: Performing final cleanup");
     
-    // Clear all state
+
     let session_count = state.sessions.len();
     state.sessions.clear();
     if session_count > 0 {

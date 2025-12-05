@@ -134,18 +134,18 @@ async fn main() -> Result<()> {
 
     info!("=== Tunnel Client Started Successfully ===");
 
-    // Wait for shutdown signal
+
     tokio::signal::ctrl_c().await?;
     info!("=== Received shutdown signal, initiating graceful shutdown ===");
 
-    // Step 1: Send shutdown signal to all components
+
     info!("Step 1/4: Broadcasting shutdown signal to all components");
     let _ = shutdown_tx.send(());
     
-    // Give components a moment to receive the signal
+
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Step 2: Stop accepting new connections (shutdown listeners)
+
     info!("Step 2/4: Shutting down ingress listeners");
     let listener_shutdown_timeout = std::time::Duration::from_secs(3);
     for (idx, handle) in listener_handles.into_iter().enumerate() {
@@ -162,11 +162,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Step 3: Wait for background tasks to complete gracefully
+
     info!("Step 3/4: Waiting for background tasks to complete");
     let task_shutdown_timeout = std::time::Duration::from_secs(10);
     
-    // Wait for all tasks with timeout
+
     let shutdown_result = tokio::time::timeout(
         task_shutdown_timeout,
         async {
@@ -202,16 +202,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Step 4: Final cleanup
+
     info!("Performing final cleanup");
     
-    // Close QUIC connection if exists
+
     if let Some(conn) = state.quic_connection.read().await.as_ref() {
         conn.close(0u32.into(), b"Client shutdown");
         info!("  ✓ QUIC connection closed");
     }
     
-    // Clear sessions
+
     let session_count = state.sessions.len();
     state.sessions.clear();
     if session_count > 0 {

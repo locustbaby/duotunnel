@@ -137,14 +137,14 @@ impl ServerConfig {
         Ok(config)
     }
     
-    /// Get bind address from server config
+
     pub fn bind_addr(&self) -> String {
         format!("0.0.0.0:{}", self.server.tunnel_port)
     }
     
-    /// Convert to legacy format for compatibility
+
     pub fn rules(&self) -> Vec<RuleConfig> {
-        // Extract rules from server_egress_upstream and tunnel_management
+
         let mut rules = Vec::new();
         
         if let Some(ref egress) = self.server_egress_upstream {
@@ -164,7 +164,7 @@ impl ServerConfig {
         rules
     }
     
-    /// Convert to legacy format for compatibility
+
     pub fn upstreams(&self) -> Vec<UpstreamConfigLegacy> {
         let mut upstreams = Vec::new();
         
@@ -182,7 +182,6 @@ impl ServerConfig {
     }
 }
 
-// Legacy structs for compatibility with existing code
 #[derive(Debug, Deserialize, Clone)]
 pub struct RuleConfig {
     pub rule_id: String,

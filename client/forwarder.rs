@@ -18,14 +18,11 @@ use crate::types::ClientState;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
 use tunnel_lib::frame::TunnelFrame as Frame;
 
-// ============================================================================
-// URI Utilities - Common URI parsing and normalization
-// ============================================================================
 
 mod uri_utils {
     use super::*;
 
-    /// Parsed URI information
+
     #[derive(Debug, Clone)]
     pub struct ParsedUri {
         pub scheme: String,
@@ -34,24 +31,24 @@ mod uri_utils {
         pub is_ssl: bool,
     }
 
-    /// Normalize URI to a standard format
-    /// Handles: http://host, https://host, host:port, host, etc.
+
+
     pub fn normalize_uri(uri: &str, default_scheme: &str) -> Result<String> {
         let uri = uri.trim();
         
-        // If already has scheme, return as-is
+
         if uri.starts_with("http://") || uri.starts_with("https://") 
             || uri.starts_with("ws://") || uri.starts_with("wss://") {
             return Ok(uri.to_string());
         }
         
-        // Add default scheme
+
         Ok(format!("{}://{}", default_scheme, uri))
     }
 
-    /// Parse target URI and extract components
+
     pub fn parse_target(target_uri: &str, protocol_type: &str) -> Result<ParsedUri> {
-        // Determine default scheme based on protocol type
+
         let default_scheme = match protocol_type {
             "http" => "http",
             "wss" => "ws",
@@ -70,7 +67,7 @@ mod uri_utils {
             .ok_or_else(|| anyhow::anyhow!("Missing host in URI: {}", target_uri))?
             .to_string();
         
-        // Determine default port based on scheme
+
         let default_port = match scheme.as_str() {
             "http" | "ws" => 80,
             "https" | "wss" => 443,
@@ -88,16 +85,13 @@ mod uri_utils {
         })
     }
 
-    /// Convert URI to host:port format (without scheme)
+
     pub fn to_host_port(target_uri: &str, protocol_type: &str) -> Result<String> {
         let parsed = parse_target(target_uri, protocol_type)?;
         Ok(format!("{}:{}", parsed.host, parsed.port))
     }
 }
 
-// ============================================================================
-// Forwarder - Main dispatcher for different protocols
-// ============================================================================
 
 pub type ForwardResult = Result<Vec<u8>>;
 
@@ -150,15 +144,12 @@ impl Forwarder {
     }
 }
 
-// ============================================================================
-// HTTP Forwarder - Handles HTTP/HTTPS requests
-// ============================================================================
 
 pub mod http {
     use super::*;
 
-    /// Read complete HTTP request (headers + body) from a stream
-    /// Returns the complete request bytes
+
+
     pub async fn read_complete_http_request(
         socket: &mut TcpStream,
     ) -> Result<BytesMut> {
@@ -224,7 +215,7 @@ pub mod http {
         Ok(buffer)
     }
 
-    /// Determine body length from HTTP headers
+
     fn determine_body_length(headers: &[httparse::Header]) -> Result<Option<usize>> {
         for header in headers {
             if header.name.eq_ignore_ascii_case("transfer-encoding") {
@@ -247,7 +238,7 @@ pub mod http {
         Ok(Some(0))
     }
 
-    /// Read chunked body
+
     async fn read_chunked_body(socket: &mut TcpStream, buffer: &mut BytesMut) -> Result<()> {
         use tokio::io::AsyncReadExt;
         
@@ -290,7 +281,7 @@ pub mod http {
         Ok(())
     }
 
-    /// Handle HTTP forward connection from local client to server via QUIC tunnel
+
     pub async fn handle_http_forward_connection(
         mut socket: TcpStream,
         connection: Arc<Connection>,
@@ -404,8 +395,8 @@ pub mod http {
         Ok(())
     }
 
-    /// Forward HTTP request using Hyper client (with connection pooling)
-    /// This is used for reverse tunneling (server -> client -> upstream)
+
+
     pub async fn forward_http_request(
         client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
         request_bytes: &[u8],
@@ -516,15 +507,12 @@ pub mod http {
     }
 }
 
-// ============================================================================
-// WebSocket Forwarder - Handles WSS requests
-// ============================================================================
 
 pub mod wss {
     use super::*;
 
-    /// Forward WSS request using tokio-tungstenite
-    /// This handles WebSocket connections with bidirectional streaming
+
+
     pub async fn forward_wss_request(
         request_bytes: &[u8],
         target_uri: &str,
@@ -538,7 +526,7 @@ pub mod wss {
             anyhow::bail!("Incomplete HTTP headers");
         }
 
-        // Use uri_utils to normalize WebSocket URL
+
         let parsed = uri_utils::parse_target(target_uri, "wss")?;
         let ws_url = format!("{}://{}:{}", 
             if parsed.is_ssl { "wss" } else { "ws" },
@@ -562,21 +550,18 @@ pub mod wss {
     }
 }
 
-// ============================================================================
-// gRPC Forwarder - Handles gRPC requests
-// ============================================================================
 
 pub mod grpc {
     use super::*;
 
-    /// Forward gRPC request using Tonic
-    /// This handles gRPC unary and streaming requests
+
+
     pub async fn forward_grpc_request(
         request_bytes: &[u8],
         target_uri: &str,
         _is_ssl: bool,
     ) -> Result<Vec<u8>> {
-        // Use uri_utils to parse target
+
         let parsed = uri_utils::parse_target(target_uri, "grpc")?;
         
         let endpoint_url = format!("{}://{}:{}", 

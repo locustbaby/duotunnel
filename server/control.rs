@@ -8,9 +8,6 @@ use tunnel_lib::protocol::{write_control_message, read_control_message};
 use tunnel_lib::proto::tunnel::control_message::Payload;
 use tunnel_lib::proto::tunnel::ConfigSyncResponse;
 
-// ============================================================================
-// Client Management Functions
-// ============================================================================
 
 pub fn find_client_id_by_addr(state: &ServerState, remote_addr: &SocketAddr) -> Option<String> {
     state.addr_to_client.get(remote_addr).map(|r| r.value().clone())
@@ -38,7 +35,6 @@ pub fn cleanup_client_registration(state: &ServerState, client_id: &str) {
     }
 }
 
-/// Select a client from a group (simple round-robin)
 pub fn select_client_from_group(
     state: &ServerState,
     group: &str,
@@ -66,7 +62,6 @@ pub fn select_client_from_group(
     anyhow::bail!("No available clients in group {}", group)
 }
 
-/// Probe a client to check if it's still alive
 pub async fn probe_client(state: &ServerState, client_id: &str) -> bool {
     if let Some(conn) = state.clients.get(client_id) {
         match tokio::time::timeout(
@@ -97,13 +92,8 @@ pub async fn probe_client(state: &ServerState, client_id: &str) -> bool {
     }
 }
 
-// ============================================================================
-// Control Stream Handler
-// ============================================================================
 
 
-/// Handle control stream for a client connection
-/// This function manages the persistent bidirectional control stream
 pub async fn handle_control_stream(
     mut control_send: SendStream,
     mut control_recv: RecvStream,
@@ -113,7 +103,7 @@ pub async fn handle_control_stream(
 ) -> Result<()> {
     info!("Control stream handler started");
     
-    // Read initial ConfigSyncRequest
+
     let control_msg = match read_control_message(&mut control_recv).await {
         Ok(msg) => msg,
         Err(e) => {
@@ -134,29 +124,29 @@ pub async fn handle_control_stream(
         }
     };
     
-    // Use client-provided ID (UUID) as the unique identifier
+
     let client_id = requested_client_id;
     
-    // Construct display name for logging
+
     let display_name = format!("{}-{}-{}", client_group, remote_addr.ip(), &client_id[..8.min(client_id.len())]);
     
-    // Register client with group mapping
+
     info!("Registering client: client_id='{}' (display: '{}'), group='{}'", 
         client_id, display_name, client_group);
     
-    // Check if this client_id already exists (same instance reconnecting)
+
     if let Some(old_conn) = state.clients.get(&client_id) {
-        // Check if old connection is still alive
+
         if old_conn.close_reason().is_none() {
             warn!("Client ID '{}' already exists with active connection, closing old connection", client_id);
             old_conn.close(0u32.into(), b"replaced by new connection");
         }
-        // Clean up old registration
+
         cleanup_client_registration(&state, &client_id);
         info!("Cleaned up old registration for client '{}'", client_id);
     }
     
-    // Register new connection
+
     state.clients.insert(client_id.clone(), conn.clone());
     state.client_groups.insert(client_id.clone(), client_group.clone());
     state.addr_to_client.insert(remote_addr, client_id.clone());
@@ -173,7 +163,7 @@ pub async fn handle_control_stream(
     info!("Client registered successfully. Total clients in group '{}': {}", 
         client_group, state.group_clients.get(&client_group).map(|v| v.len()).unwrap_or(0));
     
-    // Send initial ConfigSyncResponse
+
     let (client_rules_init, client_upstreams_init, client_config_version_init) = state.client_configs
         .get(&client_group)
         .map(|(r, u, v)| (r.clone(), u.clone(), v.clone()))
@@ -204,7 +194,7 @@ pub async fn handle_control_stream(
     }
     info!("Sent initial ConfigSyncResponse to client_id: {}", client_id);
     
-    // Keep control stream open and handle future config sync requests
+
     loop {
         match read_control_message(&mut control_recv).await {
             Ok(msg) => {
@@ -213,13 +203,13 @@ pub async fn handle_control_stream(
                         Payload::HashRequest(req) => {
                             debug!("Received ConfigHashRequest from client_id: {}", req.client_id);
                             
-                            // Get client group
+
                             let client_group_for_hash = state.client_groups
                                 .get(&req.client_id)
                                 .map(|g| g.value().clone())
                                 .unwrap_or_else(|| req.group.clone());
                             
-                            // Get config and calculate hash
+
                             let (client_rules, client_upstreams, _) = state.client_configs
                                 .get(&client_group_for_hash)
                                 .map(|(r, u, v)| (r.clone(), u.clone(), v.clone()))
@@ -260,7 +250,7 @@ pub async fn handle_control_stream(
                             debug!("Received ConfigSyncRequest from client_id: {}, version: {}", 
                                 req.client_id, req.config_version);
                             
-                            // Get client group for this client
+
                             let client_group_for_sync = state.client_groups
                                 .get(&req.client_id)
                                 .map(|g| g.value().clone())
@@ -269,7 +259,7 @@ pub async fn handle_control_stream(
                                     req.group.clone()
                                 });
                             
-                            // Get client-specific config
+
                             let (client_rules, client_upstreams, client_config_version) = state.client_configs
                                 .get(&client_group_for_sync)
                                 .map(|(r, u, v)| (r.clone(), u.clone(), v.clone()))
@@ -278,12 +268,12 @@ pub async fn handle_control_stream(
                                     (Vec::new(), Vec::new(), state.config_version.clone())
                                 });
                             
-                            // Only send config if version changed
+
                             if req.config_version != client_config_version {
                                 info!("Client {} config version mismatch: client has '{}', server has '{}', sending update",
                                     req.client_id, req.config_version, client_config_version);
                                 
-                                // Send updated ConfigSyncResponse
+
                                 let config_hash = tunnel_lib::hash::calculate_config_hash(&client_rules, &client_upstreams);
                                 
                                 let response = ConfigSyncResponse {
@@ -299,12 +289,12 @@ pub async fn handle_control_stream(
                                 
                                 if let Err(e) = write_control_message(&mut control_send, &response_msg).await {
                                     error!("Failed to send ConfigSyncResponse: {}", e);
-                                    // Check if connection is still alive
+
                                     if conn.close_reason().is_some() {
                                         info!("Connection closed, exiting control stream handler");
                                         break;
                                     }
-                                    // Otherwise, continue - might be transient error
+
                                     continue;
                                 }
                                 debug!("Sent ConfigSyncResponse to client_id: {}", req.client_id);
@@ -315,7 +305,7 @@ pub async fn handle_control_stream(
                         Payload::Unregister(req) => {
                             info!("Client {} requested graceful unregister: {}", req.client_id, req.reason);
                             cleanup_client_registration(&state, &req.client_id);
-                            // Break the loop to close the control stream handler
+
                             break;
                         }
                         _ => {
@@ -325,31 +315,31 @@ pub async fn handle_control_stream(
                 }
             }
             Err(e) => {
-                // Check if connection is actually closed
+
                 if conn.close_reason().is_some() {
                     info!("Control stream closed because connection closed for client {}", client_id);
                     break;
                 }
-                // Stream read error, but connection might still be alive
+
                 warn!("Control stream read error for client {}: {} (connection still alive, will retry)", 
                     client_id, e);
-                // Don't break immediately - wait a bit and check connection status
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 if conn.close_reason().is_some() {
                     info!("Connection closed during retry, exiting control stream handler");
                     break;
                 }
-                // Continue loop - connection is still alive
+
             }
         }
     }
     
-    // Control stream closed, clean up client registration
+
     warn!("Control stream handler exited for client {}", client_id);
     
-    // Check if connection is still in the registry (avoid duplicate cleanup)
+
     if state.clients.contains_key(&client_id) {
-        // Double check the connection is actually closed
+
         if let Some(conn_ref) = state.clients.get(&client_id) {
             if conn_ref.close_reason().is_some() {
                 info!("Cleaning up client {} after control stream closed", client_id);

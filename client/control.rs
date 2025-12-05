@@ -42,17 +42,17 @@ impl ConfigManager {
         info!("Control stream manager started, waiting for QUIC connection...");
 
         loop {
-            // Check for shutdown signal
+
             if shutdown_rx.try_recv().is_ok() {
                 info!("Control stream manager received shutdown signal");
                 return Ok(());
             }
 
-            // Wait for active connection
+
             let connection = self.wait_for_connection().await?;
             info!("QUIC connection available, starting control stream loop");
 
-            // Run control stream loop until connection closes or error occurs
+
             if let Err(e) = self.run_control_stream_loop(connection, &mut shutdown_rx).await {
                 error!("Control stream loop error: {}, will reconnect", e);
                 tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
@@ -61,23 +61,23 @@ impl ConfigManager {
         }
     }
 
-    /// Run the main control stream loop for an active connection
+
     async fn run_control_stream_loop(
         &self,
         connection: Arc<Connection>,
         shutdown_rx: &mut tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {
         loop {
-            // Check for shutdown
+
             if shutdown_rx.try_recv().is_ok() {
                 info!("Control stream loop received shutdown signal");
                 return Ok(());
             }
 
-            // Check connection status
+
             self.check_connection_alive(&connection)?;
 
-            // Open control stream with registration
+
             let (mut send, mut recv) = match self.open_control_stream(connection.clone()).await {
                 Ok(streams) => {
                     info!("Control stream opened successfully");
@@ -91,7 +91,7 @@ impl ConfigManager {
                 }
             };
 
-            // Send initial config request
+
             if let Err(e) = self.send_full_config_request(&mut send).await {
                 warn!("Failed to send initial config request: {}, will retry", e);
                 let _ = send.finish();
@@ -99,7 +99,7 @@ impl ConfigManager {
                 continue;
             }
 
-            // Run message processing loop
+
             if let Err(e) = self.process_control_messages(
                 &mut send, 
                 &mut recv, 
@@ -112,13 +112,13 @@ impl ConfigManager {
                 continue;
             }
 
-            // Stream closed normally, reopen
+
             warn!("Control stream closed, reopening");
             tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
         }
     }
 
-    /// Process control messages with periodic sync timers
+
     async fn process_control_messages(
         &self,
         send: &mut SendStream,
@@ -130,12 +130,12 @@ impl ConfigManager {
         let mut full_sync_timer = tokio::time::interval(FULL_SYNC_INTERVAL);
         let mut connection_status_timer = tokio::time::interval(CONNECTION_STATUS_CHECK_INTERVAL);
         
-        // Skip missed ticks to avoid backlog
+
         hash_check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         full_sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         connection_status_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Reset timers
+
         hash_check_timer.tick().await;
         full_sync_timer.tick().await;
         connection_status_timer.tick().await;
@@ -176,7 +176,7 @@ impl ConfigManager {
         }
     }
 
-    /// Check if connection is still alive, return error if closed
+
     fn check_connection_alive(&self, connection: &Arc<Connection>) -> Result<()> {
         if let Some(reason) = connection.close_reason() {
             Err(anyhow::anyhow!("Connection closed: {:?}", reason))

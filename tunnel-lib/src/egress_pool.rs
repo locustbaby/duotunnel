@@ -6,15 +6,13 @@ use hyper_rustls::HttpsConnector;
 use tracing::{info, debug};
 use crate::proto::tunnel::Upstream;
 
-/// Egress connection pool manager
-/// Manages HTTP/HTTPS clients for different upstream targets
 pub struct EgressPool {
-    /// Unified HTTPS-capable client (handles both HTTP and HTTPS)
+
     client: Arc<Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>>,
 }
 
 impl EgressPool {
-    /// Create a new egress pool with a unified HTTP/HTTPS client
+
     pub fn new() -> Self {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -41,12 +39,12 @@ impl EgressPool {
         Self { client }
     }
 
-    /// Get the unified client (handles both HTTP and HTTPS)
+
     pub fn client(&self) -> Arc<Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>> {
         self.client.clone()
     }
 
-    /// Warmup connections to upstreams
+
     pub async fn warmup_upstreams(&self, upstreams: &[Upstream]) {
         if upstreams.is_empty() {
             debug!("No upstreams to warmup");
@@ -95,7 +93,6 @@ impl Default for EgressPool {
     }
 }
 
-/// Warmup a single connection
 async fn warmup_connection(
     client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     address: &str,

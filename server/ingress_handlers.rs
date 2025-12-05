@@ -11,7 +11,6 @@ use crate::control::{select_client_from_group, probe_client};
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
 use tunnel_lib::frame::TunnelFrame as Frame;
 
-/// HTTP connection handler for server ingress
 pub struct HttpIngressHandler {
     state: Arc<ServerState>,
 }
@@ -27,11 +26,11 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
     async fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
         let request_start = std::time::Instant::now();
         
-        // Read complete HTTP request using shared utility from client forwarder
+
         let complete_request = read_complete_http_request(&mut stream).await?;
         info!("Read complete HTTP request ({} bytes) in {:?}", complete_request.len(), request_start.elapsed());
         
-        // Parse HTTP headers
+
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = Request::new(&mut headers);
         
@@ -45,7 +44,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
             }
         }
         
-        // Extract Host header
+
         let host_with_port = req.headers.iter()
             .find(|h| h.name.eq_ignore_ascii_case("host"))
             .and_then(|h| std::str::from_utf8(h.value).ok())
@@ -57,7 +56,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
         let host = host_with_port.split(':').next().unwrap_or(&host_with_port).trim();
         debug!("Extracted hostname (without port): {}", host);
         
-        // Match ingress routing rule
+
         let matched_rule = self.state.ingress_rules.iter()
             .find(|r| r.match_host.eq_ignore_ascii_case(host));
         
@@ -72,11 +71,11 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
             }
         };
         
-        // Select a client from the group
+
         info!("Selecting client from group '{}' for host '{}'", client_group, host);
         let client_id = select_client_from_group(&self.state, &client_group)?;
         
-        // Get Connection from registry
+
         let client_conn = self.state.clients.get(&client_id)
             .ok_or_else(|| {
                 error!("Client '{}' not found in clients registry", client_id);
@@ -86,7 +85,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
         
         info!("Selected client '{}' from group '{}', opening QUIC stream...", client_id, client_group);
         
-        // Open QUIC bidirectional stream
+
         let (mut send, mut recv) = match client_conn.open_bi().await {
             Ok(streams) => {
                 info!("Successfully opened QUIC bidirectional stream to client '{}'", client_id);
@@ -112,7 +111,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
             }
         };
         
-        // Create Session ID and routing frame
+
         let request_id = Uuid::new_v4().to_string();
         let session_id = Frame::session_id_from_uuid(&request_id);
         
@@ -131,7 +130,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
         info!("[{}] Sent routing frame to client {}: session_id={}, host={}", 
             request_id, client_id, session_id, host_with_port);
         
-        // Split request into frames
+
         const MAX_FRAME_SIZE: usize = 64 * 1024;
         let request_bytes = complete_request.to_vec();
         let mut offset = 0;
@@ -155,7 +154,7 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
         info!("[{}] Sent {} frames (total {} bytes) to client", 
             request_id, (request_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, request_bytes.len());
         
-        // Receive response frames
+
         let mut response_buffer = BytesMut::new();
         let mut session_complete = false;
         const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -196,7 +195,6 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
     }
 }
 
-/// Read complete HTTP request - reuse logic from client forwarder
 async fn read_complete_http_request(socket: &mut TcpStream) -> Result<BytesMut> {
     use tokio::io::AsyncReadExt;
     use anyhow::Context;
@@ -326,7 +324,6 @@ async fn read_chunked_body(socket: &mut TcpStream, buffer: &mut BytesMut) -> Res
     Ok(())
 }
 
-/// gRPC connection handler (placeholder)
 pub struct GrpcIngressHandler {
     _state: Arc<ServerState>,
 }
@@ -345,7 +342,6 @@ impl tunnel_lib::listener::ConnectionHandler for GrpcIngressHandler {
     }
 }
 
-/// WebSocket connection handler (placeholder)
 pub struct WssIngressHandler {
     _state: Arc<ServerState>,
 }

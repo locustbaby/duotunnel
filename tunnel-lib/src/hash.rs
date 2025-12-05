@@ -1,12 +1,10 @@
 use sha2::{Sha256, Digest};
 use crate::proto::tunnel::{Rule, Upstream};
 
-/// Calculate SHA256 hash of config (rules + upstreams)
-/// Rules and upstreams are sorted by ID/name for consistent hashing
 pub fn calculate_config_hash(rules: &[Rule], upstreams: &[Upstream]) -> String {
     let mut hasher = Sha256::new();
     
-    // Sort rules by rule_id for consistent hashing
+
     let mut sorted_rules = rules.to_vec();
     sorted_rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     
@@ -18,7 +16,7 @@ pub fn calculate_config_hash(rules: &[Rule], upstreams: &[Upstream]) -> String {
         hasher.update(rule.action_proxy_pass.as_bytes());
         hasher.update(rule.action_set_host.as_bytes());
         
-        // Hash match_header map (sorted by key)
+
         let mut headers: Vec<_> = rule.match_header.iter().collect();
         headers.sort_by_key(|(k, _)| *k);
         for (key, value) in headers {
@@ -27,7 +25,7 @@ pub fn calculate_config_hash(rules: &[Rule], upstreams: &[Upstream]) -> String {
         }
     }
     
-    // Sort upstreams by name for consistent hashing
+
     let mut sorted_upstreams = upstreams.to_vec();
     sorted_upstreams.sort_by(|a, b| a.name.cmp(&b.name));
     
@@ -35,7 +33,7 @@ pub fn calculate_config_hash(rules: &[Rule], upstreams: &[Upstream]) -> String {
         hasher.update(upstream.name.as_bytes());
         hasher.update(upstream.lb_policy.as_bytes());
         
-        // Hash servers (sorted by address)
+
         let mut sorted_servers = upstream.servers.clone();
         sorted_servers.sort_by(|a, b| a.address.cmp(&b.address));
         for server in sorted_servers {
@@ -98,7 +96,7 @@ mod tests {
             Rule {
                 rule_id: "rule1".to_string(),
                 r#type: "http".to_string(),
-                match_host: "changed.com".to_string(), // Changed
+                match_host: "changed.com".to_string(),
                 match_path_prefix: "/api".to_string(),
                 match_header: HashMap::new(),
                 action_proxy_pass: "backend".to_string(),

@@ -7,8 +7,6 @@ use httparse::{Request as HttpRequest, Status};
 use std::str::FromStr;
 use tracing::debug;
 
-/// Forward egress HTTP request using unified EgressPool client
-/// Parses frame data, converts to hyper::Request, and sends via connection pool
 pub async fn forward_egress_http_request(
     client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     request_bytes: &[u8],

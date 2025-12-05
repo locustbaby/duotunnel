@@ -6,18 +6,17 @@ use tokio::sync::Mutex;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
 
-/// Session state for frame reassembly
 pub struct SessionState {
-    /// Protocol type
+
     pub protocol_type: ProtocolType,
-    /// Accumulated payload data
+
     pub buffer: Vec<u8>,
-    /// Whether the session is complete (received END_OF_STREAM)
+
     pub is_complete: bool,
-    /// Timestamp when session was created
+
     pub created_at: Instant,
-    /// Routing information (from first frame)
-    pub routing_info: Option<(String, String)>, // (type, host)
+
+    pub routing_info: Option<(String, String)>,
 }
 
 impl SessionState {
@@ -31,19 +30,18 @@ impl SessionState {
         }
     }
 
-    /// Add frame payload to buffer
+
     pub fn add_frame(&mut self, payload: Vec<u8>, end_of_stream: bool) {
         self.buffer.extend_from_slice(&payload);
         self.is_complete = end_of_stream;
     }
 
-    /// Check if session has timed out
+
     pub fn is_timed_out(&self, timeout: std::time::Duration) -> bool {
         self.created_at.elapsed() > timeout
     }
 }
 
-/// Server state
 pub struct ServerState {
     pub clients: DashMap<String, quinn::Connection>,
     pub client_groups: DashMap<String, String>,

@@ -5,7 +5,6 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use uuid::Uuid;
 
-/// Protocol type flags (bits 0-3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolType {
     Http11 = 0,
@@ -28,21 +27,20 @@ impl ProtocolType {
     }
 }
 
-/// Tunnel frame structure
 #[derive(Debug, Clone)]
 pub struct TunnelFrame {
-    /// Session ID (8 bytes, u64)
+
     pub session_id: u64,
-    /// Protocol type and flags
+
     pub protocol_type: ProtocolType,
-    /// End of stream flag
+
     pub end_of_stream: bool,
-    /// Payload data
+
     pub payload: Vec<u8>,
 }
 
 impl TunnelFrame {
-    /// Create a new frame
+
     pub fn new(
         session_id: u64,
         protocol_type: ProtocolType,
@@ -57,42 +55,42 @@ impl TunnelFrame {
         }
     }
 
-    /// Generate session ID from UUID string
+
     pub fn session_id_from_uuid(uuid_str: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         uuid_str.hash(&mut hasher);
         hasher.finish()
     }
 
-    /// Generate session ID from UUID
+
     pub fn session_id_from_uuid_obj(uuid: &Uuid) -> u64 {
         Self::session_id_from_uuid(&uuid.to_string())
     }
 
-    /// Encode frame to bytes
+
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = BytesMut::with_capacity(13 + self.payload.len());
         
-        // Session ID (8 bytes, big-endian)
+
         buf.put_u64(self.session_id);
         
-        // Flags/Type (1 byte)
+
         let mut flags = self.protocol_type.to_u8();
         if self.end_of_stream {
-            flags |= 0x10; // Set bit 4
+            flags |= 0x10;
         }
         buf.put_u8(flags);
         
-        // Data Length (4 bytes, big-endian)
+
         buf.put_u32(self.payload.len() as u32);
         
-        // Payload
+
         buf.put_slice(&self.payload);
         
         buf.to_vec()
     }
 
-    /// Decode frame from bytes
+
     pub fn decode(data: &[u8]) -> Result<Self> {
         if data.len() < 13 {
             return Err(anyhow!("Frame too short: {} bytes", data.len()));
@@ -100,18 +98,18 @@ impl TunnelFrame {
 
         let mut buf = &data[..];
         
-        // Session ID (8 bytes)
+
         let session_id = buf.get_u64();
         
-        // Flags/Type (1 byte)
+
         let flags = buf.get_u8();
         let protocol_type = ProtocolType::from_u8(flags)?;
         let end_of_stream = (flags & 0x10) != 0;
         
-        // Data Length (4 bytes)
+
         let data_length = buf.get_u32() as usize;
         
-        // Verify we have enough data
+
         if buf.len() < data_length {
             return Err(anyhow!(
                 "Incomplete frame: expected {} bytes, got {}",
@@ -120,7 +118,7 @@ impl TunnelFrame {
             ));
         }
         
-        // Payload
+
         let payload = buf[..data_length].to_vec();
         
         Ok(Self {
@@ -132,40 +130,38 @@ impl TunnelFrame {
     }
 }
 
-/// Read a frame from a QUIC RecvStream
 pub async fn read_frame(recv: &mut RecvStream) -> Result<TunnelFrame> {
     read_frame_with_timeout(recv, None).await
 }
 
-/// Read a frame from a QUIC RecvStream with optional timeout
 pub async fn read_frame_with_timeout(
     recv: &mut RecvStream,
     timeout: Option<std::time::Duration>,
 ) -> Result<TunnelFrame> {
     let read_future = async {
-        // Read fixed header (13 bytes: 8 + 1 + 4)
+
         let mut header = vec![0u8; 13];
         recv.read_exact(&mut header).await?;
         
-        // Parse header to get payload length
+
         let mut buf = &header[..];
         let _session_id = buf.get_u64();
-        buf.get_u8(); // Skip flags for now
+        buf.get_u8();
         let data_length = buf.get_u32() as usize;
         
-        // Validate payload length (safety check)
+
         if data_length > 100 * 1024 * 1024 {
-            // 100MB limit
+
             return Err(anyhow::anyhow!("Frame payload too large: {} bytes", data_length));
         }
         
-        // Read payload
+
         let mut payload = vec![0u8; data_length];
         if data_length > 0 {
             recv.read_exact(&mut payload).await?;
         }
         
-        // Reconstruct full frame and decode
+
         let mut full_frame = header;
         full_frame.extend_from_slice(&payload);
         TunnelFrame::decode(&full_frame)
@@ -181,14 +177,12 @@ pub async fn read_frame_with_timeout(
     }
 }
 
-/// Write a frame to a QUIC SendStream
 pub async fn write_frame(send: &mut SendStream, frame: &TunnelFrame) -> Result<()> {
     let encoded = frame.encode();
     send.write_all(&encoded).await?;
     Ok(())
 }
 
-/// Write multiple frames (for convenience)
 pub async fn write_frames(send: &mut SendStream, frames: &[TunnelFrame]) -> Result<()> {
     for frame in frames {
         write_frame(send, frame).await?;

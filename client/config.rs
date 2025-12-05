@@ -22,12 +22,12 @@ impl ClientConfig {
         Ok(config)
     }
     
-    /// Get full server address with port
+
     pub fn server_addr(&self) -> String {
         format!("{}:{}", self.server_addr, self.server_port)
     }
     
-    /// Get client_id (alias for client_group_id for compatibility)
+
     pub fn client_id(&self) -> String {
         self.client_group_id.clone()
     }

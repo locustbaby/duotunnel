@@ -5,7 +5,6 @@ use tracing::warn;
 use crate::types::ClientState;
 use crate::forwarder::http::handle_http_forward_connection;
 
-/// HTTP ingress handler for forward tunneling
 pub struct HttpIngressHandler {
     state: Arc<ClientState>,
 }
@@ -33,7 +32,6 @@ impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
     }
 }
 
-/// gRPC ingress handler (placeholder)
 pub struct GrpcIngressHandler {
     _state: Arc<ClientState>,
 }
@@ -52,7 +50,6 @@ impl tunnel_lib::listener::ConnectionHandler for GrpcIngressHandler {
     }
 }
 
-/// WebSocket ingress handler (placeholder)
 pub struct WssIngressHandler {
     _state: Arc<ClientState>,
 }
