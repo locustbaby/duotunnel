@@ -1,7 +1,7 @@
 use anyhow::{Result, Context};
 use bytes::BytesMut;
-use hyper::{Body, Client};
-use hyper::client::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use httparse::{Request as HttpRequest, Status};
 use std::str::FromStr;
@@ -10,7 +10,7 @@ use tracing::debug;
 /// Forward egress HTTP request using unified EgressPool client
 /// Parses frame data, converts to hyper::Request, and sends via connection pool
 pub async fn forward_egress_http_request(
-    client: &Client<HttpsConnector<HttpConnector>, Body>,
+    client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     request_bytes: &[u8],
     target_uri: &str,
     _is_ssl: bool,
@@ -79,7 +79,7 @@ pub async fn forward_egress_http_request(
         }
     }
     
-    let hyper_request = builder.body(Body::from(body_bytes.to_vec()))
+    let hyper_request = builder.body(http_body_util::Full::new(bytes::Bytes::copy_from_slice(body_bytes)))
         .with_context(|| "Failed to build hyper request")?;
     
     let response = client.request(hyper_request).await
@@ -90,24 +90,35 @@ pub async fn forward_egress_http_request(
     let status = response.status();
     let (parts, body) = response.into_parts();
     
+    use http_body_util::BodyExt;
+    let mut body_bytes = BytesMut::new();
+    let mut body_stream = body;
+    while let Some(chunk_result) = body_stream.frame().await {
+        if let Ok(frame) = chunk_result {
+            if let Some(chunk) = frame.data_ref() {
+                body_bytes.extend_from_slice(chunk);
+            }
+        }
+    }
+    
     let mut response_bytes = BytesMut::new();
     response_bytes.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", 
         status.as_u16(), 
         status.canonical_reason().unwrap_or("Unknown")).as_bytes());
     
     for (name, value) in &parts.headers {
+        if name.as_str().eq_ignore_ascii_case("transfer-encoding") || 
+           name.as_str().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         if let Ok(value_str) = value.to_str() {
             response_bytes.extend_from_slice(format!("{}: {}\r\n", name, value_str).as_bytes());
         }
     }
-    response_bytes.extend_from_slice(b"\r\n");
     
-    use hyper::body::HttpBody;
-    let mut body_stream = body;
-    while let Some(chunk_result) = body_stream.data().await {
-        let chunk = chunk_result?;
-        response_bytes.extend_from_slice(&chunk);
-    }
+    response_bytes.extend_from_slice(format!("content-length: {}\r\n", body_bytes.len()).as_bytes());
+    response_bytes.extend_from_slice(b"\r\n");
+    response_bytes.extend_from_slice(&body_bytes);
     
     Ok(response_bytes.to_vec())
 }

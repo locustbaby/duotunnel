@@ -1,6 +1,7 @@
 use std::sync::Arc;
-use hyper::{Body, Client};
-use hyper::client::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use hyper_rustls::HttpsConnector;
 use tracing::{info, debug};
 use crate::proto::tunnel::Upstream;
@@ -9,21 +10,27 @@ use crate::proto::tunnel::Upstream;
 /// Manages HTTP/HTTPS clients for different upstream targets
 pub struct EgressPool {
     /// Unified HTTPS-capable client (handles both HTTP and HTTPS)
-    client: Arc<Client<HttpsConnector<HttpConnector>, Body>>,
+    client: Arc<Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>>,
 }
 
 impl EgressPool {
     /// Create a new egress pool with a unified HTTP/HTTPS client
     pub fn new() -> Self {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        
         let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots()
+            .with_tls_config(tls_config)
             .https_or_http()
             .enable_http1()
-            .enable_http2()
             .build();
         
         let client = Arc::new(
-            hyper::Client::builder()
+            Client::builder(TokioExecutor::new())
                 .pool_idle_timeout(std::time::Duration::from_secs(90))
                 .pool_max_idle_per_host(10)
                 .build(https_connector)
@@ -35,7 +42,7 @@ impl EgressPool {
     }
 
     /// Get the unified client (handles both HTTP and HTTPS)
-    pub fn client(&self) -> Arc<Client<HttpsConnector<HttpConnector>, Body>> {
+    pub fn client(&self) -> Arc<Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>> {
         self.client.clone()
     }
 
@@ -90,7 +97,7 @@ impl Default for EgressPool {
 
 /// Warmup a single connection
 async fn warmup_connection(
-    client: &Client<HttpsConnector<HttpConnector>, Body>,
+    client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     address: &str,
 ) -> anyhow::Result<()> {
     use hyper::{Method, Request};
@@ -101,13 +108,13 @@ async fn warmup_connection(
     let request = Request::builder()
         .method(Method::HEAD)
         .uri(uri)
-        .body(Body::empty())?;
+        .body(http_body_util::Full::new(bytes::Bytes::new()))?;
     
     let response = client.request(request).await?;
     
-    use hyper::body::HttpBody;
+    use http_body_util::BodyExt;
     let mut body = response.into_body();
-    while let Some(chunk) = body.data().await {
+    while let Some(chunk) = body.frame().await {
         let _ = chunk?;
     }
     

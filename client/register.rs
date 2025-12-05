@@ -107,7 +107,7 @@ impl RegisterManager {
         write_control_message(&mut send, &control_msg).await?;
         info!("Sent UnregisterRequest");
         
-        let _ = send.finish().await;
+        let _ = send.finish();
         Ok(())
     }
 }

@@ -12,18 +12,16 @@ use tunnel_lib::proto::tunnel::ConfigSyncResponse;
 // Client Management Functions
 // ============================================================================
 
-/// Find client_id by remote address
 pub fn find_client_id_by_addr(state: &ServerState, remote_addr: &SocketAddr) -> Option<String> {
-    state.clients.iter()
-        .find(|entry| entry.value().remote_address() == *remote_addr)
-        .map(|entry| entry.key().clone())
+    state.addr_to_client.get(remote_addr).map(|r| r.value().clone())
 }
 
-/// Clean up client registration when connection closes
 pub fn cleanup_client_registration(state: &ServerState, client_id: &str) {
     info!("Cleaning up client registration: client_id='{}'", client_id);
     
     if let Some((_, conn)) = state.clients.remove(client_id) {
+        let remote_addr = conn.remote_address();
+        state.addr_to_client.remove(&remote_addr);
         info!("Closing connection for client '{}'", client_id);
         conn.close(0u32.into(), b"server cleanup");
     }
@@ -76,7 +74,7 @@ pub async fn probe_client(state: &ServerState, client_id: &str) -> bool {
             conn.open_bi()
         ).await {
             Ok(Ok((mut send, _recv))) => {
-                let _ = send.finish().await;
+                let _ = send.finish();
                 info!("Client {} probe successful", client_id);
                 true
             }
@@ -161,12 +159,12 @@ pub async fn handle_control_stream(
     // Register new connection
     state.clients.insert(client_id.clone(), conn.clone());
     state.client_groups.insert(client_id.clone(), client_group.clone());
+    state.addr_to_client.insert(remote_addr, client_id.clone());
     
-    // Add to group_clients only if not already present (防止重复)
     state.group_clients
         .entry(client_group.clone())
         .or_insert_with(Vec::new)
-        .retain(|id| id != &client_id); // Remove any existing entry first
+        .retain(|id| id != &client_id);
     state.group_clients
         .get_mut(&client_group)
         .unwrap()

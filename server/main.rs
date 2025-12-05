@@ -27,6 +27,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+    
     let args = Args::parse();
     let config = config::ServerConfig::load(&args.config)?;
     
@@ -141,6 +145,8 @@ async fn main() -> Result<()> {
         clients: dashmap::DashMap::new(),
         client_groups: dashmap::DashMap::new(),
         group_clients: dashmap::DashMap::new(),
+        addr_to_client: dashmap::DashMap::new(),
+        data_stream_semaphore: Arc::new(tokio::sync::Semaphore::new(10000)),
         ingress_rules,
         egress_rules_http,
         egress_rules_grpc,
@@ -188,7 +194,7 @@ async fn main() -> Result<()> {
     
     // Spawn QUIC acceptor
     let state_clone = state.clone();
-    tokio::spawn(async move {
+    let quic_handle = tokio::spawn(async move {
         accept_loop(quic_server, state_clone).await;
     });
     info!("✓ QUIC acceptor loop started");
@@ -212,15 +218,88 @@ async fn main() -> Result<()> {
         config.server.wss_entry_port,
     );
     
-    let _listener_handles = listener_manager.start_all(
+    let listener_handles = listener_manager.start_all(
         http_handler,
         grpc_handler,
         wss_handler,
     ).await?;
 
-    // Keep main alive
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
+    info!("=== Tunnel Server Started Successfully ===");
 
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+    info!("=== Received shutdown signal, initiating graceful shutdown ===");
+
+    // Step 1: Stop accepting new connections (shutdown listeners)
+    info!("Step 1/4: Shutting down ingress listeners");
+    let listener_shutdown_timeout = std::time::Duration::from_secs(3);
+    for (idx, handle) in listener_handles.into_iter().enumerate() {
+        match tokio::time::timeout(listener_shutdown_timeout, handle).await {
+            Ok(Ok(())) => {
+                info!("  ✓ Listener {} shutdown successfully", idx + 1);
+            }
+            Ok(Err(e)) => {
+                error!("  ⚠ Listener {} shutdown with error: {}", idx + 1, e);
+            }
+            Err(_) => {
+                error!("  ⚠ Listener {} shutdown timeout after {:?}", idx + 1, listener_shutdown_timeout);
+            }
+        }
+    }
+
+    // Step 2: Close all client connections gracefully
+    info!("Step 2/4: Closing client connections");
+    let client_count = state.clients.len();
+    for entry in state.clients.iter() {
+        let client_id = entry.key();
+        let conn = entry.value();
+        conn.close(0u32.into(), b"Server shutdown");
+        tracing::debug!("  Closed connection for client: {}", client_id);
+    }
+    if client_count > 0 {
+        info!("  ✓ Closed {} client connections", client_count);
+    }
+
+    // Step 3: Wait for QUIC acceptor to finish
+    info!("Step 3/4: Waiting for QUIC acceptor to complete");
+    let quic_shutdown_timeout = std::time::Duration::from_secs(5);
+    
+    // Give the acceptor a moment to process the connection closures
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    
+    // Abort the acceptor loop (it's an infinite loop)
+    quic_handle.abort();
+    
+    match tokio::time::timeout(quic_shutdown_timeout, quic_handle).await {
+        Ok(Ok(())) => {
+            info!("  ✓ QUIC acceptor shutdown successfully");
+        }
+        Ok(Err(e)) if e.is_cancelled() => {
+            info!("  ✓ QUIC acceptor aborted (expected)");
+        }
+        Ok(Err(e)) => {
+            error!("  ⚠ QUIC acceptor task panicked: {}", e);
+        }
+        Err(_) => {
+            error!("  ⚠ QUIC acceptor shutdown timeout after {:?}", quic_shutdown_timeout);
+        }
+    }
+
+    // Step 4: Final cleanup
+    info!("Step 4/4: Performing final cleanup");
+    
+    // Clear all state
+    let session_count = state.sessions.len();
+    state.sessions.clear();
+    if session_count > 0 {
+        info!("  ✓ Cleared {} active sessions", session_count);
+    }
+    
+    state.clients.clear();
+    state.client_groups.clear();
+    state.group_clients.clear();
+    info!("  ✓ Cleared all client registrations");
+
+    info!("=== Tunnel server shutdown complete ===");
     Ok(())
 }

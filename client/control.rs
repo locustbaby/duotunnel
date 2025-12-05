@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, error, debug, warn};
 use quinn::{Connection, SendStream, RecvStream};
+use dashmap::DashMap;
 use tunnel_lib::protocol::{write_control_message, read_control_message};
 use tunnel_lib::proto::tunnel::control_message::Payload;
 use crate::types::{ClientState, ClientIdentity};
@@ -38,142 +39,149 @@ impl ConfigManager {
         &self,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {
-        info!("Config manager started, waiting for QUIC connection...");
+        info!("Control stream manager started, waiting for QUIC connection...");
 
         loop {
+            // Check for shutdown signal
             if shutdown_rx.try_recv().is_ok() {
-                info!("Config manager received shutdown signal");
+                info!("Control stream manager received shutdown signal");
                 return Ok(());
             }
 
+            // Wait for active connection
             let connection = self.wait_for_connection().await?;
-
             info!("QUIC connection available, starting control stream loop");
 
-            loop {
-                if shutdown_rx.try_recv().is_ok() {
-                    info!("Config manager received shutdown signal");
-                    return Ok(());
-                }
-
-                if let Some(reason) = connection.close_reason() {
-                    error!("Connection closed detected in config manager: {:?}, will wait for reconnection", reason);
-                    break;
-                }
-
-                let (mut send, mut recv) = match self.open_control_stream(connection.clone()).await {
-                    Ok(streams) => {
-                        info!("Control stream opened");
-                        streams
-                    }
-                    Err(e) => {
-                        if let Some(reason) = connection.close_reason() {
-                            error!("Connection closed while opening control stream: {:?}", reason);
-                            break;
-                        }
-                        warn!("Failed to open control stream: {}, retrying in {:?}...", e, STREAM_RECONNECT_BACKOFF);
-                        tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
-                        continue;
-                    }
-                };
-
-                if let Err(e) = self.send_full_config_request(&mut send).await {
-                    warn!("Failed to send initial config request: {}, will retry", e);
-                    let _ = send.finish().await;
-                    tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
-                    continue;
-                }
-
-                let mut hash_check_timer = tokio::time::interval(HASH_CHECK_INTERVAL);
-                let mut full_sync_timer = tokio::time::interval(FULL_SYNC_INTERVAL);
-                let mut connection_status_timer = tokio::time::interval(CONNECTION_STATUS_CHECK_INTERVAL);
-                hash_check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                full_sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                connection_status_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                hash_check_timer.tick().await;
-                full_sync_timer.tick().await;
-                connection_status_timer.tick().await;
-
-                loop {
-                    tokio::select! {
-                        _ = shutdown_rx.recv() => {
-                            info!("Config manager received shutdown signal");
-                            let _ = send.finish().await;
-                            return Ok(());
-                        }
-
-                        _ = connection_status_timer.tick() => {
-                            if let Some(reason) = connection.close_reason() {
-                                error!("Connection closed detected via periodic check in config manager: {:?}, exiting control stream loop", reason);
-                                let _ = send.finish().await;
-                                return Err(anyhow::anyhow!("Connection closed: {:?}", reason));
-                            }
-                        }
-
-                        _ = hash_check_timer.tick() => {
-                            if let Some(reason) = connection.close_reason() {
-                                error!("Connection closed detected during hash check: {:?}, exiting control stream loop", reason);
-                                let _ = send.finish().await;
-                                return Err(anyhow::anyhow!("Connection closed: {:?}", reason));
-                            }
-                            debug!("Periodic hash check triggered");
-                            if let Err(e) = self.send_hash_check_request(&mut send).await {
-                                warn!("Failed to send hash check request: {}, will reopen stream", e);
-                                let _ = send.finish().await;
-                                break;
-                            }
-                        }
-
-                        _ = full_sync_timer.tick() => {
-                            if let Some(reason) = connection.close_reason() {
-                                error!("Connection closed detected during full sync: {:?}, exiting control stream loop", reason);
-                                let _ = send.finish().await;
-                                return Err(anyhow::anyhow!("Connection closed: {:?}", reason));
-                            }
-                            info!("Periodic full config sync triggered");
-                            if let Err(e) = self.send_full_config_request(&mut send).await {
-                                warn!("Failed to send full config request: {}, will reopen stream", e);
-                                let _ = send.finish().await;
-                                break;
-                            }
-                        }
-
-                        result = read_control_message(&mut recv) => {
-                            match result {
-                                Ok(msg) => {
-                                    if let Some(reason) = connection.close_reason() {
-                                        error!("Connection closed detected during message read: {:?}, exiting control stream loop", reason);
-                                        let _ = send.finish().await;
-                                        return Err(anyhow::anyhow!("Connection closed: {:?}", reason));
-                                    }
-                                    if let Some(payload) = msg.payload {
-                                        if let Err(e) = self.handle_control_message(payload, &mut send).await {
-                                            warn!("Failed to handle control message: {}, will reopen stream", e);
-                                            let _ = send.finish().await;
-                                            break;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Some(reason) = connection.close_reason() {
-                                        error!("Connection closed during control stream read: {:?}, exiting control stream loop", reason);
-                                        let _ = send.finish().await;
-                                        return Err(anyhow::anyhow!("Connection closed: {:?}", reason));
-                                    }
-                                    warn!("Control stream read error: {}, will reopen stream", e);
-                                    let _ = send.finish().await;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                warn!("Control stream closed, will reopen");
+            // Run control stream loop until connection closes or error occurs
+            if let Err(e) = self.run_control_stream_loop(connection, &mut shutdown_rx).await {
+                error!("Control stream loop error: {}, will reconnect", e);
                 tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
                 continue;
             }
+        }
+    }
+
+    /// Run the main control stream loop for an active connection
+    async fn run_control_stream_loop(
+        &self,
+        connection: Arc<Connection>,
+        shutdown_rx: &mut tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<()> {
+        loop {
+            // Check for shutdown
+            if shutdown_rx.try_recv().is_ok() {
+                info!("Control stream loop received shutdown signal");
+                return Ok(());
+            }
+
+            // Check connection status
+            self.check_connection_alive(&connection)?;
+
+            // Open control stream with registration
+            let (mut send, mut recv) = match self.open_control_stream(connection.clone()).await {
+                Ok(streams) => {
+                    info!("Control stream opened successfully");
+                    streams
+                }
+                Err(e) => {
+                    self.check_connection_alive(&connection)?;
+                    warn!("Failed to open control stream: {}, retrying in {:?}", e, STREAM_RECONNECT_BACKOFF);
+                    tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+
+            // Send initial config request
+            if let Err(e) = self.send_full_config_request(&mut send).await {
+                warn!("Failed to send initial config request: {}, will retry", e);
+                let _ = send.finish();
+                tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
+                continue;
+            }
+
+            // Run message processing loop
+            if let Err(e) = self.process_control_messages(
+                &mut send, 
+                &mut recv, 
+                &connection, 
+                shutdown_rx
+            ).await {
+                warn!("Control message processing error: {}, will reopen stream", e);
+                let _ = send.finish();
+                tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
+                continue;
+            }
+
+            // Stream closed normally, reopen
+            warn!("Control stream closed, reopening");
+            tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
+        }
+    }
+
+    /// Process control messages with periodic sync timers
+    async fn process_control_messages(
+        &self,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+        connection: &Arc<Connection>,
+        shutdown_rx: &mut tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<()> {
+        let mut hash_check_timer = tokio::time::interval(HASH_CHECK_INTERVAL);
+        let mut full_sync_timer = tokio::time::interval(FULL_SYNC_INTERVAL);
+        let mut connection_status_timer = tokio::time::interval(CONNECTION_STATUS_CHECK_INTERVAL);
+        
+        // Skip missed ticks to avoid backlog
+        hash_check_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        full_sync_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        connection_status_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Reset timers
+        hash_check_timer.tick().await;
+        full_sync_timer.tick().await;
+        connection_status_timer.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!("Control message loop received shutdown signal");
+                    let _ = send.finish();
+                    return Ok(());
+                }
+
+                _ = connection_status_timer.tick() => {
+                    self.check_connection_alive(connection)?;
+                }
+
+                _ = hash_check_timer.tick() => {
+                    self.check_connection_alive(connection)?;
+                    debug!("Periodic hash check triggered");
+                    self.send_hash_check_request(send).await?;
+                }
+
+                _ = full_sync_timer.tick() => {
+                    self.check_connection_alive(connection)?;
+                    info!("Periodic full config sync triggered");
+                    self.send_full_config_request(send).await?;
+                }
+
+                result = read_control_message(recv) => {
+                    self.check_connection_alive(connection)?;
+                    let msg = result?;
+                    
+                    if let Some(payload) = msg.payload {
+                        self.handle_control_message(payload, send).await?;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if connection is still alive, return error if closed
+    fn check_connection_alive(&self, connection: &Arc<Connection>) -> Result<()> {
+        if let Some(reason) = connection.close_reason() {
+            Err(anyhow::anyhow!("Connection closed: {:?}", reason))
+        } else {
+            Ok(())
         }
     }
 
@@ -298,12 +306,22 @@ impl ConfigManager {
                 if current_hash.is_empty() { "empty" } else { &current_hash }, 
                 &resp.config_hash);
 
-            self.state.rules.clear();
+            let new_rule_ids: std::collections::HashSet<String> = resp.rules.iter()
+                .map(|r| r.rule_id.clone())
+                .collect();
+            
+            self.state.rules.retain(|k, _| new_rule_ids.contains(k));
+            
             for rule in &resp.rules {
                 self.state.rules.insert(rule.rule_id.clone(), rule.clone());
             }
 
-            self.state.upstreams.clear();
+            let new_upstream_names: std::collections::HashSet<String> = resp.upstreams.iter()
+                .map(|u| u.name.clone())
+                .collect();
+            
+            self.state.upstreams.retain(|k, _| new_upstream_names.contains(k));
+            
             for upstream in &resp.upstreams {
                 self.state.upstreams.insert(upstream.name.clone(), upstream.clone());
             }

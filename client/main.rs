@@ -5,18 +5,18 @@ use std::sync::Arc;
 use tracing::info;
 use tokio::sync::broadcast;
 
+mod control;
 mod config;
-mod types;
 mod forwarder;
-mod register;
-mod config_manager;
-mod quic_tunnel_manager;
-mod reverse_handler;
 mod ingress_handlers;
+mod quic_tunnel_manager;
+mod register;
+mod reverse_handler;
+mod types;
 
+use control::ConfigManager;
 use types::{ClientState, ClientIdentity};
 use quic_tunnel_manager::QuicTunnelManager;
-use config_manager::ConfigManager;
 use reverse_handler::ReverseRequestHandler;
 use forwarder::Forwarder;
 use ingress_handlers::{HttpIngressHandler, GrpcIngressHandler, WssIngressHandler};
@@ -30,6 +30,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+    
     let args = Args::parse();
 
     let config = config::ClientConfig::load(&args.config)?;
@@ -130,25 +134,89 @@ async fn main() -> Result<()> {
 
     info!("=== Tunnel Client Started Successfully ===");
 
+    // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
     info!("=== Received shutdown signal, initiating graceful shutdown ===");
 
+    // Step 1: Send shutdown signal to all components
+    info!("Step 1/4: Broadcasting shutdown signal to all components");
     let _ = shutdown_tx.send(());
+    
+    // Give components a moment to receive the signal
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    for handle in listener_handles {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle
-        ).await;
+    // Step 2: Stop accepting new connections (shutdown listeners)
+    info!("Step 2/4: Shutting down ingress listeners");
+    let listener_shutdown_timeout = std::time::Duration::from_secs(3);
+    for (idx, handle) in listener_handles.into_iter().enumerate() {
+        match tokio::time::timeout(listener_shutdown_timeout, handle).await {
+            Ok(Ok(())) => {
+                info!("  ✓ Listener {} shutdown successfully", idx + 1);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("  ⚠ Listener {} shutdown with error: {}", idx + 1, e);
+            }
+            Err(_) => {
+                tracing::warn!("  ⚠ Listener {} shutdown timeout after {:?}", idx + 1, listener_shutdown_timeout);
+            }
+        }
     }
 
-    config_handle.abort();
-    reverse_handle.abort();
-
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        quic_handle
+    // Step 3: Wait for background tasks to complete gracefully
+    info!("Step 3/4: Waiting for background tasks to complete");
+    let task_shutdown_timeout = std::time::Duration::from_secs(10);
+    
+    // Wait for all tasks with timeout
+    let shutdown_result = tokio::time::timeout(
+        task_shutdown_timeout,
+        async {
+            let (config_result, reverse_result, quic_result) = tokio::join!(
+                config_handle,
+                reverse_handle,
+                quic_handle
+            );
+            
+            match config_result {
+                Ok(_) => info!("  ✓ Control manager shutdown successfully"),
+                Err(e) => tracing::error!("  ✗ Control manager task panicked: {}", e),
+            }
+            
+            match reverse_result {
+                Ok(_) => info!("  ✓ Reverse handler shutdown successfully"),
+                Err(e) => tracing::error!("  ✗ Reverse handler task panicked: {}", e),
+            }
+            
+            match quic_result {
+                Ok(_) => info!("  ✓ QUIC tunnel manager shutdown successfully"),
+                Err(e) => tracing::error!("  ✗ QUIC tunnel manager task panicked: {}", e),
+            }
+        }
     ).await;
+
+    match shutdown_result {
+        Ok(_) => {
+            info!("Step 4/4: All tasks completed gracefully");
+        }
+        Err(_) => {
+            tracing::warn!("Step 4/4: Graceful shutdown timeout after {:?}, some tasks may still be running", task_shutdown_timeout);
+        }
+    }
+
+    // Step 4: Final cleanup
+    info!("Performing final cleanup");
+    
+    // Close QUIC connection if exists
+    if let Some(conn) = state.quic_connection.read().await.as_ref() {
+        conn.close(0u32.into(), b"Client shutdown");
+        info!("  ✓ QUIC connection closed");
+    }
+    
+    // Clear sessions
+    let session_count = state.sessions.len();
+    state.sessions.clear();
+    if session_count > 0 {
+        info!("  ✓ Cleared {} active sessions", session_count);
+    }
 
     info!("=== Tunnel client shutdown complete ===");
     Ok(())

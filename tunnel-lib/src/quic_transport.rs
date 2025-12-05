@@ -1,18 +1,20 @@
 use anyhow::{Result, anyhow};
 use quinn::{Endpoint, ServerConfig, ClientConfig, Connection, SendStream, RecvStream};
-use rustls::{Certificate, PrivateKey};
+use quinn::crypto::rustls::{QuicServerConfig, QuicClientConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::convert::TryInto;
 use tracing::{info, debug, error};
 
 /// Generate self-signed certificate for QUIC server
-pub fn generate_self_signed_cert() -> Result<(Vec<Certificate>, PrivateKey)> {
+pub fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
-    let key_der = cert.serialize_private_key_der();
-    let cert_der = cert.serialize_der()?;
-    let key = PrivateKey(key_der);
-    let cert = Certificate(cert_der);
+    let key_der = cert.key_pair.serialize_der();
+    let cert_der = cert.cert.der().to_vec();
+    let key = PrivateKeyDer::try_from(key_der)
+        .map_err(|e| anyhow!("Failed to parse private key: {}", e))?;
+    let cert = CertificateDer::from(cert_der);
     Ok((vec![cert], key))
 }
 
@@ -21,13 +23,12 @@ pub fn create_server_config() -> Result<ServerConfig> {
     let (certs, key) = generate_self_signed_cert()?;
     
     let mut server_crypto = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     
     server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
     
-    let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     
     // Configure transport parameters
     let mut transport_config = quinn::TransportConfig::default();
@@ -47,13 +48,13 @@ pub fn create_server_config() -> Result<ServerConfig> {
 /// Create QUIC client configuration (accepts self-signed certificates)
 pub fn create_client_config() -> Result<ClientConfig> {
     let mut client_crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
+        .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
     
     client_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
     
-    let mut client_config = ClientConfig::new(Arc::new(client_crypto));
+    let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
     
     // Configure transport parameters
     let mut transport_config = quinn::TransportConfig::default();
@@ -71,19 +72,45 @@ pub fn create_client_config() -> Result<ClientConfig> {
 }
 
 /// Custom certificate verifier that accepts any certificate (for testing)
+#[derive(Debug)]
 struct SkipServerVerification;
 
-impl rustls::client::ServerCertVerifier for SkipServerVerification {
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+        ]
     }
 }
 
@@ -186,8 +213,8 @@ pub mod stream {
     }
 
     /// Finish sending on a stream
-    pub async fn finish(send: &mut SendStream) -> Result<()> {
-        send.finish().await?;
+    pub fn finish(send: &mut SendStream) -> Result<()> {
+        send.finish()?;
         Ok(())
     }
 }

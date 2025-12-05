@@ -51,11 +51,13 @@ const MAX_BACKOFF: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECTION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECTION_STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_CONCURRENT_REQUESTS: usize = 1000;
 
 #[derive(Clone)]
 pub struct ReverseRequestHandler {
     state: Arc<ClientState>,
     forwarder: Arc<Forwarder>,
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ReverseRequestHandler {
@@ -63,6 +65,7 @@ impl ReverseRequestHandler {
         Self {
             state: state.clone(),
             forwarder,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         }
     }
 
@@ -86,6 +89,9 @@ impl ReverseRequestHandler {
             let mut connection_status_timer = tokio::time::interval(CONNECTION_STATUS_CHECK_INTERVAL);
             connection_status_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             connection_status_timer.tick().await;
+            
+            let mut error_count = 0;
+            const MAX_ERRORS: usize = 10;
 
             loop {
                 if shutdown_rx.try_recv().is_ok() {
@@ -120,13 +126,24 @@ impl ReverseRequestHandler {
                             Ok((send, recv)) => {
                                 info!("Accepted reverse bidirectional stream from server");
                                 backoff = INITIAL_BACKOFF;
+                                error_count = 0;
+                                
+                                let permit = match self.semaphore.clone().try_acquire_owned() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        warn!("Max concurrent requests reached ({}), rejecting new request", MAX_CONCURRENT_REQUESTS);
+                                        continue;
+                                    }
+                                };
                                 
                                 let handler_clone = ReverseRequestHandler {
                                     state: self.state.clone(),
                                     forwarder: self.forwarder.clone(),
+                                    semaphore: self.semaphore.clone(),
                                 };
                                 
                                 tokio::spawn(async move {
+                                    let _permit = permit;
                                     if let Err(e) = handler_clone.handle_reverse_stream(send, recv).await {
                                         error!("Reverse stream error: {}", e);
                                     }
@@ -141,6 +158,12 @@ impl ReverseRequestHandler {
                                 break;
                             }
                             Err(quinn::ConnectionError::TimedOut) => {
+                                error_count += 1;
+                                if error_count >= MAX_ERRORS {
+                                    error!("Max timeout errors ({}) reached in reverse handler, will reconnect", MAX_ERRORS);
+                                    break;
+                                }
+                                warn!("Reverse handler timeout ({}/{}), continuing", error_count, MAX_ERRORS);
                                 continue;
                             }
                             Err(e) => {
@@ -148,7 +171,12 @@ impl ReverseRequestHandler {
                                     error!("Connection closed detected during accept_bi error: {:?}, reverse request handler will wait for reconnection", reason);
                                     break;
                                 }
-                                warn!("Reverse stream accept error (will retry after {:?}): {}", backoff, e);
+                                error_count += 1;
+                                if error_count >= MAX_ERRORS {
+                                    error!("Max errors ({}) reached in reverse handler: {}, will reconnect", MAX_ERRORS, e);
+                                    break;
+                                }
+                                warn!("Reverse stream accept error ({}/{}, will retry after {:?}): {}", error_count, MAX_ERRORS, backoff, e);
                                 tokio::time::sleep(backoff).await;
                                 backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
                             }
@@ -336,7 +364,7 @@ impl ReverseRequestHandler {
             }
         }
         
-        if let Err(e) = send.finish().await {
+        if let Err(e) = send.finish() {
             error!("[{}] Failed to finish send stream: {}", request_id, e);
             return Err(e.into());
         }

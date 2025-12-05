@@ -10,7 +10,7 @@ use crate::proto::tunnel::{Rule, Upstream};
 /// 
 /// This function accepts a unified Hyper client for HTTP/HTTPS and handles WSS/gRPC internally
 pub async fn warmup_connection_pools(
-    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     rules: &[Rule],
     upstreams: &[Upstream],
 ) {
@@ -116,11 +116,11 @@ pub async fn warmup_connection_pools(
 #[cfg(feature = "warmup")]
 /// Warmup HTTP/HTTPS target by sending a lightweight request
 async fn warmup_http_target(
-    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     target_addr: &str,
     _is_ssl: bool,  // No longer needed, client handles both
 ) {
-    use hyper::{Body, Method, Request};
+    use hyper::{Method, Request};
     
     // Parse URI
     let uri = match hyper::Uri::from_str(target_addr) {
@@ -135,7 +135,7 @@ async fn warmup_http_target(
     let request = match Request::builder()
         .method(Method::HEAD)
         .uri(uri.clone())
-        .body(Body::empty())
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
     {
         Ok(req) => req,
         Err(e) => {
@@ -153,9 +153,9 @@ async fn warmup_http_target(
             let status = response.status();
             let body = response.into_body();
             // Read body to ensure connection is established
-            use hyper::body::HttpBody;
+            use http_body_util::BodyExt;
             let mut body_stream = body;
-            while let Some(chunk_result) = body_stream.data().await {
+            while let Some(chunk_result) = body_stream.frame().await {
                 match chunk_result {
                     Ok(_) => {}
                     Err(e) => {
@@ -178,11 +178,11 @@ async fn warmup_http_target(
 /// For WSS, we pre-establish the underlying TCP/TLS connection
 /// The actual WebSocket handshake will happen on first real request
 async fn warmup_wss_target(
-    client: &hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+    client: &hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, http_body_util::Full<bytes::Bytes>>,
     target_addr: &str,
     is_ssl: bool,
 ) {
-    use hyper::{Body, Method, Request};
+    use hyper::{Method, Request};
     
     if !is_ssl {
         warn!("WSS warmup requires HTTPS, skipping {}", target_addr);
@@ -204,7 +204,7 @@ async fn warmup_wss_target(
     let request = match Request::builder()
         .method(Method::GET)
         .uri(uri.clone())
-        .body(Body::empty())
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
     {
         Ok(req) => req,
         Err(e) => {
@@ -218,9 +218,9 @@ async fn warmup_wss_target(
         Ok(response) => {
             // Consume response to complete connection establishment
             let body = response.into_body();
-            use hyper::body::HttpBody;
+            use http_body_util::BodyExt;
             let mut body_stream = body;
-            while let Some(chunk_result) = body_stream.data().await {
+            while let Some(chunk_result) = body_stream.frame().await {
                 match chunk_result {
                     Ok(_) => {}
                     Err(e) => {

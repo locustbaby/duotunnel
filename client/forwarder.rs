@@ -1,7 +1,7 @@
 use anyhow::{Result, Context};
 use bytes::BytesMut;
-use hyper::{Body, Client};
-use hyper::client::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use httparse::{Request, Status};
 use std::str::FromStr;
@@ -407,7 +407,7 @@ pub mod http {
     /// Forward HTTP request using Hyper client (with connection pooling)
     /// This is used for reverse tunneling (server -> client -> upstream)
     pub async fn forward_http_request(
-        client: &Client<HttpsConnector<HttpConnector>, Body>,
+        client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
         request_bytes: &[u8],
         target_uri: &str,
         _is_ssl: bool,
@@ -472,7 +472,7 @@ pub mod http {
             &[]
         };
         
-        let body = Body::from(body_bytes.to_vec());
+        let body = http_body_util::Full::new(bytes::Bytes::copy_from_slice(body_bytes));
         let hyper_request = builder.body(body)?;
         
         debug!("Sending HTTP request: {} {}", hyper_request.method(), hyper_request.uri());
@@ -499,12 +499,15 @@ pub mod http {
         response_bytes.extend_from_slice(b"\r\n");
         
         let body = response.into_body();
-        use hyper::body::HttpBody;
+        use http_body_util::BodyExt;
         let mut body_bytes = Vec::new();
         let mut body_stream = body;
-        while let Some(chunk) = body_stream.data().await {
-            let chunk = chunk?;
-            body_bytes.extend_from_slice(&chunk);
+        while let Some(frame_result) = body_stream.frame().await {
+            if let Ok(frame) = frame_result {
+                if let Some(chunk) = frame.data_ref() {
+                    body_bytes.extend_from_slice(chunk);
+                }
+            }
         }
         
         response_bytes.extend_from_slice(&body_bytes);

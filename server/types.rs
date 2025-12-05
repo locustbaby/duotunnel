@@ -45,26 +45,18 @@ impl SessionState {
 
 /// Server state
 pub struct ServerState {
-    /// Map client_id -> Connection
     pub clients: DashMap<String, quinn::Connection>,
-    /// Map client_id -> client_group
     pub client_groups: DashMap<String, String>,
-    /// Map client_group -> Vec<client_id>
     pub group_clients: DashMap<String, Vec<String>>,
-    /// Server ingress routing rules (for routing external requests to client groups)
+    pub addr_to_client: DashMap<std::net::SocketAddr, String>,
+    pub data_stream_semaphore: Arc<tokio::sync::Semaphore>,
     pub ingress_rules: Vec<IngressRule>,
-    /// Server egress routing rules (for routing client-initiated requests to upstreams)
     pub egress_rules_http: Vec<EgressRule>,
     pub egress_rules_grpc: Vec<GrpcEgressRule>,
-    /// Server egress upstreams
     pub egress_upstreams: HashMap<String, EgressUpstream>,
-    /// Client-specific configurations: Map client_group -> (rules, upstreams, config_version)
     pub client_configs: HashMap<String, (Vec<Rule>, Vec<Upstream>, String)>,
-    /// Config version
     pub config_version: String,
-    /// Session state map: session_id -> SessionState
     pub sessions: Arc<DashMap<u64, Arc<Mutex<SessionState>>>>,
-    /// Egress connection pool (unified HTTP/HTTPS client with connection pooling)
     pub egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>,
 }
 

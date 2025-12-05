@@ -145,7 +145,7 @@ pub async fn handle_data_stream(
                 error!("[{}] Failed to send error response frame: {}", request_id, send_err);
             }
             
-            if let Err(finish_err) = send.finish().await {
+            if let Err(finish_err) = send.finish() {
                 error!("[{}] Failed to finish send stream: {}", request_id, finish_err);
             }
             
@@ -184,7 +184,7 @@ pub async fn handle_data_stream(
         response_bytes.len(), stream_start.elapsed());
     
     // 6. Finish the send stream
-    if let Err(e) = send.finish().await {
+    if let Err(e) = send.finish() {
         error!("[{}] Failed to finish send stream: {}", request_id, e);
         return Err(e.into());
     }
