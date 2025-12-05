@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     prost_build::compile_protos(
-        &["../tunnel.proto"],
-        &[".."],
+        &["../proto/tunnel.proto"],
+        &["../proto"],
     )?;
     Ok(())
 }
