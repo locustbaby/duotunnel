@@ -16,7 +16,7 @@ auth_token: "your-token-here"
 # Optional: Set to enable HTTP listener
 http_entry_port: 8003
 # Optional: Set to enable gRPC listener
-# grpc_entry_port: 8004
+grpc_entry_port: 8004
 # Optional: Set to enable WSS listener
-# wss_entry_port: 8443
+wss_entry_port: 8443
 

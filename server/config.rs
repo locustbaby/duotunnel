@@ -74,6 +74,8 @@ pub struct IngressRules {
     pub http: Vec<IngressRule>,
     #[serde(default)]
     pub grpc: Vec<GrpcIngressRule>,
+    #[serde(default)]
+    pub wss: Vec<IngressRule>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,6 +110,8 @@ pub struct ClientEgressRouting {
 pub struct ClientEgressRules {
     #[serde(default)]
     pub http: Vec<ClientEgressRule>,
+    #[serde(default)]
+    pub wss: Vec<ClientEgressRule>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

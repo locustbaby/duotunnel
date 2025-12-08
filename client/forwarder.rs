@@ -13,13 +13,11 @@ use tracing::{debug, info, error, warn};
 use quinn::Connection;
 use uuid::Uuid;
 use tokio_tungstenite::connect_async;
-use tonic::transport::{ClientTlsConfig, Endpoint};
 use url::Url;
 use crate::types::ClientState;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
 use tunnel_lib::frame::TunnelFrame as Frame;
 use crate::forward_strategies::{ForwardStrategy, HttpForwardStrategy, WssForwardStrategy, GrpcForwardStrategy};
-use crate::http_request_builder::HttpRequestBuilder;
 
 
 mod uri_utils {
@@ -469,8 +467,13 @@ pub mod http {
         
         debug!("Received HTTP response: {}", response.status());
         
+        // Detect HTTP version from original request
+        let http_version = tunnel_lib::http_version::HttpVersion::detect_from_request(request_bytes)?;
+        debug!("Detected HTTP version: {:?}", http_version);
+        
         let status_line = format!(
-            "HTTP/1.1 {} {}\r\n",
+            "{} {} {}\r\n",
+            http_version.to_status_line_string(),
             response.status().as_u16(),
             response.status().canonical_reason().unwrap_or("Unknown")
         );
@@ -506,13 +509,12 @@ pub mod http {
 
 pub mod wss {
     use super::*;
-
-
+    use futures_util::{SinkExt, StreamExt};
 
     pub async fn forward_wss_request(
         request_bytes: &[u8],
         target_uri: &str,
-        _is_ssl: bool,
+        is_ssl: bool,
     ) -> Result<Vec<u8>> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
@@ -522,77 +524,139 @@ pub mod wss {
             anyhow::bail!("Incomplete HTTP headers");
         }
 
-
         let parsed = uri_utils::parse_target(target_uri, "wss")?;
         let ws_url = format!("{}://{}:{}", 
-            if parsed.is_ssl { "wss" } else { "ws" },
+            if parsed.is_ssl || is_ssl { "wss" } else { "ws" },
             parsed.host,
             parsed.port
         );
 
         debug!("Connecting to WebSocket: {}", ws_url);
 
-        let (_ws_stream, _) = connect_async(&ws_url)
+        let (ws_stream, _) = connect_async(&ws_url)
             .await
             .with_context(|| format!("Failed to connect to WebSocket: {}", ws_url))?;
 
         debug!("WebSocket connected");
 
-        if !request_bytes.is_empty() {
-            warn!("WSS forwarding: Initial message received but bidirectional streaming not fully implemented");
-        }
+        // Parse HTTP upgrade request to extract headers
+        let header_end = request_bytes.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(request_bytes.len());
+
+        // Send HTTP upgrade request to backend
+        let mut backend_stream = ws_stream;
+        backend_stream.send(tokio_tungstenite::tungstenite::Message::Binary(request_bytes[..header_end].to_vec())).await?;
+
+        // Read WebSocket upgrade response
+        let mut response_buffer = BytesMut::new();
         
-        Ok(Vec::new())
+        // For WebSocket, we need to handle bidirectional streaming
+        // This is a simplified implementation that reads the initial response
+        // In practice, WebSocket forwarding should be handled differently (see reverse_handler)
+        
+        match backend_stream.next().await {
+            Some(Ok(msg)) => {
+                match msg {
+                    tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                        response_buffer.extend_from_slice(&data);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        response_buffer.extend_from_slice(text.as_bytes());
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => {
+                        debug!("WebSocket connection closed");
+                    }
+                    _ => {}
+                }
+            }
+            Some(Err(e)) => {
+                return Err(anyhow::anyhow!("WebSocket error: {}", e));
+            }
+            None => {
+                debug!("WebSocket stream ended");
+            }
+        }
+
+        Ok(response_buffer.to_vec())
     }
 }
 
 
 pub mod grpc {
     use super::*;
-
-
+    use tokio::net::TcpStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     pub async fn forward_grpc_request(
         request_bytes: &[u8],
         target_uri: &str,
-        _is_ssl: bool,
+        is_ssl: bool,
     ) -> Result<Vec<u8>> {
-
         let parsed = uri_utils::parse_target(target_uri, "grpc")?;
         
-        let endpoint_url = format!("{}://{}:{}", 
-            if parsed.is_ssl { "https" } else { "http" },
-            parsed.host,
-            parsed.port
-        );
+        debug!("Connecting to gRPC endpoint: {}:{} (SSL: {})", parsed.host, parsed.port, parsed.is_ssl || is_ssl);
 
-        let endpoint = if parsed.is_ssl {
-            Endpoint::from_shared(endpoint_url)?
-                .tls_config(ClientTlsConfig::new())?
-        } else {
-            Endpoint::from_shared(endpoint_url)?
-        };
+        // For gRPC over HTTP/2, we need to establish a TCP connection
+        // and forward HTTP/2 frames. This is a simplified implementation.
+        // In production, you'd use a proper HTTP/2 client library.
+        
+        let addr = format!("{}:{}", parsed.host, parsed.port);
+        let mut stream = TcpStream::connect(&addr).await
+            .with_context(|| format!("Failed to connect to gRPC endpoint: {}", addr))?;
 
-        debug!("Connecting to gRPC endpoint: {}:{}", parsed.host, parsed.port);
+        debug!("gRPC TCP connection established");
 
-        let _channel = endpoint.connect().await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to gRPC endpoint {}:{}: {}", 
-                parsed.host, parsed.port, e))?;
+        // Forward the entire request (HTTP/2 headers + gRPC messages)
+        stream.write_all(request_bytes).await?;
+        stream.flush().await?;
 
-        debug!("gRPC channel connected");
+        debug!("Sent gRPC request ({} bytes)", request_bytes.len());
 
-        if request_bytes.len() < 5 {
-            anyhow::bail!("Invalid gRPC message format");
+        // Read response
+        let mut response_buffer = BytesMut::new();
+        let mut buf = vec![0u8; 4096];
+        
+        // Read HTTP/2 response headers first
+        let mut header_complete = false;
+        while !header_complete && response_buffer.len() < 8192 {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            response_buffer.extend_from_slice(&buf[..n]);
+            
+            // Look for end of HTTP headers
+            for i in 0..=response_buffer.len().saturating_sub(4) {
+                if &response_buffer[i..i+4] == b"\r\n\r\n" {
+                    header_complete = true;
+                    break;
+                }
+            }
         }
 
-        let _message_data = if request_bytes.len() > 5 {
-            &request_bytes[5..]
-        } else {
-            request_bytes
-        };
+        // Continue reading gRPC response messages
+        loop {
+            let n = match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                    return Err(e.into());
+                }
+            };
+            response_buffer.extend_from_slice(&buf[..n]);
+            
+            // For gRPC, we typically read until connection closes or timeout
+            // In a more sophisticated implementation, you'd parse gRPC frames
+            // and handle streaming responses properly
+        }
 
-        warn!("gRPC forwarding: Simplified implementation - full gRPC method dispatch not implemented");
+        debug!("Received gRPC response ({} bytes)", response_buffer.len());
         
-        Ok(Vec::new())
+        Ok(response_buffer.to_vec())
     }
 }

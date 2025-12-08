@@ -9,7 +9,7 @@ path = "main.rs"
 
 [dependencies]
 tunnel-lib = { path = "../tunnel-lib", features = ["warmup", "egress"] }
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.48", features = ["full", "io-util"] }
 quinn = "0.11"
 rustls = "0.23"
 tokio-rustls = "0.26"
@@ -30,3 +30,6 @@ hyper = { version = "1.5", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", features = ["http1", "http2", "ring"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls", "native-tls-vendored"] }
+futures-util = "0.3"
+url = "2.5"

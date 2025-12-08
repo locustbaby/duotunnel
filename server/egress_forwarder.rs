@@ -5,7 +5,11 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use httparse::{Request as HttpRequest, Status};
 use std::str::FromStr;
-use tracing::debug;
+use tracing::{debug, warn};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::connect_async;
+use futures_util::{SinkExt, StreamExt};
 
 pub async fn forward_egress_http_request(
     client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,
@@ -85,6 +89,10 @@ pub async fn forward_egress_http_request(
     
     debug!("Received HTTP response: {} from {}", response.status(), uri_str);
     
+    // Detect HTTP version from original request
+    let http_version = tunnel_lib::http_version::HttpVersion::detect_from_request(request_bytes)?;
+    debug!("Detected HTTP version: {:?}", http_version);
+    
     let status = response.status();
     let (parts, body) = response.into_parts();
     
@@ -100,7 +108,8 @@ pub async fn forward_egress_http_request(
     }
     
     let mut response_bytes = BytesMut::new();
-    response_bytes.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", 
+    response_bytes.extend_from_slice(format!("{} {} {}\r\n", 
+        http_version.to_status_line_string(),
         status.as_u16(), 
         status.canonical_reason().unwrap_or("Unknown")).as_bytes());
     
@@ -119,4 +128,150 @@ pub async fn forward_egress_http_request(
     response_bytes.extend_from_slice(&body_bytes);
     
     Ok(response_bytes.to_vec())
+}
+
+pub async fn forward_egress_grpc_request(
+    request_bytes: &[u8],
+    target_uri: &str,
+    is_ssl: bool,
+) -> Result<Vec<u8>> {
+    debug!("Forwarding gRPC request to: {} (SSL: {})", target_uri, is_ssl);
+    
+    // Parse target URI
+    let uri = if target_uri.starts_with("http://") || target_uri.starts_with("https://") {
+        target_uri.to_string()
+    } else {
+        format!("{}://{}", if is_ssl { "https" } else { "http" }, target_uri)
+    };
+    
+    let url = url::Url::parse(&uri)
+        .with_context(|| format!("Invalid gRPC target URI: {}", target_uri))?;
+    
+    let host = url.host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing host in URI: {}", target_uri))?;
+    let port = url.port().unwrap_or(if is_ssl { 443 } else { 80 });
+    let addr = format!("{}:{}", host, port);
+    
+    debug!("Connecting to gRPC endpoint: {}", addr);
+    
+    // Establish TCP connection
+    let mut stream = TcpStream::connect(&addr).await
+        .with_context(|| format!("Failed to connect to gRPC endpoint: {}", addr))?;
+    
+    // Forward the entire request (HTTP/2 headers + gRPC messages)
+    stream.write_all(request_bytes).await?;
+    stream.flush().await?;
+    
+    debug!("Sent gRPC request ({} bytes)", request_bytes.len());
+    
+    // Read response
+    let mut response_buffer = BytesMut::new();
+    let mut buf = vec![0u8; 4096];
+    
+    // Read HTTP/2 response headers
+    let mut header_complete = false;
+    while !header_complete && response_buffer.len() < 8192 {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        response_buffer.extend_from_slice(&buf[..n]);
+        
+        // Look for end of HTTP headers
+        for i in 0..=response_buffer.len().saturating_sub(4) {
+            if &response_buffer[i..i+4] == b"\r\n\r\n" {
+                header_complete = true;
+                break;
+            }
+        }
+    }
+    
+    // Continue reading gRPC response messages
+    loop {
+        let n = match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+                return Err(e.into());
+            }
+        };
+        response_buffer.extend_from_slice(&buf[..n]);
+    }
+    
+    debug!("Received gRPC response ({} bytes)", response_buffer.len());
+    
+    Ok(response_buffer.to_vec())
+}
+
+pub async fn forward_egress_wss_request(
+    request_bytes: &[u8],
+    target_uri: &str,
+    is_ssl: bool,
+) -> Result<Vec<u8>> {
+    debug!("Forwarding WebSocket request to: {} (SSL: {})", target_uri, is_ssl);
+    
+    // Parse target URI
+    let ws_url = if target_uri.starts_with("ws://") || target_uri.starts_with("wss://") {
+        target_uri.to_string()
+    } else {
+        format!("{}://{}", if is_ssl { "wss" } else { "ws" }, target_uri)
+    };
+    
+    debug!("Connecting to WebSocket: {}", ws_url);
+    
+    // Connect to WebSocket backend
+    let (mut ws_stream, _) = connect_async(&ws_url)
+        .await
+        .with_context(|| format!("Failed to connect to WebSocket: {}", ws_url))?;
+    
+    debug!("WebSocket connected");
+    
+    // Parse HTTP upgrade request to extract headers
+    let header_end = request_bytes.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(request_bytes.len());
+    
+    // Send HTTP upgrade request to backend
+    if header_end > 0 {
+        ws_stream.send(tokio_tungstenite::tungstenite::Message::Binary(
+            request_bytes[..header_end].to_vec()
+        )).await?;
+    }
+    
+    // Read WebSocket upgrade response
+    let mut response_buffer = BytesMut::new();
+    
+    // Read initial response (upgrade response)
+    match ws_stream.next().await {
+        Some(Ok(msg)) => {
+            match msg {
+                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                    response_buffer.extend_from_slice(&data);
+                }
+                tokio_tungstenite::tungstenite::Message::Text(text) => {
+                    response_buffer.extend_from_slice(text.as_bytes());
+                }
+                tokio_tungstenite::tungstenite::Message::Close(_) => {
+                    debug!("WebSocket connection closed");
+                }
+                _ => {}
+            }
+        }
+        Some(Err(e)) => {
+            return Err(anyhow::anyhow!("WebSocket error: {}", e));
+        }
+        None => {
+            debug!("WebSocket stream ended");
+        }
+    }
+    
+    // Note: For full bidirectional WebSocket forwarding, this should be handled
+    // differently (see reverse_handler.rs for streaming implementation)
+    warn!("WebSocket egress forwarding: Simplified implementation - full bidirectional streaming handled in reverse_handler");
+    
+    Ok(response_buffer.to_vec())
 }

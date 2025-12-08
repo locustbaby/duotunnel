@@ -5,7 +5,7 @@ use quinn::{SendStream, RecvStream};
 use uuid::Uuid;
 use bytes::BytesMut;
 use crate::types::ServerState;
-use crate::egress_forwarder::forward_egress_http_request;
+use crate::egress_forwarder::{forward_egress_http_request, forward_egress_grpc_request, forward_egress_wss_request};
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
 
 pub async fn handle_data_stream(
@@ -112,6 +112,20 @@ pub async fn handle_data_stream(
                 is_target_ssl,
             ).await
         }
+        "grpc" => {
+            forward_egress_grpc_request(
+                &request_buffer,
+                &final_target_addr,
+                is_target_ssl,
+            ).await
+        }
+        "wss" => {
+            forward_egress_wss_request(
+                &request_buffer,
+                &final_target_addr,
+                is_target_ssl,
+            ).await
+        }
         _ => {
             anyhow::bail!("Protocol {} not yet implemented for egress forwarding", routing_info.r#type);
         }
@@ -122,12 +136,17 @@ pub async fn handle_data_stream(
         Err(e) => {
             error!("[{}] Failed to forward {} request: {}", request_id, routing_info.r#type, e);
             
+            // Detect HTTP version from request
+            let http_version = tunnel_lib::http_version::HttpVersion::detect_from_request(&request_buffer)
+                .unwrap_or(tunnel_lib::http_version::HttpVersion::Http11);
+            
             let error_response = format!(
-                "HTTP/1.1 502 Bad Gateway\r\n\
+                "{} 502 Bad Gateway\r\n\
                 Content-Length: {}\r\n\
                 Content-Type: text/plain\r\n\
                 \r\n\
                 {}",
+                http_version.to_status_line_string(),
                 e.to_string().len(),
                 e
             );

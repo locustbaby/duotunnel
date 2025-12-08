@@ -21,10 +21,12 @@ impl EgressPool {
             .with_root_certificates(root_store)
             .with_no_client_auth();
         
+        // hyper-rustls automatically configures ALPN when enable_http2() is called
         let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(tls_config)
             .https_or_http()
             .enable_http1()
+            .enable_http2()   // Automatically handles ALPN negotiation
             .build();
         
         let client = Arc::new(
@@ -34,7 +36,7 @@ impl EgressPool {
                 .build(https_connector)
         );
 
-        info!("Egress pool initialized with unified HTTP/HTTPS client");
+        info!("Egress pool initialized with unified HTTP/HTTPS client (HTTP/1.1 + HTTP/2 support)");
         
         Self { client }
     }

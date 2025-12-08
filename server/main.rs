@@ -51,14 +51,23 @@ async fn main() -> Result<()> {
     info!("QUIC tunnel bind address: {}", bind_addr);
 
 
+    // Collect ingress rules from http and wss (both use same IngressRule structure)
     let ingress_rules: Vec<IngressRule> = config.tunnel_management
         .as_ref()
         .and_then(|tm| tm.server_ingress_routing.as_ref())
         .map(|sir| {
-            sir.rules.http.iter().map(|r| IngressRule {
+            let mut all_rules = Vec::new();
+            // Add HTTP rules
+            all_rules.extend(sir.rules.http.iter().map(|r| IngressRule {
                 match_host: r.match_host.clone(),
                 action_client_group: r.action_client_group.clone(),
-            }).collect()
+            }));
+            // Add WSS rules (same structure as HTTP rules)
+            all_rules.extend(sir.rules.wss.iter().map(|r| IngressRule {
+                match_host: r.match_host.clone(),
+                action_client_group: r.action_client_group.clone(),
+            }));
+            all_rules
         })
         .unwrap_or_default();
 
@@ -79,7 +88,7 @@ async fn main() -> Result<()> {
         for (name, upstream_config) in &egress.upstreams {
             if let Some(server) = upstream_config.servers.first() {
                 let address = server.address.clone();
-                let is_ssl = address.starts_with("https://");
+                let is_ssl = address.starts_with("https://") || address.starts_with("wss://");
                 upstreams_map.insert(name.clone(), types::EgressUpstream {
                     name: name.clone(),
                     address: address.clone(),
@@ -100,17 +109,31 @@ async fn main() -> Result<()> {
         if let Some(ref client_configs_map) = tm.client_configs {
             for (group_id, client_routing) in &client_configs_map.client_egress_routings {
 
-                let client_rules: Vec<Rule> = client_routing.rules.http.iter().enumerate()
+                let mut client_rules: Vec<Rule> = Vec::new();
+                
+                // Add HTTP rules
+                client_rules.extend(client_routing.rules.http.iter().enumerate()
                     .map(|(idx, r)| Rule {
-                        rule_id: format!("client_{}_{}", group_id, idx),
+                        rule_id: format!("client_{}_http_{}", group_id, idx),
                         r#type: "http".to_string(),
                         match_host: r.match_host.clone(),
                         match_path_prefix: String::new(),
                         match_header: HashMap::new(),
                         action_proxy_pass: r.action_upstream.clone(),
                         action_set_host: String::new(),
-                    })
-                    .collect();
+                    }));
+                
+                // Add WSS rules
+                client_rules.extend(client_routing.rules.wss.iter().enumerate()
+                    .map(|(idx, r)| Rule {
+                        rule_id: format!("client_{}_wss_{}", group_id, idx),
+                        r#type: "wss".to_string(),
+                        match_host: r.match_host.clone(),
+                        match_path_prefix: String::new(),
+                        match_header: HashMap::new(),
+                        action_proxy_pass: r.action_upstream.clone(),
+                        action_set_host: String::new(),
+                    }));
                 
 
                 let client_upstreams: Vec<Upstream> = client_routing.upstreams.iter()
@@ -159,18 +182,6 @@ async fn main() -> Result<()> {
 
 
     if let Some(ref egress) = config.server_egress_upstream {
-        let rules: Vec<Rule> = egress.rules.http.iter().enumerate()
-            .map(|(idx, r)| Rule {
-                rule_id: format!("egress_http_{}", idx),
-                r#type: "http".to_string(),
-                match_host: r.match_host.clone(),
-                match_path_prefix: String::new(),
-                match_header: std::collections::HashMap::new(),
-                action_proxy_pass: r.action_upstream.clone(),
-                action_set_host: String::new(),
-            })
-            .collect();
-        
         let upstreams: Vec<Upstream> = egress.upstreams.iter().map(|(name, u)| Upstream {
             name: name.clone(),
             servers: u.servers.iter().map(|s| UpstreamServer {
