@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
+use crate::connection_state::ConnectionStateMachine;
 
 #[derive(Debug, Clone)]
 pub struct ClientIdentity {
@@ -62,4 +63,10 @@ pub struct ClientState {
     pub sessions: Arc<DashMap<u64, Arc<tokio::sync::Mutex<SessionState>>>>,
 
     pub egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>,
+
+    pub connection_state: Arc<ConnectionStateMachine>,
+
+    pub rule_matcher: Arc<tokio::sync::RwLock<crate::rule_matcher::RuleMatcher>>,
+
+    pub session_manager: Arc<crate::session_manager::SessionManager>,
 }

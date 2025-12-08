@@ -47,9 +47,22 @@ impl QuicTunnelManager {
         let mut backoff = INITIAL_BACKOFF;
 
         loop {
-            if shutdown_rx.try_recv().is_ok() {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() {
                 info!("QUIC tunnel manager received shutdown signal");
                 break;
+            }
+
+            // Check shutdown via broadcast channel
+            if shutdown_rx.try_recv().is_ok() {
+                self.state.connection_state.transition_to_shutting_down();
+                info!("QUIC tunnel manager received shutdown signal");
+                break;
+            }
+
+            // Transition to connecting state
+            if self.state.connection_state.should_reconnect() {
+                self.state.connection_state.transition_to_connecting();
             }
 
             info!("Connecting to QUIC server at {}...", self.server_addr);
@@ -58,6 +71,7 @@ impl QuicTunnelManager {
                 Ok(c) => c,
                 Err(e) => {
                     error!("Failed to create QUIC client: {}", e);
+                    self.state.connection_state.transition_to_reconnecting();
                     tokio::time::sleep(backoff).await;
                     backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
                     continue;
@@ -68,6 +82,9 @@ impl QuicTunnelManager {
                 Ok(conn) => {
                     info!("Successfully connected to QUIC server");
                     let conn = Arc::new(conn);
+
+                    // Transition to connected state
+                    self.state.connection_state.transition_to_connected();
 
                     {
                         let mut lock = self.state.quic_connection.write().await;
@@ -85,19 +102,27 @@ impl QuicTunnelManager {
 
                     match session_result {
                         Ok(_) => {
-                            info!("Connection session ended normally");
+                            info!("Connection session ended normally (shutdown)");
+                            break;
                         }
                         Err(e) => {
+                            if self.state.connection_state.is_shutting_down() {
+                                info!("Connection closed during shutdown, exiting");
+                                break;
+                            }
+                            // Transition to reconnecting state
+                            self.state.connection_state.transition_to_reconnecting();
                             warn!("Connection session error: {}, will reconnect", e);
                         }
                     }
                 }
                 Err(e) => {
                     error!("Failed to connect to QUIC server: {}", e);
+                    self.state.connection_state.transition_to_reconnecting();
                 }
             }
 
-            if shutdown_rx.try_recv().is_ok() {
+            if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
                 info!("QUIC tunnel manager shutting down");
                 break;
             }
@@ -123,17 +148,30 @@ impl QuicTunnelManager {
         loop {
             tokio::select! {
                 reason = connection.closed() => {
+                    if self.state.connection_state.is_shutting_down() {
+                        info!("Connection closed during shutdown: {:?}", reason);
+                        return Ok(());
+                    }
+                    // Transition to reconnecting state
+                    self.state.connection_state.transition_to_reconnecting();
                     let error_msg = format!("QUIC connection closed: {:?}", reason);
                     error!("{}", error_msg);
                     return Err(anyhow::anyhow!("{}", error_msg));
                 }
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received, closing QUIC connection");
+                    self.state.connection_state.transition_to_shutting_down();
                     connection.close(0u32.into(), b"graceful shutdown");
                     return Ok(());
                 }
                 _ = connection_check_interval.tick() => {
                     if let Some(reason) = connection.close_reason() {
+                        if self.state.connection_state.is_shutting_down() {
+                            info!("Connection closed during shutdown: {:?}", reason);
+                            return Ok(());
+                        }
+                        // Transition to reconnecting state
+                        self.state.connection_state.transition_to_reconnecting();
                         let error_msg = format!("Connection closed detected via periodic check: {:?}", reason);
                         error!("{}", error_msg);
                         return Err(anyhow::anyhow!("{}", error_msg));

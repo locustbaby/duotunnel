@@ -36,3 +36,4 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls", "native-tls-ve
 tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 futures-util = "0.3"
+lru = "0.12"

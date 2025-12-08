@@ -9,6 +9,7 @@ use crate::types::ClientState;
 use crate::forwarder::Forwarder;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo};
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
+use crate::stream_state::StreamStateMachine;
 
 fn match_rule_by_type_and_host<'a>(rules: &'a [Rule], rule_type: &str, host: &str) -> Result<Option<&'a Rule>> {
     let host_without_port = host.split(':').next().unwrap_or(host).trim();
@@ -58,6 +59,7 @@ pub struct ReverseRequestHandler {
     state: Arc<ClientState>,
     forwarder: Arc<Forwarder>,
     semaphore: Arc<tokio::sync::Semaphore>,
+    stream_state: Arc<StreamStateMachine>,
 }
 
 impl ReverseRequestHandler {
@@ -66,6 +68,7 @@ impl ReverseRequestHandler {
             state: state.clone(),
             forwarder,
             semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            stream_state: Arc::new(StreamStateMachine::new()),
         }
     }
 
@@ -76,7 +79,15 @@ impl ReverseRequestHandler {
         info!("Reverse request handler started, waiting for QUIC connection...");
         
         loop {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
+                info!("Reverse request handler received shutdown signal");
+                return Ok(());
+            }
+
+            // Check shutdown via broadcast channel
             if shutdown_rx.try_recv().is_ok() {
+                self.stream_state.transition_to_closing();
                 info!("Reverse request handler received shutdown signal");
                 return Ok(());
             }
@@ -84,6 +95,9 @@ impl ReverseRequestHandler {
             let connection = self.wait_for_connection().await?;
 
             info!("QUIC connection available, starting reverse stream listener loop");
+
+            // Transition to active state
+            self.stream_state.transition_to_active();
 
             let mut backoff = INITIAL_BACKOFF;
             let mut connection_status_timer = tokio::time::interval(CONNECTION_STATUS_CHECK_INTERVAL);
@@ -94,12 +108,26 @@ impl ReverseRequestHandler {
             const MAX_ERRORS: usize = 10;
 
             loop {
+                // Check shutdown via state machine
+                if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
+                    info!("Reverse request handler received shutdown signal");
+                    return Ok(());
+                }
+
+                // Check shutdown via broadcast channel
                 if shutdown_rx.try_recv().is_ok() {
+                    self.stream_state.transition_to_closing();
                     info!("Reverse request handler received shutdown signal");
                     return Ok(());
                 }
 
                 if let Some(reason) = connection.close_reason() {
+                    if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                        info!("Reverse handler: connection closed during shutdown: {:?}", reason);
+                        return Ok(());
+                    }
+                    // Transition to reconnecting state
+                    self.stream_state.transition_to_reconnecting();
                     error!("Connection closed detected in reverse handler: {:?}, will wait for reconnection", reason);
                     break;
                 }
@@ -107,11 +135,17 @@ impl ReverseRequestHandler {
                 tokio::select! {
                     _ = shutdown_rx.recv() => {
                         info!("Reverse request handler received shutdown signal");
+                        self.stream_state.transition_to_closing();
                         return Ok(());
                     }
 
                     _ = connection_status_timer.tick() => {
                         if let Some(reason) = connection.close_reason() {
+                            if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                                info!("Reverse handler: connection closed during shutdown: {:?}", reason);
+                                return Ok(());
+                            }
+                            self.stream_state.transition_to_reconnecting();
                             error!("Connection closed detected via periodic check in reverse handler: {:?}, will wait for reconnection", reason);
                             break;
                         }
@@ -119,6 +153,11 @@ impl ReverseRequestHandler {
                     
                     result = connection.accept_bi() => {
                         if let Some(reason) = connection.close_reason() {
+                            if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                                info!("Reverse handler: connection closed during shutdown: {:?}", reason);
+                                return Ok(());
+                            }
+                            self.stream_state.transition_to_reconnecting();
                             error!("Connection closed detected during accept_bi in reverse handler: {:?}, will wait for reconnection", reason);
                             break;
                         }
@@ -140,6 +179,7 @@ impl ReverseRequestHandler {
                                     state: self.state.clone(),
                                     forwarder: self.forwarder.clone(),
                                     semaphore: self.semaphore.clone(),
+                                    stream_state: self.stream_state.clone(),
                                 };
                                 
                                 tokio::spawn(async move {
@@ -150,16 +190,27 @@ impl ReverseRequestHandler {
                                 });
                             }
                             Err(quinn::ConnectionError::ApplicationClosed(reason)) => {
+                                if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                                    info!("Reverse handler: ApplicationClosed during shutdown: {:?}", reason);
+                                    return Ok(());
+                                }
+                                self.stream_state.transition_to_reconnecting();
                                 error!("Connection closed (ApplicationClosed) in reverse handler: {:?}, will wait for reconnection", reason);
                                 break;
                             }
                             Err(quinn::ConnectionError::ConnectionClosed(reason)) => {
+                                if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                                    info!("Reverse handler: ConnectionClosed during shutdown: {:?}", reason);
+                                    return Ok(());
+                                }
+                                self.stream_state.transition_to_reconnecting();
                                 error!("Connection closed (ConnectionClosed) in reverse handler: {:?}, will wait for reconnection", reason);
                                 break;
                             }
                             Err(quinn::ConnectionError::TimedOut) => {
                                 error_count += 1;
                                 if error_count >= MAX_ERRORS {
+                                    self.stream_state.transition_to_reconnecting();
                                     error!("Max timeout errors ({}) reached in reverse handler, will reconnect", MAX_ERRORS);
                                     break;
                                 }
@@ -168,11 +219,17 @@ impl ReverseRequestHandler {
                             }
                             Err(e) => {
                                 if let Some(reason) = connection.close_reason() {
+                                    if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                                        info!("Reverse handler: connection closed during shutdown: {:?}", reason);
+                                        return Ok(());
+                                    }
+                                    self.stream_state.transition_to_reconnecting();
                                     error!("Connection closed detected during accept_bi error: {:?}, reverse request handler will wait for reconnection", reason);
                                     break;
                                 }
                                 error_count += 1;
                                 if error_count >= MAX_ERRORS {
+                                    self.stream_state.transition_to_reconnecting();
                                     error!("Max errors ({}) reached in reverse handler: {}, will reconnect", MAX_ERRORS, e);
                                     break;
                                 }
@@ -189,13 +246,18 @@ impl ReverseRequestHandler {
 
     async fn wait_for_connection(&self) -> Result<Arc<Connection>> {
         loop {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
+                return Err(anyhow::anyhow!("Shutting down"));
+            }
+
             let connection = {
                 let lock = self.state.quic_connection.read().await;
                 lock.clone()
             };
 
             if let Some(conn) = connection {
-                if conn.close_reason().is_none() {
+                if conn.close_reason().is_none() && self.state.connection_state.current() == crate::connection_state::ConnectionState::Connected {
                     return Ok(conn);
                 }
             }
@@ -265,13 +327,16 @@ impl ReverseRequestHandler {
             }
         }
         
-        let rules: Vec<Rule> = self.state.rules.iter().map(|r| r.value().clone()).collect();
         let upstreams: Vec<Upstream> = self.state.upstreams.iter().map(|u| u.value().clone()).collect();
         
-        info!("[{}] Matching rules for type={}, host={} (total rules: {}, total upstreams: {})", 
-            request_id, routing_info.r#type, routing_info.host, rules.len(), upstreams.len());
+        // Use optimized RuleMatcher for O(1) lookup
+        let matched_rule = {
+            let matcher = self.state.rule_matcher.read().await;
+            matcher.match_rule(&routing_info.r#type, &routing_info.host)
+        };
         
-        let matched_rule = match_rule_by_type_and_host(&rules, &routing_info.r#type, &routing_info.host)?;
+        info!("[{}] Matching rules for type={}, host={} (total upstreams: {})", 
+            request_id, routing_info.r#type, routing_info.host, upstreams.len());
         
         let (final_target_addr, is_target_ssl) = if let Some(rule) = matched_rule {
             info!("[{}] Matched rule: {} -> {} (action_proxy_pass)", 

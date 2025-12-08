@@ -6,6 +6,7 @@ use hyper_rustls::HttpsConnector;
 use httparse::{Request, Status};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tracing::{debug, info, error, warn};
@@ -17,6 +18,8 @@ use url::Url;
 use crate::types::ClientState;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, write_frame, RoutingInfo, create_routing_frame};
 use tunnel_lib::frame::TunnelFrame as Frame;
+use crate::forward_strategies::{ForwardStrategy, HttpForwardStrategy, WssForwardStrategy, GrpcForwardStrategy};
+use crate::http_request_builder::HttpRequestBuilder;
 
 
 mod uri_utils {
@@ -98,11 +101,31 @@ pub type ForwardResult = Result<Vec<u8>>;
 #[derive(Clone)]
 pub struct Forwarder {
     state: Arc<ClientState>,
+    strategies: Arc<HashMap<String, Box<dyn ForwardStrategy>>>,
 }
 
 impl Forwarder {
     pub fn new(state: Arc<ClientState>) -> Self {
-        Self { state }
+        let client = state.egress_pool.client();
+        let mut strategies: HashMap<String, Box<dyn ForwardStrategy>> = HashMap::new();
+        
+        // Register strategies
+        strategies.insert("http".to_string(), Box::new(HttpForwardStrategy::new(client.clone())));
+        strategies.insert("https".to_string(), Box::new(HttpForwardStrategy::new(client.clone())));
+        strategies.insert("wss".to_string(), Box::new(WssForwardStrategy::new()));
+        strategies.insert("ws".to_string(), Box::new(WssForwardStrategy::new()));
+        strategies.insert("grpc".to_string(), Box::new(GrpcForwardStrategy::new()));
+        
+        Self {
+            state,
+            strategies: Arc::new(strategies),
+        }
+    }
+
+    pub fn get_strategy(&self, protocol_type: &str) -> Result<&dyn ForwardStrategy> {
+        self.strategies.get(protocol_type)
+            .map(|s| s.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("Unsupported protocol type: {}", protocol_type))
     }
 
     pub async fn forward(
@@ -112,35 +135,8 @@ impl Forwarder {
         target_uri: &str,
         is_ssl: bool,
     ) -> ForwardResult {
-        let client = self.state.egress_pool.client();
-        
-        match protocol_type {
-            "http" => {
-                http::forward_http_request(
-                    &client,
-                    request_bytes,
-                    target_uri,
-                    is_ssl,
-                ).await
-            }
-            "wss" => {
-                wss::forward_wss_request(
-                    request_bytes,
-                    target_uri,
-                    is_ssl,
-                ).await
-            }
-            "grpc" => {
-                grpc::forward_grpc_request(
-                    request_bytes,
-                    target_uri,
-                    is_ssl,
-                ).await
-            }
-            _ => {
-                Err(anyhow::anyhow!("Unsupported protocol type: {}", protocol_type))
-            }
-        }
+        let strategy = self.get_strategy(protocol_type)?;
+        strategy.forward(request_bytes, target_uri, is_ssl).await
     }
 }
 

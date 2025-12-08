@@ -13,6 +13,13 @@ mod quic_tunnel_manager;
 mod register;
 mod reverse_handler;
 mod types;
+mod connection_state;
+mod stream_state;
+mod rule_matcher;
+mod session_manager;
+mod forward_strategies;
+mod http_request_builder;
+mod message_handlers;
 
 use control::ConfigManager;
 use types::{ClientState, ClientIdentity};
@@ -138,7 +145,8 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("=== Received shutdown signal, initiating graceful shutdown ===");
 
-
+    // Transition connection state to shutting down
+    state.connection_state.transition_to_shutting_down();
     info!("Step 1/4: Broadcasting shutdown signal to all components");
     let _ = shutdown_tx.send(());
     
@@ -218,6 +226,8 @@ async fn main() -> Result<()> {
         info!("  ✓ Cleared {} active sessions", session_count);
     }
 
+    // Transition to shutdown state
+    state.connection_state.transition_to_shutdown();
     info!("=== Tunnel client shutdown complete ===");
     Ok(())
 }
@@ -234,13 +244,24 @@ fn initialize_logging(log_level: &str) {
 }
 
 fn initialize_client_state(egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>) -> Arc<ClientState> {
+    let session_manager = Arc::new(session_manager::SessionManager::new(None, None));
+    let cleanup_handle = session_manager.clone().start_cleanup_task();
+    
+    // Keep cleanup task running
+    tokio::spawn(async move {
+        cleanup_handle.await.ok();
+    });
+    
     Arc::new(ClientState {
         rules: Arc::new(dashmap::DashMap::new()),
         upstreams: Arc::new(dashmap::DashMap::new()),
         config_version: Arc::new(tokio::sync::RwLock::new("0".to_string())),
         config_hash: Arc::new(tokio::sync::RwLock::new(String::new())),
         quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
-        sessions: Arc::new(dashmap::DashMap::new()),
+        sessions: Arc::new(dashmap::DashMap::new()),  // Legacy
         egress_pool,
+        connection_state: Arc::new(connection_state::ConnectionStateMachine::new()),
+        rule_matcher: Arc::new(tokio::sync::RwLock::new(rule_matcher::RuleMatcher::new())),
+        session_manager,
     })
 }

@@ -10,6 +10,9 @@ pub mod warmup;
 #[cfg(feature = "egress")]
 pub mod egress_pool;
 
+#[cfg(feature = "egress")]
+pub mod connection_pool_decorators;
+
 pub mod proto {
     pub mod tunnel {
         include!(concat!(env!("OUT_DIR"), "/tunnel.rs"));

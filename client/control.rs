@@ -3,12 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, error, debug, warn};
 use quinn::{Connection, SendStream, RecvStream};
-use dashmap::DashMap;
 use tunnel_lib::protocol::{write_control_message, read_control_message};
 use tunnel_lib::proto::tunnel::control_message::Payload;
 use crate::types::{ClientState, ClientIdentity};
 use tunnel_lib::egress_pool::EgressPool;
 use crate::register::RegisterManager;
+use crate::stream_state::StreamStateMachine;
+use crate::message_handlers::MessageHandlerChain;
 
 const HASH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const FULL_SYNC_INTERVAL: Duration = Duration::from_secs(300);
@@ -20,6 +21,8 @@ pub struct ConfigManager {
     identity: ClientIdentity,
     state: Arc<ClientState>,
     egress_pool: Arc<EgressPool>,
+    stream_state: Arc<StreamStateMachine>,
+    message_handler_chain: Arc<MessageHandlerChain>,
 }
 
 impl ConfigManager {
@@ -28,10 +31,13 @@ impl ConfigManager {
         state: Arc<ClientState>,
         egress_pool: Arc<EgressPool>,
     ) -> Self {
+        let identity_clone = identity.clone();
         Self {
             identity,
             state,
             egress_pool,
+            stream_state: Arc::new(StreamStateMachine::new()),
+            message_handler_chain: Arc::new(MessageHandlerChain::new(identity_clone)),
         }
     }
 
@@ -42,21 +48,38 @@ impl ConfigManager {
         info!("Control stream manager started, waiting for QUIC connection...");
 
         loop {
-
-            if shutdown_rx.try_recv().is_ok() {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
                 info!("Control stream manager received shutdown signal");
                 return Ok(());
             }
 
+            // Check shutdown via broadcast channel
+            if shutdown_rx.try_recv().is_ok() {
+                self.stream_state.transition_to_closing();
+                info!("Control stream manager received shutdown signal");
+                return Ok(());
+            }
 
             let connection = self.wait_for_connection().await?;
             info!("QUIC connection available, starting control stream loop");
 
-
             if let Err(e) = self.run_control_stream_loop(connection, &mut shutdown_rx).await {
+                if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                    info!("Control stream manager shutting down after error");
+                    return Ok(());
+                }
+                // Transition to reconnecting state
+                self.stream_state.transition_to_reconnecting();
                 error!("Control stream loop error: {}, will reconnect", e);
                 tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
                 continue;
+            }
+            
+            if shutdown_rx.try_recv().is_ok() || self.state.connection_state.is_shutting_down() {
+                self.stream_state.transition_to_closing();
+                info!("Control stream manager shutting down");
+                return Ok(());
             }
         }
     }
@@ -68,37 +91,50 @@ impl ConfigManager {
         shutdown_rx: &mut tokio::sync::broadcast::Receiver<()>,
     ) -> Result<()> {
         loop {
-
-            if shutdown_rx.try_recv().is_ok() {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
                 info!("Control stream loop received shutdown signal");
                 return Ok(());
             }
 
+            // Check shutdown via broadcast channel
+            if shutdown_rx.try_recv().is_ok() {
+                self.stream_state.transition_to_closing();
+                info!("Control stream loop received shutdown signal");
+                return Ok(());
+            }
 
             self.check_connection_alive(&connection)?;
 
+            // Transition to opening state
+            if self.stream_state.should_reconnect() {
+                self.stream_state.transition_to_opening();
+            }
 
             let (mut send, mut recv) = match self.open_control_stream(connection.clone()).await {
                 Ok(streams) => {
                     info!("Control stream opened successfully");
+                    // Transition to active state
+                    self.stream_state.transition_to_active();
                     streams
                 }
                 Err(e) => {
                     self.check_connection_alive(&connection)?;
+                    // Transition to reconnecting state
+                    self.stream_state.transition_to_reconnecting();
                     warn!("Failed to open control stream: {}, retrying in {:?}", e, STREAM_RECONNECT_BACKOFF);
                     tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
                     continue;
                 }
             };
 
-
             if let Err(e) = self.send_full_config_request(&mut send).await {
                 warn!("Failed to send initial config request: {}, will retry", e);
+                self.stream_state.transition_to_reconnecting();
                 let _ = send.finish();
                 tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
                 continue;
             }
-
 
             if let Err(e) = self.process_control_messages(
                 &mut send, 
@@ -107,12 +143,14 @@ impl ConfigManager {
                 shutdown_rx
             ).await {
                 warn!("Control message processing error: {}, will reopen stream", e);
+                self.stream_state.transition_to_reconnecting();
                 let _ = send.finish();
                 tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
                 continue;
             }
 
-
+            // Stream closed, transition to reconnecting
+            self.stream_state.transition_to_reconnecting();
             warn!("Control stream closed, reopening");
             tokio::time::sleep(STREAM_RECONNECT_BACKOFF).await;
         }
@@ -141,9 +179,18 @@ impl ConfigManager {
         connection_status_timer.tick().await;
 
         loop {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
+                info!("Control message loop received shutdown signal");
+                self.stream_state.transition_to_closing();
+                let _ = send.finish();
+                return Ok(());
+            }
+
             tokio::select! {
                 _ = shutdown_rx.recv() => {
                     info!("Control message loop received shutdown signal");
+                    self.stream_state.transition_to_closing();
                     let _ = send.finish();
                     return Ok(());
                 }
@@ -187,13 +234,18 @@ impl ConfigManager {
 
     async fn wait_for_connection(&self) -> Result<Arc<Connection>> {
         loop {
+            // Check shutdown via state machine
+            if self.state.connection_state.is_shutting_down() || self.stream_state.is_closing() {
+                return Err(anyhow::anyhow!("Shutting down"));
+            }
+
             let connection = {
                 let lock = self.state.quic_connection.read().await;
                 lock.clone()
             };
 
             if let Some(conn) = connection {
-                if conn.close_reason().is_none() {
+                if conn.close_reason().is_none() && self.state.connection_state.current() == crate::connection_state::ConnectionState::Connected {
                     return Ok(conn);
                 }
             }
@@ -215,31 +267,13 @@ impl ConfigManager {
         payload: Payload,
         send: &mut SendStream,
     ) -> Result<()> {
-        match payload {
-            Payload::ConfigSyncResponse(resp) => {
-                self.handle_config_sync_response(resp).await;
-            }
-            Payload::HashResponse(hash_resp) => {
-                self.handle_hash_response(hash_resp, send).await?;
-            }
-            Payload::IncrementalUpdate(update) => {
-                self.handle_incremental_update(update).await;
-            }
-            Payload::ConfigPush(push) => {
-                debug!("Received ConfigPushNotification for version: {}", push.config_version);
-                self.send_full_config_request(send).await?;
-            }
-            Payload::Heartbeat(_) => {
-                debug!("Received heartbeat from server");
-            }
-            Payload::ErrorMessage(err) => {
-                error!("Received error from server: {} - {}", err.code, err.message);
-            }
-            _ => {
-                warn!("Received unexpected control message");
-            }
-        }
-        Ok(())
+        // Use message handler chain for cleaner code
+        self.message_handler_chain.handle(
+            payload,
+            send,
+            &self.state,
+            &self.egress_pool,
+        ).await
     }
 
     async fn send_hash_check_request(&self, send: &mut SendStream) -> Result<()> {
@@ -316,6 +350,14 @@ impl ConfigManager {
                 self.state.rules.insert(rule.rule_id.clone(), rule.clone());
             }
 
+            // Update RuleMatcher with new rules
+            {
+                use tunnel_lib::proto::tunnel::Rule;
+                let rules: Vec<Rule> = self.state.rules.iter().map(|r| r.value().clone()).collect();
+                let mut matcher = self.state.rule_matcher.write().await;
+                matcher.update_rules(rules);
+            }
+
             let new_upstream_names: std::collections::HashSet<String> = resp.upstreams.iter()
                 .map(|u| u.name.clone())
                 .collect();
@@ -362,6 +404,14 @@ impl ConfigManager {
         for rule in &update.updated_rules {
             self.state.rules.insert(rule.rule_id.clone(), rule.clone());
             debug!("Updated rule: {}", rule.rule_id);
+        }
+
+        // Update RuleMatcher with updated rules
+        {
+            use tunnel_lib::proto::tunnel::Rule;
+            let rules: Vec<Rule> = self.state.rules.iter().map(|r| r.value().clone()).collect();
+            let mut matcher = self.state.rule_matcher.write().await;
+            matcher.update_rules(rules);
         }
 
         for upstream_name in &update.deleted_upstream_names {
