@@ -35,7 +35,7 @@ server_egress_upstream:
   rules:
     http:
       # - match_host: "echo.free.beeceptor.com"
-      - match_host: "www.google.com"
+      - match_host: "wss.localtest.com"
         action_upstream: "backend"
     
     grpc:
@@ -53,18 +53,18 @@ tunnel_management:
   server_ingress_routing:
     rules:
       http:
-        - match_host: "test-tunnel-harbor-us-vdc.zilliz.cc"
+        - match_host: "wss.localtest.com"
           action_client_group: "group-a"
-        - match_host: "www2.google.com"
+        - match_host: "www2.localtest.com"
           action_client_group: "group-b"
       
       grpc:
-        - match_host: "grpc.google.com"
+        - match_host: "grpc.localtest.com"
           match_service: "com.example.MyService"
           action_client_group: "group-a"
       
       wss:
-        - match_host: "wss.google.com"
+        - match_host: "wss.localtest.com"
           action_client_group: "group-a"
   
   # --- 3.2 CLIENT_ROUTINGS ---
@@ -77,7 +77,7 @@ tunnel_management:
           local_service: # Client's local service (e.g., http://127.0.0.1:8080)
             servers:
               # - address: "https://echo.free.beeceptor.com"
-              - address: "https://harbor-us-vdc.zilliz.cc"
+              - address: "https://www.google.com"
                 resolve: false
             lb_policy: "round_robin"
           
@@ -95,7 +95,7 @@ tunnel_management:
         
         rules: # Client's rules for traffic received from the tunnel (forwards to local service)
           http:
-            - match_host: "test-tunnel-harbor-us-vdc.zilliz.cc"
+            - match_host: "wss.localtest.com"
               action_upstream: "local_service"
             - match_host: "www.google.com"
               action_upstream: "local_service"
@@ -103,7 +103,7 @@ tunnel_management:
               action_upstream: "http_service"
           
           wss:
-            - match_host: "wss.google.com"
+            - match_host: "wss.localtest.com"
               action_upstream: "wss_service"
       
       group-b:

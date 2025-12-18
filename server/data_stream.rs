@@ -26,6 +26,13 @@ pub async fn handle_data_stream(
         request_id, routing_info.r#type, routing_info.host, routing_frame.session_id
     );
     
+    // Parse host to extract hostname (remove port if present)
+    let host_with_port = routing_info.host.as_str();
+    let host = host_with_port.split(':').next().unwrap_or(host_with_port).trim();
+    if host != host_with_port {
+        info!("[{}] Parsed host from '{}' to '{}' (removed port)", request_id, host_with_port, host);
+    }
+    
     let session_id = routing_frame.session_id;
     
 
@@ -63,11 +70,11 @@ pub async fn handle_data_stream(
 
     let matched_upstream = if routing_info.r#type == "http" {
         state.egress_rules_http.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(&routing_info.host))
+            .find(|r| r.match_host.eq_ignore_ascii_case(host))
             .map(|r| r.action_upstream.clone())
     } else if routing_info.r#type == "grpc" {
         state.egress_rules_grpc.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(&routing_info.host))
+            .find(|r| r.match_host.eq_ignore_ascii_case(host))
             .map(|r| r.action_upstream.clone())
     } else {
         None
@@ -76,17 +83,17 @@ pub async fn handle_data_stream(
     let (final_target_addr, is_target_ssl) = if let Some(upstream_name) = matched_upstream {
         if let Some(upstream) = state.egress_upstreams.get(&upstream_name) {
             info!("[{}] Matched egress rule: {} -> upstream {} ({})", 
-                request_id, routing_info.host, upstream_name, upstream.address);
+                request_id, host, upstream_name, upstream.address);
             (upstream.address.clone(), upstream.is_ssl)
         } else {
             error!("[{}] Upstream '{}' not found", request_id, upstream_name);
             return Err(anyhow::anyhow!("Upstream '{}' not found", upstream_name));
         }
     } else {
-        error!("[{}] No matching egress rule for type={}, host={}", 
-            request_id, routing_info.r#type, routing_info.host);
+        error!("[{}] No matching egress rule for type={}, host={} (parsed from: {})", 
+            request_id, routing_info.r#type, host, routing_info.host);
         return Err(anyhow::anyhow!("No matching egress rule for type={}, host={}", 
-            routing_info.r#type, routing_info.host));
+            routing_info.r#type, host));
     };
     
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 

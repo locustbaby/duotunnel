@@ -584,6 +584,23 @@ impl tunnel_lib::listener::ConnectionHandler for WssIngressHandler {
                 anyhow::bail!("Incomplete WebSocket HTTP headers");
             }
         }
+        
+        // Verify this is a WebSocket upgrade request
+        let is_websocket = req.headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("upgrade") && 
+            std::str::from_utf8(h.value).map(|v| v.eq_ignore_ascii_case("websocket")).unwrap_or(false)
+        }) && req.headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("connection") && 
+            std::str::from_utf8(h.value).map(|v| v.to_lowercase().contains("upgrade")).unwrap_or(false)
+        });
+        
+        if !is_websocket {
+            // Check if this might be a TLS handshake (WSS attempt)
+            if header_buffer.len() > 0 && header_buffer[0] == 0x16 {
+                return Err(anyhow::anyhow!("TLS handshake detected. This server only supports WS (non-encrypted WebSocket). Use ws:// instead of wss://"));
+            }
+            return Err(anyhow::anyhow!("Not a WebSocket upgrade request. Missing Upgrade: websocket or Connection: Upgrade headers"));
+        }
 
         let host_with_port = req.headers.iter()
             .find(|h| h.name.eq_ignore_ascii_case("host"))
@@ -678,19 +695,44 @@ impl tunnel_lib::listener::ConnectionHandler for WssIngressHandler {
                         buffer.extend_from_slice(&buf[..n]);
                         
                         const MAX_FRAME_SIZE: usize = 64 * 1024;
-                        while buffer.len() >= MAX_FRAME_SIZE {
-                            let chunk = buffer[..MAX_FRAME_SIZE].to_vec();
-                            buffer = buffer[MAX_FRAME_SIZE..].into();
+                        // For WebSocket, send data more aggressively:
+                        // - If buffer reaches MAX_FRAME_SIZE, send immediately
+                        // - If we got less data than read buffer size (partial read), send what we have
+                        let should_send = buffer.len() >= MAX_FRAME_SIZE || n < buf.len();
+                        
+                        if should_send && !buffer.is_empty() {
+                            // Send in MAX_FRAME_SIZE chunks first
+                            while buffer.len() >= MAX_FRAME_SIZE {
+                                let chunk = buffer[..MAX_FRAME_SIZE].to_vec();
+                                buffer = buffer[MAX_FRAME_SIZE..].into();
+                                
+                                let data_frame = TunnelFrame::new(
+                                    session_id_clone,
+                                    ProtocolType::WssFrame,
+                                    false,
+                                    chunk,
+                                );
+                                if let Err(e) = write_frame(&mut send_clone, &data_frame).await {
+                                    error!("[{}] Error sending WebSocket frame: {}", request_id_clone, e);
+                                    return;
+                                }
+                            }
                             
-                            let data_frame = TunnelFrame::new(
-                                session_id_clone,
-                                ProtocolType::WssFrame,
-                                false,
-                                chunk,
-                            );
-                            if let Err(e) = write_frame(&mut send_clone, &data_frame).await {
-                                error!("[{}] Error sending WebSocket frame: {}", request_id_clone, e);
-                                return;
+                            // Send remaining buffer (even if small, for WebSocket responsiveness)
+                            if !buffer.is_empty() {
+                                let chunk = buffer.to_vec();
+                                buffer.clear();
+                                
+                                let data_frame = TunnelFrame::new(
+                                    session_id_clone,
+                                    ProtocolType::WssFrame,
+                                    false,
+                                    chunk,
+                                );
+                                if let Err(e) = write_frame(&mut send_clone, &data_frame).await {
+                                    error!("[{}] Error sending WebSocket frame: {}", request_id_clone, e);
+                                    return;
+                                }
                             }
                         }
                     }
