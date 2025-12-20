@@ -6,7 +6,9 @@ use uuid::Uuid;
 use bytes::BytesMut;
 use crate::types::ServerState;
 use crate::egress_forwarder::{forward_egress_http_request, forward_egress_grpc_request, forward_egress_wss_request};
+use crate::streaming_forwarder;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
+use std::time::Duration;
 
 pub async fn handle_data_stream(
     mut send: SendStream,
@@ -35,10 +37,88 @@ pub async fn handle_data_stream(
     
     let session_id = routing_frame.session_id;
     
-
-    let mut request_buffer = BytesMut::new();
-    let mut session_complete = false;
-    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    // Parse host to extract hostname (remove port if present)
+    let host_with_port = routing_info.host.as_str();
+    let host = host_with_port.split(':').next().unwrap_or(host_with_port).trim();
+    if host != host_with_port {
+        info!("[{}] Parsed host from '{}' to '{}' (removed port)", request_id, host_with_port, host);
+    }
+    
+    // Find upstream
+    let matched_upstream = if routing_info.r#type == "http" {
+        state.egress_rules_http.iter()
+            .find(|r| r.match_host.eq_ignore_ascii_case(host))
+            .map(|r| r.action_upstream.clone())
+    } else if routing_info.r#type == "grpc" {
+        state.egress_rules_grpc.iter()
+            .find(|r| r.match_host.eq_ignore_ascii_case(host))
+            .map(|r| r.action_upstream.clone())
+    } else {
+        None
+    };
+    
+    let (final_target_addr, is_target_ssl) = if let Some(upstream_name) = matched_upstream {
+        if let Some(upstream) = state.egress_upstreams.get(&upstream_name) {
+            info!("[{}] Matched egress rule: {} -> upstream {} ({})", 
+                request_id, host, upstream_name, upstream.address);
+            (upstream.address.clone(), upstream.is_ssl)
+        } else {
+            error!("[{}] Upstream '{}' not found", request_id, upstream_name);
+            return Err(anyhow::anyhow!("Upstream '{}' not found", upstream_name));
+        }
+    } else {
+        error!("[{}] No matching egress rule for type={}, host={} (parsed from: {})", 
+            request_id, routing_info.r#type, host, routing_info.host);
+        return Err(anyhow::anyhow!("No matching egress rule for type={}, host={}", 
+            routing_info.r#type, host));
+    };
+    
+    info!("[{}] Forwarding to upstream: {} (SSL: {})", 
+        request_id, final_target_addr, is_target_ssl);
+    
+    // For streaming: read first frame to get request header, then stream body
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+    
+    // Read first data frame (should contain HTTP headers)
+    let first_frame = match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(REQUEST_TIMEOUT)).await {
+        Ok(frame) => {
+            if frame.session_id != session_id {
+                warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
+                    request_id, frame.session_id, session_id);
+                return Err(anyhow::anyhow!("Mismatched session_id"));
+            }
+            frame
+        }
+        Err(e) => {
+            if e.to_string().contains("timeout") {
+                error!("[{}] Request timeout after {:?}", request_id, REQUEST_TIMEOUT);
+            } else {
+                error!("[{}] Error reading first frame: {}", request_id, e);
+            }
+            return Err(e);
+        }
+    };
+    
+    // Determine if we should use streaming mode (for HTTP with large bodies)
+    // Streaming leverages QUIC's multiplexing: we can process multiple requests concurrently
+    let use_streaming = routing_info.r#type == "http" && !first_frame.end_of_stream;
+    
+    // If streaming mode, use dedicated streaming forwarder
+    if use_streaming {
+        info!("[{}] Using QUIC streaming mode for HTTP request (leverages multiplexing)", request_id);
+        return streaming_forwarder::forward_http_streaming(
+            &state.egress_pool.client(),
+            recv,
+            send,
+            &final_target_addr,
+            session_id,
+            &request_id,
+        ).await;
+    }
+    
+    // Non-streaming mode: collect all frames first (for gRPC, WSS, or small HTTP requests)
+    let mut request_buffer = BytesMut::from(first_frame.payload.as_slice());
+    let mut session_complete = first_frame.end_of_stream;
     
     while !session_complete {
         match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(REQUEST_TIMEOUT)).await {
@@ -110,6 +190,7 @@ pub async fn handle_data_stream(
         }
     };
     
+    // Non-streaming mode: use existing forwarders
     let response_bytes = match routing_info.r#type.as_str() {
         "http" => {
             forward_egress_http_request(

@@ -5,11 +5,12 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use httparse::{Request as HttpRequest, Status};
 use std::str::FromStr;
-use tracing::{debug, warn};
+use tracing::{debug, warn, error};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::connect_async;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 
 pub async fn forward_egress_http_request(
     client: &Client<HttpsConnector<HttpConnector>, http_body_util::Full<bytes::Bytes>>,

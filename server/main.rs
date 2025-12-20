@@ -13,6 +13,7 @@ mod control;
 mod data_stream;
 mod egress_forwarder;
 mod ingress_handlers;
+mod streaming_forwarder;
 
 use types::{ServerState, IngressRule};
 use connection::accept_loop;
