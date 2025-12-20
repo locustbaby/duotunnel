@@ -332,28 +332,64 @@ impl ReverseRequestHandler {
         
         // WebSocket requires special handling: bidirectional streaming
         if routing_info.r#type == "wss" {
-            // Read first frame (HTTP upgrade request) only
+            // Read HTTP upgrade request directly (no TunnelFrame encapsulation)
+            // WebSocket upgrade requests typically don't have a body, but we read headers first
             let mut initial_request = BytesMut::new();
-            match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(REQUEST_TIMEOUT)).await {
-                Ok(frame) => {
-                    if frame.session_id != session_id {
-                        return Err(anyhow::anyhow!("Mismatched session_id"));
+            let mut header_complete = false;
+            let mut header_end_pos = 0;
+            const MAX_HEADER_SIZE: usize = 8192;
+            
+            // Read until we have complete HTTP headers
+            while !header_complete && initial_request.len() < MAX_HEADER_SIZE {
+                let mut buf = vec![0u8; 4096];
+                match tokio::time::timeout(REQUEST_TIMEOUT, recv.read(&mut buf)).await {
+                    Ok(Ok(Some(n))) => {
+                        if n == 0 {
+                            return Err(anyhow::anyhow!("QUIC stream ended before HTTP headers"));
+                        }
+                        initial_request.extend_from_slice(&buf[..n]);
+                        
+                        // Look for end of HTTP headers (\r\n\r\n)
+                        for i in 0..=initial_request.len().saturating_sub(4) {
+                            if &initial_request[i..i+4] == b"\r\n\r\n" {
+                                header_complete = true;
+                                header_end_pos = i + 4;
+                                break;
+                            }
+                        }
                     }
-                    initial_request.extend_from_slice(&frame.payload);
-                    info!("[{}] Received WebSocket upgrade request ({} bytes)", request_id, initial_request.len());
-                }
-                Err(e) => {
-                    error!("[{}] Failed to read WebSocket upgrade request: {}", request_id, e);
-                    return Err(e);
+                    Ok(Ok(None)) => {
+                        return Err(anyhow::anyhow!("QUIC stream closed before HTTP headers"));
+                    }
+                    Ok(Err(e)) => {
+                        error!("[{}] Failed to read WebSocket upgrade request: {}", request_id, e);
+                        return Err(e.into());
+                    }
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Timeout reading WebSocket upgrade request"));
+                    }
                 }
             }
+            
+            if !header_complete {
+                return Err(anyhow::anyhow!("HTTP headers incomplete or too large"));
+            }
+            
+            info!("[{}] Received WebSocket upgrade request headers ({} bytes) - direct forwarding", 
+                request_id, header_end_pos);
+            
+            // For WebSocket, we need to handle the upgrade request and then stream bidirectionally
+            // The initial_request contains the HTTP upgrade request headers (and possibly body data)
+            // Note: WebSocket upgrade requests typically don't have a body, but we pass the full buffer
+            // to handle_websocket_stream which will extract only the headers part
+            let initial_request_vec: Vec<u8> = initial_request.to_vec();
             
             return self.handle_websocket_stream(
                 send,
                 recv,
                 routing_info,
                 session_id,
-                initial_request,
+                BytesMut::from(initial_request_vec.as_slice()),
                 final_target_addr,
                 is_target_ssl,
                 request_id,
@@ -378,11 +414,21 @@ impl ReverseRequestHandler {
                     session_complete = frame.end_of_stream;
                     
                     if session_complete {
-                        info!("[{}] Received complete request ({} bytes)", request_id, request_buffer.len());
+                        info!("[{}] Received complete request ({} bytes) - end_of_stream flag set", request_id, request_buffer.len());
                     }
                 }
                 Err(e) => {
-                    if e.to_string().contains("timeout") {
+                    let err_str = e.to_string();
+                    // If stream is closed (server called finish), and we have some data, consider it complete
+                    if (err_str.contains("stream closed") || err_str.contains("connection closed") || err_str.contains("UnexpectedEof")) 
+                        && !request_buffer.is_empty() {
+                        warn!("[{}] QUIC stream closed while reading frames, but received {} bytes. Treating as complete request.", 
+                            request_id, request_buffer.len());
+                        session_complete = true;
+                        break;
+                    }
+                    
+                    if err_str.contains("timeout") {
                         error!("[{}] Request timeout after {:?}", request_id, REQUEST_TIMEOUT);
                     } else {
                         error!("[{}] Error reading frame: {}", request_id, e);
@@ -487,7 +533,7 @@ impl ReverseRequestHandler {
         mut send: SendStream,
         mut recv: RecvStream,
         routing_info: RoutingInfo,
-        session_id: u64,
+        _session_id: u64,
         initial_request: BytesMut,
         target_addr: String,
         is_ssl: bool,
@@ -519,9 +565,12 @@ impl ReverseRequestHandler {
         let parse_result = req.parse(&initial_request)
             .map_err(|e| anyhow::anyhow!("Failed to parse WebSocket upgrade request: {}", e))?;
         
-        if !matches!(parse_result, httparse::Status::Complete(_)) {
-            anyhow::bail!("Incomplete WebSocket upgrade request");
-        }
+        let header_end_pos = match parse_result {
+            httparse::Status::Complete(pos) => pos,
+            httparse::Status::Partial => {
+                anyhow::bail!("Incomplete WebSocket upgrade request");
+            }
+        };
         
         // Modify Host header to match backend
         let mut modified_request = Vec::new();
@@ -612,179 +661,91 @@ impl ReverseRequestHandler {
                 return Err(anyhow::anyhow!("Backend response headers incomplete"));
             }
             
-            // Forward HTTP upgrade response to server
-            let response_frame = TunnelFrame::new(
-                session_id,
-                ProtocolType::WssFrame,
-                false,
-                response_buffer[..header_end_pos].to_vec(),
-            );
-            write_frame(&mut send, &response_frame).await?;
-            info!("[{}] Sent WebSocket upgrade response to server ({} bytes)", request_id, header_end_pos);
+            // Forward HTTP upgrade response to server (direct forwarding, no encapsulation)
+            send.write_all(&response_buffer[..header_end_pos]).await?;
+            info!("[{}] Sent WebSocket upgrade response to server ({} bytes) - direct forwarding", request_id, header_end_pos);
             
-            // Use TLS streams for bidirectional forwarding
+            // Use TLS streams for bidirectional forwarding (direct forwarding, no encapsulation)
+            // Note: recv stream position is already after the HTTP upgrade request headers
+            // so we can directly start forwarding from QUIC to TLS
+            // Move tls_write and tls_read into their respective tasks
             let mut send_clone = send;
             let mut recv_clone = recv;
-            let session_id_clone = session_id;
             let request_id_clone1 = request_id.clone();
             let request_id_clone2 = request_id.clone();
-            const MAX_FRAME_SIZE: usize = 64 * 1024;
+            const FORWARD_TIMEOUT: Duration = Duration::from_secs(300);
             
-            // Task 1: Forward from tunnel to backend (TLS)
+            // Task 1: Forward from tunnel (QUIC) to backend (TLS) - direct forwarding
+            // Move tls_write into this task
             let tunnel_to_backend_task = tokio::spawn(async move {
-                let mut session_complete = false;
-                const FRAME_TIMEOUT: Duration = Duration::from_secs(300);
+                let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
                 
-                while !session_complete {
-                    match tunnel_lib::frame::read_frame_with_timeout(&mut recv_clone, Some(FRAME_TIMEOUT)).await {
-                        Ok(frame) => {
-                            if frame.session_id != session_id_clone {
-                                warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
-                                    request_id_clone1, frame.session_id, session_id_clone);
-                                continue;
+                loop {
+                    match tokio::time::timeout(FORWARD_TIMEOUT, recv_clone.read(&mut buf)).await {
+                        Ok(Ok(Some(n))) => {
+                            if n == 0 {
+                                debug!("[{}] QUIC stream ended", request_id_clone1);
+                                break;
                             }
                             
-                            if !frame.payload.is_empty() {
-                                if let Err(e) = tls_write.write_all(&frame.payload).await {
-                                    error!("[{}] Error writing to backend TLS: {}", request_id_clone1, e);
-                                    break;
-                                }
-                                if let Err(e) = tls_write.flush().await {
-                                    error!("[{}] Error flushing to backend TLS: {}", request_id_clone1, e);
-                                    break;
-                                }
+                            if let Err(e) = tls_write.write_all(&buf[..n]).await {
+                                error!("[{}] Error writing to backend TLS: {}", request_id_clone1, e);
+                                break;
                             }
-                            
-                            session_complete = frame.end_of_stream;
-                            if session_complete {
-                                debug!("[{}] Received end of stream from tunnel", request_id_clone1);
+                            if let Err(e) = tls_write.flush().await {
+                                error!("[{}] Error flushing to backend TLS: {}", request_id_clone1, e);
                                 break;
                             }
                         }
-                        Err(e) => {
-                            if e.to_string().contains("timeout") {
-                                warn!("[{}] Tunnel frame read timeout", request_id_clone1);
-                            } else {
-                                error!("[{}] Error reading frame from tunnel: {}", request_id_clone1, e);
-                            }
+                        Ok(Ok(None)) => {
+                            debug!("[{}] QUIC stream closed", request_id_clone1);
+                            // Shutdown TLS write side when QUIC stream ends
+                            let _ = tls_write.shutdown().await;
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            error!("[{}] Error reading from QUIC: {}", request_id_clone1, e);
+                            break;
+                        }
+                        Err(_) => {
+                            warn!("[{}] QUIC to backend TLS forward timeout", request_id_clone1);
                             break;
                         }
                     }
                 }
             });
             
-            // Task 2: Forward from backend (TLS) to tunnel
+            // Task 2: Forward from backend (TLS) to tunnel (QUIC) - direct forwarding
+            // Move tls_read into this task
             let backend_to_tunnel_task = tokio::spawn(async move {
-                let mut buffer = BytesMut::new();
-                let mut read_buf = vec![0u8; 4096];
+                let mut read_buf = vec![0u8; 64 * 1024]; // 64KB buffer
                 
                 loop {
-                    match tls_read.read(&mut read_buf).await {
-                        Ok(0) => {
-                            debug!("[{}] Backend TLS connection closed", request_id_clone2);
-                            if !buffer.is_empty() {
-                                let frame = TunnelFrame::new(
-                                    session_id_clone,
-                                    ProtocolType::WssFrame,
-                                    true,
-                                    buffer.to_vec(),
-                                );
-                                let _ = write_frame(&mut send_clone, &frame).await;
-                            } else {
-                                let end_frame = TunnelFrame::new(
-                                    session_id_clone,
-                                    ProtocolType::WssFrame,
-                                    true,
-                                    Vec::new(),
-                                );
-                                let _ = write_frame(&mut send_clone, &end_frame).await;
+                    match tokio::time::timeout(FORWARD_TIMEOUT, tls_read.read(&mut read_buf)).await {
+                        Ok(Ok(n)) => {
+                            if n == 0 {
+                                debug!("[{}] Backend TLS connection closed", request_id_clone2);
+                                break;
                             }
-                            break;
-                        }
-                        Ok(n) => {
-                            buffer.extend_from_slice(&read_buf[..n]);
                             
-                            // For WebSocket, send data more aggressively:
-                            // - If buffer reaches MAX_FRAME_SIZE, send immediately
-                            // - If we got less data than read buffer size (partial read), send what we have
-                            // - Otherwise, send if buffer has accumulated enough data
-                            let should_send = buffer.len() >= MAX_FRAME_SIZE || 
-                                             n < read_buf.len(); // Partial read indicates no more data immediately available
-                            
-                            if should_send && !buffer.is_empty() {
-                                // Send in MAX_FRAME_SIZE chunks first
-                                while buffer.len() >= MAX_FRAME_SIZE {
-                                    let chunk = buffer[..MAX_FRAME_SIZE].to_vec();
-                                    buffer = buffer[MAX_FRAME_SIZE..].into();
-                                    
-                                    let frame = TunnelFrame::new(
-                                        session_id_clone,
-                                        ProtocolType::WssFrame,
-                                        false,
-                                        chunk,
-                                    );
-                                    
-                                    if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                                        let err_str = e.to_string();
-                                        if err_str.contains("sending stopped by peer") || 
-                                           err_str.contains("connection closed") {
-                                            debug!("[{}] Tunnel connection closed, breaking", request_id_clone2);
-                                            return;
-                                        } else {
-                                            error!("[{}] Error sending frame to tunnel: {}", request_id_clone2, e);
-                                            return;
-                                        }
-                                    }
-                                }
-                                
-                                // Send remaining buffer (even if small, for WebSocket responsiveness)
-                                if !buffer.is_empty() {
-                                    let chunk = buffer.to_vec();
-                                    buffer.clear();
-                                    
-                                    let frame = TunnelFrame::new(
-                                        session_id_clone,
-                                        ProtocolType::WssFrame,
-                                        false,
-                                        chunk,
-                                    );
-                                    
-                                    if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                                        let err_str = e.to_string();
-                                        if err_str.contains("sending stopped by peer") || 
-                                           err_str.contains("connection closed") {
-                                            debug!("[{}] Tunnel connection closed, breaking", request_id_clone2);
-                                            return;
-                                        } else {
-                                            error!("[{}] Error sending frame to tunnel: {}", request_id_clone2, e);
-                                            return;
-                                        }
-                                    }
-                                }
+                            if let Err(e) = send_clone.write_all(&read_buf[..n]).await {
+                                error!("[{}] Error writing to QUIC: {}", request_id_clone2, e);
+                                break;
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             error!("[{}] Error reading from backend TLS: {}", request_id_clone2, e);
                             break;
                         }
-                    }
-                }
-                
-                if !buffer.is_empty() {
-                    let frame = TunnelFrame::new(
-                        session_id_clone,
-                        ProtocolType::WssFrame,
-                        true,
-                        buffer.to_vec(),
-                    );
-                    if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                        let err_str = e.to_string();
-                        if !err_str.contains("sending stopped by peer") && 
-                           !err_str.contains("connection closed") {
-                            debug!("[{}] Error sending final frame: {}", request_id_clone2, e);
+                        Err(_) => {
+                            warn!("[{}] Backend TLS to QUIC forward timeout", request_id_clone2);
+                            break;
                         }
                     }
                 }
+                
+                // Finish QUIC send stream
+                let _ = send_clone.finish();
             });
             
             // Wait for either task to complete
@@ -801,7 +762,7 @@ impl ReverseRequestHandler {
                 }
             }
             
-            info!("[{}] WebSocket stream completed in {:?}", request_id, stream_start.elapsed());
+            info!("[{}] WebSocket stream completed (direct forwarding) in {:?}", request_id, stream_start.elapsed());
             return Ok(());
         } else {
             // Plain TCP connection
@@ -841,42 +802,31 @@ impl ReverseRequestHandler {
                 return Err(anyhow::anyhow!("Backend response headers incomplete"));
             }
             
-            // Forward HTTP upgrade response to server
-            let response_frame = TunnelFrame::new(
-                session_id,
-                ProtocolType::WssFrame,
-                false,
-                response_buffer[..header_end_pos].to_vec(),
-            );
-            write_frame(&mut send, &response_frame).await?;
-            info!("[{}] Sent WebSocket upgrade response to server ({} bytes)", request_id, header_end_pos);
+            // Forward HTTP upgrade response to server (direct forwarding, no encapsulation)
+            send.write_all(&response_buffer[..header_end_pos]).await?;
+            info!("[{}] Sent WebSocket upgrade response to server ({} bytes) - direct forwarding", request_id, header_end_pos);
             
-            // Split streams for bidirectional forwarding
+            // Split streams for bidirectional forwarding (direct forwarding, no encapsulation)
             let (mut backend_recv, mut backend_send) = tokio::io::split(backend_stream);
             let mut send_clone = send;
             let mut recv_clone = recv;
-            let session_id_clone = session_id;
             let request_id_clone1 = request_id.clone();
             let request_id_clone2 = request_id.clone();
-            const MAX_FRAME_SIZE: usize = 64 * 1024;
+            const FORWARD_TIMEOUT: Duration = Duration::from_secs(300);
             
-            // Task 1: Forward from tunnel to backend (TCP)
-        let tunnel_to_backend_task = tokio::spawn(async move {
-            let mut session_complete = false;
-            const FRAME_TIMEOUT: Duration = Duration::from_secs(300);
-            
-            while !session_complete {
-                match tunnel_lib::frame::read_frame_with_timeout(&mut recv_clone, Some(FRAME_TIMEOUT)).await {
-                    Ok(frame) => {
-                        if frame.session_id != session_id_clone {
-                            warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
-                                request_id_clone1, frame.session_id, session_id_clone);
-                            continue;
-                        }
-                        
-                        // Forward payload directly to backend TCP stream
-                        if !frame.payload.is_empty() {
-                            if let Err(e) = backend_send.write_all(&frame.payload).await {
+            // Task 1: Forward from tunnel (QUIC) to backend (TCP) - direct forwarding
+            let tunnel_to_backend_task = tokio::spawn(async move {
+                let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
+                
+                loop {
+                    match tokio::time::timeout(FORWARD_TIMEOUT, recv_clone.read(&mut buf)).await {
+                        Ok(Ok(Some(n))) => {
+                            if n == 0 {
+                                debug!("[{}] QUIC stream ended", request_id_clone1);
+                                break;
+                            }
+                            
+                            if let Err(e) = backend_send.write_all(&buf[..n]).await {
                                 error!("[{}] Error writing to backend: {}", request_id_clone1, e);
                                 break;
                             }
@@ -885,157 +835,72 @@ impl ReverseRequestHandler {
                                 break;
                             }
                         }
-                        
-                        session_complete = frame.end_of_stream;
-                        if session_complete {
-                            debug!("[{}] Received end of stream from tunnel", request_id_clone1);
+                        Ok(Ok(None)) => {
+                            debug!("[{}] QUIC stream closed", request_id_clone1);
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            error!("[{}] Error reading from QUIC: {}", request_id_clone1, e);
+                            break;
+                        }
+                        Err(_) => {
+                            warn!("[{}] QUIC to backend forward timeout", request_id_clone1);
                             break;
                         }
                     }
-                    Err(e) => {
-                        if e.to_string().contains("timeout") {
-                            warn!("[{}] Tunnel frame read timeout", request_id_clone1);
-                        } else {
-                            error!("[{}] Error reading frame from tunnel: {}", request_id_clone1, e);
-                        }
-                        break;
-                    }
                 }
-            }
-        });
-        
-        // Task 2: Forward from backend (TCP) to tunnel
-        let backend_to_tunnel_task = tokio::spawn(async move {
-            let mut buffer = BytesMut::new();
-            let mut read_buf = vec![0u8; 4096];
+                
+                // Close backend send side
+                let _ = backend_send.shutdown().await;
+            });
             
-            loop {
-                match backend_recv.read(&mut read_buf).await {
-                    Ok(0) => {
-                        debug!("[{}] Backend connection closed", request_id_clone2);
-                        // Send remaining buffer if any
-                        if !buffer.is_empty() {
-                            let frame = TunnelFrame::new(
-                                session_id_clone,
-                                ProtocolType::WssFrame,
-                                true,
-                                buffer.to_vec(),
-                            );
-                            let _ = write_frame(&mut send_clone, &frame).await;
-                        } else {
-                            // Send end frame
-                            let end_frame = TunnelFrame::new(
-                                session_id_clone,
-                                ProtocolType::WssFrame,
-                                true,
-                                Vec::new(),
-                            );
-                            let _ = write_frame(&mut send_clone, &end_frame).await;
-                        }
-                        break;
-                    }
-                    Ok(n) => {
-                        buffer.extend_from_slice(&read_buf[..n]);
-                        
-                        // For WebSocket, send data more aggressively:
-                        // - If buffer reaches MAX_FRAME_SIZE, send immediately
-                        // - If we got less data than read buffer size (partial read), send what we have
-                        // - Otherwise, send if buffer has accumulated enough data
-                        let should_send = buffer.len() >= MAX_FRAME_SIZE || 
-                                         n < read_buf.len(); // Partial read indicates no more data immediately available
-                        
-                        if should_send && !buffer.is_empty() {
-                            // Send in MAX_FRAME_SIZE chunks first
-                            while buffer.len() >= MAX_FRAME_SIZE {
-                                let chunk = buffer[..MAX_FRAME_SIZE].to_vec();
-                                buffer = buffer[MAX_FRAME_SIZE..].into();
-                                
-                                let frame = TunnelFrame::new(
-                                    session_id_clone,
-                                    ProtocolType::WssFrame,
-                                    false,
-                                    chunk,
-                                );
-                                
-                                if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                                    let err_str = e.to_string();
-                                    if err_str.contains("sending stopped by peer") || 
-                                       err_str.contains("connection closed") {
-                                        debug!("[{}] Tunnel connection closed, breaking", request_id_clone2);
-                                        return;
-                                    } else {
-                                        error!("[{}] Error sending frame to tunnel: {}", request_id_clone2, e);
-                                        return;
-                                    }
-                                }
+            // Task 2: Forward from backend (TCP) to tunnel (QUIC) - direct forwarding
+            let backend_to_tunnel_task = tokio::spawn(async move {
+                let mut read_buf = vec![0u8; 64 * 1024]; // 64KB buffer
+                
+                loop {
+                    match tokio::time::timeout(FORWARD_TIMEOUT, backend_recv.read(&mut read_buf)).await {
+                        Ok(Ok(n)) => {
+                            if n == 0 {
+                                debug!("[{}] Backend connection closed", request_id_clone2);
+                                break;
                             }
                             
-                            // Send remaining buffer (even if small, for WebSocket responsiveness)
-                            if !buffer.is_empty() {
-                                let chunk = buffer.to_vec();
-                                buffer.clear();
-                                
-                                let frame = TunnelFrame::new(
-                                    session_id_clone,
-                                    ProtocolType::WssFrame,
-                                    false,
-                                    chunk,
-                                );
-                                
-                                if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                                    let err_str = e.to_string();
-                                    if err_str.contains("sending stopped by peer") || 
-                                       err_str.contains("connection closed") {
-                                        debug!("[{}] Tunnel connection closed, breaking", request_id_clone2);
-                                        return;
-                                    } else {
-                                        error!("[{}] Error sending frame to tunnel: {}", request_id_clone2, e);
-                                        return;
-                                    }
-                                }
+                            if let Err(e) = send_clone.write_all(&read_buf[..n]).await {
+                                error!("[{}] Error writing to QUIC: {}", request_id_clone2, e);
+                                break;
                             }
                         }
+                        Ok(Err(e)) => {
+                            error!("[{}] Error reading from backend: {}", request_id_clone2, e);
+                            break;
+                        }
+                        Err(_) => {
+                            warn!("[{}] Backend to QUIC forward timeout", request_id_clone2);
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        error!("[{}] Error reading from backend: {}", request_id_clone2, e);
-                        break;
+                }
+                
+                // Finish QUIC send stream
+                let _ = send_clone.finish();
+            });
+            
+            // Wait for either task to complete
+            tokio::select! {
+                result = tunnel_to_backend_task => {
+                    if let Err(e) = result {
+                        error!("[{}] Tunnel to backend task error: {}", request_id, e);
+                    }
+                }
+                result = backend_to_tunnel_task => {
+                    if let Err(e) = result {
+                        error!("[{}] Backend to tunnel task error: {}", request_id, e);
                     }
                 }
             }
             
-            // Send remaining buffer
-            if !buffer.is_empty() {
-                let frame = TunnelFrame::new(
-                    session_id_clone,
-                    ProtocolType::WssFrame,
-                    true,
-                    buffer.to_vec(),
-                );
-                if let Err(e) = write_frame(&mut send_clone, &frame).await {
-                    let err_str = e.to_string();
-                    if !err_str.contains("sending stopped by peer") && 
-                       !err_str.contains("connection closed") {
-                        debug!("[{}] Error sending final frame: {}", request_id_clone2, e);
-                    }
-                }
-            }
-        });
-        
-        // Wait for either task to complete
-        tokio::select! {
-            result = tunnel_to_backend_task => {
-                if let Err(e) = result {
-                    error!("[{}] Tunnel to backend task error: {}", request_id, e);
-                }
-            }
-            result = backend_to_tunnel_task => {
-                if let Err(e) = result {
-                    error!("[{}] Backend to tunnel task error: {}", request_id, e);
-                }
-            }
-        }
-        
-            info!("[{}] WebSocket stream completed in {:?}", request_id, stream_start.elapsed());
+            info!("[{}] WebSocket bidirectional forwarding completed (direct forwarding)", request_id);
             Ok(())
         }
     }

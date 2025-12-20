@@ -128,108 +128,54 @@ impl tunnel_lib::listener::ConnectionHandler for GrpcIngressHandler {
         write_frame(&mut send, &routing_frame).await?;
         info!("[{}] Sent gRPC routing frame: session_id={}, host={}", request_id, session_id, host);
 
-        // Forward HTTP/2 headers
-        const MAX_FRAME_SIZE: usize = 64 * 1024;
-        let header_vec = header_buffer[..header_end_pos].to_vec();
-        let header_frame = TunnelFrame::new(
-            session_id,
-            ProtocolType::Grpc,
-            false, // Not end of stream yet
-            header_vec,
-        );
-        write_frame(&mut send, &header_frame).await?;
-
-        // Forward remaining data (gRPC messages)
-        let mut remaining_data = header_buffer[header_end_pos..].to_vec();
+        // Direct forwarding: write raw gRPC data without encapsulation
+        // First write headers
+        send.write_all(&header_buffer[..header_end_pos]).await?;
         
-        // Read and forward gRPC messages
-        loop {
-            let mut buf = vec![0u8; 4096];
-            match socket.read(&mut buf).await {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    remaining_data.extend_from_slice(&buf[..n]);
-                    
-                    // Send chunks if buffer is large enough
-                    while remaining_data.len() >= MAX_FRAME_SIZE {
-                        let chunk = remaining_data[..MAX_FRAME_SIZE].to_vec();
-                        remaining_data = remaining_data[MAX_FRAME_SIZE..].to_vec();
-                        
-                        let data_frame = TunnelFrame::new(
-                            session_id,
-                            ProtocolType::Grpc,
-                            false,
-                            chunk,
-                        );
-                        write_frame(&mut send, &data_frame).await?;
-                    }
-                }
-                Err(e) => {
-                    error!("[{}] Error reading from gRPC socket: {}", request_id, e);
-                    return Err(e.into());
-                }
-            }
-        }
-
-        // Send any remaining data and end frame
+        // Then stream remaining data directly
+        let mut remaining_data = header_buffer[header_end_pos..].to_vec();
         if !remaining_data.is_empty() {
-            let final_frame = TunnelFrame::new(
-                session_id,
-                ProtocolType::Grpc,
-                true,
-                remaining_data,
-            );
-            write_frame(&mut send, &final_frame).await?;
-        } else {
-            // Send empty end frame
-            let end_frame = TunnelFrame::new(
-                session_id,
-                ProtocolType::Grpc,
-                true,
-                Vec::new(),
-            );
-            write_frame(&mut send, &end_frame).await?;
+            send.write_all(&remaining_data).await?;
         }
+        
+        // Stream remaining data from socket directly to QUIC stream
+        tokio::io::copy(&mut socket, &mut send).await?;
+        send.finish()?;
+        
+        info!("[{}] Sent raw gRPC request directly to server (no encapsulation)", request_id);
 
-        // Read response from tunnel and forward to client
-        let mut response_buffer = BytesMut::new();
-        let mut session_complete = false;
+        // Direct forwarding: read raw gRPC response without frame parsing
+        let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
         const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-        while !session_complete {
-            match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(RESPONSE_TIMEOUT)).await {
-                Ok(frame) => {
-                    if frame.session_id != session_id {
-                        warn!("[{}] Received frame with mismatched session_id: {} (expected {})", 
-                            request_id, frame.session_id, session_id);
-                        continue;
+        
+        loop {
+            match tokio::time::timeout(RESPONSE_TIMEOUT, recv.read(&mut buf)).await {
+                Ok(Ok(Some(n))) => {
+                    if n == 0 {
+                        debug!("[{}] QUIC stream ended", request_id);
+                        break;
                     }
-                    
-                    response_buffer.extend_from_slice(&frame.payload);
-                    session_complete = frame.end_of_stream;
                     
                     // Forward response chunks to client as they arrive
-                    if !frame.payload.is_empty() {
-                        socket.write_all(&frame.payload).await?;
-                    }
-                    
-                    if session_complete {
-                        info!("[{}] Received complete gRPC response ({} bytes)", request_id, response_buffer.len());
-                        socket.flush().await?;
-                    }
+                    socket.write_all(&buf[..n]).await?;
                 }
-                Err(e) => {
-                    if e.to_string().contains("timeout") {
-                        error!("[{}] Response timeout after {:?}", request_id, RESPONSE_TIMEOUT);
-                    } else {
-                        error!("[{}] Error reading frame: {}", request_id, e);
-                    }
-                    return Err(e);
+                Ok(Ok(None)) => {
+                    debug!("[{}] QUIC stream closed", request_id);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    error!("[{}] Error reading from QUIC: {}", request_id, e);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    warn!("[{}] Response timeout after {:?}", request_id, RESPONSE_TIMEOUT);
+                    break;
                 }
             }
         }
+        
+        socket.flush().await?;
+        info!("[{}] Received and forwarded raw gRPC response directly (no frame parsing)", request_id);
 
         send.finish()?;
         info!("[{}] gRPC ingress connection completed", request_id);

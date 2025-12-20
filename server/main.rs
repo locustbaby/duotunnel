@@ -13,7 +13,7 @@ mod control;
 mod data_stream;
 mod egress_forwarder;
 mod ingress_handlers;
-mod streaming_forwarder;
+mod rule_matcher;
 
 use types::{ServerState, IngressRule};
 use connection::accept_loop;
@@ -164,6 +164,39 @@ async fn main() -> Result<()> {
 
     let egress_pool = Arc::new(tunnel_lib::egress_pool::EgressPool::new());
 
+    // Initialize rule matcher for O(1) lookup performance
+    let mut rule_matcher = rule_matcher::ServerRuleMatcher::new();
+    
+    // Update ingress rules (HTTP and WSS) - convert from config types to types
+    if let Some(ref tm) = config.tunnel_management {
+        if let Some(ref sir) = tm.server_ingress_routing {
+            let http_rules: Vec<types::IngressRule> = sir.rules.http.iter()
+                .map(|r| types::IngressRule {
+                    match_host: r.match_host.clone(),
+                    action_client_group: r.action_client_group.clone(),
+                })
+                .collect();
+            let wss_rules: Vec<types::IngressRule> = sir.rules.wss.iter()
+                .map(|r| types::IngressRule {
+                    match_host: r.match_host.clone(),
+                    action_client_group: r.action_client_group.clone(),
+                })
+                .collect();
+            rule_matcher.update_ingress_rules(http_rules, "http");
+            rule_matcher.update_ingress_rules(wss_rules, "wss");
+        }
+    }
+    
+    // Update egress rules
+    rule_matcher.update_egress_http_rules(egress_rules_http.clone());
+    rule_matcher.update_egress_grpc_rules(egress_rules_grpc.clone());
+    
+    let rule_matcher = Arc::new(tokio::sync::RwLock::new(rule_matcher));
+    
+    info!("Initialized rule matcher: {} ingress rules, {} egress HTTP rules, {} egress gRPC rules",
+        rule_matcher.read().await.ingress_rule_count(),
+        rule_matcher.read().await.egress_http_rule_count(),
+        rule_matcher.read().await.egress_grpc_rule_count());
 
     let state = Arc::new(ServerState {
         clients: dashmap::DashMap::new(),
@@ -179,6 +212,7 @@ async fn main() -> Result<()> {
         config_version: config.server.config_version.clone(),
         sessions: Arc::new(dashmap::DashMap::new()),
         egress_pool,
+        rule_matcher,
     });
 
 

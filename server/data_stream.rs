@@ -6,9 +6,13 @@ use uuid::Uuid;
 use bytes::BytesMut;
 use crate::types::ServerState;
 use crate::egress_forwarder::{forward_egress_http_request, forward_egress_grpc_request, forward_egress_wss_request};
-use crate::streaming_forwarder;
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
+use tunnel_lib::direct_forward::forward_bidirectional_raw;
+use tokio::net::TcpStream;
 use std::time::Duration;
+use tokio_rustls::TlsConnector;
+use rustls::ClientConfig;
+use webpki_roots::TLS_SERVER_ROOTS;
 
 pub async fn handle_data_stream(
     mut send: SendStream,
@@ -37,24 +41,27 @@ pub async fn handle_data_stream(
     
     let session_id = routing_frame.session_id;
     
-    // Parse host to extract hostname (remove port if present)
-    let host_with_port = routing_info.host.as_str();
-    let host = host_with_port.split(':').next().unwrap_or(host_with_port).trim();
-    if host != host_with_port {
-        info!("[{}] Parsed host from '{}' to '{}' (removed port)", request_id, host_with_port, host);
-    }
-    
-    // Find upstream
-    let matched_upstream = if routing_info.r#type == "http" {
-        state.egress_rules_http.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(host))
-            .map(|r| r.action_upstream.clone())
-    } else if routing_info.r#type == "grpc" {
-        state.egress_rules_grpc.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(host))
-            .map(|r| r.action_upstream.clone())
-    } else {
-        None
+    // Find upstream using RuleMatcher for O(1) lookup
+    let matched_upstream = {
+        if routing_info.r#type == "http" {
+            let matcher = state.rule_matcher.read().await;
+            matcher.match_egress_http_rule(&host)
+                .map(|r| r.action_upstream)
+        } else if routing_info.r#type == "grpc" {
+            // For gRPC, we need service name - try to extract from path or use empty string
+            let service = routing_info.path.split('/').nth(1).unwrap_or("");
+            let matcher = state.rule_matcher.read().await;
+            matcher.match_egress_grpc_rule(&host, service)
+                .map(|r| r.action_upstream)
+                .or_else(|| {
+                    // Fallback: try matching by host only (if service is empty in rule)
+                    state.egress_rules_grpc.iter()
+                        .find(|r| r.match_host.eq_ignore_ascii_case(host) && r.match_service.is_empty())
+                        .map(|r| r.action_upstream.clone())
+                })
+        } else {
+            None
+        }
     };
     
     let (final_target_addr, is_target_ssl) = if let Some(upstream_name) = matched_upstream {
@@ -76,10 +83,11 @@ pub async fn handle_data_stream(
     info!("[{}] Forwarding to upstream: {} (SSL: {})", 
         request_id, final_target_addr, is_target_ssl);
     
-    // For streaming: read first frame to get request header, then stream body
+    // For HTTP, gRPC, and WSS: read frames first (same as server->client ingress)
+    // This ensures consistency with how client handles requests from server
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
     
-    // Read first data frame (should contain HTTP headers)
+    // Read first data frame
     let first_frame = match tunnel_lib::frame::read_frame_with_timeout(&mut recv, Some(REQUEST_TIMEOUT)).await {
         Ok(frame) => {
             if frame.session_id != session_id {
@@ -99,24 +107,7 @@ pub async fn handle_data_stream(
         }
     };
     
-    // Determine if we should use streaming mode (for HTTP with large bodies)
-    // Streaming leverages QUIC's multiplexing: we can process multiple requests concurrently
-    let use_streaming = routing_info.r#type == "http" && !first_frame.end_of_stream;
-    
-    // If streaming mode, use dedicated streaming forwarder
-    if use_streaming {
-        info!("[{}] Using QUIC streaming mode for HTTP request (leverages multiplexing)", request_id);
-        return streaming_forwarder::forward_http_streaming(
-            &state.egress_pool.client(),
-            recv,
-            send,
-            &final_target_addr,
-            session_id,
-            &request_id,
-        ).await;
-    }
-    
-    // Non-streaming mode: collect all frames first (for gRPC, WSS, or small HTTP requests)
+    // Collect all frames
     let mut request_buffer = BytesMut::from(first_frame.payload.as_slice());
     let mut session_complete = first_frame.end_of_stream;
     
@@ -146,38 +137,6 @@ pub async fn handle_data_stream(
             }
         }
     }
-    
-
-    let matched_upstream = if routing_info.r#type == "http" {
-        state.egress_rules_http.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(host))
-            .map(|r| r.action_upstream.clone())
-    } else if routing_info.r#type == "grpc" {
-        state.egress_rules_grpc.iter()
-            .find(|r| r.match_host.eq_ignore_ascii_case(host))
-            .map(|r| r.action_upstream.clone())
-    } else {
-        None
-    };
-    
-    let (final_target_addr, is_target_ssl) = if let Some(upstream_name) = matched_upstream {
-        if let Some(upstream) = state.egress_upstreams.get(&upstream_name) {
-            info!("[{}] Matched egress rule: {} -> upstream {} ({})", 
-                request_id, host, upstream_name, upstream.address);
-            (upstream.address.clone(), upstream.is_ssl)
-        } else {
-            error!("[{}] Upstream '{}' not found", request_id, upstream_name);
-            return Err(anyhow::anyhow!("Upstream '{}' not found", upstream_name));
-        }
-    } else {
-        error!("[{}] No matching egress rule for type={}, host={} (parsed from: {})", 
-            request_id, routing_info.r#type, host, routing_info.host);
-        return Err(anyhow::anyhow!("No matching egress rule for type={}, host={}", 
-            routing_info.r#type, host));
-    };
-    
-    info!("[{}] Forwarding to upstream: {} (SSL: {})", 
-        request_id, final_target_addr, is_target_ssl);
     
 
     let protocol_type_enum = match routing_info.r#type.as_str() {
