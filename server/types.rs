@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tunnel_lib::proto::tunnel::{Rule, Upstream};
 use tunnel_lib::frame::ProtocolType;
 
@@ -56,6 +56,7 @@ pub struct ServerState {
     pub config_version: String,
     pub sessions: Arc<DashMap<u64, Arc<Mutex<SessionState>>>>,
     pub egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>,
+    pub rule_matcher: Arc<RwLock<crate::rule_matcher::ServerRuleMatcher>>,
 }
 
 #[derive(Debug, Clone)]

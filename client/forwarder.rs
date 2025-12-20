@@ -1,5 +1,5 @@
 use anyhow::{Result, Context};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
@@ -94,7 +94,7 @@ mod uri_utils {
 }
 
 
-pub type ForwardResult = Result<Vec<u8>>;
+pub type ForwardResult = Result<Bytes>;
 
 #[derive(Clone)]
 pub struct Forwarder {
@@ -327,6 +327,8 @@ pub mod http {
         info!("[{}] Sent routing frame to server: session_id={}, host={}", 
             request_id, session_id, host);
         
+        // Send HTTP request data using TunnelFrame (same as server->client ingress)
+        // This ensures consistency with how server handles requests from client
         const MAX_FRAME_SIZE: usize = 64 * 1024;
         let request_bytes = complete_request.to_vec();
         let mut offset = 0;
@@ -347,9 +349,16 @@ pub mod http {
             offset += chunk_size;
         }
         
-        info!("[{}] Sent {} request frames (total {} bytes) to server", 
+        info!("[{}] Sent {} frames (total {} bytes) to server", 
             request_id, (request_bytes.len() + MAX_FRAME_SIZE - 1) / MAX_FRAME_SIZE, request_bytes.len());
         
+        // Finish the send stream to signal that request is complete
+        // This allows the server to know when to close the TCP write side
+        // The recv stream remains open to receive the response
+        send.finish()?;
+        info!("[{}] Finished send stream, waiting for response", request_id);
+        
+        // Read response frames from server (same as server->client ingress)
         let mut response_buffer = BytesMut::new();
         let mut session_complete = false;
         const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -366,12 +375,27 @@ pub mod http {
                     response_buffer.extend_from_slice(&frame.payload);
                     session_complete = frame.end_of_stream;
                     
+                    // Stream response chunks to client as we receive them
+                    if !frame.payload.is_empty() {
+                        socket.write_all(&frame.payload).await?;
+                    }
+                    
                     if session_complete {
                         info!("[{}] Received complete response ({} bytes)", request_id, response_buffer.len());
                     }
                 }
                 Err(e) => {
-                    if e.to_string().contains("timeout") {
+                    let err_str = e.to_string();
+                    // If stream is closed (server called finish), and we have some data, consider it complete
+                    if (err_str.contains("stream closed") || err_str.contains("connection closed") || err_str.contains("UnexpectedEof")) 
+                        && !response_buffer.is_empty() {
+                        warn!("[{}] QUIC stream closed while reading frames, but received {} bytes. Treating as complete response.", 
+                            request_id, response_buffer.len());
+                        session_complete = true;
+                        break;
+                    }
+                    
+                    if err_str.contains("timeout") {
                         error!("[{}] Response timeout after {:?}", request_id, RESPONSE_TIMEOUT);
                     } else {
                         error!("[{}] Error reading frame: {}", request_id, e);
@@ -381,9 +405,8 @@ pub mod http {
             }
         }
         
-        socket.write_all(&response_buffer).await?;
         socket.flush().await?;
-        info!("[{}] Sent response to local client ({} bytes) in {:?}", 
+        info!("[{}] Received and sent HTTP response ({} bytes) in {:?}", 
             request_id, response_buffer.len(), stream_start.elapsed());
         
         Ok(())
@@ -396,7 +419,7 @@ pub mod http {
         request_bytes: &[u8],
         target_uri: &str,
         _is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = Request::new(&mut headers);
         
@@ -502,7 +525,7 @@ pub mod http {
         
         response_bytes.extend_from_slice(&body_bytes);
         
-        Ok(response_bytes.to_vec())
+        Ok(response_bytes.freeze())
     }
 }
 
@@ -515,7 +538,7 @@ pub mod wss {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         
@@ -579,7 +602,7 @@ pub mod wss {
             }
         }
 
-        Ok(response_buffer.to_vec())
+        Ok(response_buffer.freeze())
     }
 }
 
@@ -593,7 +616,7 @@ pub mod grpc {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let parsed = uri_utils::parse_target(target_uri, "grpc")?;
         
         debug!("Connecting to gRPC endpoint: {}:{} (SSL: {})", parsed.host, parsed.port, parsed.is_ssl || is_ssl);
@@ -657,6 +680,6 @@ pub mod grpc {
 
         debug!("Received gRPC response ({} bytes)", response_buffer.len());
         
-        Ok(response_buffer.to_vec())
+        Ok(response_buffer.freeze())
     }
 }

@@ -26,7 +26,7 @@ use types::{ClientState, ClientIdentity};
 use quic_tunnel_manager::QuicTunnelManager;
 use reverse_handler::ReverseRequestHandler;
 use forwarder::Forwarder;
-use ingress_handlers::{HttpIngressHandler, GrpcIngressHandler, WssIngressHandler};
+use ingress_handlers::HttpIngressHandler;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -80,24 +80,16 @@ async fn main() -> Result<()> {
         Arc::new(HttpIngressHandler::new(state.clone()))
     });
     
-    let grpc_handler = config.grpc_entry_port.map(|_| {
-        Arc::new(GrpcIngressHandler::new(state.clone()))
-    });
-    
-    let wss_handler = config.wss_entry_port.map(|_| {
-        Arc::new(WssIngressHandler::new(state.clone()))
-    });
-    
     let listener_manager = tunnel_lib::listener::ListenerManager::new(
         config.http_entry_port,
-        config.grpc_entry_port,
-        config.wss_entry_port,
+        None, // gRPC no longer supported
+        None, // WSS (Client → Server) no longer supported
     );
     
     let listener_handles = listener_manager.start_all(
         http_handler,
-        grpc_handler,
-        wss_handler,
+        None::<Arc<HttpIngressHandler>>, // gRPC no longer supported
+        None::<Arc<HttpIngressHandler>>, // WSS (Client → Server) no longer supported
     ).await?;
 
     info!("=== Step 5: Starting QuicTunnelManager ===");
@@ -213,8 +205,8 @@ async fn main() -> Result<()> {
 
     info!("Performing final cleanup");
     
-
-    if let Some(conn) = state.quic_connection.read().await.as_ref() {
+    // ✅ Optimized: Use load_full() for lock-free access
+    if let Some(conn) = state.quic_connection.load_full() {
         conn.close(0u32.into(), b"Client shutdown");
         info!("  ✓ QUIC connection closed");
     }
@@ -257,8 +249,10 @@ fn initialize_client_state(egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>
         upstreams: Arc::new(dashmap::DashMap::new()),
         config_version: Arc::new(tokio::sync::RwLock::new("0".to_string())),
         config_hash: Arc::new(tokio::sync::RwLock::new(String::new())),
-        quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
-        sessions: Arc::new(dashmap::DashMap::new()),  // Legacy
+        // ✅ Optimized: Use ArcSwapOption for lock-free access
+        quic_connection: Arc::new(arc_swap::ArcSwapOption::from(None)),
+        // ✅ Optimized: DashMap doesn't need outer Arc
+        sessions: dashmap::DashMap::new(),
         egress_pool,
         connection_state: Arc::new(connection_state::ConnectionStateMachine::new()),
         rule_matcher: Arc::new(tokio::sync::RwLock::new(rule_matcher::RuleMatcher::new())),

@@ -4,6 +4,7 @@ pub mod hash;
 pub mod frame;
 pub mod listener;
 pub mod http_version;
+pub mod direct_forward;
 
 #[cfg(feature = "warmup")]
 pub mod warmup;
