@@ -213,8 +213,8 @@ async fn main() -> Result<()> {
 
     info!("Performing final cleanup");
     
-
-    if let Some(conn) = state.quic_connection.read().await.as_ref() {
+    // ✅ Optimized: Use load_full() for lock-free access
+    if let Some(conn) = state.quic_connection.load_full() {
         conn.close(0u32.into(), b"Client shutdown");
         info!("  ✓ QUIC connection closed");
     }
@@ -257,8 +257,10 @@ fn initialize_client_state(egress_pool: Arc<tunnel_lib::egress_pool::EgressPool>
         upstreams: Arc::new(dashmap::DashMap::new()),
         config_version: Arc::new(tokio::sync::RwLock::new("0".to_string())),
         config_hash: Arc::new(tokio::sync::RwLock::new(String::new())),
-        quic_connection: Arc::new(tokio::sync::RwLock::new(None)),
-        sessions: Arc::new(dashmap::DashMap::new()),  // Legacy
+        // ✅ Optimized: Use ArcSwapOption for lock-free access
+        quic_connection: Arc::new(arc_swap::ArcSwapOption::from(None)),
+        // ✅ Optimized: DashMap doesn't need outer Arc
+        sessions: dashmap::DashMap::new(),
         egress_pool,
         connection_state: Arc::new(connection_state::ConnectionStateMachine::new()),
         rule_matcher: Arc::new(tokio::sync::RwLock::new(rule_matcher::RuleMatcher::new())),

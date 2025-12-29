@@ -258,10 +258,9 @@ impl ReverseRequestHandler {
                 return Err(anyhow::anyhow!("Shutting down"));
             }
 
-            let connection = {
-                let lock = self.state.quic_connection.read().await;
-                lock.clone()
-            };
+            // ✅ Optimized: Use load_full() for lock-free atomic read
+            let connection = self.state.quic_connection.load_full();
+
 
             if let Some(conn) = connection {
                 if conn.close_reason().is_none() && self.state.connection_state.current() == crate::connection_state::ConnectionState::Connected {
@@ -459,12 +458,14 @@ impl ReverseRequestHandler {
             Ok(response_bytes) => {
                 info!("[{}] Received response from upstream ({} bytes)", request_id, response_bytes.len());
                 
+                // Convert to Bytes for zero-copy slicing
+                let response_bytes = bytes::Bytes::from(response_bytes);
                 const MAX_FRAME_SIZE: usize = 64 * 1024;
                 let mut offset = 0;
                 
                 while offset < response_bytes.len() {
                     let chunk_size = std::cmp::min(MAX_FRAME_SIZE, response_bytes.len() - offset);
-                    let chunk = response_bytes[offset..offset + chunk_size].to_vec();
+                    let chunk = response_bytes.slice(offset..offset + chunk_size);
                     let is_last = offset + chunk_size >= response_bytes.len();
                     
                     let response_frame = TunnelFrame::new(

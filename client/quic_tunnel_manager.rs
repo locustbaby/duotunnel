@@ -86,19 +86,15 @@ impl QuicTunnelManager {
                     // Transition to connected state
                     self.state.connection_state.transition_to_connected();
 
-                    {
-                        let mut lock = self.state.quic_connection.write().await;
-                        *lock = Some(conn.clone());
-                    }
+                    // ✅ Optimized: Use store() for lock-free atomic update
+                    self.state.quic_connection.store(Some(conn.clone()));
 
                     backoff = INITIAL_BACKOFF;
 
                     let session_result = self.run_connection_session(conn.clone(), shutdown_rx.resubscribe()).await;
                     
-                    {
-                        let mut lock = self.state.quic_connection.write().await;
-                        *lock = None;
-                    }
+                    // ✅ Optimized: Use store() for lock-free atomic update
+                    self.state.quic_connection.store(None);
 
                     match session_result {
                         Ok(_) => {

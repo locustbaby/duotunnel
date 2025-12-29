@@ -1,5 +1,5 @@
 use anyhow::{Result, Context};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
@@ -94,7 +94,7 @@ mod uri_utils {
 }
 
 
-pub type ForwardResult = Result<Vec<u8>>;
+pub type ForwardResult = Result<Bytes>;
 
 #[derive(Clone)]
 pub struct Forwarder {
@@ -419,7 +419,7 @@ pub mod http {
         request_bytes: &[u8],
         target_uri: &str,
         _is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = Request::new(&mut headers);
         
@@ -525,7 +525,7 @@ pub mod http {
         
         response_bytes.extend_from_slice(&body_bytes);
         
-        Ok(response_bytes.to_vec())
+        Ok(response_bytes.freeze())
     }
 }
 
@@ -538,7 +538,7 @@ pub mod wss {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         
@@ -602,7 +602,7 @@ pub mod wss {
             }
         }
 
-        Ok(response_buffer.to_vec())
+        Ok(response_buffer.freeze())
     }
 }
 
@@ -616,7 +616,7 @@ pub mod grpc {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let parsed = uri_utils::parse_target(target_uri, "grpc")?;
         
         debug!("Connecting to gRPC endpoint: {}:{} (SSL: {})", parsed.host, parsed.port, parsed.is_ssl || is_ssl);
@@ -680,6 +680,6 @@ pub mod grpc {
 
         debug!("Received gRPC response ({} bytes)", response_buffer.len());
         
-        Ok(response_buffer.to_vec())
+        Ok(response_buffer.freeze())
     }
 }

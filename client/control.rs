@@ -239,10 +239,9 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!("Shutting down"));
             }
 
-            let connection = {
-                let lock = self.state.quic_connection.read().await;
-                lock.clone()
-            };
+            // ✅ Optimized: Use load_full() for lock-free atomic read
+            let connection = self.state.quic_connection.load_full();
+
 
             if let Some(conn) = connection {
                 if conn.close_reason().is_none() && self.state.connection_state.current() == crate::connection_state::ConnectionState::Connected {

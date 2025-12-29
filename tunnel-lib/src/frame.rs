@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use bytes::{BytesMut, BufMut, Buf};
+use bytes::{Bytes, BytesMut, BufMut, Buf};
 use quinn::{RecvStream, SendStream};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
@@ -36,7 +36,7 @@ pub struct TunnelFrame {
 
     pub end_of_stream: bool,
 
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 impl TunnelFrame {
@@ -45,13 +45,13 @@ impl TunnelFrame {
         session_id: u64,
         protocol_type: ProtocolType,
         end_of_stream: bool,
-        payload: Vec<u8>,
+        payload: impl Into<Bytes>,
     ) -> Self {
         Self {
             session_id,
             protocol_type,
             end_of_stream,
-            payload,
+            payload: payload.into(),
         }
     }
 
@@ -68,7 +68,7 @@ impl TunnelFrame {
     }
 
 
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(13 + self.payload.len());
         
 
@@ -87,7 +87,7 @@ impl TunnelFrame {
 
         buf.put_slice(&self.payload);
         
-        buf.to_vec()
+        buf.freeze()
     }
 
 
@@ -119,7 +119,7 @@ impl TunnelFrame {
         }
         
 
-        let payload = buf[..data_length].to_vec();
+        let payload = Bytes::copy_from_slice(&buf[..data_length]);
         
         Ok(Self {
             session_id,

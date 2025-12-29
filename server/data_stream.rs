@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::{info, error, warn};
 use quinn::{SendStream, RecvStream};
 use uuid::Uuid;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use crate::types::ServerState;
 use crate::egress_forwarder::{forward_egress_http_request, forward_egress_grpc_request, forward_egress_wss_request};
 use tunnel_lib::protocol::{TunnelFrame, ProtocolType, read_frame, write_frame, RoutingInfo};
@@ -108,7 +108,7 @@ pub async fn handle_data_stream(
     };
     
     // Collect all frames
-    let mut request_buffer = BytesMut::from(first_frame.payload.as_slice());
+    let mut request_buffer = BytesMut::from(&*first_frame.payload);
     let mut session_complete = first_frame.end_of_stream;
     
     while !session_complete {
@@ -219,13 +219,14 @@ pub async fn handle_data_stream(
     
     info!("[{}] Received response from upstream ({} bytes)", request_id, response_bytes.len());
     
-
+    // Convert to Bytes for zero-copy slicing
+    let response_bytes = Bytes::from(response_bytes);
     const MAX_FRAME_SIZE: usize = 64 * 1024;
     let mut offset = 0;
     
     while offset < response_bytes.len() {
         let chunk_size = std::cmp::min(MAX_FRAME_SIZE, response_bytes.len() - offset);
-        let chunk = response_bytes[offset..offset + chunk_size].to_vec();
+        let chunk = response_bytes.slice(offset..offset + chunk_size);
         let is_last = offset + chunk_size >= response_bytes.len();
         
         let response_frame = TunnelFrame::new(

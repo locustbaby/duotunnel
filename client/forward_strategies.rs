@@ -13,7 +13,7 @@ pub trait ForwardStrategy: Send + Sync {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>>;
+    ) -> Result<Bytes>;
 }
 
 pub struct HttpForwardStrategy {
@@ -33,7 +33,7 @@ impl ForwardStrategy for HttpForwardStrategy {
         request_bytes: &[u8],
         target_uri: &str,
         _is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         crate::forwarder::http::forward_http_request(
             &self.client,
             request_bytes,
@@ -58,7 +58,7 @@ impl ForwardStrategy for WssForwardStrategy {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         crate::forwarder::wss::forward_wss_request(
             request_bytes,
             target_uri,
@@ -82,7 +82,7 @@ impl ForwardStrategy for GrpcForwardStrategy {
         request_bytes: &[u8],
         target_uri: &str,
         is_ssl: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         crate::forwarder::grpc::forward_grpc_request(
             request_bytes,
             target_uri,

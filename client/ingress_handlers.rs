@@ -23,10 +23,8 @@ impl HttpIngressHandler {
 #[async_trait::async_trait]
 impl tunnel_lib::listener::ConnectionHandler for HttpIngressHandler {
     async fn handle_connection(&self, socket: TcpStream) -> Result<()> {
-        let connection = {
-            let lock = self.state.quic_connection.read().await;
-            lock.clone()
-        };
+        // ✅ Optimized: Use load_full() for lock-free atomic read
+        let connection = self.state.quic_connection.load_full();
 
         if let Some(conn) = connection {
             handle_http_forward_connection(socket, conn).await
@@ -53,10 +51,8 @@ impl tunnel_lib::listener::ConnectionHandler for GrpcIngressHandler {
         let request_id = Uuid::new_v4().to_string();
         info!("[{}] New gRPC ingress connection", request_id);
 
-        let connection = {
-            let lock = self.state.quic_connection.read().await;
-            lock.clone()
-        };
+        // ✅ Optimized: Use load_full() for lock-free atomic read
+        let connection = self.state.quic_connection.load_full();
 
         let conn = match connection {
             Some(conn) => conn,
@@ -199,10 +195,8 @@ impl tunnel_lib::listener::ConnectionHandler for WssIngressHandler {
         let request_id = Uuid::new_v4().to_string();
         info!("[{}] New WebSocket ingress connection", request_id);
 
-        let connection = {
-            let lock = self.state.quic_connection.read().await;
-            lock.clone()
-        };
+        // ✅ Optimized: Use load_full() for lock-free atomic read
+        let connection = self.state.quic_connection.load_full();
 
         let conn = match connection {
             Some(conn) => conn,

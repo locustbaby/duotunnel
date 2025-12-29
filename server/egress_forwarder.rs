@@ -1,5 +1,5 @@
 use anyhow::{Result, Context};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_rustls::HttpsConnector;
@@ -17,7 +17,7 @@ pub async fn forward_egress_http_request(
     request_bytes: &[u8],
     target_uri: &str,
     _is_ssl: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Bytes> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = HttpRequest::new(&mut headers);
     
@@ -128,14 +128,14 @@ pub async fn forward_egress_http_request(
     response_bytes.extend_from_slice(b"\r\n");
     response_bytes.extend_from_slice(&body_bytes);
     
-    Ok(response_bytes.to_vec())
+    Ok(response_bytes.freeze())
 }
 
 pub async fn forward_egress_grpc_request(
     request_bytes: &[u8],
     target_uri: &str,
     is_ssl: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Bytes> {
     debug!("Forwarding gRPC request to: {} (SSL: {})", target_uri, is_ssl);
     
     // Parse target URI
@@ -204,14 +204,14 @@ pub async fn forward_egress_grpc_request(
     
     debug!("Received gRPC response ({} bytes)", response_buffer.len());
     
-    Ok(response_buffer.to_vec())
+    Ok(response_buffer.freeze())
 }
 
 pub async fn forward_egress_wss_request(
     request_bytes: &[u8],
     target_uri: &str,
     is_ssl: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Bytes> {
     debug!("Forwarding WebSocket request to: {} (SSL: {})", target_uri, is_ssl);
     
     // Parse target URI
@@ -274,5 +274,5 @@ pub async fn forward_egress_wss_request(
     // differently (see reverse_handler.rs for streaming implementation)
     warn!("WebSocket egress forwarding: Simplified implementation - full bidirectional streaming handled in reverse_handler");
     
-    Ok(response_buffer.to_vec())
+    Ok(response_buffer.freeze())
 }
