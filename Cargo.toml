@@ -1,0 +1,9 @@
+[workspace]
+
+members = [
+    "tunnel-lib",
+    "server",
+    "client"
+]
+
+resolver = "2"

@@ -1,0 +1,105 @@
+# ====================================================================
+# SECTION 1: SERVER BASIC CONFIGURATION
+# ====================================================================
+server:
+  config_version: "v1.0.0"
+  tunnel_port: 10086
+  entry_port: 8001
+  log_level: "debug"
+  trace_enabled: false
+
+# ====================================================================
+# SECTION 2: SERVER EGRESS UPSTREAM
+# Upstreams are external services reachable by the server.
+# ====================================================================
+server_egress_upstream:
+  upstreams:
+    backend:
+      servers:
+        - address: "https://www.google.com"
+          resolve: true
+      lb_policy: "round_robin"
+  
+  rules:
+    http:
+      - match_host: "wss.localtest.com"
+        action_upstream: "backend"
+
+# ====================================================================
+# SECTION 3: TUNNEL MANAGEMENT
+# ====================================================================
+tunnel_management:
+  # Vhost-based routing (unified, protocol-agnostic)
+  server_ingress_routing:
+    rules:
+      vhost:
+        - match_host: "wss.localtest.com"
+          action_client_group: "group-a"
+        - match_host: "harbor.example.com"
+          action_client_group: "group-a"
+        - match_host: "test.local"
+          action_client_group: "group-a"
+        - match_host: "www2.localtest.com"
+          action_client_group: "group-b"
+
+      tcp:
+        - match_port: 50051
+          action_client_group: "group-a"
+          action_proxy_name: "grpc_service"
+  
+  client_configs:
+    client_egress_routings:
+      group-a:
+        config_version: "v1.0.0"
+        upstreams:
+          echo_beeceptor:
+            servers:
+              - address: "echo.free.beeceptor.com:443"
+                resolve: true
+            lb_policy: "round_robin"
+
+          google_service:
+            servers:
+              - address: "www.google.com:443"
+                resolve: true
+            lb_policy: "round_robin"
+
+          http_service:
+            servers:
+              - address: "127.0.0.1:8080"
+                resolve: false
+            lb_policy: "round_robin"
+
+          wss_service:
+            servers:
+              - address: "wss://echo.websocket.org"
+                resolve: false
+            lb_policy: "round_robin"
+
+          grpc_service:
+            servers:
+              - address: "https://grpc-echo.semior.dev:443"
+                resolve: true
+            lb_policy: "round_robin"
+
+        rules:
+          vhost:
+            - match_host: "wss.localtest.com"
+              # action_upstream: "grpc_service"
+              # action_upstream: "wss_service"
+              action_upstream: "echo_beeceptor"
+            - match_host: "harbor.example.com"
+              action_upstream: "google_service"
+            - match_host: "localhost"
+              action_upstream: "http_service"
+            - match_host: "test.local"
+              action_upstream: "http_service"
+      
+      group-b:
+        config_version: "v1.0.0"
+        upstreams:
+          local_service:
+            servers:
+              - address: "127.0.0.1:9100"
+                resolve: false
+            lb_policy: "round_robin"

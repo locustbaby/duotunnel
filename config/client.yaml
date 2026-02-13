@@ -1,0 +1,20 @@
+# Client Configuration
+
+log_level: "debug"
+trace_enabled: false
+
+# Skip TLS verification for self-signed certs (development only)
+tls_skip_verify: true
+
+# Connection to server address and port
+server_addr: "127.0.0.1"
+server_port: 10086
+
+# Client group id
+client_group_id: "group-a"
+
+# Optional: Authentication token
+auth_token: "your-token-here"
+
+# Optional: Set to enable HTTP listener
+http_entry_port: 8003
