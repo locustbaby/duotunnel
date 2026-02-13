@@ -75,11 +75,63 @@ Local App → Client Entry → QUIC Stream → Server → External Service
 
 ## Quick Start
 
-### Prerequisites
+### Simple Ingress Tunnel Example
 
-- Rust 1.70+
+Expose a local web service (e.g., `localhost:8080`) to the internet through a public server:
 
-### Build
+**Server (public IP: `example.com`):**
+```yaml
+# config/server.yaml
+server:
+  tunnel_port: 10086
+  entry_port: 8001
+
+tunnel_management:
+  server_ingress_routing:
+    rules:
+      vhost:
+        - match_host: "app.example.com"
+          action_client_group: "group-a"
+
+  client_configs:
+    client_egress_routings:
+      group-a:
+        upstreams:
+          local_web:
+            servers:
+              - address: "127.0.0.1:8080"
+        rules:
+          vhost:
+            - match_host: "app.example.com"
+              action_upstream: "local_web"
+```
+
+**Client (private network):**
+```yaml
+# config/client.yaml
+server_addr: "example.com"
+server_port: 10086
+client_group_id: "group-a"
+```
+
+**Run:**
+```bash
+# On server
+./server --config config/server.yaml
+
+# On client
+./client --config config/client.yaml
+
+# Access your local service at http://app.example.com:8001
+```
+
+Traffic flow: `Internet → example.com:8001 → QUIC tunnel → Client → localhost:8080`
+
+---
+
+### Build from Source
+
+**Prerequisites:** Rust 1.70+
 
 ```bash
 cargo build --release
@@ -208,6 +260,33 @@ Local App → Client → QUIC Tunnel → Server → External API
 ```
 WSS Client → Server → QUIC Tunnel → Client → Local WS Service
 ```
+
+## Acknowledgments
+
+DuoTunnel is inspired by [frp](https://github.com/fatedier/frp) (Fast Reverse Proxy), a popular and mature tunnel solution. We learned from frp's architecture and design principles, particularly its client-server model and proxy routing mechanisms.
+
+### Key Innovations Beyond frp
+
+While building upon frp's foundation, DuoTunnel introduces several architectural improvements:
+
+1. **Server-to-Client Config Distribution**
+   - **frp**: Clients use local configuration files only. Dynamic updates require manual file edits and `frpc reload`.
+   - **DuoTunnel**: Server pushes routing configurations to clients via `LoginResp` messages. Clients receive and apply routing rules automatically without local config files.
+   - **Benefit**: Centralized configuration management, instant updates across client groups.
+
+2. **Bidirectional Tunnel (Ingress + Egress)**
+   - **frp**: Primarily a reverse proxy (ingress only). Exposes internal services to the internet.
+   - **DuoTunnel**: Supports both directions simultaneously:
+     - **Ingress**: External → Server → Client → Backend (like frp)
+     - **Egress**: Local → Client → Server → External (forward proxy)
+   - **Benefit**: Single tunnel for both inbound and outbound traffic, unified architecture.
+
+3. **QUIC-Native Multiplexing**
+   - **frp**: Uses TCP + Yamux for stream multiplexing, requires connection pools and pre-created connections.
+   - **DuoTunnel**: Leverages QUIC's native multiplexing with 0-RTT stream creation (see comparison table above).
+   - **Benefit**: Lower latency, simpler code, automatic connection migration, built-in 0-RTT resumption.
+
+We're grateful to the frp team for pioneering this space and providing a solid reference implementation.
 
 ## References
 
