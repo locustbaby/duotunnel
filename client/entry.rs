@@ -1,8 +1,10 @@
 use anyhow::Result;
 use quinn::Connection;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, debug};
+use tracing::{info, warn, debug};
 use tunnel_lib::{send_routing_info, RoutingInfo, relay_bidirectional, detect_protocol_and_host};
 use bytes::Bytes;
 
@@ -10,11 +12,13 @@ pub async fn start_entry_listener(
     conn: Connection,
     port: u16,
     cancel_token: CancellationToken,
+    max_connections: u32,
 ) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr).await?;
+    let semaphore = Arc::new(Semaphore::new(max_connections as usize));
 
-    info!(addr = %addr, "client entry listener started");
+    info!(addr = %addr, max_connections = %max_connections, "client entry listener started");
 
     loop {
         tokio::select! {
@@ -25,11 +29,20 @@ pub async fn start_entry_listener(
             result = listener.accept() => {
                 let (stream, peer_addr) = result?;
                 stream.set_nodelay(true)?;
-                debug!(peer_addr = %peer_addr, "new entry connection");
 
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(port = port, "entry connection rejected: max connections reached");
+                        continue;
+                    }
+                };
+
+                debug!(peer_addr = %peer_addr, "new entry connection");
                 let conn = conn.clone();
 
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_entry_connection(conn, stream).await {
                         debug!(error = %e, "entry connection error");
                     }
@@ -61,7 +74,7 @@ async fn handle_entry_connection(
         proxy_name: "entry".to_string(),
         src_addr: peer_addr.ip().to_string(),
         src_port: peer_addr.port(),
-        protocol: protocol.clone(),
+        protocol: protocol.to_string(),
         host,
     };
     

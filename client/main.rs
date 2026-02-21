@@ -155,8 +155,9 @@ async fn run_client(config: &ClientConfigFile, endpoint: &quinn::Endpoint) -> Re
     if let Some(entry_port) = config.http_entry_port {
         let conn = conn.clone();
         let token = cancel_token.clone();
+        let max_entry_conns = config.max_concurrent_streams;
         tokio::spawn(async move {
-            if let Err(e) = entry::start_entry_listener(conn, entry_port, token).await {
+            if let Err(e) = entry::start_entry_listener(conn, entry_port, token, max_entry_conns).await {
                 error!(port = entry_port, error = %e, "entry listener failed");
             }
         });

@@ -94,17 +94,6 @@ async fn handle_quic_connection(
 
     metrics::auth_success(&group_id);
 
-    // Check for duplicate ClientID and handle conflict
-    if let Some(existing_conn) = state.registry.get_client_connection(&login.client_id) {
-        warn!(
-            client_id = %login.client_id,
-            "duplicate client ID detected, closing old connection"
-        );
-        metrics::duplicate_client_closed();
-        existing_conn.close(0u32.into(), b"duplicate client");
-        state.registry.unregister(&login.client_id);
-    }
-
     let client_config = state.config.to_client_config(&group_id)
         .unwrap_or_else(|| ClientConfig::default());
 
@@ -121,7 +110,21 @@ async fn handle_quic_connection(
         "client authenticated and registered"
     );
 
-    state.registry.register(login.client_id.clone(), group_id.clone(), conn.clone());
+    // Atomically replace any existing registration for this client_id.
+    // replace_or_register uses DashMap::entry() to eliminate the race window
+    // that would exist with a separate get → unregister → register sequence.
+    if let Some(old_conn) = state.registry.replace_or_register(
+        login.client_id.clone(),
+        group_id.clone(),
+        conn.clone(),
+    ) {
+        warn!(
+            client_id = %login.client_id,
+            "duplicate client ID detected, closing old connection"
+        );
+        metrics::duplicate_client_closed();
+        old_conn.close(0u32.into(), b"duplicate client");
+    }
     metrics::client_registered(&group_id);
 
     loop {

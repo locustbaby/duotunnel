@@ -66,7 +66,7 @@ async fn handle_http_connection(state: Arc<ServerState>, mut stream: TcpStream) 
         } else {
             let host = detected_host.or_else(|| extract_host_from_http(&buf[..n]))
                 .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
-            handle_plaintext_h1_connection(state, stream, host, protocol, peer_addr, n).await
+            handle_plaintext_h1_connection(state, stream, host, protocol.to_string(), peer_addr, n).await
         }
     }
 }

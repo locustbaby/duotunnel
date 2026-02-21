@@ -139,25 +139,28 @@ impl UpstreamPeer for H2Peer {
                             if frame.is_data() {
                                 let data = frame.into_data().unwrap();
                                 let len = data.len();
-                                // Reserve capacity if needed? h2 send_data handles flow control for us by returning Poll::Pending if blocked.
-                                // But here we are in async context, send_data returns Result.
-                                // send_data pushes to buffer. We might need to handle capacity explicitly if we push too fast?
-                                // h2::SendStream::send_data does NOT await capacity. It fails if window is too small?
-                                // No, send_data(..., end_of_stream: bool).
-                                // h2 documentation says: "If there is not enough capacity in the stream's window, this will return an error."
-                                // Wait, actually `send_data` returns Ok(()) if it queues the data. 
-                                // But if we just pump data, we might buffer infinitely in memory if peer is slow.
-                                // We should check `capacity` or `reserve_capacity`.
-                                
-                                // Actually, h2::SendStream::reserve_capacity is async.
-                                send_stream.reserve_capacity(len); 
-                                // Wait, reserve_capacity requests capacity.
-                                
-                                // Correct way: use `poll_capacity` or just send and handle error?
-                                // h2 0.4 `send_data` docs: "Frames are queued up... If the remote window is exceeded, the data is buffered internally."
-                                // So strictly speaking it's "safe" but can OOM.
-                                // For robust proxying, ideally we wait for capacity.
-                                
+
+                                // Request capacity from the flow-control window, then
+                                // await until the remote grants at least some capacity.
+                                // Without this, send_data buffers data unboundedly in
+                                // memory when the receiver is slower than the upstream,
+                                // which can cause OOM under sustained load.
+                                send_stream.reserve_capacity(len);
+                                match futures_util::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                                    None => {
+                                        error!("H2 flow control: send stream closed before capacity granted");
+                                        return;
+                                    }
+                                    Some(Err(e)) => {
+                                        error!("H2 flow control error: {}", e);
+                                        return;
+                                    }
+                                    Some(Ok(_granted)) => {
+                                        // At least some capacity granted; send_data will
+                                        // respect the actual window size internally.
+                                    }
+                                }
+
                                 if let Err(e) = send_stream.send_data(data, false) {
                                      error!("Failed to send response data: {}", e);
                                      return;

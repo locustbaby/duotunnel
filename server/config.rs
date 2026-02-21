@@ -144,15 +144,17 @@ pub struct ServerDef {
 }
 
 impl ServerConfigFile {
-    /// Validate authentication token for a group
+    /// Validate authentication token for a group using constant-time comparison
+    /// to prevent timing side-channel attacks.
     pub fn validate_token(&self, group_id: &str, token: &str) -> bool {
+        use subtle::ConstantTimeEq;
         // If no tokens configured, allow all (backward compatible)
         if self.server.auth_tokens.is_empty() {
             return true;
         }
-        // Check if token matches for the group
+        // Use ct_eq() so comparison time does not leak how many bytes matched
         self.server.auth_tokens.get(group_id)
-            .map(|expected| expected == token)
+            .map(|expected| bool::from(expected.as_bytes().ct_eq(token.as_bytes())))
             .unwrap_or(false)
     }
 

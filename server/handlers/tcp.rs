@@ -76,7 +76,7 @@ async fn handle_tcp_connection(
             proxy_name,
             src_addr: peer_addr.ip().to_string(),
             src_port: peer_addr.port(),
-            protocol,
+            protocol: protocol.to_string(),
             host,
         },
         stream,

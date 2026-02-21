@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use dashmap::DashMap;
 use quinn::Connection;
 use tracing::{info, warn, debug};
@@ -10,54 +10,59 @@ struct ClientInfo {
     conn: Connection,
 }
 
-/// Thread-safe client group with O(1) round-robin selection
+/// Thread-safe client group with O(1) stable round-robin selection.
+///
+/// Uses `RwLock<Vec<(String, Connection)>>` instead of `DashMap` so that
+/// `select_healthy` can index by position in O(1) with a deterministic order.
+/// Write operations (add/remove) are rare — only on connect/disconnect — so
+/// write-lock contention is negligible.
 pub struct ClientGroup {
-    /// Direct references to connections for O(1) access
-    clients: DashMap<String, Connection>,
-    /// Round-robin counter
+    clients: RwLock<Vec<(String, Connection)>>,
     counter: AtomicUsize,
 }
 
 impl ClientGroup {
     pub fn new() -> Self {
         Self {
-            clients: DashMap::new(),
+            clients: RwLock::new(Vec::new()),
             counter: AtomicUsize::new(0),
         }
     }
 
     pub fn add(&self, client_id: String, conn: Connection) {
-        self.clients.insert(client_id, conn);
+        let mut c = self.clients.write().unwrap();
+        // Replace if the same client_id already exists (idempotent upsert)
+        c.retain(|(id, _)| id != &client_id);
+        c.push((client_id, conn));
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
-        self.clients.remove(client_id).is_some()
+        let mut c = self.clients.write().unwrap();
+        let before = c.len();
+        c.retain(|(id, _)| id != client_id);
+        c.len() < before
     }
 
     pub fn is_empty(&self) -> bool {
-        self.clients.is_empty()
+        self.clients.read().unwrap().is_empty()
     }
 
-    /// Select a healthy client using round-robin. O(n) worst case when all clients
-    /// are unhealthy, but O(1) amortized when most clients are healthy.
+    /// Select a healthy client using O(1) round-robin.
+    ///
+    /// Iterates at most `len` slots starting from the atomic counter position,
+    /// skipping any connection that has already been closed.
     pub fn select_healthy(&self) -> Option<Connection> {
-        let len = self.clients.len();
+        let c = self.clients.read().unwrap();
+        let len = c.len();
         if len == 0 {
             return None;
         }
 
-        let start_idx = self.counter.fetch_add(1, Ordering::Relaxed);
-
-        // Try up to `len` clients starting from counter position
+        let start = self.counter.fetch_add(1, Ordering::Relaxed);
         for i in 0..len {
-            let idx = (start_idx + i) % len;
-
-            // Get the client at this index position
-            if let Some(entry) = self.clients.iter().nth(idx) {
-                let conn = entry.value();
-                if conn.close_reason().is_none() {
-                    return Some(conn.clone());
-                }
+            let (_, conn) = &c[(start + i) % len];
+            if conn.close_reason().is_none() {
+                return Some(conn.clone());
             }
         }
 
@@ -81,20 +86,65 @@ impl ClientRegistry {
         }
     }
 
-    pub fn register(&self, client_id: String, group_id: String, conn: Connection) {
-        info!(client_id = %client_id, group_id = %group_id, "registering client");
+    /// Atomically replace an existing registration or create a new one.
+    ///
+    /// Uses `DashMap::entry()` which holds a shard-level lock across the
+    /// check-and-swap, eliminating the race window that existed with the
+    /// previous get → unregister → register three-step sequence.
+    ///
+    /// Returns the old `Connection` if one was displaced (caller should close it).
+    pub fn replace_or_register(
+        &self,
+        client_id: String,
+        group_id: String,
+        conn: Connection,
+    ) -> Option<Connection> {
+        use dashmap::mapref::entry::Entry;
 
-        // Store client info for unregistration lookup
-        self.clients.insert(client_id.clone(), ClientInfo {
-            group_id: group_id.clone(),
-            conn: conn.clone(),
-        });
+        let old_conn = match self.clients.entry(client_id.clone()) {
+            Entry::Occupied(mut occ) => {
+                let old_info = occ.get();
+                let old_group_id = old_info.group_id.clone();
+                let old_conn = old_info.conn.clone();
 
-        // Add to group (create if needed)
+                // Remove from the old group before overwriting
+                if let Some(grp) = self.groups.get(&old_group_id) {
+                    grp.remove(&client_id);
+                    if grp.is_empty() {
+                        drop(grp);
+                        debug!(group_id = %old_group_id, "removing empty group");
+                        self.groups.remove(&old_group_id);
+                    }
+                }
+
+                occ.insert(ClientInfo {
+                    group_id: group_id.clone(),
+                    conn: conn.clone(),
+                });
+
+                Some(old_conn)
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(ClientInfo {
+                    group_id: group_id.clone(),
+                    conn: conn.clone(),
+                });
+                None
+            }
+        };
+
+        // Add to the (possibly new) group
         self.groups
             .entry(group_id)
             .or_insert_with(|| Arc::new(ClientGroup::new()))
             .add(client_id, conn);
+
+        old_conn
+    }
+
+    pub fn register(&self, client_id: String, group_id: String, conn: Connection) {
+        info!(client_id = %client_id, group_id = %group_id, "registering client");
+        self.replace_or_register(client_id, group_id, conn);
     }
 
     /// Get the connection for a specific client (for duplicate detection)
@@ -109,8 +159,8 @@ impl ClientRegistry {
             if let Some(group) = self.groups.get(&info.group_id) {
                 group.remove(client_id);
 
-                // Optionally clean up empty groups
                 if group.is_empty() {
+                    drop(group);
                     debug!(group_id = %info.group_id, "removing empty group");
                     self.groups.remove(&info.group_id);
                 }
