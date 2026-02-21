@@ -53,7 +53,7 @@ pub async fn run_tcp_listener(
 
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
-    mut stream: TcpStream,
+    stream: TcpStream,
     proxy_name: String,
     group_id: String,
 ) -> Result<()> {
@@ -61,7 +61,7 @@ async fn handle_tcp_connection(
 
     let peer_addr = stream.peer_addr()?;
 
-    let mut buf = vec![0u8; 4096];
+    let mut buf = [0u8; 4096]; // stack-allocated; avoids heap alloc per connection
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
 

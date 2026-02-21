@@ -23,6 +23,7 @@ pub use transport::listener::{
 };
 
 pub use transport::addr::{parse_upstream, normalize_host, UpstreamAddr};
+pub use transport::quic::{QuicTransportParams, build_transport_config};
 pub use protocol::rewrite::Rewriter;
 pub use protocol::detect::detect_protocol_and_host;
 pub use engine::relay::{relay_bidirectional, relay_with_initial};

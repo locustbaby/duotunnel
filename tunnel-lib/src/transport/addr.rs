@@ -47,9 +47,9 @@ pub fn parse_upstream(addr: &str) -> UpstreamAddr {
 /// - `example.com:80`  → `example.com`
 /// - `example.com`     → `example.com`
 fn extract_host(addr: &str) -> &str {
-    if addr.starts_with('[') {
+    if let Some(rest) = addr.strip_prefix('[') {
         // IPv6: find the closing bracket
-        addr[1..].split(']').next().unwrap_or(addr)
+        rest.split(']').next().unwrap_or(addr)
     } else {
         addr.split(':').next().unwrap_or(addr)
     }
@@ -75,9 +75,9 @@ fn extract_port(addr: &str) -> Option<u16> {
 }
 
 pub fn normalize_host(host: &str) -> String {
-    if host.starts_with('[') {
+    if let Some(rest) = host.strip_prefix('[') {
         // IPv6 in brackets: strip brackets
-        host[1..].split(']').next().unwrap_or(host).to_lowercase()
+        rest.split(']').next().unwrap_or(host).to_lowercase()
     } else {
         host.split(':').next().unwrap_or(host).to_lowercase()
     }

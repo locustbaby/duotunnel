@@ -56,7 +56,7 @@ impl UpstreamPeer for H2Peer {
             let scheme = self.scheme.clone();
 
             tokio::spawn(async move {
-                let (parts, mut body) = req.into_parts();
+                let (parts, body) = req.into_parts();
                 debug!(method = %parts.method, uri = %parts.uri, "H2 request received");
 
                 let target_uri = format!(
@@ -206,34 +206,27 @@ impl UpstreamPeer for H2Peer {
 // Adapter to turn h2::RecvStream into a Stream of hyper Frames
 fn stream_body_from_h2(mut body: h2::RecvStream) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + 'static> {
     let stream = futures_util::stream::poll_fn(move |cx| {
-        loop {
-            // Check for data
-            match body.poll_data(cx) {
-                Poll::Ready(Some(Ok(bytes))) => {
-                    let _ = body.flow_control().release_capacity(bytes.len());
-                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))));
-                }
-                Poll::Ready(None) => {
-                    // Data stream ended, check trailers
-                    match body.poll_trailers(cx) {
-                        Poll::Ready(Ok(Some(trailers))) => {
-                            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-                        }
-                        Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))),
-                        Poll::Pending => return Poll::Pending,
+        // Check for data
+        match body.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                let _ = body.flow_control().release_capacity(bytes.len());
+                Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))))
+            }
+            Poll::Ready(None) => {
+                // Data stream ended, check trailers
+                match body.poll_trailers(cx) {
+                    Poll::Ready(Ok(Some(trailers))) => {
+                        Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                     }
-                }
-                Poll::Pending => {
-                     // If data is pending, we still need to check if trailers are available?
-                     // No, poll_data returning Pending means no data yet.
-                     // But could there be trailers without data? poll_data returns None in that case.
-                     return Poll::Pending;
+                    Poll::Ready(Ok(None)) => Poll::Ready(None),
+                    Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))),
+                    Poll::Pending => Poll::Pending,
                 }
             }
+            Poll::Pending => Poll::Pending,
         }
     });
     StreamBody::new(stream)

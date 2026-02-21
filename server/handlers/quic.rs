@@ -12,17 +12,10 @@ use crate::{ServerState, tunnel_handler, metrics};
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
 
-    let (certs, key) = tunnel_lib::infra::pki::generate_self_signed_cert()?;
-
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?
-    ));
-
+    // Build server config with QUIC transport params from config file.
+    // Falls back to sensible defaults for any unset field.
+    let quic_params = state.config.server.quic_transport_params();
+    let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
 
     info!(addr = %addr, "QUIC server listening");
@@ -95,7 +88,7 @@ async fn handle_quic_connection(
     metrics::auth_success(&group_id);
 
     let client_config = state.config.to_client_config(&group_id)
-        .unwrap_or_else(|| ClientConfig::default());
+        .unwrap_or_default();
 
     let resp = LoginResp {
         success: true,

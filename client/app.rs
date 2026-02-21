@@ -144,6 +144,7 @@ impl ProxyApp for ClientApp {
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
 
+        #[allow(unreachable_patterns)]
         match context.protocol {
 
             Protocol::H1 => {
@@ -209,6 +210,7 @@ impl ProxyApp for ClientApp {
                         .with_single_cert(certs, key)?;
                      let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
 
+                     #[allow(dead_code)]
                      struct MitmH2Peer {
                          acceptor: tokio_rustls::TlsAcceptor,
                          target_addr: std::net::SocketAddr,
@@ -246,7 +248,7 @@ impl ProxyApp for ClientApp {
                              let target_host = self.tls_host.clone();
                              let client = self.https_client.clone();
 
-                             let service = service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                             let service = service_fn(move |req: Request<hyper::body::Incoming>| {
                                  let target_host = target_host.clone();
                                  let client = client.clone();
                                  async move {
@@ -261,13 +263,13 @@ impl ProxyApp for ClientApp {
                                      
                                      debug!("MITM H2: forwarding request to {} {}", parts.method, parts.uri);
                                      
-                                     let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                                     let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
                                      let upstream_req = Request::from_parts(parts, boxed_body);
                                      
                                      match client.request(upstream_req).await {
                                          Ok(resp) => {
                                              let (parts, body) = resp.into_parts();
-                                             let boxed = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                                             let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                                              Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                                          }
                                          Err(e) => {

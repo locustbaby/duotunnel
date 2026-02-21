@@ -1,5 +1,5 @@
 use super::peers::UpstreamPeer;
-use crate::engine::relay::relay_with_initial;
+use crate::engine::{bridge, relay::relay_with_initial};
 use anyhow::{Result, Context};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -71,9 +71,9 @@ impl UpstreamScheme {
 
 /// Extract host from an address string, handling IPv6 bracket notation.
 fn extract_host_part(addr: &str) -> String {
-    if addr.starts_with('[') {
+    if let Some(rest) = addr.strip_prefix('[') {
         // IPv6: [::1]:8080 → "::1"
-        addr[1..].split(']').next().unwrap_or(addr).to_string()
+        rest.split(']').next().unwrap_or(addr).to_string()
     } else {
         addr.split(':').next().unwrap_or(addr).to_string()
     }
@@ -158,8 +158,10 @@ impl UpstreamPeer for TcpPeer {
 
         let initial_slice = initial_data.as_deref();
 
-        info!(target = %self.target_addr, "starting bidirectional relay (raw tcp)");
-        relay_with_initial(recv, send, tcp_stream, initial_slice.unwrap_or(&[])).await?;
+        info!(target = %self.target_addr, "starting bidirectional relay (raw tcp, into_split)");
+        // Use bridge::relay_with_first_data which calls TcpStream::into_split() — zero-cost
+        // split without Arc<Mutex> overhead of the generic tokio::io::split().
+        bridge::relay_with_first_data(recv, send, tcp_stream, initial_slice).await?;
 
         Ok(())
     }

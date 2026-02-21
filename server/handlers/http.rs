@@ -44,12 +44,12 @@ pub async fn run_http_listener(state: Arc<ServerState>, port: u16) -> Result<()>
     }
 }
 
-async fn handle_http_connection(state: Arc<ServerState>, mut stream: TcpStream) -> Result<()> {
+async fn handle_http_connection(state: Arc<ServerState>, stream: TcpStream) -> Result<()> {
     use tunnel_lib::detect_protocol_and_host;
     use tunnel_lib::protocol::detect::extract_tls_sni;
 
     let peer_addr = stream.peer_addr()?;
-    let mut buf = vec![0u8; 16384];
+    let mut buf = [0u8; 16384]; // stack-allocated; avoids heap alloc per connection
     let n = stream.peek(&mut buf).await?;
 
     let is_tls = n > 0 && buf[0] == 0x16;
@@ -131,7 +131,7 @@ async fn handle_tls_connection(
                 host: Some(target_host),
             };
 
-            let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
 
             match proxy::forward_h2_request(&client_conn, routing_info, upstream_req).await {
@@ -218,7 +218,7 @@ async fn handle_plaintext_h2_connection(
                 host: Some(host),
             };
 
-            let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
 
             match proxy::forward_h2_request(&client_conn, routing_info, upstream_req).await {
@@ -264,8 +264,8 @@ async fn handle_plaintext_h1_connection(
 
     let proxy_name = host.clone();
 
-    let mut data = vec![0u8; peeked_bytes];
-    stream.read_exact(&mut data).await?;
+    let mut data = [0u8; 16384]; // stack-allocated; peeked_bytes <= 16384
+    stream.read_exact(&mut data[..peeked_bytes]).await?;
 
     proxy::forward_with_initial_data(
         &client_conn,
@@ -277,6 +277,6 @@ async fn handle_plaintext_h1_connection(
             host: Some(host),
         },
         stream,
-        &data,
+        &data[..peeked_bytes],
     ).await
 }

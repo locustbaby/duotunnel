@@ -5,7 +5,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, debug};
-use tunnel_lib::{send_routing_info, RoutingInfo, relay_bidirectional, detect_protocol_and_host};
+use tunnel_lib::{send_routing_info, RoutingInfo, relay_quic_to_tcp, detect_protocol_and_host};
 use bytes::Bytes;
 
 pub async fn start_entry_listener(
@@ -54,10 +54,8 @@ pub async fn start_entry_listener(
 
 async fn handle_entry_connection(
     conn: Connection,
-    mut local_stream: TcpStream,
+    local_stream: TcpStream,
 ) -> Result<()> {
-    use tokio::io::AsyncReadExt;
-    
     let peer_addr = local_stream.peer_addr()?;
     
     let mut buf = vec![0u8; 4096];
@@ -80,7 +78,9 @@ async fn handle_entry_connection(
     
     send_routing_info(&mut send, &routing_info).await?;
 
-    let (sent, received) = relay_bidirectional(recv, send, local_stream).await?;
+    // Use relay_quic_to_tcp which calls TcpStream::into_split() — zero-cost split,
+    // no Arc<Mutex> overhead compared to the generic relay_bidirectional.
+    let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
     
     debug!(sent = sent, received = received, protocol = %protocol, "entry relay completed");
 

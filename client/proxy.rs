@@ -30,7 +30,6 @@ pub async fn handle_work_stream(
 
     if routing_info.protocol == "h2" {
         let host = routing_info.host.clone().unwrap_or_else(|| routing_info.proxy_name.clone());
-        let host_without_port = host.split(':').next().unwrap_or(&host);
         
         let upstream_addr = proxy_map.get_local_address(&routing_info.proxy_name, Some(&host), false)
             .ok_or_else(|| anyhow::anyhow!("no upstream for H2 request to {}", host))?;
@@ -74,13 +73,13 @@ pub async fn handle_work_stream(
                 
                 debug!("Client H2: forwarding {} {} to upstream", parts.method, parts.uri);
                 
-                let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
                 let upstream_req = Request::from_parts(parts, boxed_body);
                 
                 match https_client.request(upstream_req).await {
                     Ok(resp) => {
                         let (parts, body) = resp.into_parts();
-                        let boxed = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                        let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                         Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                     }
                     Err(e) => {

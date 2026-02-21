@@ -52,6 +52,27 @@ pub struct ServerBasicConfig {
     /// Prometheus metrics port (optional)
     #[serde(default)]
     pub metrics_port: Option<u16>,
+
+    // --- QUIC transport tuning (all optional; defaults match previous hard-coded values) ---
+
+    /// Maximum concurrent bidirectional QUIC streams (default: 1000)
+    #[serde(default)]
+    pub quic_max_concurrent_streams: Option<u32>,
+    /// Per-stream receive window in MB (default: 1)
+    #[serde(default)]
+    pub quic_stream_window_mb: Option<u64>,
+    /// Per-connection receive/send window in MB (default: 8)
+    #[serde(default)]
+    pub quic_connection_window_mb: Option<u64>,
+    /// QUIC keep-alive interval in seconds (default: 20)
+    #[serde(default)]
+    pub quic_keepalive_secs: Option<u64>,
+    /// QUIC idle timeout in seconds (default: 60)
+    #[serde(default)]
+    pub quic_idle_timeout_secs: Option<u64>,
+    /// Congestion controller: "bbr" or omit for default NewReno
+    #[serde(default)]
+    pub quic_congestion: Option<String>,
 }
 
 fn default_max_connections() -> usize {
@@ -141,6 +162,30 @@ pub struct ServerDef {
     pub address: String,
     #[serde(default)]
     pub resolve: bool,
+}
+
+impl ServerBasicConfig {
+    /// Convert YAML QUIC fields into a `QuicTransportParams`, applying defaults for any
+    /// field not explicitly set in the config file.
+    pub fn quic_transport_params(&self) -> tunnel_lib::QuicTransportParams {
+        let defaults = tunnel_lib::QuicTransportParams::default();
+        tunnel_lib::QuicTransportParams {
+            max_concurrent_streams: self.quic_max_concurrent_streams
+                .unwrap_or(defaults.max_concurrent_streams),
+            stream_receive_window_bytes: self.quic_stream_window_mb
+                .map(|mb| mb * 1024 * 1024)
+                .unwrap_or(defaults.stream_receive_window_bytes),
+            connection_receive_window_bytes: self.quic_connection_window_mb
+                .map(|mb| mb * 1024 * 1024)
+                .unwrap_or(defaults.connection_receive_window_bytes),
+            send_window_bytes: self.quic_connection_window_mb
+                .map(|mb| mb * 1024 * 1024)
+                .unwrap_or(defaults.send_window_bytes),
+            keepalive_secs: self.quic_keepalive_secs.unwrap_or(defaults.keepalive_secs),
+            idle_timeout_secs: self.quic_idle_timeout_secs.unwrap_or(defaults.idle_timeout_secs),
+            congestion: self.quic_congestion.clone().or(defaults.congestion),
+        }
+    }
 }
 
 impl ServerConfigFile {

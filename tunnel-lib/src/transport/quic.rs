@@ -1,12 +1,71 @@
 use anyhow::{Result, anyhow};
 use quinn::{Endpoint, ServerConfig, ClientConfig, Connection, SendStream, RecvStream};
 use quinn::crypto::rustls::{QuicServerConfig, QuicClientConfig};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::convert::TryInto;
 use tracing::{info, debug, error};
 
+/// Tunable QUIC transport parameters.
+///
+/// All fields have sensible defaults matching the previously hard-coded values,
+/// so existing callers are fully backward compatible.
+#[derive(Debug, Clone)]
+pub struct QuicTransportParams {
+    /// Maximum concurrent bidirectional streams (default: 1000)
+    pub max_concurrent_streams: u32,
+    /// Per-stream receive window in bytes (default: 1 MB)
+    pub stream_receive_window_bytes: u64,
+    /// Per-connection receive window in bytes (default: 8 MB)
+    pub connection_receive_window_bytes: u64,
+    /// Per-connection send window in bytes (default: 8 MB)
+    pub send_window_bytes: u64,
+    /// Keep-alive interval in seconds (default: 20)
+    pub keepalive_secs: u64,
+    /// Idle timeout in seconds (default: 60)
+    pub idle_timeout_secs: u64,
+    /// Optional congestion controller: `"bbr"` or `None` for default NewReno
+    pub congestion: Option<String>,
+}
+
+impl Default for QuicTransportParams {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: 1000,
+            stream_receive_window_bytes: 1024 * 1024,         // 1 MB
+            connection_receive_window_bytes: 8 * 1024 * 1024, // 8 MB
+            send_window_bytes: 8 * 1024 * 1024,               // 8 MB
+            keepalive_secs: 20,
+            idle_timeout_secs: 60,
+            congestion: None,
+        }
+    }
+}
+
+/// Apply `QuicTransportParams` to a `TransportConfig`.
+fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTransportParams) {
+    tc.max_concurrent_bidi_streams(params.max_concurrent_streams.into());
+    tc.max_concurrent_uni_streams(params.max_concurrent_streams.into());
+    tc.stream_receive_window(params.stream_receive_window_bytes.try_into().unwrap());
+    tc.receive_window(params.connection_receive_window_bytes.try_into().unwrap());
+    tc.send_window(params.send_window_bytes);
+    tc.keep_alive_interval(Some(std::time::Duration::from_secs(params.keepalive_secs)));
+    tc.max_idle_timeout(Some(
+        std::time::Duration::from_secs(params.idle_timeout_secs)
+            .try_into()
+            .unwrap(),
+    ));
+
+    if let Some(ref mode) = params.congestion {
+        if mode.eq_ignore_ascii_case("bbr") {
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        }
+        // Unknown values: silently fall back to default (NewReno)
+    }
+}
+
+/// Build a `ServerConfig` using default transport parameters.
 pub fn create_server_config() -> Result<ServerConfig> {
     let (certs, key) = crate::infra::pki::generate_self_signed_cert()?;
     
@@ -20,20 +79,27 @@ pub fn create_server_config() -> Result<ServerConfig> {
     
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(1000_u32.into());
-    transport_config.max_concurrent_uni_streams(1000_u32.into());
-    // Increase flow control windows: default ~48KB stream / ~1.5MB connection is too small
-    // for high-throughput scenarios with many concurrent streams.
-    transport_config.stream_receive_window((1024 * 1024u64).try_into().unwrap()); // 1MB per stream
-    transport_config.receive_window((8 * 1024 * 1024u64).try_into().unwrap());    // 8MB per connection
-    transport_config.send_window(8 * 1024 * 1024u64);                             // 8MB send buffer
-
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
-
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-
+    apply_transport_params(&mut transport_config, &QuicTransportParams::default());
     server_config.transport_config(Arc::new(transport_config));
-    
+
+    Ok(server_config)
+}
+
+/// Build a `ServerConfig` with custom transport parameters.
+///
+/// Used by callers that source parameters from a config file.
+pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerConfig> {
+    let (certs, key) = crate::infra::pki::generate_self_signed_cert()?;
+
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+    let mut transport_config = quinn::TransportConfig::default();
+    apply_transport_params(&mut transport_config, params);
+    server_config.transport_config(Arc::new(transport_config));
     Ok(server_config)
 }
 
@@ -49,20 +115,21 @@ pub fn create_client_config() -> Result<ClientConfig> {
     
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(1000_u32.into());
-    transport_config.max_concurrent_uni_streams(1000_u32.into());
-    // Match server-side window sizes for symmetric flow control
-    transport_config.stream_receive_window((1024 * 1024u64).try_into().unwrap()); // 1MB per stream
-    transport_config.receive_window((8 * 1024 * 1024u64).try_into().unwrap());    // 8MB per connection
-    transport_config.send_window(8 * 1024 * 1024u64);                             // 8MB send buffer
-
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
-
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-
+    apply_transport_params(&mut transport_config, &QuicTransportParams::default());
     client_config.transport_config(Arc::new(transport_config));
-    
+
     Ok(client_config)
+}
+
+/// Build a `ClientConfig` with custom transport parameters.
+///
+/// The TLS layer always uses `SkipServerVerification` (dev mode).
+/// Callers needing proper TLS validation build their own `ClientConfig` and
+/// only call this for the transport tuning portion (see `client/main.rs`).
+pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::TransportConfig> {
+    let mut tc = quinn::TransportConfig::default();
+    apply_transport_params(&mut tc, params);
+    Arc::new(tc)
 }
 
 #[derive(Debug)]
