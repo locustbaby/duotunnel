@@ -135,11 +135,11 @@ impl ProxyApp for ServerEgressApp {
                 };
 
                 if is_https {
-                    Ok(Box::new(TlsTcpPeer {
+                    Ok(Box::new(TlsTcpPeer::new(
                         target_addr,
-                        tls_host: tls_host.unwrap_or_default(),
-                        alpn: scheme.alpn(),
-                    }))
+                        tls_host.unwrap_or_default(),
+                        scheme.alpn(),
+                    )?))
                 } else {
                     Ok(Box::new(TcpPeer { target_addr }))
                 }

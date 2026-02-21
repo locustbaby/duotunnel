@@ -20,6 +20,7 @@ pub async fn run_tcp_listener(
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        stream.set_nodelay(true)?;
         debug!(peer_addr = %peer_addr, "new TCP connection");
 
         let permit = match state.tcp_semaphore.clone().try_acquire_owned() {

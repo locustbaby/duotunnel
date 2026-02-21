@@ -24,6 +24,7 @@ pub async fn start_entry_listener(
             }
             result = listener.accept() => {
                 let (stream, peer_addr) = result?;
+                stream.set_nodelay(true)?;
                 debug!(peer_addr = %peer_addr, "new entry connection");
 
                 let conn = conn.clone();

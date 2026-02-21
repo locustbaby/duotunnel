@@ -173,11 +173,11 @@ impl ProxyApp for ClientApp {
                  };
 
                  if is_https {
-                      Ok(Box::new(tunnel_lib::proxy::tcp::TlsTcpPeer {
+                      Ok(Box::new(tunnel_lib::proxy::tcp::TlsTcpPeer::new(
                           target_addr,
-                          tls_host: tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
-                          alpn: None,
-                      }))
+                          tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
+                          None,
+                      )?))
                  } else {
                       Ok(Box::new(tunnel_lib::proxy::tcp::TcpPeer {
                           target_addr,

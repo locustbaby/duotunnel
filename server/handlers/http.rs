@@ -16,6 +16,7 @@ pub async fn run_http_listener(state: Arc<ServerState>, port: u16) -> Result<()>
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        stream.set_nodelay(true)?;
         debug!(peer_addr = %peer_addr, "new entry connection");
 
         let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
