@@ -20,14 +20,18 @@ pub fn create_server_config() -> Result<ServerConfig> {
     
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(100_u32.into());
-    transport_config.max_concurrent_uni_streams(100_u32.into());
+    transport_config.max_concurrent_bidi_streams(1000_u32.into());
+    transport_config.max_concurrent_uni_streams(1000_u32.into());
+    // Increase flow control windows: default ~48KB stream / ~1.5MB connection is too small
+    // for high-throughput scenarios with many concurrent streams.
+    transport_config.stream_receive_window((1024 * 1024u64).try_into().unwrap()); // 1MB per stream
+    transport_config.receive_window((8 * 1024 * 1024u64).try_into().unwrap());    // 8MB per connection
+    transport_config.send_window(8 * 1024 * 1024u64);                             // 8MB send buffer
 
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
 
-
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    
+
     server_config.transport_config(Arc::new(transport_config));
     
     Ok(server_config)
@@ -45,14 +49,17 @@ pub fn create_client_config() -> Result<ClientConfig> {
     
 
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(100_u32.into());
-    transport_config.max_concurrent_uni_streams(100_u32.into());
+    transport_config.max_concurrent_bidi_streams(1000_u32.into());
+    transport_config.max_concurrent_uni_streams(1000_u32.into());
+    // Match server-side window sizes for symmetric flow control
+    transport_config.stream_receive_window((1024 * 1024u64).try_into().unwrap()); // 1MB per stream
+    transport_config.receive_window((8 * 1024 * 1024u64).try_into().unwrap());    // 8MB per connection
+    transport_config.send_window(8 * 1024 * 1024u64);                             // 8MB send buffer
 
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
 
-
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    
+
     client_config.transport_config(Arc::new(transport_config));
     
     Ok(client_config)
