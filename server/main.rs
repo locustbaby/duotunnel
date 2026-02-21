@@ -23,7 +23,7 @@ struct Args {
 }
 
 pub struct ServerState {
-    pub config: ServerConfigFile,
+    pub config: Arc<ServerConfigFile>,
     pub registry: SharedRegistry,
     pub vhost_router: Arc<VhostRouter<String>>,
     pub egress_map: Arc<egress::ServerEgressMap>,
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
 
     let state = Arc::new(ServerState {
-        config: config.clone(),
+        config: Arc::new(config.clone()),
         registry: new_shared_registry(),
         vhost_router: Arc::new(build_vhost_router(&config)),
         egress_map: Arc::new(egress::ServerEgressMap::from_config(&config)),

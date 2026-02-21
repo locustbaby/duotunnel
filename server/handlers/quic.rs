@@ -134,7 +134,7 @@ async fn handle_quic_connection(
                 match result {
                     Ok((send, recv)) => {
                         debug!("accepted reverse stream from client");
-                        let config = Arc::new(state.config.clone());
+                        let config = state.config.clone(); // O(1) Arc clone — no deep copy
                         let egress_map = state.egress_map.clone();
                         tokio::spawn(async move {
                             if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, config, egress_map).await {

@@ -49,13 +49,17 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
+    // Build the QUIC endpoint once; reuse it across reconnections to avoid
+    // binding a new UDP socket (and potentially leaking fds) on every reconnect.
+    let endpoint = build_quic_endpoint(&config)?;
+
     // Exponential backoff for reconnection
     let mut retry_delay = std::time::Duration::from_secs(1);
     const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
     const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
     loop {
-        match run_client(&config).await {
+        match run_client(&config, &endpoint).await {
             Ok(_) => {
                 info!("Connection closed gracefully, reconnecting immediately...");
                 retry_delay = INITIAL_RETRY_DELAY; // Reset on graceful close
@@ -70,7 +74,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_client(config: &ClientConfigFile) -> Result<()> {
+fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;
     // ALPN must match server's "tunnel-quic"
     crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
@@ -88,14 +92,18 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     client_config.transport_config(Arc::new(transport_config));
     debug!(max_streams = %max_streams, "QUIC transport configured");
-    
+
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
 
+async fn run_client(config: &ClientConfigFile, endpoint: &quinn::Endpoint) -> Result<()> {
     let server_addr = config.server_address().parse()?;
     info!(server_addr = %server_addr, "Connecting to server...");
     
     let conn = endpoint.connect(server_addr, "localhost")?.await?;
+
     info!("Connected to server");
 
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -140,6 +148,7 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
     let cancel_token = CancellationToken::new();
 
     // P1: Semaphore for client-side backpressure on incoming streams
+    let max_streams = config.max_concurrent_streams;
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = %max_streams, "Stream backpressure configured");
 
