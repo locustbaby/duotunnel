@@ -7,3 +7,9 @@ members = [
 ]
 
 resolver = "2"
+
+[profile.release]
+lto = "thin"           # Cross-crate inlining without full LTO compile time cost
+opt-level = 3
+codegen-units = 1      # Single codegen unit enables better inlining
+strip = "debuginfo"    # Smaller binaries; retain symbol names for stack traces

@@ -48,7 +48,18 @@ pub async fn handle_work_stream(
                 let normalized_addr = upstream_addr
                     .replace("wss://", "https://")
                     .replace("ws://", "http://");
-                let upstream_uri: hyper::Uri = normalized_addr.parse().unwrap();
+                let upstream_uri: hyper::Uri = match normalized_addr.parse() {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        tracing::error!("invalid upstream URI '{}': {}", normalized_addr, e);
+                        return Ok(Response::builder()
+                            .status(502)
+                            .body(http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync())
+                            .unwrap());
+                    }
+                };
                 let mut uri_parts = parts.uri.clone().into_parts();
                 uri_parts.scheme = upstream_uri.scheme().cloned();
                 uri_parts.authority = upstream_uri.authority().cloned();

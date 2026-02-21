@@ -77,18 +77,18 @@ pub async fn forward_http(
     let scheme = if parsed.is_https { "https" } else { "http" };
     let uri: Uri = format!("{}://{}{}", scheme, parsed.host, path).parse()?;
 
-    let hyper_method = match method {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "DELETE" => Method::DELETE,
-        "HEAD" => Method::HEAD,
-        "OPTIONS" => Method::OPTIONS,
-        "PATCH" => Method::PATCH,
-        _ => Method::GET,
-    };
+    // Method::from_bytes handles all valid HTTP methods including PROPFIND,
+    // MKCOL, CONNECT, TRACE, and custom extension methods.
+    let hyper_method = Method::from_bytes(method.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid HTTP method: {}", method))?;
 
-    let body_start = parse_result.unwrap();
+    // Return an error instead of panicking when headers don't fit in the 8KB buffer.
+    let body_start = match parse_result {
+        httparse::Status::Complete(n) => n,
+        httparse::Status::Partial => return Err(anyhow::anyhow!(
+            "HTTP request headers exceed {} bytes read buffer", first_chunk.len()
+        )),
+    };
     let remaining_first = &first_chunk[body_start..];
 
     let content_length: usize = hyper_headers
@@ -160,7 +160,9 @@ pub async fn forward_http(
     send.write_all(status_line.as_bytes()).await?;
 
     for (name, value) in response.headers() {
-        let header_line = format!("{}: {}\r\n", name, value.to_str()?);
+        // Use from_utf8_lossy so non-ASCII header values (e.g. some Set-Cookie fields)
+        // are forwarded as-is instead of causing the entire response to be aborted.
+        let header_line = format!("{}: {}\r\n", name, String::from_utf8_lossy(value.as_bytes()));
         send.write_all(header_line.as_bytes()).await?;
     }
     send.write_all(b"\r\n").await?;

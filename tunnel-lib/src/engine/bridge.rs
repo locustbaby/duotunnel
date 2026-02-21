@@ -22,10 +22,13 @@ where
     };
 
     let (sent, recv) = tokio::join!(a_to_b, b_to_a);
-    
+
     debug!("relay completed: sent={:?}, recv={:?}", sent, recv);
-    
-    Ok((sent.unwrap_or(0), recv.unwrap_or(0)))
+
+    match (sent, recv) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
 }
 
 pub async fn relay_unidirectional<R, W>(mut reader: R, mut writer: W) -> std::io::Result<u64>
@@ -74,10 +77,13 @@ pub async fn relay_quic_to_tcp(
     };
 
     let (sent, recv) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    
+
     debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
-    
-    Ok((sent.unwrap_or(0), recv.unwrap_or(0)))
+
+    match (sent, recv) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+    }
 }
 
 pub async fn relay_with_first_data(
@@ -105,8 +111,11 @@ pub async fn relay_with_first_data(
     };
 
     let (sent, recv) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    
-    Ok((sent.unwrap_or(0), recv.unwrap_or(0)))
+
+    match (sent, recv) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

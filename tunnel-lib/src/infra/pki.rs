@@ -38,6 +38,10 @@ impl CertCache {
     }
 
     fn insert(&mut self, host: String, certs: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) {
+        // Amortised eviction: remove all expired entries before inserting a new one.
+        // This prevents unbounded growth when many distinct hostnames are seen over time.
+        let ttl = self.ttl;
+        self.certs.retain(|_, c| c.created_at.elapsed() < ttl);
         self.certs.insert(host, CachedCert {
             certs,
             key,

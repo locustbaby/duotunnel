@@ -1,5 +1,6 @@
 use anyhow::Result;
 use quinn::Connection;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{info, debug};
 use crate::{RoutingInfo, send_routing_info};
@@ -15,28 +16,31 @@ pub async fn forward_to_client(
         "forwarding to client via QUIC"
     );
 
-    let (mut send, recv) = client_conn.open_bi().await?;
-    
+    let (mut send, mut recv) = client_conn.open_bi().await?;
+
     send_routing_info(&mut send, &routing_info).await?;
-    
+
     debug!("routing info sent, starting relay");
-    
-    let (tcp_read, tcp_write) = external_stream.into_split();
-    
+
+    let (mut tcp_read, mut tcp_write) = external_stream.into_split();
+
+    // No BufReader/BufWriter: QUIC already has internal stream buffering,
+    // and TcpStream uses kernel socket buffers. An extra userspace layer
+    // only adds memory and an unnecessary copy.
     let quic_to_tcp = async {
-        tokio::io::copy(&mut tokio::io::BufReader::new(recv), &mut tokio::io::BufWriter::new(tcp_write)).await
+        tokio::io::copy(&mut recv, &mut tcp_write).await
     };
-    
+
     let tcp_to_quic = async {
-        let bytes = tokio::io::copy(&mut tokio::io::BufReader::new(tcp_read), &mut send).await?;
+        let bytes = tokio::io::copy(&mut tcp_read, &mut send).await?;
         let _ = send.finish();
         Ok::<_, std::io::Error>(bytes)
     };
-    
+
     let (r1, r2) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    
+
     debug!("relay completed: quic->tcp={:?}, tcp->quic={:?}", r1, r2);
-    
+
     Ok(())
 }
 
@@ -52,31 +56,29 @@ pub async fn forward_with_initial_data(
         "forwarding to client with initial data"
     );
 
-    let (mut send, recv) = client_conn.open_bi().await?;
-    
+    let (mut send, mut recv) = client_conn.open_bi().await?;
+
     send_routing_info(&mut send, &routing_info).await?;
-    
+
     send.write_all(initial_data).await?;
-    
+
     debug!("routing info and initial data sent, starting relay");
-    
-    let (tcp_read, tcp_write) = external_stream.into_split();
-    
+
+    let (mut tcp_read, mut tcp_write) = external_stream.into_split();
+
     let quic_to_tcp = async {
-        tokio::io::copy(&mut tokio::io::BufReader::new(recv), &mut tokio::io::BufWriter::new(tcp_write)).await
+        tokio::io::copy(&mut recv, &mut tcp_write).await
     };
-    
+
     let tcp_to_quic = async {
-        let bytes = tokio::io::copy(&mut tokio::io::BufReader::new(tcp_read), &mut send).await?;
+        let bytes = tokio::io::copy(&mut tcp_read, &mut send).await?;
         let _ = send.finish();
         Ok::<_, std::io::Error>(bytes)
     };
-    
+
     let (r1, r2) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    
+
     debug!("relay completed: quic->tcp={:?}, tcp->quic={:?}", r1, r2);
-    
+
     Ok(())
 }
-
-
