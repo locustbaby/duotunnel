@@ -140,24 +140,34 @@ impl UpstreamPeer for H2Peer {
                                 let data = frame.into_data().unwrap();
                                 let len = data.len();
 
-                                // Request capacity from the flow-control window, then
-                                // await until the remote grants at least some capacity.
-                                // Without this, send_data buffers data unboundedly in
-                                // memory when the receiver is slower than the upstream,
-                                // which can cause OOM under sustained load.
+                                // Wait until the remote's flow-control window is large
+                                // enough to hold the entire frame before calling
+                                // send_data(). Without this loop, send_data() may
+                                // internally buffer data beyond the granted window,
+                                // leading to unbounded memory growth when the receiver
+                                // is slower than the upstream (OOM risk).
+                                //
+                                // reserve_capacity() signals how much we *want*; each
+                                // poll_capacity() wake-up may only grant a portion, so
+                                // we loop until the cumulative granted capacity covers
+                                // the full frame length.
                                 send_stream.reserve_capacity(len);
-                                match futures_util::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
-                                    None => {
-                                        error!("H2 flow control: send stream closed before capacity granted");
-                                        return;
+                                loop {
+                                    if send_stream.capacity() >= len {
+                                        break;
                                     }
-                                    Some(Err(e)) => {
-                                        error!("H2 flow control error: {}", e);
-                                        return;
-                                    }
-                                    Some(Ok(_granted)) => {
-                                        // At least some capacity granted; send_data will
-                                        // respect the actual window size internally.
+                                    match futures_util::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                                        None => {
+                                            error!("H2 flow control: send stream closed before capacity granted");
+                                            return;
+                                        }
+                                        Some(Err(e)) => {
+                                            error!("H2 flow control error: {}", e);
+                                            return;
+                                        }
+                                        Some(Ok(_)) => {
+                                            // More capacity granted; re-check the total.
+                                        }
                                     }
                                 }
 
