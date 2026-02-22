@@ -14,7 +14,7 @@ server_egress_upstream:
           resolve: true
       lb_policy: "round_robin"
   rules:
-    http:
+    vhost:
       - match_host: "echo.free.beeceptor.com"
         action_upstream: "echo_backend"
 

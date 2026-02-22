@@ -3,7 +3,8 @@
 members = [
     "tunnel-lib",
     "server",
-    "client"
+    "client",
+    "ci-helpers",
 ]
 
 resolver = "2"

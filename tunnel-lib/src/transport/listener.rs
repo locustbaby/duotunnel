@@ -247,4 +247,148 @@ mod tests {
             Some(("GET".to_string(), "/api/users".to_string()))
         );
     }
+
+    // ── remove & size operations ─────────────────────────────────────────────
+
+    #[test]
+    fn test_vhost_router_is_empty_and_len() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        assert!(router.is_empty());
+        assert_eq!(router.len(), 0);
+
+        router.add_route("a.com", "x".to_string());
+        assert!(!router.is_empty());
+        assert_eq!(router.len(), 1);
+
+        router.add_route("*.b.com", "y".to_string());
+        assert_eq!(router.len(), 2);
+    }
+
+    #[test]
+    fn test_vhost_router_remove_exact() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("example.com", "group-a".to_string());
+        assert_eq!(router.get("example.com"), Some("group-a".to_string()));
+
+        router.remove("example.com");
+        assert_eq!(router.get("example.com"), None);
+        assert!(router.is_empty());
+    }
+
+    #[test]
+    fn test_vhost_router_remove_wildcard() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("*.example.com", "group-a".to_string());
+        assert_eq!(router.get("api.example.com"), Some("group-a".to_string()));
+
+        router.remove("*.example.com");
+        assert_eq!(router.get("api.example.com"), None);
+        assert!(router.is_empty());
+    }
+
+    #[test]
+    fn test_vhost_router_remove_nonexistent_is_noop() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("example.com", "group-a".to_string());
+        router.remove("other.com"); // must not panic or affect existing route
+        assert_eq!(router.get("example.com"), Some("group-a".to_string()));
+        assert_eq!(router.len(), 1);
+    }
+
+    // ── wildcard edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_wildcard_does_not_match_parent_domain() {
+        // *.example.com must NOT match example.com itself
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("*.example.com", "wildcard".to_string());
+        assert_eq!(router.get("example.com"), None);
+    }
+
+    #[test]
+    fn test_wildcard_does_not_match_sibling_domain() {
+        // *.example.com must NOT match notexample.com
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("*.example.com", "wildcard".to_string());
+        assert_eq!(router.get("notexample.com"), None);
+    }
+
+    #[test]
+    fn test_exact_takes_priority_over_wildcard() {
+        // When both *.example.com and api.example.com are registered,
+        // exact must win for api.example.com.
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("*.example.com", "wildcard-group".to_string());
+        router.add_route("api.example.com", "exact-group".to_string());
+
+        assert_eq!(router.get("api.example.com"), Some("exact-group".to_string()));
+        assert_eq!(router.get("www.example.com"), Some("wildcard-group".to_string()));
+    }
+
+    #[test]
+    fn test_wildcard_case_insensitive() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("*.EXAMPLE.COM", "group-a".to_string());
+        assert_eq!(router.get("Api.Example.Com"), Some("group-a".to_string()));
+    }
+
+    // ── HTTP header parsing edge cases ───────────────────────────────────────
+
+    #[test]
+    fn test_extract_host_uppercase_header_name() {
+        // Header name matching must be case-insensitive
+        let req = b"GET / HTTP/1.1\r\nHOST: example.com\r\n\r\n";
+        assert_eq!(extract_host_from_http(req), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_host_with_port() {
+        // Host header may include a port; it should be returned as-is
+        let req = b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
+        assert_eq!(
+            extract_host_from_http(req),
+            Some("example.com:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_missing_returns_none() {
+        let req = b"GET / HTTP/1.1\r\nContent-Type: text/plain\r\n\r\n";
+        assert_eq!(extract_host_from_http(req), None);
+    }
+
+    #[test]
+    fn test_extract_host_extra_whitespace() {
+        // Spaces after the colon should be trimmed
+        let req = b"GET / HTTP/1.1\r\nHost:   example.com  \r\n\r\n";
+        assert_eq!(
+            extract_host_from_http(req),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_method_path_post() {
+        let req = b"POST /submit HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(
+            extract_method_path_from_http(req),
+            Some(("POST".to_string(), "/submit".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_extract_method_path_missing_path_returns_none() {
+        // Request line with only one token — no path
+        let req = b"GET\r\nHost: example.com\r\n\r\n";
+        assert_eq!(extract_method_path_from_http(req), None);
+    }
+
+    #[test]
+    fn test_extract_method_path_root() {
+        let req = b"DELETE / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(
+            extract_method_path_from_http(req),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+    }
 }

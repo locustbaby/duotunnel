@@ -1,0 +1,28 @@
+[package]
+name = "ci-helpers"
+version = "0.1.0"
+edition = "2021"
+# Not published; used only by CI integration tests.
+
+[[bin]]
+name = "grpc-echo-server"
+path = "src/grpc_echo_server.rs"
+
+[[bin]]
+name = "ws-echo-server"
+path = "src/ws_echo_server.rs"
+
+[[bin]]
+name = "http-echo-server"
+path = "src/http_echo_server.rs"
+
+[dependencies]
+tonic = "0.12"
+tonic-health = "0.12"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+serde_json = "1"

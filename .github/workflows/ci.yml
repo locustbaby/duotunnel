@@ -1,0 +1,652 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "fix/**", "feat/**"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Unit tests + clippy
+  # ─────────────────────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo test (all workspace crates)
+        run: cargo test --workspace
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace -- -D warnings
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Integration tests — end-to-end, all protocols
+  #
+  # Local backends (ci-helpers binaries, always reachable):
+  #   http-echo-server  127.0.0.1:9999  — HTTP/1.1 + HTTP/2 JSON echo
+  #   ws-echo-server    127.0.0.1:8765  — WebSocket frame echo
+  #   grpc-echo-server  127.0.0.1:50051 — gRPC Health service
+  #
+  # External backends (real internet, continue-on-error):
+  #   echo.free.beeceptor.com:443       — HTTP echo (HTTPS)
+  #   wss://echo.websocket.org          — WebSocket echo (WSS)
+  #   https://grpc-echo.semior.dev:443  — gRPC echo (HTTPS)
+  #
+  # /etc/hosts maps test domains to 127.0.0.1 for Host-header–based routing:
+  #   echo.local / ws.local / grpc.local → tunnel-server entry_port :8080
+  #
+  # Tunnel topology:
+  #   curl/wscat/grpcurl
+  #     │ ingress → echo.local:8080 (server entry_port) ──QUIC:10086──→ client
+  #     │                                                                   │ egress
+  #     │ egress  → 127.0.0.1:8081 (client http_entry_port)                │
+  #     └─────────────────────────────────────────────────────────────────────→ backends
+  #
+  # Test cases (mirrors verify_proxy.sh + extended):
+  #   HTTP/1.1 GET           — ingress + egress
+  #   HTTP/1.1 POST body     — ingress + egress
+  #   Custom header forward  — ingress
+  #   Connection-reuse timing (3 sequential GETs, print latencies)
+  #   Stability (10 requests, >= 8 must succeed)
+  #   HTTP/2 (h2c upgrade)   — ingress + egress
+  #   WebSocket echo          — ingress (local + external)
+  #   gRPC Health/Check       — ingress (local + external)
+  #   gRPC server reflection  — ingress local
+  #   Bidirectional concurrent (5+5 parallel requests)
+  # ─────────────────────────────────────────────────────────────────────────────
+  integration-test:
+    name: Integration Test (all protocols)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build all binaries (server, client, ci-helpers)
+        run: cargo build --release
+
+      - name: Install test tools (wscat, grpcurl)
+        run: |
+          npm install -g wscat
+          GRPCURL_VER=1.9.1
+          curl -fsSL \
+            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VER}/grpcurl_${GRPCURL_VER}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      # /etc/hosts — map test domains to 127.0.0.1 so curl/wscat/grpcurl use them
+      - name: Configure /etc/hosts for test domains
+        run: |
+          sudo tee -a /etc/hosts << 'EOF'
+          127.0.0.1  echo.local
+          127.0.0.1  ws.local
+          127.0.0.1  grpc.local
+          127.0.0.1  echo.beeceptor.test
+          127.0.0.1  ws.ext.test
+          127.0.0.1  grpc.ext.test
+          EOF
+
+      # ─── Start local backend servers ─────────────────────────────────────────
+      - name: Start http-echo-server (:9999)
+        run: |
+          ./target/release/http-echo-server 9999 > /tmp/http-echo.log 2>&1 &
+          echo $! > /tmp/http-echo.pid
+          for i in $(seq 1 10); do
+            curl -sf http://127.0.0.1:9999/ > /dev/null && break; sleep 0.3
+          done
+          echo "http-echo-server ready"
+
+      - name: Start ws-echo-server (:8765)
+        run: |
+          ./target/release/ws-echo-server 8765 > /tmp/ws-echo.log 2>&1 &
+          echo $! > /tmp/ws-echo.pid
+          sleep 1
+          echo "ws-echo-server ready"
+
+      - name: Start grpc-echo-server (:50051)
+        run: |
+          ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log 2>&1 &
+          echo $! > /tmp/grpc-echo.pid
+          sleep 1
+          echo "grpc-echo-server ready"
+
+      # Write inline Health proto (reused by all gRPC tests)
+      - name: Write grpc.health.v1 proto
+        run: |
+          cat > /tmp/health.proto << 'PROTO'
+          syntax = "proto3";
+          package grpc.health.v1;
+          message HealthCheckRequest { string service = 1; }
+          message HealthCheckResponse {
+            enum ServingStatus { UNKNOWN=0; SERVING=1; NOT_SERVING=2; }
+            ServingStatus status = 1;
+          }
+          service Health {
+            rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+          }
+          PROTO
+
+      # ─── Tunnel server config ─────────────────────────────────────────────────
+      - name: Write CI server config
+        run: |
+          cat > /tmp/ci-server.yaml << 'YAML'
+          server:
+            tunnel_port: 10086
+            entry_port: 8080
+            log_level: "info"
+            quic:
+              keepalive_secs: 10
+              idle_timeout_secs: 30
+              max_concurrent_streams: 200
+
+          server_egress_upstream:
+            upstreams:
+              http_echo_local:
+                servers:
+                  - address: "127.0.0.1:9999"
+                    resolve: false
+                lb_policy: "round_robin"
+              echo_beeceptor:
+                servers:
+                  - address: "echo.free.beeceptor.com:443"
+                    resolve: true
+                lb_policy: "round_robin"
+            rules:
+              vhost:
+                - match_host: "echo.local"
+                  action_upstream: "http_echo_local"
+                - match_host: "echo.free.beeceptor.com"
+                  action_upstream: "echo_beeceptor"
+
+          tunnel_management:
+            server_ingress_routing:
+              rules:
+                vhost:
+                  - match_host: "echo.local"
+                    action_client_group: "ci-group"
+                  - match_host: "ws.local"
+                    action_client_group: "ci-group"
+                  - match_host: "grpc.local"
+                    action_client_group: "ci-group"
+                  - match_host: "echo.beeceptor.test"
+                    action_client_group: "ci-group"
+                  - match_host: "ws.ext.test"
+                    action_client_group: "ci-group"
+                  - match_host: "grpc.ext.test"
+                    action_client_group: "ci-group"
+
+            client_configs:
+              client_egress_routings:
+                ci-group:
+                  config_version: "v1.0.0"
+                  upstreams:
+                    http_echo_local:
+                      servers:
+                        - address: "127.0.0.1:9999"
+                          resolve: false
+                      lb_policy: "round_robin"
+                    ws_echo_local:
+                      servers:
+                        - address: "ws://127.0.0.1:8765"
+                          resolve: false
+                      lb_policy: "round_robin"
+                    grpc_echo_local:
+                      servers:
+                        - address: "http://127.0.0.1:50051"
+                          resolve: false
+                      lb_policy: "round_robin"
+                    echo_beeceptor:
+                      servers:
+                        - address: "echo.free.beeceptor.com:443"
+                          resolve: true
+                      lb_policy: "round_robin"
+                    wss_ext:
+                      servers:
+                        - address: "wss://echo.websocket.org"
+                          resolve: false
+                      lb_policy: "round_robin"
+                    grpc_ext:
+                      servers:
+                        - address: "https://grpc-echo.semior.dev:443"
+                          resolve: true
+                      lb_policy: "round_robin"
+                  rules:
+                    vhost:
+                      - match_host: "echo.local"
+                        action_upstream: "http_echo_local"
+                      - match_host: "ws.local"
+                        action_upstream: "ws_echo_local"
+                      - match_host: "grpc.local"
+                        action_upstream: "grpc_echo_local"
+                      - match_host: "echo.beeceptor.test"
+                        action_upstream: "echo_beeceptor"
+                      - match_host: "ws.ext.test"
+                        action_upstream: "wss_ext"
+                      - match_host: "grpc.ext.test"
+                        action_upstream: "grpc_ext"
+          YAML
+
+      # ─── Tunnel client config ─────────────────────────────────────────────────
+      - name: Write CI client config
+        run: |
+          cat > /tmp/ci-client.yaml << 'YAML'
+          log_level: "info"
+          tls_skip_verify: true
+          server_addr: "127.0.0.1"
+          server_port: 10086
+          client_group_id: "ci-group"
+          http_entry_port: 8081
+          quic:
+            keepalive_secs: 10
+            idle_timeout_secs: 30
+            max_concurrent_streams: 200
+          reconnect:
+            initial_delay_ms: 500
+            max_delay_ms: 5000
+          YAML
+
+      # ─── Start tunnel ─────────────────────────────────────────────────────────
+      - name: Start tunnel server
+        run: |
+          ./target/release/server --config /tmp/ci-server.yaml \
+            > /tmp/ci-server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          sleep 2
+
+      - name: Start tunnel client and wait for login
+        run: |
+          ./target/release/client --config /tmp/ci-client.yaml \
+            > /tmp/ci-client.log 2>&1 &
+          echo $! > /tmp/client.pid
+          for i in $(seq 1 30); do
+            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            sleep 0.5
+          done
+          if ! grep -q "Login successful" /tmp/ci-client.log; then
+            echo "ERROR: client did not login"
+            echo "=== server ===" && cat /tmp/ci-server.log
+            echo "=== client ===" && cat /tmp/ci-client.log
+            exit 1
+          fi
+          echo "Client connected and logged in"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 1 — HTTP/1.1 (local http-echo-server)
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[HTTP] 1.1 GET request — ingress (echo.local:8080)"
+        run: |
+          RESP=$(curl -sf -w "\n%{http_code}" --max-time 15 http://echo.local:8080/ 2>&1)
+          CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | head -1)
+          echo "Code: $CODE  Body: ${BODY:0:200}"
+          [ "$CODE" = "200" ] || { echo "FAIL: expected 200, got $CODE"; exit 1; }
+          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
+            || { echo "FAIL: response body invalid"; exit 1; }
+          echo "PASS"
+
+      - name: "[HTTP] 1.1 POST with JSON body — ingress"
+        run: |
+          RESP=$(curl -sf --max-time 15 \
+                   -X POST \
+                   -H "Content-Type: application/json" \
+                   -d '{"tunnel":"ci","test":"post-body-123"}' \
+                   http://echo.local:8080/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          assert 'post-body-123' in d['body'], d['body']
+          " || { echo "FAIL: POST body not echoed"; exit 1; }
+          echo "PASS"
+
+      - name: "[HTTP] 1.1 Custom header forwarding — ingress"
+        run: |
+          RESP=$(curl -sf --max-time 15 \
+                   -H "X-Tunnel-Test: reliable" \
+                   http://echo.local:8080/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          hdrs = {k.lower(): v for k,v in d['headers'].items()}
+          assert hdrs.get('x-tunnel-test') == 'reliable', hdrs
+          " || { echo "FAIL: custom header not forwarded"; exit 1; }
+          echo "PASS"
+
+      - name: "[HTTP] 1.1 Connection-reuse timing (3 sequential GETs)"
+        run: |
+          echo "--- Connection reuse latency ---"
+          for i in 1 2 3; do
+            TIMING=$(curl -s -o /dev/null --max-time 15 \
+              -w "connect=%{time_connect}s total=%{time_total}s code=%{http_code}" \
+              http://echo.local:8080/ 2>&1)
+            echo "  Req $i: $TIMING"
+          done
+          echo "PASS (latency logged above)"
+
+      - name: "[HTTP] 1.1 Stability test (10 requests, >= 8 must succeed)"
+        run: |
+          OK=0
+          for i in $(seq 1 10); do
+            CODE=$(curl -s -o /dev/null --max-time 15 -w "%{http_code}" http://echo.local:8080/ 2>&1)
+            if [ "$CODE" = "200" ]; then
+              printf "  ✅(%s)" "$i"
+              OK=$((OK+1))
+            else
+              printf "  ❌(%s,code=%s)" "$i" "$CODE"
+            fi
+          done
+          echo ""
+          if [ "$OK" -ge 8 ]; then
+            echo "PASS: $OK/10 requests succeeded"
+          else
+            echo "FAIL: only $OK/10 requests succeeded (expected >= 8)"
+            exit 1
+          fi
+
+      - name: "[HTTP] 1.1 GET — egress (client:8081 → server → http-echo)"
+        run: |
+          RESP=$(curl -sf -w "\n%{http_code}" --max-time 15 \
+                   -H "Host: echo.local" http://127.0.0.1:8081/ 2>&1)
+          CODE=$(echo "$RESP" | tail -1); BODY=$(echo "$RESP" | head -1)
+          echo "Code: $CODE  Body: ${BODY:0:200}"
+          [ "$CODE" = "200" ] || { echo "FAIL: expected 200 got $CODE"; exit 1; }
+          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
+            || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[HTTP] 1.1 POST body — egress"
+        run: |
+          RESP=$(curl -sf --max-time 15 \
+                   -X POST -H "Host: echo.local" \
+                   -H "Content-Type: application/json" \
+                   -d '{"tunnel":"ci","test":"egress-post-456"}' \
+                   http://127.0.0.1:8081/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          assert 'egress-post-456' in d['body'], d['body']
+          " || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 2 — HTTP/2
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[HTTP2] h2c upgrade via entry port — ingress"
+        run: |
+          HTTP_VER=$(curl -so /dev/null --max-time 15 --http2 \
+                       -w "%{http_version}" http://echo.local:8080/ 2>&1)
+          RESP=$(curl -sf --max-time 15 --http2 http://echo.local:8080/ 2>&1)
+          echo "Negotiated: http/$HTTP_VER  Response: ${RESP:0:200}"
+          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
+            || { echo "FAIL"; exit 1; }
+          echo "PASS (http/$HTTP_VER)"
+
+      - name: "[HTTP2] POST via h2c — ingress"
+        run: |
+          RESP=$(curl -sf --max-time 15 --http2 \
+                   -X POST -H "Content-Type: application/json" \
+                   -d '{"h2":"post-test"}' \
+                   http://echo.local:8080/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          assert 'h2' in d['body'] or d['method']=='POST', d
+          " || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[HTTP2] h2c via egress port — client:8081"
+        run: |
+          HTTP_VER=$(curl -so /dev/null --max-time 15 --http2 \
+                       -H "Host: echo.local" \
+                       -w "%{http_version}" http://127.0.0.1:8081/ 2>&1)
+          RESP=$(curl -sf --max-time 15 --http2 \
+                   -H "Host: echo.local" http://127.0.0.1:8081/ 2>&1)
+          echo "Negotiated: http/$HTTP_VER  Response: ${RESP:0:200}"
+          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
+            || { echo "FAIL"; exit 1; }
+          echo "PASS (http/$HTTP_VER)"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 3 — WebSocket
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[WS] Echo test — ingress (ws.local:8080 → ws-echo-server)"
+        run: |
+          RESP=$(echo "hello-ws-tunnel" | timeout 15 \
+                   wscat --connect "ws://ws.local:8080" \
+                         --wait 5 2>&1 || true)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -q "hello-ws-tunnel" || {
+            echo "FAIL: echo not received"
+            exit 1
+          }
+          echo "PASS"
+
+      - name: "[WS] Multiple messages — ingress"
+        run: |
+          # Send two messages; both should be echoed back.
+          RESP=$(printf "msg-one\nmsg-two\n" | timeout 15 \
+                   wscat --connect "ws://ws.local:8080" \
+                         --wait 5 2>&1 || true)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -q "msg-one" || { echo "FAIL: msg-one not echoed"; exit 1; }
+          echo "$RESP" | grep -q "msg-two" || { echo "FAIL: msg-two not echoed"; exit 1; }
+          echo "PASS"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 4 — gRPC (via H2 proxy path)
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[gRPC] Health/Check (service='') — ingress (grpc.local:8080)"
+        run: |
+          RESP=$(grpcurl -plaintext \
+                   -import-path /tmp -proto health.proto \
+                   -max-time 15 \
+                   -d '{"service":""}' \
+                   grpc.local:8080 \
+                   grpc.health.v1.Health/Check 2>&1 || true)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "SERVING\|status" || {
+            echo "FAIL: expected SERVING status"
+            exit 1
+          }
+          echo "PASS"
+
+      - name: "[gRPC] Server reflection list — ingress (grpc.local:8080)"
+        run: |
+          # grpc-echo-server registers health service; reflection should list it.
+          RESP=$(grpcurl -plaintext -max-time 15 grpc.local:8080 list 2>&1 || true)
+          echo "Reflection response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "health\|grpc\|service\|method" || {
+            echo "FAIL: reflection returned no services"
+            exit 1
+          }
+          echo "PASS"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 5 — Bidirectional concurrent (local backends)
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[Bidir] 5 concurrent ingress + 5 concurrent egress (HTTP/1.1)"
+        run: |
+          for i in $(seq 1 5); do
+            (curl -sf --max-time 20 http://echo.local:8080/ \
+               | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          print('in-$i:OK' if d['method']=='GET' else 'in-$i:FAIL')" \
+               2>/dev/null || echo "in-$i:FAIL") > /tmp/bidir-in-$i.txt &
+            (curl -sf --max-time 20 -H "Host: echo.local" http://127.0.0.1:8081/ \
+               | python3 -c "
+          import sys,json; d=json.load(sys.stdin)
+          print('eg-$i:OK' if d['method']=='GET' else 'eg-$i:FAIL')" \
+               2>/dev/null || echo "eg-$i:FAIL") > /tmp/bidir-eg-$i.txt &
+          done
+          wait
+          FAIL=0
+          for i in $(seq 1 5); do
+            R_IN=$(cat /tmp/bidir-in-$i.txt); R_EG=$(cat /tmp/bidir-eg-$i.txt)
+            echo "  $R_IN  |  $R_EG"
+            echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+            echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+          done
+          if [ "$FAIL" -gt 1 ]; then
+            echo "FAIL: $FAIL/10 concurrent requests failed"
+            exit 1
+          fi
+          echo "PASS: $((10-FAIL))/10 succeeded"
+
+      - name: "[Bidir] Mixed protocols concurrent (HTTP1 + HTTP2 + WS — ingress)"
+        run: |
+          (curl -sf --max-time 20 http://echo.local:8080/ \
+             | python3 -c "import sys,json; d=json.load(sys.stdin); print('h1:OK' if d['method']=='GET' else 'h1:FAIL')" \
+             2>/dev/null || echo "h1:FAIL") > /tmp/mixed-h1.txt &
+          (curl -sf --max-time 20 --http2 http://echo.local:8080/ \
+             | python3 -c "import sys,json; d=json.load(sys.stdin); print('h2:OK' if d['method']=='GET' else 'h2:FAIL')" \
+             2>/dev/null || echo "h2:FAIL") > /tmp/mixed-h2.txt &
+          (echo "concurrent-ws" | timeout 15 wscat --connect "ws://ws.local:8080" --wait 4 \
+             | grep -q "concurrent-ws" && echo "ws:OK" || echo "ws:FAIL") > /tmp/mixed-ws.txt 2>&1 &
+          wait
+          R_H1=$(cat /tmp/mixed-h1.txt); R_H2=$(cat /tmp/mixed-h2.txt); R_WS=$(cat /tmp/mixed-ws.txt)
+          echo "  $R_H1 | $R_H2 | $R_WS"
+          echo "$R_H1$R_H2$R_WS" | grep -q "FAIL" && {
+            echo "FAIL: at least one mixed-protocol request failed"
+            exit 1
+          }
+          echo "PASS"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 6 — External backends (continue-on-error: flaky internet services)
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[Ext-HTTP] GET ingress — echo.beeceptor.test → beeceptor"
+        continue-on-error: true
+        run: |
+          RESP=$(curl -sf --max-time 20 http://echo.beeceptor.test:8080/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "method\|path\|beeceptor\|url" || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[Ext-HTTP] POST body ingress — echo.beeceptor.test → beeceptor"
+        continue-on-error: true
+        run: |
+          RESP=$(curl -sf --max-time 20 \
+                   -X POST -H "Content-Type: application/json" \
+                   -d '{"ci":"ext-post-test"}' \
+                   http://echo.beeceptor.test:8080/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "ext-post-test\|body\|json" || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[Ext-HTTP] GET egress — client:8081 → server → beeceptor"
+        continue-on-error: true
+        run: |
+          RESP=$(curl -sf --max-time 20 \
+                   -H "Host: echo.free.beeceptor.com" http://127.0.0.1:8081/ 2>&1)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "method\|path\|beeceptor\|url" || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[Ext-WS] Echo ingress — ws.ext.test → echo.websocket.org"
+        continue-on-error: true
+        run: |
+          RESP=$(echo "ext-ws-hello" | timeout 20 \
+                   wscat --connect "ws://ws.ext.test:8080" \
+                         --wait 8 2>&1 || true)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "ext-ws-hello\|101\|websocket\|connected" || {
+            echo "FAIL"
+            exit 1
+          }
+          echo "PASS"
+
+      - name: "[Ext-gRPC] Health/Check ingress — grpc.ext.test → semior.dev"
+        continue-on-error: true
+        run: |
+          RESP=$(grpcurl -plaintext \
+                   -import-path /tmp -proto health.proto \
+                   -max-time 20 \
+                   -d '{"service":""}' \
+                   grpc.ext.test:8080 \
+                   grpc.health.v1.Health/Check 2>&1 || true)
+          echo "Response: ${RESP:0:300}"
+          echo "$RESP" | grep -qi "SERVING\|status" || { echo "FAIL"; exit 1; }
+          echo "PASS"
+
+      - name: "[Ext-Bidir] 3 concurrent ingress + 3 concurrent egress"
+        continue-on-error: true
+        run: |
+          for i in $(seq 1 3); do
+            (curl -sf --max-time 25 http://echo.beeceptor.test:8080/ \
+               | grep -qi "method\|beeceptor" && echo "in-$i:OK" || echo "in-$i:FAIL") \
+               > /tmp/ext-bidir-in-$i.txt &
+            (curl -sf --max-time 25 -H "Host: echo.free.beeceptor.com" http://127.0.0.1:8081/ \
+               | grep -qi "method\|beeceptor" && echo "eg-$i:OK" || echo "eg-$i:FAIL") \
+               > /tmp/ext-bidir-eg-$i.txt &
+          done
+          wait
+          FAIL=0
+          for i in $(seq 1 3); do
+            R_IN=$(cat /tmp/ext-bidir-in-$i.txt); R_EG=$(cat /tmp/ext-bidir-eg-$i.txt)
+            echo "  $R_IN  |  $R_EG"
+            echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+            echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+          done
+          if [ "$FAIL" -gt 2 ]; then echo "FAIL: $FAIL/6"; exit 1; fi
+          echo "PASS: $((6-FAIL))/6"
+
+      # ─── Diagnostics ─────────────────────────────────────────────────────────
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-${{ github.run_id }}
+          path: |
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/http-echo.log
+            /tmp/ws-echo.log
+            /tmp/grpc-echo.log
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
