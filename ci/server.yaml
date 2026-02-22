@@ -1,0 +1,94 @@
+server:
+  tunnel_port: 10086
+  entry_port: 8080
+  log_level: "info"
+  quic:
+    keepalive_secs: 10
+    idle_timeout_secs: 30
+    max_concurrent_streams: 200
+
+server_egress_upstream:
+  upstreams:
+    http_echo_local:
+      servers:
+        - address: "127.0.0.1:9999"
+          resolve: false
+      lb_policy: "round_robin"
+    echo_beeceptor:
+      servers:
+        - address: "echo.free.beeceptor.com:443"
+          resolve: true
+      lb_policy: "round_robin"
+  rules:
+    vhost:
+      - match_host: "echo.local"
+        action_upstream: "http_echo_local"
+      - match_host: "echo.free.beeceptor.com"
+        action_upstream: "echo_beeceptor"
+
+tunnel_management:
+  server_ingress_routing:
+    rules:
+      vhost:
+        - match_host: "echo.local"
+          action_client_group: "ci-group"
+        - match_host: "ws.local"
+          action_client_group: "ci-group"
+        - match_host: "grpc.local"
+          action_client_group: "ci-group"
+        - match_host: "echo.beeceptor.test"
+          action_client_group: "ci-group"
+        - match_host: "ws.ext.test"
+          action_client_group: "ci-group"
+        - match_host: "grpc.ext.test"
+          action_client_group: "ci-group"
+
+  client_configs:
+    client_egress_routings:
+      ci-group:
+        config_version: "v1.0.0"
+        upstreams:
+          http_echo_local:
+            servers:
+              - address: "127.0.0.1:9999"
+                resolve: false
+            lb_policy: "round_robin"
+          ws_echo_local:
+            servers:
+              - address: "ws://127.0.0.1:8765"
+                resolve: false
+            lb_policy: "round_robin"
+          grpc_echo_local:
+            servers:
+              - address: "http://127.0.0.1:50051"
+                resolve: false
+            lb_policy: "round_robin"
+          echo_beeceptor:
+            servers:
+              - address: "echo.free.beeceptor.com:443"
+                resolve: true
+            lb_policy: "round_robin"
+          wss_ext:
+            servers:
+              - address: "wss://echo.websocket.org"
+                resolve: false
+            lb_policy: "round_robin"
+          grpc_ext:
+            servers:
+              - address: "https://grpc-echo.semior.dev:443"
+                resolve: true
+            lb_policy: "round_robin"
+        rules:
+          vhost:
+            - match_host: "echo.local"
+              action_upstream: "http_echo_local"
+            - match_host: "ws.local"
+              action_upstream: "ws_echo_local"
+            - match_host: "grpc.local"
+              action_upstream: "grpc_echo_local"
+            - match_host: "echo.beeceptor.test"
+              action_upstream: "echo_beeceptor"
+            - match_host: "ws.ext.test"
+              action_upstream: "wss_ext"
+            - match_host: "grpc.ext.test"
+              action_upstream: "grpc_ext"

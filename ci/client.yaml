@@ -1,0 +1,13 @@
+log_level: "info"
+tls_skip_verify: true
+server_addr: "127.0.0.1"
+server_port: 10086
+client_group_id: "ci-group"
+http_entry_port: 8081
+quic:
+  keepalive_secs: 10
+  idle_timeout_secs: 30
+  max_concurrent_streams: 200
+reconnect:
+  initial_delay_ms: 500
+  max_delay_ms: 5000

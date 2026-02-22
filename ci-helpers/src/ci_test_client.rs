@@ -1,12 +1,12 @@
-/// CI test client — replaces wscat / grpcurl / curl in GitHub Actions.
-///
-/// Usage:
-///   ci-test-client http  <url> [--method GET|POST] [--body <json>] [--header Key:Value]
-///   ci-test-client http2 <url>
-///   ci-test-client ws    <url> [--message <text>]
-///   ci-test-client grpc  <host:port> [--service <svc>]
-///
-/// Exit code 0 = PASS, 1 = FAIL.
+// CI test client — replaces wscat / grpcurl / curl in GitHub Actions.
+//
+// Usage:
+//   ci-test-client http  <url> [--method GET|POST] [--body <json>] [--header Key:Value]
+//   ci-test-client http2 <url>
+//   ci-test-client ws    <url> [--message <text>]
+//   ci-test-client grpc  <host:port> [--service <svc>]
+//
+// Exit code 0 = PASS, 1 = FAIL.
 
 use std::process;
 use std::time::Duration;
