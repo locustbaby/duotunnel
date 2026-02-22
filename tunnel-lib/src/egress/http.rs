@@ -149,7 +149,7 @@ pub async fn forward_http(
                         Ok(Some((hyper::body::Frame::data(chunk), (recv, None, read, total))))
                     }
                     Ok(_) => Ok(None),
-                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    Err(e) => Err(std::io::Error::other(e)),
                 }
             },
         );

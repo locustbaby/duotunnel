@@ -10,7 +10,7 @@ use crate::transport::quic::QuicTransportParams;
 /// them because it breaks figment's env-var layer.  When adding or renaming a transport
 /// field, update both structs.
 /// SYNC WITH: client/config.rs → ClientQuicConfig
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct QuicConfig {
     /// Max concurrent bidirectional streams. Default: 1000.
@@ -27,18 +27,6 @@ pub struct QuicConfig {
     pub congestion: Option<String>,
 }
 
-impl Default for QuicConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent_streams: None,
-            stream_window_mb: None,
-            connection_window_mb: None,
-            keepalive_secs: None,
-            idle_timeout_secs: None,
-            congestion: None,
-        }
-    }
-}
 
 impl From<&QuicConfig> for QuicTransportParams {
     fn from(c: &QuicConfig) -> Self {

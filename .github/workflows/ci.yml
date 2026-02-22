@@ -103,9 +103,9 @@ jobs:
       - name: Install test tools (wscat, grpcurl)
         run: |
           npm install -g wscat
-          GRPCURL_VER=1.9.1
+          GRPCURL_VER=1.9.3
           curl -fsSL \
-            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VER}/grpcurl_${GRPCURL_VER}_linux_amd64.tar.gz" \
+            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VER}/grpcurl_${GRPCURL_VER}_linux_x86_64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       # /etc/hosts — map test domains to 127.0.0.1 so curl/wscat/grpcurl use them

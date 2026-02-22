@@ -213,7 +213,7 @@ fn stream_body_from_h2(mut body: h2::RecvStream) -> StreamBody<impl Stream<Item 
                 Poll::Ready(Some(Ok(Frame::data(bytes))))
             }
             Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))))
+                Poll::Ready(Some(Err(std::io::Error::other(e))))
             }
             Poll::Ready(None) => {
                 // Data stream ended, check trailers
@@ -222,7 +222,7 @@ fn stream_body_from_h2(mut body: h2::RecvStream) -> StreamBody<impl Stream<Item 
                         Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                     }
                     Poll::Ready(Ok(None)) => Poll::Ready(None),
-                    Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))),
+                    Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
                     Poll::Pending => Poll::Pending,
                 }
             }
@@ -269,7 +269,7 @@ impl AsyncRead for QuicIo {
 
         match Pin::new(&mut self.recv).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -283,7 +283,7 @@ impl AsyncWrite for QuicIo {
     ) -> Poll<std::io::Result<usize>> {
         match Pin::new(&mut self.send).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -291,7 +291,7 @@ impl AsyncWrite for QuicIo {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match Pin::new(&mut self.send).poll_flush(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -299,7 +299,7 @@ impl AsyncWrite for QuicIo {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match Pin::new(&mut self.send).poll_shutdown(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
