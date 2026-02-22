@@ -3,13 +3,11 @@ use tracing::{info, debug};
 use tunnel_lib::recv_routing_info;
 use tunnel_lib::proxy::core::{ProxyEngine, Protocol};
 use std::sync::Arc;
-use crate::config::ServerConfigFile;
 use crate::egress::{ServerEgressApp, ServerEgressMap};
 
 pub async fn handle_tunnel_stream(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    _config: Arc<ServerConfigFile>,
     egress_map: Arc<ServerEgressMap>,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;

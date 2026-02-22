@@ -13,9 +13,34 @@ use std::time::Duration;
 use crate::transport::addr::parse_upstream;
 use crate::protocol::rewrite::Rewriter;
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+pub type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+
+/// Tunable parameters for the outbound HTTP/HTTPS connection pool.
+///
+/// Shared by server egress, client egress, and the standalone egress helper.
+/// All fields have defaults preserving the previous hard-coded behaviour.
+#[derive(Debug, Clone)]
+pub struct HttpClientParams {
+    /// Idle-connection TTL before eviction from the pool (seconds). Default: 90.
+    pub pool_idle_timeout_secs: u64,
+    /// Maximum idle connections kept per host. Default: 10.
+    pub pool_max_idle_per_host: usize,
+}
+
+impl Default for HttpClientParams {
+    fn default() -> Self {
+        Self {
+            pool_idle_timeout_secs: 90,
+            pool_max_idle_per_host: 10,
+        }
+    }
+}
 
 pub fn create_https_client() -> HttpsClient {
+    create_https_client_with(&HttpClientParams::default())
+}
+
+pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .unwrap()
@@ -25,8 +50,8 @@ pub fn create_https_client() -> HttpsClient {
         .build();
 
     Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(params.pool_max_idle_per_host)
         .build(https)
 }
 

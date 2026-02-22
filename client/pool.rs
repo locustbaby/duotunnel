@@ -19,7 +19,7 @@ pub async fn run_pool(
     endpoint: &quinn::Endpoint,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let n = config.quic_connections.max(1) as usize;
+    let n = config.quic.connections.max(1) as usize;
     info!(connections = n, "starting QUIC connection pool");
 
     let mut handles = Vec::with_capacity(n);
@@ -60,9 +60,9 @@ async fn run_slot(
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
 ) {
-    let mut retry_delay = std::time::Duration::from_secs(1);
-    const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
-    const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    let initial_delay = std::time::Duration::from_millis(config.reconnect.initial_delay_ms);
+    let max_delay = std::time::Duration::from_millis(config.reconnect.max_delay_ms);
+    let mut retry_delay = initial_delay;
 
     loop {
         tokio::select! {
@@ -74,20 +74,20 @@ async fn run_slot(
                 match result {
                     Ok(_) => {
                         info!(client_id = %config.client_id, "connection closed gracefully, reconnecting...");
-                        retry_delay = INITIAL_RETRY_DELAY;
+                        retry_delay = initial_delay;
                     }
                     Err(e) => {
                         error!(
                             client_id = %config.client_id,
                             error = %e,
-                            retry_in_secs = %retry_delay.as_secs(),
+                            retry_in_ms = %retry_delay.as_millis(),
                             "connection error, reconnecting..."
                         );
                         tokio::select! {
                             _ = cancel.cancelled() => return,
                             _ = tokio::time::sleep(retry_delay) => {}
                         }
-                        retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
+                        retry_delay = std::cmp::min(retry_delay * 2, max_delay);
                     }
                 }
             }

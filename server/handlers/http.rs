@@ -16,7 +16,7 @@ pub async fn run_http_listener(state: Arc<ServerState>, port: u16) -> Result<()>
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
-        stream.set_nodelay(true)?;
+        state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new entry connection");
 
         let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
@@ -48,8 +48,9 @@ async fn handle_http_connection(state: Arc<ServerState>, stream: TcpStream) -> R
     use tunnel_lib::detect_protocol_and_host;
     use tunnel_lib::protocol::detect::extract_tls_sni;
 
+    let peek_size = state.proxy_buffer_params.peek_buf_size;
     let peer_addr = stream.peer_addr()?;
-    let mut buf = [0u8; 16384]; // stack-allocated; avoids heap alloc per connection
+    let mut buf = vec![0u8; peek_size];
     let n = stream.peek(&mut buf).await?;
 
     let is_tls = n > 0 && buf[0] == 0x16;
@@ -86,7 +87,7 @@ async fn handle_tls_connection(
 
     debug!(host = %host, "TLS connection detected, terminating");
 
-    let group_id = state.vhost_router.get(&host)
+    let group_id = state.routing.load().vhost_router.get(&host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
 
     let client_conn = state.registry.select_client_for_group(&group_id)
@@ -187,7 +188,7 @@ async fn handle_plaintext_h2_connection(
 
             let host_without_port = host.split(':').next().unwrap_or(&host);
 
-            let group_id = match state.vhost_router.get(host_without_port) {
+            let group_id = match state.routing.load().vhost_router.get(host_without_port) {
                 Some(g) => g,
                 None => {
                     return Ok(Response::builder()
@@ -256,7 +257,7 @@ async fn handle_plaintext_h1_connection(
 
     debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
 
-    let group_id = state.vhost_router.get(&host)
+    let group_id = state.routing.load().vhost_router.get(&host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
 
     let client_conn = state.registry.select_client_for_group(&group_id)
@@ -264,7 +265,7 @@ async fn handle_plaintext_h1_connection(
 
     let proxy_name = host.clone();
 
-    let mut data = [0u8; 16384]; // stack-allocated; peeked_bytes <= 16384
+    let mut data = vec![0u8; state.proxy_buffer_params.peek_buf_size];
     stream.read_exact(&mut data[..peeked_bytes]).await?;
 
     proxy::forward_with_initial_data(

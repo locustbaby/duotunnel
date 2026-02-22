@@ -1,8 +1,37 @@
 use anyhow::{Result, anyhow};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+
+/// Tunable parameters for the dynamic self-signed certificate cache.
+/// Used directly as the YAML config type (`server.pki`) — no separate `PkiConfig` wrapper needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PkiParams {
+    /// How long a generated certificate is kept in the in-process cache before
+    /// being regenerated (seconds). Default: 3600 (1 hour).
+    pub cert_cache_ttl_secs: u64,
+}
+
+impl Default for PkiParams {
+    fn default() -> Self {
+        Self {
+            cert_cache_ttl_secs: 3600,
+        }
+    }
+}
+
+/// Initialise (or re-initialise) the global cert cache with explicit TTL.
+///
+/// Call this once at server startup before any TLS connections are accepted.
+/// If not called, the cache is lazily initialised with `PkiParams::default()`
+/// on the first certificate request (backward-compatible behaviour).
+pub fn init_cert_cache(params: &PkiParams) {
+    let mut guard = CERT_CACHE.write().unwrap();
+    *guard = Some(CertCache::new(Duration::from_secs(params.cert_cache_ttl_secs)));
+}
 
 /// Cached certificate with expiry tracking
 struct CachedCert {
@@ -51,7 +80,7 @@ impl CertCache {
 }
 
 /// Generate a self-signed certificate for the given hostname with caching.
-/// Certificates are cached for 1 hour by default to avoid expensive crypto operations.
+/// Certificates are cached for the TTL configured via `init_cert_cache` (default 1 hour).
 pub fn generate_self_signed_cert_for_host(host: &str) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     // Try to get from cache first
     {
@@ -73,10 +102,12 @@ pub fn generate_self_signed_cert_for_host(host: &str) -> Result<(Vec<Certificate
     let cert = CertificateDer::from(cert_der);
     let certs = vec![cert];
 
-    // Store in cache
+    // Store in cache; lazily init with default TTL if not yet initialised.
     {
         let mut cache_guard = CERT_CACHE.write().unwrap();
-        let cache = cache_guard.get_or_insert_with(|| CertCache::new(Duration::from_secs(3600)));
+        let cache = cache_guard.get_or_insert_with(|| {
+            CertCache::new(Duration::from_secs(PkiParams::default().cert_cache_ttl_secs))
+        });
         cache.insert(host.to_string(), certs.clone(), key.clone_key());
     }
 

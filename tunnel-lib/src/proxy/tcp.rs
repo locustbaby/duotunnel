@@ -104,6 +104,8 @@ fn extract_port_number(addr: &str) -> Option<u16> {
 
 pub struct TcpPeer {
     pub target_addr: SocketAddr,
+    /// TCP socket options applied to the upstream connection. Defaults to `TcpParams::default()`.
+    pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
 
 /// TLS peer with a pre-built connector shared across all `connect()` calls.
@@ -116,6 +118,8 @@ pub struct TlsTcpPeer {
     /// Pre-built connector. `Arc<ClientConfig>` is reference-counted internally,
     /// so cloning the connector is O(1) and does not re-allocate the root store.
     pub connector: Arc<TlsConnector>,
+    /// TCP socket options applied to the upstream connection.
+    pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
 
 impl TlsTcpPeer {
@@ -123,6 +127,15 @@ impl TlsTcpPeer {
         target_addr: SocketAddr,
         tls_host: String,
         alpn: Option<Vec<Vec<u8>>>,
+    ) -> Result<Self> {
+        Self::new_with_params(target_addr, tls_host, alpn, crate::transport::tcp_params::TcpParams::default())
+    }
+
+    pub fn new_with_params(
+        target_addr: SocketAddr,
+        tls_host: String,
+        alpn: Option<Vec<Vec<u8>>>,
+        tcp_params: crate::transport::tcp_params::TcpParams,
     ) -> Result<Self> {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -139,6 +152,7 @@ impl TlsTcpPeer {
             target_addr,
             tls_host,
             connector: Arc::new(TlsConnector::from(Arc::new(tls_config))),
+            tcp_params,
         })
     }
 }
@@ -154,7 +168,7 @@ impl UpstreamPeer for TcpPeer {
         debug!("connecting to tcp upstream: {}", self.target_addr);
         let tcp_stream = TcpStream::connect(self.target_addr).await
             .context("failed to connect to tcp upstream")?;
-        tcp_stream.set_nodelay(true).context("failed to set TCP_NODELAY on tcp upstream")?;
+        self.tcp_params.apply(&tcp_stream).context("failed to apply TCP params to upstream")?;
 
         let initial_slice = initial_data.as_deref();
 
@@ -179,7 +193,7 @@ impl UpstreamPeer for TlsTcpPeer {
 
         let tcp_stream = TcpStream::connect(self.target_addr).await
             .context("failed to connect to tcp upstream")?;
-        tcp_stream.set_nodelay(true).context("failed to set TCP_NODELAY on TLS upstream")?;
+        self.tcp_params.apply(&tcp_stream).context("failed to apply TCP params to TLS upstream")?;
 
         let server_name = ServerName::try_from(self.tls_host.clone())
             .map_err(|_| anyhow::anyhow!("invalid TLS server name: {}", self.tls_host))?;

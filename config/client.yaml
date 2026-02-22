@@ -18,3 +18,34 @@ auth_token: "your-token-here"
 
 # Optional: Set to enable HTTP listener
 http_entry_port: 8003
+
+# QUIC connection pool tuning
+quic:
+  connections: 1          # Number of parallel QUIC connections to server (default: 1)
+  max_concurrent_streams: 100  # Max concurrent bidirectional streams (default: 100)
+  # keepalive_secs: 20    # default: 20
+  # idle_timeout_secs: 60 # default: 60
+  # congestion: "bbr"     # default: NewReno
+  # stream_window_mb: 1   # default: 1 MB
+  # connection_window_mb: 8 # default: 8 MB
+
+# TCP socket options applied to upstream connections
+tcp:
+  nodelay: true
+  # recv_buf_size: 262144  # default: null (OS default)
+  # send_buf_size: 262144  # default: null (OS default)
+
+# Outbound HTTP connection pool
+http_pool:
+  idle_timeout_secs: 90
+  max_idle_per_host: 10
+
+# Protocol detection peek buffer
+proxy_buffers:
+  peek_buf_size: 16384
+
+# Reconnect backoff (milliseconds)
+reconnect:
+  initial_delay_ms: 1000  # default: 1000
+  max_delay_ms: 60000     # default: 60000
+  grace_ms: 100           # wait after cancel before reconnect (default: 100)

@@ -8,13 +8,14 @@ use tunnel_lib::{
 };
 
 use crate::{ServerState, tunnel_handler, metrics};
+use crate::config::build_client_config_for_group;
 
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
 
     // Build server config with QUIC transport params from config file.
     // Falls back to sensible defaults for any unset field.
-    let quic_params = state.config.server.quic_transport_params();
+    let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
 
@@ -87,8 +88,11 @@ async fn handle_quic_connection(
 
     metrics::auth_success(&group_id);
 
-    let client_config = state.config.to_client_config(&group_id)
-        .unwrap_or_default();
+    let client_config = {
+        let routing = state.routing.load();
+        build_client_config_for_group(&routing.tunnel_management, &group_id)
+            .unwrap_or_default()
+    };
 
     let resp = LoginResp {
         success: true,
@@ -130,10 +134,9 @@ async fn handle_quic_connection(
                 match result {
                     Ok((send, recv)) => {
                         debug!("accepted reverse stream from client");
-                        let config = state.config.clone(); // O(1) Arc clone — no deep copy
-                        let egress_map = state.egress_map.clone();
+                        let egress_map = state.routing.load().egress_map.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, config, egress_map).await {
+                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, egress_map).await {
                                 debug!(error = %e, "egress stream error");
                             }
                         });

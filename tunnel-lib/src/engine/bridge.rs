@@ -27,6 +27,10 @@ where
 
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e1), Err(e2)) => {
+            debug!("relay: both directions failed; suppressed: {}", e2);
+            Err(e1)
+        }
         (Err(e), _) | (_, Err(e)) => Err(e),
     }
 }
@@ -82,6 +86,10 @@ pub async fn relay_quic_to_tcp(
 
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e1), Err(e2)) => {
+            debug!("relay_quic_to_tcp: both directions failed; suppressed: {}", e2);
+            Err(e1.into())
+        }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
     }
 }
@@ -114,6 +122,10 @@ pub async fn relay_with_first_data(
 
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e1), Err(e2)) => {
+            debug!("relay_with_first_data: both directions failed; suppressed: {}", e2);
+            Err(e1.into())
+        }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
     }
 }

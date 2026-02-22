@@ -7,9 +7,10 @@ use tunnel_lib::proxy::core::ProxyEngine;
 use crate::app::{ClientApp, LocalProxyMap};
 
 pub async fn handle_work_stream(
-    send: SendStream, 
+    send: SendStream,
     mut recv: RecvStream,
     proxy_map: Arc<LocalProxyMap>,
+    tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
@@ -101,7 +102,7 @@ pub async fn handle_work_stream(
             .await
             .map_err(|e| anyhow::anyhow!("Client H2 connection error: {}", e))?;
     } else {
-        let app = ClientApp::new(proxy_map);
+        let app = ClientApp::new(proxy_map, tcp_params);
         let engine = ProxyEngine::new(app);
 
         let client_addr = format!("{}:{}", routing_info.src_addr, routing_info.src_port)

@@ -20,7 +20,7 @@ pub async fn run_tcp_listener(
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
-        stream.set_nodelay(true)?;
+        state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new TCP connection");
 
         let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
@@ -61,7 +61,7 @@ async fn handle_tcp_connection(
 
     let peer_addr = stream.peer_addr()?;
 
-    let mut buf = [0u8; 4096]; // stack-allocated; avoids heap alloc per connection
+    let mut buf = vec![0u8; state.proxy_buffer_params.peek_buf_size];
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
 
