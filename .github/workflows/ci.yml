@@ -312,6 +312,14 @@ jobs:
           ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
             --header "Host: echo.local"
 
+      - name: "[HTTP2] h2c POST + body verify — egress (client:8081 → server → http-echo)"
+        run: |
+          ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
+            --header "Host: echo.local" \
+            --method POST \
+            --body '{"h2":"egress-post-test"}' \
+            --expect-body "egress-post-test"
+
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 4 — WebSocket
       # ═══════════════════════════════════════════════════════════════════════════
