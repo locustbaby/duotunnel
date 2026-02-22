@@ -2,7 +2,8 @@
 //
 // Usage:
 //   ci-test-client http  <url> [--method GET|POST] [--body <json>] [--header Key:Value]
-//   ci-test-client http2 <url>
+//                                [--expect-body <substring>] [--allow-status <code>]
+//   ci-test-client http2 <url> [same flags]
 //   ci-test-client ws    <url> [--message <text>]
 //   ci-test-client grpc  <host:port> [--service <svc>]
 //
@@ -47,18 +48,22 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
     let mut method = "GET".to_string();
     let mut body_str: Option<String> = None;
     let mut extra_headers: Vec<(String, String)> = Vec::new();
+    let mut expect_body: Option<String> = None;
+    let mut allow_statuses: Vec<u16> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--method" => { i += 1; method = args[i].clone(); }
-            "--body"   => { i += 1; body_str = Some(args[i].clone()); }
-            "--header" => {
+            "--method"       => { i += 1; method = args[i].clone(); }
+            "--body"         => { i += 1; body_str = Some(args[i].clone()); }
+            "--header"       => {
                 i += 1;
                 let kv = &args[i];
                 let colon = kv.find(':').ok_or_else(|| format!("bad header: {kv}"))?;
                 extra_headers.push((kv[..colon].to_string(), kv[colon+1..].trim().to_string()));
             }
+            "--expect-body"  => { i += 1; expect_body = Some(args[i].clone()); }
+            "--allow-status" => { i += 1; allow_statuses.push(args[i].parse::<u16>().map_err(|_| format!("bad status: {}", args[i]))?); }
             _ => {}
         }
         i += 1;
@@ -81,6 +86,16 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
 
     let body_bytes = body_str.map(|s| s.into_bytes()).unwrap_or_default();
 
+    // If --header "Host: ..." was given, use that as the Host header; otherwise use URI host.
+    let effective_host = extra_headers.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| host.clone());
+    // Remove Host from extra_headers to avoid duplicate Host header
+    let non_host_headers: Vec<_> = extra_headers.iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("host"))
+        .collect();
+
     if force_h2 {
         use hyper_util::rt::TokioIo;
         use hyper::client::conn::http2;
@@ -96,9 +111,9 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
         let mut req = hyper::Request::builder()
             .method(method.as_str())
             .uri(url)
-            .header("host", &host)
+            .header("host", &effective_host)
             .header("content-type", "application/json");
-        for (k, v) in &extra_headers {
+        for (k, v) in &non_host_headers {
             req = req.header(k.as_str(), v.as_str());
         }
         let req = req
@@ -112,7 +127,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
 
         let status = resp.status().as_u16();
         let body = read_body(resp.into_body()).await?;
-        validate_response(status, &body, "HTTP/2")
+        validate_response(status, &body, "HTTP/2", expect_body.as_deref(), &allow_statuses)
     } else {
         use hyper_util::rt::TokioIo;
         use hyper::client::conn::http1;
@@ -128,9 +143,9 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
         let mut req = hyper::Request::builder()
             .method(method.as_str())
             .uri(path)
-            .header("host", &host)
+            .header("host", &effective_host)
             .header("content-type", "application/json");
-        for (k, v) in &extra_headers {
+        for (k, v) in &non_host_headers {
             req = req.header(k.as_str(), v.as_str());
         }
         let req = req
@@ -144,7 +159,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
 
         let status = resp.status().as_u16();
         let body = read_body(resp.into_body()).await?;
-        validate_response(status, &body, "HTTP/1.1")
+        validate_response(status, &body, "HTTP/1.1", expect_body.as_deref(), &allow_statuses)
     }
 }
 
@@ -163,9 +178,20 @@ where
     Ok(String::from_utf8_lossy(&collected.to_bytes()).into_owned())
 }
 
-fn validate_response(status: u16, body: &str, proto: &str) -> Result<String, String> {
-    if status != 200 {
+fn validate_response(status: u16, body: &str, proto: &str, expect_body: Option<&str>, allow_statuses: &[u16]) -> Result<String, String> {
+    let ok_status = status == 200 || allow_statuses.contains(&status);
+    if !ok_status {
         return Err(format!("{proto}: unexpected status {status}, body: {}", &body[..body.len().min(200)]));
+    }
+    // If rate-limited (429) or other allowed non-200, skip body checks
+    if status != 200 {
+        return Ok(format!("{proto} {status} (allowed status, len={})", body.len()));
+    }
+    // Check expected body substring if specified
+    if let Some(expected) = expect_body {
+        if !body.contains(expected) {
+            return Err(format!("{proto}: expected body to contain {:?}, got: {}", expected, &body[..body.len().min(300)]));
+        }
     }
     // The echo server returns JSON with a "method" field
     match serde_json::from_str::<serde_json::Value>(body) {

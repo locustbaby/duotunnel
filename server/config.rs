@@ -74,7 +74,7 @@ pub struct ServerEgressUpstream {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct EgressRules {
     #[serde(default)]
-    pub http: Vec<EgressHttpRule>,
+    pub vhost: Vec<EgressHttpRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

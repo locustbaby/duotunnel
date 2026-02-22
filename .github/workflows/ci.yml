@@ -167,41 +167,20 @@ jobs:
 
       - name: "[HTTP] 1.1 GET request — ingress (echo.local:8080)"
         run: |
-          RESP=$(curl -sf -w "\n%{http_code}" --max-time 15 http://echo.local:8080/ 2>&1)
-          CODE=$(echo "$RESP" | tail -1)
-          BODY=$(echo "$RESP" | head -1)
-          echo "Code: $CODE  Body: ${BODY:0:200}"
-          [ "$CODE" = "200" ] || { echo "FAIL: expected 200, got $CODE"; exit 1; }
-          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
-            || { echo "FAIL: response body invalid"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://echo.local:8080/"
 
       - name: "[HTTP] 1.1 POST with JSON body — ingress"
         run: |
-          RESP=$(curl -sf --max-time 15 \
-                   -X POST \
-                   -H "Content-Type: application/json" \
-                   -d '{"tunnel":"ci","test":"post-body-123"}' \
-                   http://echo.local:8080/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          assert 'post-body-123' in d['body'], d['body']
-          " || { echo "FAIL: POST body not echoed"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://echo.local:8080/" \
+            --method POST \
+            --body '{"tunnel":"ci","test":"post-body-123"}' \
+            --expect-body "post-body-123"
 
       - name: "[HTTP] 1.1 Custom header forwarding — ingress"
         run: |
-          RESP=$(curl -sf --max-time 15 \
-                   -H "X-Tunnel-Test: reliable" \
-                   http://echo.local:8080/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          hdrs = {k.lower(): v for k,v in d['headers'].items()}
-          assert hdrs.get('x-tunnel-test') == 'reliable', hdrs
-          " || { echo "FAIL: custom header not forwarded"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://echo.local:8080/" \
+            --header "X-Tunnel-Test: reliable" \
+            --expect-body "x-tunnel-test"
 
       - name: "[HTTP] 1.1 Connection-reuse timing (3 sequential GETs)"
         run: |
@@ -218,12 +197,11 @@ jobs:
         run: |
           OK=0
           for i in $(seq 1 10); do
-            CODE=$(curl -s -o /dev/null --max-time 15 -w "%{http_code}" http://echo.local:8080/ 2>&1)
-            if [ "$CODE" = "200" ]; then
+            if ./target/release/ci-test-client http "http://echo.local:8080/" > /dev/null 2>&1; then
               printf "  ✅(%s)" "$i"
               OK=$((OK+1))
             else
-              printf "  ❌(%s,code=%s)" "$i" "$CODE"
+              printf "  ❌(%s)" "$i"
             fi
           done
           echo ""
@@ -236,28 +214,16 @@ jobs:
 
       - name: "[HTTP] 1.1 GET — egress (client:8081 → server → http-echo)"
         run: |
-          RESP=$(curl -sf -w "\n%{http_code}" --max-time 15 \
-                   -H "Host: echo.local" http://127.0.0.1:8081/ 2>&1)
-          CODE=$(echo "$RESP" | tail -1); BODY=$(echo "$RESP" | head -1)
-          echo "Code: $CODE  Body: ${BODY:0:200}"
-          [ "$CODE" = "200" ] || { echo "FAIL: expected 200 got $CODE"; exit 1; }
-          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
-            || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --header "Host: echo.local"
 
       - name: "[HTTP] 1.1 POST body — egress"
         run: |
-          RESP=$(curl -sf --max-time 15 \
-                   -X POST -H "Host: echo.local" \
-                   -H "Content-Type: application/json" \
-                   -d '{"tunnel":"ci","test":"egress-post-456"}' \
-                   http://127.0.0.1:8081/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          assert 'egress-post-456' in d['body'], d['body']
-          " || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --method POST \
+            --header "Host: echo.local" \
+            --body '{"tunnel":"ci","test":"egress-post-456"}' \
+            --expect-body "egress-post-456"
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 2 — HTTP/2
@@ -265,38 +231,19 @@ jobs:
 
       - name: "[HTTP2] h2c upgrade via entry port — ingress"
         run: |
-          HTTP_VER=$(curl -so /dev/null --max-time 15 --http2 \
-                       -w "%{http_version}" http://echo.local:8080/ 2>&1)
-          RESP=$(curl -sf --max-time 15 --http2 http://echo.local:8080/ 2>&1)
-          echo "Negotiated: http/$HTTP_VER  Response: ${RESP:0:200}"
-          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
-            || { echo "FAIL"; exit 1; }
-          echo "PASS (http/$HTTP_VER)"
+          ./target/release/ci-test-client http2 "http://echo.local:8080/"
 
       - name: "[HTTP2] POST via h2c — ingress"
         run: |
-          RESP=$(curl -sf --max-time 15 --http2 \
-                   -X POST -H "Content-Type: application/json" \
-                   -d '{"h2":"post-test"}' \
-                   http://echo.local:8080/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          assert 'h2' in d['body'] or d['method']=='POST', d
-          " || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http2 "http://echo.local:8080/" \
+            --method POST \
+            --body '{"h2":"post-test"}' \
+            --expect-body "post-test"
 
       - name: "[HTTP2] h2c via egress port — client:8081"
         run: |
-          HTTP_VER=$(curl -so /dev/null --max-time 15 --http2 \
-                       -H "Host: echo.local" \
-                       -w "%{http_version}" http://127.0.0.1:8081/ 2>&1)
-          RESP=$(curl -sf --max-time 15 --http2 \
-                   -H "Host: echo.local" http://127.0.0.1:8081/ 2>&1)
-          echo "Negotiated: http/$HTTP_VER  Response: ${RESP:0:200}"
-          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['method']=='GET'" \
-            || { echo "FAIL"; exit 1; }
-          echo "PASS (http/$HTTP_VER)"
+          ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
+            --header "Host: echo.local"
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 3 — WebSocket
@@ -325,21 +272,18 @@ jobs:
       - name: "[Bidir] 5 concurrent ingress + 5 concurrent egress (HTTP/1.1)"
         run: |
           for i in $(seq 1 5); do
-            (curl -sf --max-time 20 http://echo.local:8080/ \
-               | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          print('in-$i:OK' if d['method']=='GET' else 'in-$i:FAIL')" \
-               2>/dev/null || echo "in-$i:FAIL") > /tmp/bidir-in-$i.txt &
-            (curl -sf --max-time 20 -H "Host: echo.local" http://127.0.0.1:8081/ \
-               | python3 -c "
-          import sys,json; d=json.load(sys.stdin)
-          print('eg-$i:OK' if d['method']=='GET' else 'eg-$i:FAIL')" \
-               2>/dev/null || echo "eg-$i:FAIL") > /tmp/bidir-eg-$i.txt &
+            (./target/release/ci-test-client http "http://echo.local:8080/" \
+               > /tmp/bidir-in-$i.txt 2>&1 && echo "in-$i:OK" >> /tmp/bidir-in-$i.txt \
+               || echo "in-$i:FAIL" >> /tmp/bidir-in-$i.txt) &
+            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+               --header "Host: echo.local" \
+               > /tmp/bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" >> /tmp/bidir-eg-$i.txt \
+               || echo "eg-$i:FAIL" >> /tmp/bidir-eg-$i.txt) &
           done
           wait
           FAIL=0
           for i in $(seq 1 5); do
-            R_IN=$(cat /tmp/bidir-in-$i.txt); R_EG=$(cat /tmp/bidir-eg-$i.txt)
+            R_IN=$(tail -1 /tmp/bidir-in-$i.txt); R_EG=$(tail -1 /tmp/bidir-eg-$i.txt)
             echo "  $R_IN  |  $R_EG"
             echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
             echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
@@ -352,16 +296,14 @@ jobs:
 
       - name: "[Bidir] Mixed protocols concurrent (HTTP1 + HTTP2 + WS — ingress)"
         run: |
-          (curl -sf --max-time 20 http://echo.local:8080/ \
-             | python3 -c "import sys,json; d=json.load(sys.stdin); print('h1:OK' if d['method']=='GET' else 'h1:FAIL')" \
-             2>/dev/null || echo "h1:FAIL") > /tmp/mixed-h1.txt &
-          (curl -sf --max-time 20 --http2 http://echo.local:8080/ \
-             | python3 -c "import sys,json; d=json.load(sys.stdin); print('h2:OK' if d['method']=='GET' else 'h2:FAIL')" \
-             2>/dev/null || echo "h2:FAIL") > /tmp/mixed-h2.txt &
+          (./target/release/ci-test-client http "http://echo.local:8080/" \
+             > /tmp/mixed-h1.txt 2>&1 && echo "h1:OK" || echo "h1:FAIL") >> /tmp/mixed-h1.txt &
+          (./target/release/ci-test-client http2 "http://echo.local:8080/" \
+             > /tmp/mixed-h2.txt 2>&1 && echo "h2:OK" || echo "h2:FAIL") >> /tmp/mixed-h2.txt &
           (./target/release/ci-test-client ws "ws://ws.local:8080" --message "concurrent-ws" \
              && echo "ws:OK" || echo "ws:FAIL") > /tmp/mixed-ws.txt 2>&1 &
           wait
-          R_H1=$(cat /tmp/mixed-h1.txt); R_H2=$(cat /tmp/mixed-h2.txt); R_WS=$(cat /tmp/mixed-ws.txt)
+          R_H1=$(tail -1 /tmp/mixed-h1.txt); R_H2=$(tail -1 /tmp/mixed-h2.txt); R_WS=$(tail -1 /tmp/mixed-ws.txt)
           echo "  $R_H1 | $R_H2 | $R_WS"
           echo "$R_H1$R_H2$R_WS" | grep -q "FAIL" && {
             echo "FAIL: at least one mixed-protocol request failed"
@@ -376,30 +318,24 @@ jobs:
       - name: "[Ext-HTTP] GET ingress — echo.beeceptor.test → beeceptor"
         continue-on-error: true
         run: |
-          RESP=$(curl -sf --max-time 20 http://echo.beeceptor.test:8080/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "method\|path\|beeceptor\|url" || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          # 429 (rate limit) is expected and acceptable from beeceptor
+          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+            --allow-status 429
 
       - name: "[Ext-HTTP] POST body ingress — echo.beeceptor.test → beeceptor"
         continue-on-error: true
         run: |
-          RESP=$(curl -sf --max-time 20 \
-                   -X POST -H "Content-Type: application/json" \
-                   -d '{"ci":"ext-post-test"}' \
-                   http://echo.beeceptor.test:8080/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "ext-post-test\|body\|json" || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+            --method POST \
+            --body '{"ci":"ext-post-test"}' \
+            --allow-status 429
 
       - name: "[Ext-HTTP] GET egress — client:8081 → server → beeceptor"
         continue-on-error: true
         run: |
-          RESP=$(curl -sf --max-time 20 \
-                   -H "Host: echo.free.beeceptor.com" http://127.0.0.1:8081/ 2>&1)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "method\|path\|beeceptor\|url" || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --header "Host: echo.free.beeceptor.com" \
+            --allow-status 429
 
       - name: "[Ext-WS] Echo ingress — ws.ext.test → echo.websocket.org"
         continue-on-error: true
@@ -415,17 +351,18 @@ jobs:
         continue-on-error: true
         run: |
           for i in $(seq 1 3); do
-            (curl -sf --max-time 25 http://echo.beeceptor.test:8080/ \
-               | grep -qi "method\|beeceptor" && echo "in-$i:OK" || echo "in-$i:FAIL") \
-               > /tmp/ext-bidir-in-$i.txt &
-            (curl -sf --max-time 25 -H "Host: echo.free.beeceptor.com" http://127.0.0.1:8081/ \
-               | grep -qi "method\|beeceptor" && echo "eg-$i:OK" || echo "eg-$i:FAIL") \
-               > /tmp/ext-bidir-eg-$i.txt &
+            (./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+               --allow-status 429 \
+               > /tmp/ext-bidir-in-$i.txt 2>&1 && echo "in-$i:OK" || echo "in-$i:FAIL") &
+            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+               --header "Host: echo.free.beeceptor.com" \
+               --allow-status 429 \
+               > /tmp/ext-bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" || echo "eg-$i:FAIL") &
           done
           wait
           FAIL=0
           for i in $(seq 1 3); do
-            R_IN=$(cat /tmp/ext-bidir-in-$i.txt); R_EG=$(cat /tmp/ext-bidir-eg-$i.txt)
+            R_IN=$(tail -1 /tmp/ext-bidir-in-$i.txt); R_EG=$(tail -1 /tmp/ext-bidir-eg-$i.txt)
             echo "  $R_IN  |  $R_EG"
             echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
             echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true

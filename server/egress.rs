@@ -34,7 +34,7 @@ impl ServerEgressMap {
             upstreams.insert(name.clone(), UpstreamGroup::new(servers));
         }
 
-        for rule in &egress.rules.http {
+        for rule in &egress.rules.vhost {
             http_rules.insert(rule.match_host.clone(), rule.action_upstream.clone());
         }
 
