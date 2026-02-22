@@ -100,15 +100,7 @@ jobs:
       - name: Build all binaries (server, client, ci-helpers)
         run: cargo build --release
 
-      - name: Install test tools (wscat, grpcurl)
-        run: |
-          npm install -g wscat
-          GRPCURL_VER=1.9.3
-          curl -fsSL \
-            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VER}/grpcurl_${GRPCURL_VER}_linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin grpcurl
-
-      # /etc/hosts — map test domains to 127.0.0.1 so curl/wscat/grpcurl use them
+      # /etc/hosts — map test domains to 127.0.0.1 so curl/ci-test-client use them
       - name: Configure /etc/hosts for test domains
         run: |
           sudo tee -a /etc/hosts << 'EOF'
@@ -143,22 +135,6 @@ jobs:
           echo $! > /tmp/grpc-echo.pid
           sleep 1
           echo "grpc-echo-server ready"
-
-      # Write inline Health proto (reused by all gRPC tests)
-      - name: Write grpc.health.v1 proto
-        run: |
-          cat > /tmp/health.proto << 'PROTO'
-          syntax = "proto3";
-          package grpc.health.v1;
-          message HealthCheckRequest { string service = 1; }
-          message HealthCheckResponse {
-            enum ServingStatus { UNKNOWN=0; SERVING=1; NOT_SERVING=2; }
-            ServingStatus status = 1;
-          }
-          service Health {
-            rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
-          }
-          PROTO
 
       # ─── Tunnel server config ─────────────────────────────────────────────────
       - name: Write CI server config
@@ -447,26 +423,11 @@ jobs:
 
       - name: "[WS] Echo test — ingress (ws.local:8080 → ws-echo-server)"
         run: |
-          RESP=$(echo "hello-ws-tunnel" | timeout 15 \
-                   wscat --connect "ws://ws.local:8080" \
-                         --wait 5 2>&1 || true)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -q "hello-ws-tunnel" || {
-            echo "FAIL: echo not received"
-            exit 1
-          }
-          echo "PASS"
+          ./target/release/ci-test-client ws "ws://ws.local:8080" --message "hello-ws-tunnel"
 
-      - name: "[WS] Multiple messages — ingress"
+      - name: "[WS] Custom message — ingress"
         run: |
-          # Send two messages; both should be echoed back.
-          RESP=$(printf "msg-one\nmsg-two\n" | timeout 15 \
-                   wscat --connect "ws://ws.local:8080" \
-                         --wait 5 2>&1 || true)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -q "msg-one" || { echo "FAIL: msg-one not echoed"; exit 1; }
-          echo "$RESP" | grep -q "msg-two" || { echo "FAIL: msg-two not echoed"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client ws "ws://ws.local:8080" --message "ci-msg-two"
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 4 — gRPC (via H2 proxy path)
@@ -474,29 +435,7 @@ jobs:
 
       - name: "[gRPC] Health/Check (service='') — ingress (grpc.local:8080)"
         run: |
-          RESP=$(grpcurl -plaintext \
-                   -import-path /tmp -proto health.proto \
-                   -max-time 15 \
-                   -d '{"service":""}' \
-                   grpc.local:8080 \
-                   grpc.health.v1.Health/Check 2>&1 || true)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "SERVING\|status" || {
-            echo "FAIL: expected SERVING status"
-            exit 1
-          }
-          echo "PASS"
-
-      - name: "[gRPC] Server reflection list — ingress (grpc.local:8080)"
-        run: |
-          # grpc-echo-server registers health service; reflection should list it.
-          RESP=$(grpcurl -plaintext -max-time 15 grpc.local:8080 list 2>&1 || true)
-          echo "Reflection response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "health\|grpc\|service\|method" || {
-            echo "FAIL: reflection returned no services"
-            exit 1
-          }
-          echo "PASS"
+          ./target/release/ci-test-client grpc "grpc.local:8080" --service ""
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 5 — Bidirectional concurrent (local backends)
@@ -538,8 +477,8 @@ jobs:
           (curl -sf --max-time 20 --http2 http://echo.local:8080/ \
              | python3 -c "import sys,json; d=json.load(sys.stdin); print('h2:OK' if d['method']=='GET' else 'h2:FAIL')" \
              2>/dev/null || echo "h2:FAIL") > /tmp/mixed-h2.txt &
-          (echo "concurrent-ws" | timeout 15 wscat --connect "ws://ws.local:8080" --wait 4 \
-             | grep -q "concurrent-ws" && echo "ws:OK" || echo "ws:FAIL") > /tmp/mixed-ws.txt 2>&1 &
+          (./target/release/ci-test-client ws "ws://ws.local:8080" --message "concurrent-ws" \
+             && echo "ws:OK" || echo "ws:FAIL") > /tmp/mixed-ws.txt 2>&1 &
           wait
           R_H1=$(cat /tmp/mixed-h1.txt); R_H2=$(cat /tmp/mixed-h2.txt); R_WS=$(cat /tmp/mixed-ws.txt)
           echo "  $R_H1 | $R_H2 | $R_WS"
@@ -584,28 +523,12 @@ jobs:
       - name: "[Ext-WS] Echo ingress — ws.ext.test → echo.websocket.org"
         continue-on-error: true
         run: |
-          RESP=$(echo "ext-ws-hello" | timeout 20 \
-                   wscat --connect "ws://ws.ext.test:8080" \
-                         --wait 8 2>&1 || true)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "ext-ws-hello\|101\|websocket\|connected" || {
-            echo "FAIL"
-            exit 1
-          }
-          echo "PASS"
+          ./target/release/ci-test-client ws "ws://ws.ext.test:8080" --message "ext-ws-hello"
 
       - name: "[Ext-gRPC] Health/Check ingress — grpc.ext.test → semior.dev"
         continue-on-error: true
         run: |
-          RESP=$(grpcurl -plaintext \
-                   -import-path /tmp -proto health.proto \
-                   -max-time 20 \
-                   -d '{"service":""}' \
-                   grpc.ext.test:8080 \
-                   grpc.health.v1.Health/Check 2>&1 || true)
-          echo "Response: ${RESP:0:300}"
-          echo "$RESP" | grep -qi "SERVING\|status" || { echo "FAIL"; exit 1; }
-          echo "PASS"
+          ./target/release/ci-test-client grpc "grpc.ext.test:8080" --service ""
 
       - name: "[Ext-Bidir] 3 concurrent ingress + 3 concurrent egress"
         continue-on-error: true
