@@ -25,11 +25,9 @@ pub fn extract_h2_authority(data: &[u8]) -> Option<String> {
             
             // Handle PADDED flag (0x8)
             let mut pad_length = 0;
-            if flags & 0x08 != 0 {
-                if payload_start < remaining.len() {
-                    pad_length = remaining[payload_start] as usize;
-                    payload_start += 1;
-                }
+            if flags & 0x08 != 0 && payload_start < remaining.len() {
+                pad_length = remaining[payload_start] as usize;
+                payload_start += 1;
             }
             
             // Handle PRIORITY flag (0x20)
@@ -39,10 +37,8 @@ pub fn extract_h2_authority(data: &[u8]) -> Option<String> {
             
             if payload_start <= payload_end {
                 // Remove padding from end
-                if pad_length > 0 {
-                     if payload_end >= pad_length {
-                         payload_end -= pad_length;
-                     }
+                if pad_length > 0 && payload_end >= pad_length {
+                    payload_end -= pad_length;
                 }
                 
                 if payload_start < payload_end {

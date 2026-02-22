@@ -28,6 +28,7 @@ tokio-rustls = "0.26"
 webpki-roots = "0.26"
 hpack = "0.3"
 h2 = "0.4"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

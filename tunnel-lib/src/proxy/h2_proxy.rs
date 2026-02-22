@@ -50,7 +50,7 @@ where
     let resp = sender.send_request(req).await?;
     
     let (parts, body) = resp.into_parts();
-    let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+    let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
     
     Ok(Response::from_parts(parts, boxed_body))
 }

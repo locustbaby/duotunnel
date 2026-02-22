@@ -32,3 +32,7 @@ async-trait = "0.1"
 tokio-rustls = "0.26"
 prometheus = "0.13"
 lazy_static = "1.5"
+subtle = "2.5"
+arc-swap = "1.7"
+notify = { version = "6.1", features = ["macos_kqueue"] }
+figment = { version = "0.10", features = ["yaml", "env"] }

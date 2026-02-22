@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,36 +10,11 @@ use tunnel_lib::proxy::tcp::{TcpPeer, TlsTcpPeer, UpstreamScheme};
 use tunnel_lib::proxy::http::HttpPeer;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnectorBuilder;
-use std::time::Duration;
 
-use crate::config::ServerConfigFile;
+use crate::config::ServerEgressUpstream;
+use tunnel_lib::{HttpClientParams, UpstreamGroup};
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
-
-/// Upstream group with round-robin load balancing
-struct UpstreamGroup {
-    servers: Vec<String>,
-    counter: AtomicUsize,
-}
-
-impl UpstreamGroup {
-    fn new(servers: Vec<String>) -> Self {
-        Self {
-            servers,
-            counter: AtomicUsize::new(0),
-        }
-    }
-
-    fn next(&self) -> Option<&String> {
-        if self.servers.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.servers.len();
-        self.servers.get(idx)
-    }
-}
 
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
@@ -49,33 +23,22 @@ pub struct ServerEgressMap {
 }
 
 impl ServerEgressMap {
-    pub fn from_config(config: &ServerConfigFile) -> Self {
+    pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
         let mut upstreams = HashMap::new();
         let mut http_rules = HashMap::new();
 
-        for (name, upstream_def) in &config.server_egress_upstream.upstreams {
+        for (name, upstream_def) in &egress.upstreams {
             let servers: Vec<String> = upstream_def.servers.iter()
                 .map(|s| s.address.clone())
                 .collect();
             upstreams.insert(name.clone(), UpstreamGroup::new(servers));
         }
 
-        for rule in &config.server_egress_upstream.rules.http {
+        for rule in &egress.rules.http {
             http_rules.insert(rule.match_host.clone(), rule.action_upstream.clone());
         }
 
-        let https = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .unwrap()
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build();
-
-        let https_client = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(10)
-            .build(https);
+        let https_client = tunnel_lib::create_https_client_with(http_params);
 
         Self { upstreams, http_rules, https_client }
     }
@@ -135,13 +98,16 @@ impl ProxyApp for ServerEgressApp {
                 };
 
                 if is_https {
-                    Ok(Box::new(TlsTcpPeer {
+                    Ok(Box::new(TlsTcpPeer::new(
                         target_addr,
-                        tls_host: tls_host.unwrap_or_default(),
-                        alpn: scheme.alpn(),
-                    }))
+                        tls_host.unwrap_or_default(),
+                        scheme.alpn(),
+                    )?))
                 } else {
-                    Ok(Box::new(TcpPeer { target_addr }))
+                    Ok(Box::new(TcpPeer {
+                        target_addr,
+                        tcp_params: tunnel_lib::TcpParams::default(),
+                    }))
                 }
             },
             Protocol::H1 | Protocol::H2 | Protocol::Unknown => {

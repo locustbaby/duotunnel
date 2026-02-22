@@ -70,25 +70,49 @@ impl<T: Clone + Send + Sync> VhostRouter<T> {
     }
 
     pub fn get(&self, host: &str) -> Option<T> {
-        let host = host.split(':').next().unwrap_or(host).to_lowercase();
+        let bare = host.split(':').next().unwrap_or(host);
 
-        // Fast path: exact match (lock-free)
-        if let Some(entry) = self.exact.get(&host) {
-            return Some(entry.value().clone());
-        }
+        // Zero-allocation fast path for ASCII hostnames (covers ~100% of real-world hosts).
+        // Stack-allocate a 256-byte buffer and make_ascii_lowercase in place — no heap alloc.
+        let mut buf = [0u8; 256];
+        if bare.len() <= 256 && bare.is_ascii() {
+            let n = bare.len();
+            buf[..n].copy_from_slice(bare.as_bytes());
+            buf[..n].make_ascii_lowercase();
+            // SAFETY: input was ASCII (validated above); make_ascii_lowercase preserves UTF-8 validity.
+            let lower = unsafe { std::str::from_utf8_unchecked(&buf[..n]) };
 
-        // Slow path: wildcard matching (read lock only)
-        let wildcards = self.wildcards.read();
-        for (pattern, value) in wildcards.iter() {
-            if pattern.starts_with("*.") {
-                let suffix = &pattern[1..]; // ".example.com"
-                if host.ends_with(suffix) {
-                    return Some(value.clone());
+            if let Some(entry) = self.exact.get(lower) {
+                return Some(entry.value().clone());
+            }
+
+            let wildcards = self.wildcards.read();
+            for (pattern, value) in wildcards.iter() {
+                if pattern.starts_with("*.") {
+                    let suffix = &pattern[1..]; // ".example.com"
+                    if lower.ends_with(suffix) {
+                        return Some(value.clone());
+                    }
                 }
             }
+            None
+        } else {
+            // Rare fallback: heap allocate for long or non-ASCII hostnames
+            let lower = bare.to_lowercase();
+            if let Some(entry) = self.exact.get(&lower) {
+                return Some(entry.value().clone());
+            }
+            let wildcards = self.wildcards.read();
+            for (pattern, value) in wildcards.iter() {
+                if pattern.starts_with("*.") {
+                    let suffix = &pattern[1..];
+                    if lower.ends_with(suffix) {
+                        return Some(value.clone());
+                    }
+                }
+            }
+            None
         }
-
-        None
     }
 
     pub fn remove(&self, host: &str) {
@@ -150,9 +174,9 @@ pub fn extract_host_from_http(data: &[u8]) -> Option<String> {
     let data_str = std::str::from_utf8(data).ok()?;
 
     for line in data_str.lines() {
-        if line.to_lowercase().starts_with("host:") {
-            let host = line[5..].trim();
-            return Some(host.to_string());
+        // Case-insensitive prefix check without heap allocation (no to_lowercase())
+        if line.len() > 5 && line[..5].eq_ignore_ascii_case("host:") {
+            return Some(line[5..].trim().to_string());
         }
     }
     None

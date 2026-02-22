@@ -56,7 +56,7 @@ impl UpstreamPeer for H2Peer {
             let scheme = self.scheme.clone();
 
             tokio::spawn(async move {
-                let (parts, mut body) = req.into_parts();
+                let (parts, body) = req.into_parts();
                 debug!(method = %parts.method, uri = %parts.uri, "H2 request received");
 
                 let target_uri = format!(
@@ -139,25 +139,38 @@ impl UpstreamPeer for H2Peer {
                             if frame.is_data() {
                                 let data = frame.into_data().unwrap();
                                 let len = data.len();
-                                // Reserve capacity if needed? h2 send_data handles flow control for us by returning Poll::Pending if blocked.
-                                // But here we are in async context, send_data returns Result.
-                                // send_data pushes to buffer. We might need to handle capacity explicitly if we push too fast?
-                                // h2::SendStream::send_data does NOT await capacity. It fails if window is too small?
-                                // No, send_data(..., end_of_stream: bool).
-                                // h2 documentation says: "If there is not enough capacity in the stream's window, this will return an error."
-                                // Wait, actually `send_data` returns Ok(()) if it queues the data. 
-                                // But if we just pump data, we might buffer infinitely in memory if peer is slow.
-                                // We should check `capacity` or `reserve_capacity`.
-                                
-                                // Actually, h2::SendStream::reserve_capacity is async.
-                                send_stream.reserve_capacity(len); 
-                                // Wait, reserve_capacity requests capacity.
-                                
-                                // Correct way: use `poll_capacity` or just send and handle error?
-                                // h2 0.4 `send_data` docs: "Frames are queued up... If the remote window is exceeded, the data is buffered internally."
-                                // So strictly speaking it's "safe" but can OOM.
-                                // For robust proxying, ideally we wait for capacity.
-                                
+
+                                // Wait until the remote's flow-control window is large
+                                // enough to hold the entire frame before calling
+                                // send_data(). Without this loop, send_data() may
+                                // internally buffer data beyond the granted window,
+                                // leading to unbounded memory growth when the receiver
+                                // is slower than the upstream (OOM risk).
+                                //
+                                // reserve_capacity() signals how much we *want*; each
+                                // poll_capacity() wake-up may only grant a portion, so
+                                // we loop until the cumulative granted capacity covers
+                                // the full frame length.
+                                send_stream.reserve_capacity(len);
+                                loop {
+                                    if send_stream.capacity() >= len {
+                                        break;
+                                    }
+                                    match futures_util::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                                        None => {
+                                            error!("H2 flow control: send stream closed before capacity granted");
+                                            return;
+                                        }
+                                        Some(Err(e)) => {
+                                            error!("H2 flow control error: {}", e);
+                                            return;
+                                        }
+                                        Some(Ok(_)) => {
+                                            // More capacity granted; re-check the total.
+                                        }
+                                    }
+                                }
+
                                 if let Err(e) = send_stream.send_data(data, false) {
                                      error!("Failed to send response data: {}", e);
                                      return;
@@ -193,34 +206,27 @@ impl UpstreamPeer for H2Peer {
 // Adapter to turn h2::RecvStream into a Stream of hyper Frames
 fn stream_body_from_h2(mut body: h2::RecvStream) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + 'static> {
     let stream = futures_util::stream::poll_fn(move |cx| {
-        loop {
-            // Check for data
-            match body.poll_data(cx) {
-                Poll::Ready(Some(Ok(bytes))) => {
-                    let _ = body.flow_control().release_capacity(bytes.len());
-                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))));
-                }
-                Poll::Ready(None) => {
-                    // Data stream ended, check trailers
-                    match body.poll_trailers(cx) {
-                        Poll::Ready(Ok(Some(trailers))) => {
-                            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-                        }
-                        Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                        Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))),
-                        Poll::Pending => return Poll::Pending,
+        // Check for data
+        match body.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                let _ = body.flow_control().release_capacity(bytes.len());
+                Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))))
+            }
+            Poll::Ready(None) => {
+                // Data stream ended, check trailers
+                match body.poll_trailers(cx) {
+                    Poll::Ready(Ok(Some(trailers))) => {
+                        Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                     }
-                }
-                Poll::Pending => {
-                     // If data is pending, we still need to check if trailers are available?
-                     // No, poll_data returning Pending means no data yet.
-                     // But could there be trailers without data? poll_data returns None in that case.
-                     return Poll::Pending;
+                    Poll::Ready(Ok(None)) => Poll::Ready(None),
+                    Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))),
+                    Poll::Pending => Poll::Pending,
                 }
             }
+            Poll::Pending => Poll::Pending,
         }
     });
     StreamBody::new(stream)

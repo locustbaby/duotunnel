@@ -7,9 +7,10 @@ use tunnel_lib::proxy::core::ProxyEngine;
 use crate::app::{ClientApp, LocalProxyMap};
 
 pub async fn handle_work_stream(
-    send: SendStream, 
+    send: SendStream,
     mut recv: RecvStream,
     proxy_map: Arc<LocalProxyMap>,
+    tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
@@ -30,7 +31,6 @@ pub async fn handle_work_stream(
 
     if routing_info.protocol == "h2" {
         let host = routing_info.host.clone().unwrap_or_else(|| routing_info.proxy_name.clone());
-        let host_without_port = host.split(':').next().unwrap_or(&host);
         
         let upstream_addr = proxy_map.get_local_address(&routing_info.proxy_name, Some(&host), false)
             .ok_or_else(|| anyhow::anyhow!("no upstream for H2 request to {}", host))?;
@@ -48,7 +48,18 @@ pub async fn handle_work_stream(
                 let normalized_addr = upstream_addr
                     .replace("wss://", "https://")
                     .replace("ws://", "http://");
-                let upstream_uri: hyper::Uri = normalized_addr.parse().unwrap();
+                let upstream_uri: hyper::Uri = match normalized_addr.parse() {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        tracing::error!("invalid upstream URI '{}': {}", normalized_addr, e);
+                        return Ok(Response::builder()
+                            .status(502)
+                            .body(http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync())
+                            .unwrap());
+                    }
+                };
                 let mut uri_parts = parts.uri.clone().into_parts();
                 uri_parts.scheme = upstream_uri.scheme().cloned();
                 uri_parts.authority = upstream_uri.authority().cloned();
@@ -63,13 +74,13 @@ pub async fn handle_work_stream(
                 
                 debug!("Client H2: forwarding {} {} to upstream", parts.method, parts.uri);
                 
-                let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
                 let upstream_req = Request::from_parts(parts, boxed_body);
                 
                 match https_client.request(upstream_req).await {
                     Ok(resp) => {
                         let (parts, body) = resp.into_parts();
-                        let boxed = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                        let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                         Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                     }
                     Err(e) => {
@@ -91,7 +102,7 @@ pub async fn handle_work_stream(
             .await
             .map_err(|e| anyhow::anyhow!("Client H2 connection error: {}", e))?;
     } else {
-        let app = ClientApp::new(proxy_map);
+        let app = ClientApp::new(proxy_map, tcp_params);
         let engine = ProxyEngine::new(app);
 
         let client_addr = format!("{}:{}", routing_info.src_addr, routing_info.src_port)

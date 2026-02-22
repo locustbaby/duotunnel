@@ -211,7 +211,7 @@ impl ProtocolDriver for Http1Driver {
 
         let sanitized_headers = sanitize_response_headers(response.headers());
         for (name, value) in &sanitized_headers {
-            let value_str = value.to_str().unwrap_or_else(|_| "");
+            let value_str = value.to_str().unwrap_or("");
             let header_line = format!("{}: {}\r\n", name, value_str);
             self.send.write_all(header_line.as_bytes()).await?;
         }
@@ -246,7 +246,7 @@ impl ProtocolDriver for Http1Driver {
 
         if !accumulated_trailers.is_empty() {
             for (name, value) in &accumulated_trailers {
-                let value_str = value.to_str().unwrap_or_else(|_| "");
+                let value_str = value.to_str().unwrap_or("");
                 let trailer_line = format!("{}: {}\r\n", name, value_str);
                 self.send.write_all(trailer_line.as_bytes()).await?;
             }

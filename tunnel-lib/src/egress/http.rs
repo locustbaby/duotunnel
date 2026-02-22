@@ -13,9 +13,34 @@ use std::time::Duration;
 use crate::transport::addr::parse_upstream;
 use crate::protocol::rewrite::Rewriter;
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+pub type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+
+/// Tunable parameters for the outbound HTTP/HTTPS connection pool.
+///
+/// Shared by server egress, client egress, and the standalone egress helper.
+/// All fields have defaults preserving the previous hard-coded behaviour.
+#[derive(Debug, Clone)]
+pub struct HttpClientParams {
+    /// Idle-connection TTL before eviction from the pool (seconds). Default: 90.
+    pub pool_idle_timeout_secs: u64,
+    /// Maximum idle connections kept per host. Default: 10.
+    pub pool_max_idle_per_host: usize,
+}
+
+impl Default for HttpClientParams {
+    fn default() -> Self {
+        Self {
+            pool_idle_timeout_secs: 90,
+            pool_max_idle_per_host: 10,
+        }
+    }
+}
 
 pub fn create_https_client() -> HttpsClient {
+    create_https_client_with(&HttpClientParams::default())
+}
+
+pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .unwrap()
@@ -25,8 +50,8 @@ pub fn create_https_client() -> HttpsClient {
         .build();
 
     Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(params.pool_max_idle_per_host)
         .build(https)
 }
 
@@ -77,18 +102,18 @@ pub async fn forward_http(
     let scheme = if parsed.is_https { "https" } else { "http" };
     let uri: Uri = format!("{}://{}{}", scheme, parsed.host, path).parse()?;
 
-    let hyper_method = match method {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "DELETE" => Method::DELETE,
-        "HEAD" => Method::HEAD,
-        "OPTIONS" => Method::OPTIONS,
-        "PATCH" => Method::PATCH,
-        _ => Method::GET,
-    };
+    // Method::from_bytes handles all valid HTTP methods including PROPFIND,
+    // MKCOL, CONNECT, TRACE, and custom extension methods.
+    let hyper_method = Method::from_bytes(method.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid HTTP method: {}", method))?;
 
-    let body_start = parse_result.unwrap();
+    // Return an error instead of panicking when headers don't fit in the 8KB buffer.
+    let body_start = match parse_result {
+        httparse::Status::Complete(n) => n,
+        httparse::Status::Partial => return Err(anyhow::anyhow!(
+            "HTTP request headers exceed {} bytes read buffer", first_chunk.len()
+        )),
+    };
     let remaining_first = &first_chunk[body_start..];
 
     let content_length: usize = hyper_headers
@@ -160,7 +185,9 @@ pub async fn forward_http(
     send.write_all(status_line.as_bytes()).await?;
 
     for (name, value) in response.headers() {
-        let header_line = format!("{}: {}\r\n", name, value.to_str()?);
+        // Use from_utf8_lossy so non-ASCII header values (e.g. some Set-Cookie fields)
+        // are forwarded as-is instead of causing the entire response to be aborted.
+        let header_line = format!("{}: {}\r\n", name, String::from_utf8_lossy(value.as_bytes()));
         send.write_all(header_line.as_bytes()).await?;
     }
     send.write_all(b"\r\n").await?;

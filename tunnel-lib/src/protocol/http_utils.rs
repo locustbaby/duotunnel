@@ -1,4 +1,4 @@
-use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use hyper::header::{self, HeaderMap, HeaderName};
 
 const HOP_BY_HOP_REQUEST: &[&str] = &[
     "connection",

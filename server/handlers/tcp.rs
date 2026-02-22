@@ -20,6 +20,7 @@ pub async fn run_tcp_listener(
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new TCP connection");
 
         let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
@@ -52,7 +53,7 @@ pub async fn run_tcp_listener(
 
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
-    mut stream: TcpStream,
+    stream: TcpStream,
     proxy_name: String,
     group_id: String,
 ) -> Result<()> {
@@ -60,7 +61,7 @@ async fn handle_tcp_connection(
 
     let peer_addr = stream.peer_addr()?;
 
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; state.proxy_buffer_params.peek_buf_size];
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
 
@@ -75,7 +76,7 @@ async fn handle_tcp_connection(
             proxy_name,
             src_addr: peer_addr.ip().to_string(),
             src_port: peer_addr.port(),
-            protocol,
+            protocol: protocol.to_string(),
             host,
         },
         stream,

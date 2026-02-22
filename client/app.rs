@@ -1,48 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use anyhow::{Result, anyhow, Context};
 use async_trait::async_trait;
-use bytes::Bytes;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnectorBuilder;
 use tracing::{debug, info};
-use tunnel_lib::ClientConfig;
+use tunnel_lib::{ClientConfig, HttpClientParams, UpstreamGroup};
 use tunnel_lib::proxy::core::{ProxyApp, Context as ProxyContext, Protocol};
 use tunnel_lib::proxy::peers::UpstreamPeer;
 use tunnel_lib::proxy::http::HttpPeer;
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
-
-/// Upstream group with round-robin load balancing
-struct UpstreamGroup {
-    servers: Vec<String>,
-    counter: AtomicUsize,
-}
-
-impl UpstreamGroup {
-    fn new(servers: Vec<String>) -> Self {
-        Self {
-            servers,
-            counter: AtomicUsize::new(0),
-        }
-    }
-
-    fn next(&self) -> Option<&String> {
-        if self.servers.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.servers.len();
-        self.servers.get(idx)
-    }
-
-    fn first(&self) -> Option<&String> {
-        self.servers.first()
-    }
-}
+pub use tunnel_lib::egress::http::HttpsClient;
 
 pub struct LocalProxyMap {
     upstreams: HashMap<String, UpstreamGroup>,
@@ -51,7 +17,7 @@ pub struct LocalProxyMap {
 }
 
 impl LocalProxyMap {
-    pub fn from_config(config: &ClientConfig) -> Self {
+    pub fn from_config(config: &ClientConfig, http_params: &HttpClientParams) -> Self {
         let mut upstreams = HashMap::new();
         let mut http_rules = HashMap::new();
 
@@ -66,18 +32,7 @@ impl LocalProxyMap {
             http_rules.insert(rule.match_host.clone(), rule.action_upstream.clone());
         }
 
-        let https = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .unwrap()
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build();
-
-        let https_client = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(10)
-            .build(https);
+        let https_client = tunnel_lib::create_https_client_with(http_params);
 
         Self { upstreams, http_rules, https_client }
     }
@@ -117,11 +72,12 @@ impl LocalProxyMap {
 
 pub struct ClientApp {
     map: Arc<LocalProxyMap>,
+    tcp_params: tunnel_lib::TcpParams,
 }
 
 impl ClientApp {
-    pub fn new(map: Arc<LocalProxyMap>) -> Self {
-        Self { map }
+    pub fn new(map: Arc<LocalProxyMap>, tcp_params: tunnel_lib::TcpParams) -> Self {
+        Self { map, tcp_params }
     }
 }
 
@@ -144,6 +100,7 @@ impl ProxyApp for ClientApp {
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
 
+        #[allow(unreachable_patterns)]
         match context.protocol {
 
             Protocol::H1 => {
@@ -173,14 +130,16 @@ impl ProxyApp for ClientApp {
                  };
 
                  if is_https {
-                      Ok(Box::new(tunnel_lib::proxy::tcp::TlsTcpPeer {
+                      Ok(Box::new(tunnel_lib::proxy::tcp::TlsTcpPeer::new_with_params(
                           target_addr,
-                          tls_host: tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
-                          alpn: None,
-                      }))
+                          tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
+                          None,
+                          self.tcp_params.clone(),
+                      )?))
                  } else {
                       Ok(Box::new(tunnel_lib::proxy::tcp::TcpPeer {
                           target_addr,
+                          tcp_params: self.tcp_params.clone(),
                       }))
                  }
             },
@@ -209,6 +168,7 @@ impl ProxyApp for ClientApp {
                         .with_single_cert(certs, key)?;
                      let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
 
+                     #[allow(dead_code)]
                      struct MitmH2Peer {
                          acceptor: tokio_rustls::TlsAcceptor,
                          target_addr: std::net::SocketAddr,
@@ -246,7 +206,7 @@ impl ProxyApp for ClientApp {
                              let target_host = self.tls_host.clone();
                              let client = self.https_client.clone();
 
-                             let service = service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                             let service = service_fn(move |req: Request<hyper::body::Incoming>| {
                                  let target_host = target_host.clone();
                                  let client = client.clone();
                                  async move {
@@ -261,13 +221,13 @@ impl ProxyApp for ClientApp {
                                      
                                      debug!("MITM H2: forwarding request to {} {}", parts.method, parts.uri);
                                      
-                                     let boxed_body = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                                     let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
                                      let upstream_req = Request::from_parts(parts, boxed_body);
                                      
                                      match client.request(upstream_req).await {
                                          Ok(resp) => {
                                              let (parts, body) = resp.into_parts();
-                                             let boxed = body.map_err(|e| std::io::Error::other(e)).boxed_unsync();
+                                             let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                                              Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                                          }
                                          Err(e) => {
@@ -301,6 +261,7 @@ impl ProxyApp for ClientApp {
                      // Always use plain TCPPeer for non-HTTPS upstream
                      Ok(Box::new(tunnel_lib::proxy::tcp::TcpPeer {
                          target_addr,
+                         tcp_params: self.tcp_params.clone(),
                      }))
                  }
             },

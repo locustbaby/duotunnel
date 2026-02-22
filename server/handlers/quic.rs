@@ -8,21 +8,15 @@ use tunnel_lib::{
 };
 
 use crate::{ServerState, tunnel_handler, metrics};
+use crate::config::build_client_config_for_group;
 
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
 
-    let (certs, key) = tunnel_lib::infra::pki::generate_self_signed_cert()?;
-
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?
-    ));
-
+    // Build server config with QUIC transport params from config file.
+    // Falls back to sensible defaults for any unset field.
+    let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
+    let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
 
     info!(addr = %addr, "QUIC server listening");
@@ -94,19 +88,11 @@ async fn handle_quic_connection(
 
     metrics::auth_success(&group_id);
 
-    // Check for duplicate ClientID and handle conflict
-    if let Some(existing_conn) = state.registry.get_client_connection(&login.client_id) {
-        warn!(
-            client_id = %login.client_id,
-            "duplicate client ID detected, closing old connection"
-        );
-        metrics::duplicate_client_closed();
-        existing_conn.close(0u32.into(), b"duplicate client");
-        state.registry.unregister(&login.client_id);
-    }
-
-    let client_config = state.config.to_client_config(&group_id)
-        .unwrap_or_else(|| ClientConfig::default());
+    let client_config = {
+        let routing = state.routing.load();
+        build_client_config_for_group(&routing.tunnel_management, &group_id)
+            .unwrap_or_default()
+    };
 
     let resp = LoginResp {
         success: true,
@@ -121,7 +107,21 @@ async fn handle_quic_connection(
         "client authenticated and registered"
     );
 
-    state.registry.register(login.client_id.clone(), group_id.clone(), conn.clone());
+    // Atomically replace any existing registration for this client_id.
+    // replace_or_register uses DashMap::entry() to eliminate the race window
+    // that would exist with a separate get → unregister → register sequence.
+    if let Some(old_conn) = state.registry.replace_or_register(
+        login.client_id.clone(),
+        group_id.clone(),
+        conn.clone(),
+    ) {
+        warn!(
+            client_id = %login.client_id,
+            "duplicate client ID detected, closing old connection"
+        );
+        metrics::duplicate_client_closed();
+        old_conn.close(0u32.into(), b"duplicate client");
+    }
     metrics::client_registered(&group_id);
 
     loop {
@@ -134,10 +134,9 @@ async fn handle_quic_connection(
                 match result {
                     Ok((send, recv)) => {
                         debug!("accepted reverse stream from client");
-                        let config = Arc::new(state.config.clone());
-                        let egress_map = state.egress_map.clone();
+                        let egress_map = state.routing.load().egress_map.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, config, egress_map).await {
+                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, egress_map).await {
                                 debug!(error = %e, "egress stream error");
                             }
                         });

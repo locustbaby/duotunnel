@@ -2,43 +2,47 @@ use crate::extract_host_from_http;
 
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-pub fn detect_protocol_and_host(data: &[u8]) -> (String, Option<String>) {
+/// Detect the application protocol and optional Host/SNI from the initial bytes.
+///
+/// Returns `(&'static str, Option<String>)` so the protocol label is a zero-cost
+/// static string slice — no heap allocation on the hot path.  Callers that need
+/// to store it in a `String` field call `.to_string()` once at the storage site.
+pub fn detect_protocol_and_host(data: &[u8]) -> (&'static str, Option<String>) {
     if data.len() >= HTTP2_PREFACE.len() && &data[..HTTP2_PREFACE.len()] == HTTP2_PREFACE {
-        return ("h2".to_string(), None);
+        return ("h2", None);
     }
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    
+
     if let Ok(status) = req.parse(data) {
         if status.is_complete() || status.is_partial() {
             let host = extract_host_from_http(data);
-            
+
             for h in req.headers.iter() {
                 if h.name.eq_ignore_ascii_case("Upgrade") {
                     if let Ok(val) = std::str::from_utf8(h.value) {
                         if val.eq_ignore_ascii_case("websocket") {
-                            return ("websocket".to_string(), host);
+                            return ("websocket", host);
                         }
                     }
                 }
             }
-            
-            return ("h1".to_string(), host);
-        }
-    }
-    
-    // 3. Check for TLS ClientHello (SNI)
-    // Content Type: 0x16 (Handshake), Version: 0x030X
-    if data.len() > 5 && data[0] == 0x16 && data[1] == 0x03 {
-        if let Some(sni) = extract_tls_sni(data) {
-             // We return "tcp" because we want transparent TCP forwarding for TLS, 
-             // but we provide the Host so routing works.
-             return ("tcp".to_string(), Some(sni));
+
+            return ("h1", host);
         }
     }
 
-    ("tcp".to_string(), None)
+    // Check for TLS ClientHello (SNI)
+    // Content Type: 0x16 (Handshake), Version: 0x030X
+    if data.len() > 5 && data[0] == 0x16 && data[1] == 0x03 {
+        if let Some(sni) = extract_tls_sni(data) {
+             // Return "tcp" for transparent TLS forwarding; SNI drives routing.
+             return ("tcp", Some(sni));
+        }
+    }
+
+    ("tcp", None)
 }
 
 pub fn extract_tls_sni(data: &[u8]) -> Option<String> {

@@ -1,21 +1,11 @@
 use hyper::HeaderMap;
 
+#[derive(Default)]
 pub struct Rewriter {
     pub host_rewrite: Option<String>,
     pub path_prefix: Option<String>,
     pub header_add: Vec<(String, String)>,
     pub header_remove: Vec<String>,
-}
-
-impl Default for Rewriter {
-    fn default() -> Self {
-        Self {
-            host_rewrite: None,
-            path_prefix: None,
-            header_add: Vec::new(),
-            header_remove: Vec::new(),
-        }
-    }
 }
 
 impl Rewriter {

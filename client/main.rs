@@ -12,6 +12,7 @@ use tunnel_lib::{
 mod config;
 mod proxy;
 mod app;
+mod pool;
 
 mod entry;
 mod utils;
@@ -49,28 +50,61 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
-    // Exponential backoff for reconnection
-    let mut retry_delay = std::time::Duration::from_secs(1);
-    const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
-    const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    // Build the QUIC endpoint once; reuse it across reconnections to avoid
+    // binding a new UDP socket (and potentially leaking fds) on every reconnect.
+    let endpoint = build_quic_endpoint(&config)?;
 
-    loop {
-        match run_client(&config).await {
-            Ok(_) => {
-                info!("Connection closed gracefully, reconnecting immediately...");
-                retry_delay = INITIAL_RETRY_DELAY; // Reset on graceful close
-            }
-            Err(e) => {
-                error!(error = %e, retry_in_secs = %retry_delay.as_secs(), "Connection error, reconnecting...");
-                tokio::time::sleep(retry_delay).await;
-                // Exponential backoff with max cap
-                retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
+    // Shared cancel token — fired by Ctrl+C to shut down all connection slots cleanly.
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("Received Ctrl+C, shutting down...");
+            cancel_clone.cancel();
+        }
+    });
+
+    if config.quic.connections > 1 {
+        // Multi-connection pool: each slot runs its own reconnect loop independently.
+        info!(connections = %config.quic.connections, "using multi-QUIC connection pool");
+        pool::run_pool(&config, &endpoint, cancel).await
+    } else {
+        // Single-connection mode (default): classic exponential backoff reconnect loop.
+        let initial_delay = std::time::Duration::from_millis(config.reconnect.initial_delay_ms);
+        let max_delay = std::time::Duration::from_millis(config.reconnect.max_delay_ms);
+        let mut retry_delay = initial_delay;
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Shutdown signal received, exiting.");
+                    return Ok(());
+                }
+                result = run_client(&config, &endpoint) => {
+                    match result {
+                        Ok(_) => {
+                            info!("Connection closed gracefully, reconnecting immediately...");
+                            retry_delay = initial_delay;
+                        }
+                        Err(e) => {
+                            error!(error = %e, retry_in_ms = %retry_delay.as_millis(), "Connection error, reconnecting...");
+                            tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    info!("Shutdown signal received, exiting.");
+                                    return Ok(());
+                                }
+                                _ = tokio::time::sleep(retry_delay) => {}
+                            }
+                            retry_delay = std::cmp::min(retry_delay * 2, max_delay);
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-async fn run_client(config: &ClientConfigFile) -> Result<()> {
+fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;
     // ALPN must match server's "tunnel-quic"
     crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
@@ -79,23 +113,28 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?
     ));
 
-    // Configure transport settings
-    let max_streams = config.max_concurrent_streams;
-    let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(max_streams.into());
-    transport_config.max_concurrent_uni_streams(max_streams.into());
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(20)));
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    client_config.transport_config(Arc::new(transport_config));
-    debug!(max_streams = %max_streams, "QUIC transport configured");
-    
+    // Build transport config from YAML parameters (falls back to sensible defaults).
+    let quic_params = tunnel_lib::QuicTransportParams::from(&config.quic);
+    let transport_config = tunnel_lib::build_transport_config(&quic_params);
+    client_config.transport_config(transport_config);
+    debug!(
+        max_streams = %quic_params.max_concurrent_streams,
+        keepalive_secs = %quic_params.keepalive_secs,
+        congestion = ?quic_params.congestion,
+        "QUIC transport configured"
+    );
+
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
 
+pub(crate) async fn run_client(config: &ClientConfigFile, endpoint: &quinn::Endpoint) -> Result<()> {
     let server_addr = config.server_address().parse()?;
     info!(server_addr = %server_addr, "Connecting to server...");
     
     let conn = endpoint.connect(server_addr, "localhost")?.await?;
+
     info!("Connected to server");
 
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -126,7 +165,7 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
         "Login successful, config received"
     );
 
-    let proxy_map = Arc::new(LocalProxyMap::from_config(&resp.config));
+    let proxy_map = Arc::new(LocalProxyMap::from_config(&resp.config, &tunnel_lib::HttpClientParams::from(&config.http_pool)));
 
     for proxy in &resp.config.proxies {
         debug!(
@@ -140,14 +179,20 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
     let cancel_token = CancellationToken::new();
 
     // P1: Semaphore for client-side backpressure on incoming streams
+    let max_streams = config.quic.max_concurrent_streams;
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = %max_streams, "Stream backpressure configured");
+
+    let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
     if let Some(entry_port) = config.http_entry_port {
         let conn = conn.clone();
         let token = cancel_token.clone();
+        let max_entry_conns = config.quic.max_concurrent_streams;
+        let entry_tcp_params = tcp_params.clone();
+        let peek_buf_size = config.proxy_buffers.peek_buf_size;
         tokio::spawn(async move {
-            if let Err(e) = entry::start_entry_listener(conn, entry_port, token).await {
+            if let Err(e) = entry::start_entry_listener(conn, entry_port, token, max_entry_conns, entry_tcp_params, peek_buf_size).await {
                 error!(port = entry_port, error = %e, "entry listener failed");
             }
         });
@@ -173,9 +218,10 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
                         };
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
+                        let tcp_params = tcp_params.clone();
                         tokio::spawn(async move {
                             let _permit = permit; // Hold permit until stream completes
-                            if let Err(e) = handle_work_stream(send, recv, proxy_map).await {
+                            if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 debug!(error = %e, "work stream error");
                             }
                         });
@@ -192,7 +238,7 @@ async fn run_client(config: &ClientConfigFile) -> Result<()> {
     // Cancel all reverse proxy listeners before reconnecting
     cancel_token.cancel();
     // Give listeners time to shutdown
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(config.reconnect.grace_ms)).await;
 
     result
 }
