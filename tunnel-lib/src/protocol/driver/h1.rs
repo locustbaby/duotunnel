@@ -178,7 +178,7 @@ impl ProtocolDriver for Http1Driver {
                         Ok(Some((hyper::body::Frame::data(data), (recv, None, read, total))))
                     }
                     Ok(None) => Ok(None),
-                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    Err(e) => Err(std::io::Error::other(e)),
                 }
             },
         );

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use anyhow::Result;
-use figment::{Figment, providers::{Format, Yaml, Env, Serialized}};
+use figment::{Figment, providers::{Format, Yaml, Env}};
 use tunnel_lib::config::{TcpConfig, QuicConfig, HttpPoolConfig, ProxyBufferConfig};
 use tunnel_lib::PkiParams;
 
@@ -180,7 +180,7 @@ impl ServerConfigFile {
     pub fn load(path: &str) -> Result<Self> {
         let resolved = tunnel_lib::resolve_config_path(path)?;
 
-        let config: ServerConfigFile = Figment::from(Serialized::defaults(serde_yaml::Value::Null))
+        let config: ServerConfigFile = Figment::new()
             .merge(Yaml::file(&resolved))
             .merge(
                 Env::prefixed("TUNNEL_SERVER__")

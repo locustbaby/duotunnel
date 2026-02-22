@@ -7,9 +7,9 @@ echo "=== DuoTunnel Bidirectional Test ==="
 echo ""
 
 # Build binaries if needed
-if [ ! -f "../../target/release/server" ] || [ ! -f "../../target/release/client" ]; then
+if [ ! -f "../../../target/release/server" ] || [ ! -f "../../../target/release/client" ]; then
     echo "Building binaries..."
-    cd ../.. && cargo build --release && cd -
+    cd ../../.. && cargo build --release && cd -
     echo "✓ Build completed"
 else
     echo "✓ Binaries found"
@@ -19,7 +19,7 @@ echo ""
 
 # Start tunnel server
 echo "Starting tunnel server..."
-../../target/release/server --config server.yaml > /tmp/tunnel-server.log 2>&1 &
+../../../target/release/server --config server.yaml > /tmp/tunnel-server.log 2>&1 &
 SERVER_PID=$!
 echo "Tunnel server started (PID: $SERVER_PID)"
 
@@ -27,7 +27,7 @@ sleep 2
 
 # Start tunnel client
 echo "Starting tunnel client..."
-../../target/release/client --config client.yaml > /tmp/tunnel-client.log 2>&1 &
+../../../target/release/client --config client.yaml > /tmp/tunnel-client.log 2>&1 &
 CLIENT_PID=$!
 echo "Tunnel client started (PID: $CLIENT_PID)"
 

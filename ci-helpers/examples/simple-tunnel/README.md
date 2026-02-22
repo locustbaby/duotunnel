@@ -21,7 +21,7 @@ Local App → Client:8002 → QUIC Tunnel → Server → echo.free.beeceptor.com
 ### Automated Test
 
 ```bash
-cd examples/simple-tunnel
+cd ci-helpers/examples/simple-tunnel
 bash test.sh
 ```
 
@@ -35,12 +35,12 @@ The script will:
 
 1. **Start the tunnel server**:
    ```bash
-   ./target/release/server --config examples/simple-tunnel/server.yaml
+   ./target/release/server --config ci-helpers/examples/simple-tunnel/server.yaml
    ```
 
 2. **Start the tunnel client** (in another terminal):
    ```bash
-   ./target/release/client --config examples/simple-tunnel/client.yaml
+   ./target/release/client --config ci-helpers/examples/simple-tunnel/client.yaml
    ```
 
 3. **Test ingress** (server → client):

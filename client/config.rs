@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use anyhow::Result;
-use figment::{Figment, providers::{Format, Yaml, Env, Serialized}};
+use figment::{Figment, providers::{Format, Yaml, Env}};
 use tunnel_lib::config::{TcpConfig, HttpPoolConfig, ProxyBufferConfig};
 use tunnel_lib::transport::quic::QuicTransportParams;
 
@@ -148,7 +148,7 @@ impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {
         let resolved = tunnel_lib::resolve_config_path(path)?;
 
-        let config: ClientConfigFile = Figment::from(Serialized::defaults(serde_yaml::Value::Null))
+        let config: ClientConfigFile = Figment::new()
             .merge(Yaml::file(&resolved))
             .merge(
                 Env::prefixed("TUNNEL_CLIENT__")

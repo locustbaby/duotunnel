@@ -139,14 +139,14 @@ jobs:
       # ─── Start tunnel ─────────────────────────────────────────────────────────
       - name: Start tunnel server
         run: |
-          ./target/release/server --config ci/server.yaml \
+          ./target/release/server --config ci-helpers/server.yaml \
             > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
           sleep 2
 
       - name: Start tunnel client and wait for login
         run: |
-          ./target/release/client --config ci/client.yaml \
+          ./target/release/client --config ci-helpers/client.yaml \
             > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 30); do
