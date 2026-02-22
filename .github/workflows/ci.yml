@@ -332,6 +332,11 @@ jobs:
         run: |
           ./target/release/ci-test-client grpc "grpc.local:8080" --service ""
 
+      - name: "[gRPC] EchoService/Echo — ingress (grpc.local:8080 → grpc-echo-server)"
+        run: |
+          ./target/release/ci-test-client grpc-echo "grpc.local:8080" \
+            --ping "ci-local-echo-test"
+
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 6 — Bidirectional concurrent (local backends)
       # ═══════════════════════════════════════════════════════════════════════════

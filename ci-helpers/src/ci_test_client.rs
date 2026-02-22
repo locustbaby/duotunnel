@@ -313,10 +313,13 @@ async fn run_grpc(addr: &str, args: &[String]) -> Result<String, String> {
 
 // ─── gRPC Echo (grpc_echo.v1.EchoService/Echo) ───────────────────────────────
 //
-// Sends a ping message and expects a response.
-// Supports TLS (--tls) and certificate skip-verify (--insecure).
-// The EchoRequest has a "ping" field (tag 1, string).
-// The EchoResponse has a "pong" or "message" field (tag 1, string).
+// Sends a ping message and validates the response body echoes it back.
+// Supports TLS (--tls).
+//
+// EchoRequest  { ping: string (tag 1) }
+// EchoResponse { headers: map<string,string> (tag 1), body: string (tag 2), remote_addr: string (tag 3) }
+//
+// Validates that the response body field contains the sent ping text.
 
 #[derive(Clone, prost::Message)]
 struct EchoRequest {
@@ -326,8 +329,12 @@ struct EchoRequest {
 
 #[derive(Clone, prost::Message)]
 struct EchoResponse {
-    #[prost(string, tag = "1")]
-    pub pong: String,
+    #[prost(map = "string, string", tag = "1")]
+    pub headers: std::collections::HashMap<String, String>,
+    #[prost(string, tag = "2")]
+    pub body: String,
+    #[prost(string, tag = "3")]
+    pub remote_addr: String,
 }
 
 async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
@@ -392,5 +399,20 @@ async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
     .map_err(|e| format!("gRPC Echo error: status={} message={}", e.code(), e.message()))?;
 
     let echo_resp = resp.into_inner();
-    Ok(format!("EchoService/Echo ping={:?} → pong={:?}", ping_text, echo_resp.pong))
+
+    // Validate: the echoed body must contain the ping text we sent.
+    if !echo_resp.body.contains(&ping_text) {
+        return Err(format!(
+            "EchoService/Echo body mismatch: sent {:?}, got body={:?}",
+            ping_text, echo_resp.body
+        ));
+    }
+
+    Ok(format!(
+        "EchoService/Echo ping={:?} → body={:?} headers={} remote={}",
+        ping_text,
+        echo_resp.body,
+        echo_resp.headers.len(),
+        echo_resp.remote_addr,
+    ))
 }
