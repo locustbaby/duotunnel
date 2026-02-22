@@ -59,23 +59,23 @@ jobs:
   #   echo.local / ws.local / grpc.local → tunnel-server entry_port :8080
   #
   # Tunnel topology:
-  #   curl/wscat/grpcurl
+  #   ci-test-client
   #     │ ingress → echo.local:8080 (server entry_port) ──QUIC:10086──→ client
   #     │                                                                   │ egress
   #     │ egress  → 127.0.0.1:8081 (client http_entry_port)                │
   #     └─────────────────────────────────────────────────────────────────────→ backends
   #
-  # Test cases (mirrors verify_proxy.sh + extended):
-  #   HTTP/1.1 GET           — ingress + egress
-  #   HTTP/1.1 POST body     — ingress + egress
-  #   Custom header forward  — ingress
-  #   Connection-reuse timing (3 sequential GETs, print latencies)
-  #   Stability (10 requests, >= 8 must succeed)
-  #   HTTP/2 (h2c upgrade)   — ingress + egress
-  #   WebSocket echo          — ingress (local + external)
-  #   gRPC Health/Check       — ingress (local + external)
-  #   gRPC server reflection  — ingress local
-  #   Bidirectional concurrent (5+5 parallel requests)
+  # Test order (external first, local second):
+  #   SECTION 1 — External backends (continue-on-error)
+  #     gRPC EchoService/Echo  — tunnel → grpc-echo.semior.dev:443
+  #     gRPC EchoService/Echo  — direct connection (validates endpoint)
+  #     HTTP GET/POST          — tunnel → beeceptor (429 accepted)
+  #     WebSocket echo         — tunnel → echo.websocket.org
+  #   SECTION 2 — HTTP/1.1 local (ingress + egress)
+  #   SECTION 3 — HTTP/2 h2c upgrade (ingress + egress)
+  #   SECTION 4 — WebSocket local
+  #   SECTION 5 — gRPC Health local
+  #   SECTION 6 — Bidirectional concurrent
   # ─────────────────────────────────────────────────────────────────────────────
   integration-test:
     name: Integration Test (all protocols)
@@ -162,7 +162,73 @@ jobs:
           echo "Client connected and logged in"
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 1 — HTTP/1.1 (local http-echo-server)
+      #  SECTION 1 — External backends (continue-on-error: real internet services)
+      #              Tested FIRST to validate basic tunnel connectivity quickly.
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[Ext-gRPC] Echo/Ping — grpc.ext.test:8080 → grpc-echo.semior.dev:443"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client grpc "grpc.ext.test:8080" --service ""
+
+      - name: "[Ext-gRPC/Echo] EchoService/Echo — direct to grpc-echo.semior.dev:443"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client grpc-echo "grpc-echo.semior.dev:443" \
+            --tls --ping "ci-tunnel-ping"
+
+      - name: "[Ext-HTTP] GET ingress — echo.beeceptor.test → beeceptor"
+        continue-on-error: true
+        run: |
+          # 429 (rate limit) is expected and acceptable from beeceptor
+          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+            --allow-status 429
+
+      - name: "[Ext-HTTP] POST body ingress — echo.beeceptor.test → beeceptor"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+            --method POST \
+            --body '{"ci":"ext-post-test"}' \
+            --allow-status 429
+
+      - name: "[Ext-HTTP] GET egress — client:8081 → server → beeceptor"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --header "Host: echo.free.beeceptor.com" \
+            --allow-status 429
+
+      - name: "[Ext-WS] Echo ingress — ws.ext.test → echo.websocket.org"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client ws "ws://ws.ext.test:8080" --message "ext-ws-hello"
+
+      - name: "[Ext-Bidir] 3 concurrent ingress + 3 concurrent egress"
+        continue-on-error: true
+        run: |
+          for i in $(seq 1 3); do
+            (./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
+               --allow-status 429 \
+               > /tmp/ext-bidir-in-$i.txt 2>&1 && echo "in-$i:OK" || echo "in-$i:FAIL") &
+            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+               --header "Host: echo.free.beeceptor.com" \
+               --allow-status 429 \
+               > /tmp/ext-bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" || echo "eg-$i:FAIL") &
+          done
+          wait
+          FAIL=0
+          for i in $(seq 1 3); do
+            R_IN=$(tail -1 /tmp/ext-bidir-in-$i.txt); R_EG=$(tail -1 /tmp/ext-bidir-eg-$i.txt)
+            echo "  $R_IN  |  $R_EG"
+            echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+            echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+          done
+          if [ "$FAIL" -gt 2 ]; then echo "FAIL: $FAIL/6"; exit 1; fi
+          echo "PASS: $((6-FAIL))/6"
+
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 2 — HTTP/1.1 (local http-echo-server)
       # ═══════════════════════════════════════════════════════════════════════════
 
       - name: "[HTTP] 1.1 GET request — ingress (echo.local:8080)"
@@ -198,10 +264,10 @@ jobs:
           OK=0
           for i in $(seq 1 10); do
             if ./target/release/ci-test-client http "http://echo.local:8080/" > /dev/null 2>&1; then
-              printf "  ✅(%s)" "$i"
+              printf "  OK(%s)" "$i"
               OK=$((OK+1))
             else
-              printf "  ❌(%s)" "$i"
+              printf "  FAIL(%s)" "$i"
             fi
           done
           echo ""
@@ -226,7 +292,8 @@ jobs:
             --expect-body "egress-post-456"
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 2 — HTTP/2
+      #  SECTION 3 — HTTP/2 (h2c upgrade via HTTP/1.1 Upgrade header)
+      #              Uses byte-level forwarding path (same as curl --http2).
       # ═══════════════════════════════════════════════════════════════════════════
 
       - name: "[HTTP2] h2c upgrade via entry port — ingress"
@@ -246,7 +313,7 @@ jobs:
             --header "Host: echo.local"
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 3 — WebSocket
+      #  SECTION 4 — WebSocket
       # ═══════════════════════════════════════════════════════════════════════════
 
       - name: "[WS] Echo test — ingress (ws.local:8080 → ws-echo-server)"
@@ -258,7 +325,7 @@ jobs:
           ./target/release/ci-test-client ws "ws://ws.local:8080" --message "ci-msg-two"
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 4 — gRPC (via H2 proxy path)
+      #  SECTION 5 — gRPC (via H2 proxy path)
       # ═══════════════════════════════════════════════════════════════════════════
 
       - name: "[gRPC] Health/Check (service='') — ingress (grpc.local:8080)"
@@ -266,7 +333,7 @@ jobs:
           ./target/release/ci-test-client grpc "grpc.local:8080" --service ""
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 5 — Bidirectional concurrent (local backends)
+      #  SECTION 6 — Bidirectional concurrent (local backends)
       # ═══════════════════════════════════════════════════════════════════════════
 
       - name: "[Bidir] 5 concurrent ingress + 5 concurrent egress (HTTP/1.1)"
@@ -310,65 +377,6 @@ jobs:
             exit 1
           }
           echo "PASS"
-
-      # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 6 — External backends (continue-on-error: flaky internet services)
-      # ═══════════════════════════════════════════════════════════════════════════
-
-      - name: "[Ext-HTTP] GET ingress — echo.beeceptor.test → beeceptor"
-        continue-on-error: true
-        run: |
-          # 429 (rate limit) is expected and acceptable from beeceptor
-          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
-            --allow-status 429
-
-      - name: "[Ext-HTTP] POST body ingress — echo.beeceptor.test → beeceptor"
-        continue-on-error: true
-        run: |
-          ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
-            --method POST \
-            --body '{"ci":"ext-post-test"}' \
-            --allow-status 429
-
-      - name: "[Ext-HTTP] GET egress — client:8081 → server → beeceptor"
-        continue-on-error: true
-        run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
-            --header "Host: echo.free.beeceptor.com" \
-            --allow-status 429
-
-      - name: "[Ext-WS] Echo ingress — ws.ext.test → echo.websocket.org"
-        continue-on-error: true
-        run: |
-          ./target/release/ci-test-client ws "ws://ws.ext.test:8080" --message "ext-ws-hello"
-
-      - name: "[Ext-gRPC] Health/Check ingress — grpc.ext.test → semior.dev"
-        continue-on-error: true
-        run: |
-          ./target/release/ci-test-client grpc "grpc.ext.test:8080" --service ""
-
-      - name: "[Ext-Bidir] 3 concurrent ingress + 3 concurrent egress"
-        continue-on-error: true
-        run: |
-          for i in $(seq 1 3); do
-            (./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
-               --allow-status 429 \
-               > /tmp/ext-bidir-in-$i.txt 2>&1 && echo "in-$i:OK" || echo "in-$i:FAIL") &
-            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
-               --header "Host: echo.free.beeceptor.com" \
-               --allow-status 429 \
-               > /tmp/ext-bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" || echo "eg-$i:FAIL") &
-          done
-          wait
-          FAIL=0
-          for i in $(seq 1 3); do
-            R_IN=$(tail -1 /tmp/ext-bidir-in-$i.txt); R_EG=$(tail -1 /tmp/ext-bidir-eg-$i.txt)
-            echo "  $R_IN  |  $R_EG"
-            echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
-            echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
-          done
-          if [ "$FAIL" -gt 2 ]; then echo "FAIL: $FAIL/6"; exit 1; fi
-          echo "PASS: $((6-FAIL))/6"
 
       # ─── Diagnostics ─────────────────────────────────────────────────────────
       - name: Upload logs on failure
