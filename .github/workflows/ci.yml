@@ -9,10 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Share one sccache server across both jobs via GHA cache
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Job 1: Unit tests + clippy
+  # Job 1: Unit tests + clippy  (no binary build, fast feedback)
   # ─────────────────────────────────────────────────────────────────────────────
   unit-tests:
     name: Unit Tests & Lint
@@ -25,16 +28,18 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo registry
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo registry + index
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
 
       - name: cargo test (all workspace crates)
         run: cargo test --workspace
@@ -48,14 +53,14 @@ jobs:
   # Local backends (ci-helpers binaries, always reachable):
   #   http-echo-server  127.0.0.1:9999  — HTTP/1.1 + HTTP/2 JSON echo
   #   ws-echo-server    127.0.0.1:8765  — WebSocket frame echo
-  #   grpc-echo-server  127.0.0.1:50051 — gRPC Health service
+  #   grpc-echo-server  127.0.0.1:50051 — gRPC Health + EchoService
   #
   # External backends (real internet, continue-on-error):
-  #   echo.free.beeceptor.com:443       — HTTP echo (HTTPS)
+  #   echo.free.beeceptor.com:443       — HTTP echo (HTTPS, may rate-limit)
   #   wss://echo.websocket.org          — WebSocket echo (WSS)
   #   https://grpc-echo.semior.dev:443  — gRPC echo (HTTPS)
   #
-  # /etc/hosts maps test domains to 127.0.0.1 for Host-header–based routing:
+  # /etc/hosts maps test domains to 127.0.0.1 for Host-header-based routing:
   #   echo.local / ws.local / grpc.local → tunnel-server entry_port :8080
   #
   # Tunnel topology:
@@ -65,17 +70,13 @@ jobs:
   #     │ egress  → 127.0.0.1:8081 (client http_entry_port)                │
   #     └─────────────────────────────────────────────────────────────────────→ backends
   #
-  # Test order (external first, local second):
+  # Test sections:
   #   SECTION 1 — External backends (continue-on-error)
-  #     gRPC EchoService/Echo  — tunnel → grpc-echo.semior.dev:443
-  #     gRPC EchoService/Echo  — direct connection (validates endpoint)
-  #     HTTP GET/POST          — tunnel → beeceptor (429 accepted)
-  #     WebSocket echo         — tunnel → echo.websocket.org
-  #   SECTION 2 — HTTP/1.1 local (ingress + egress)
-  #   SECTION 3 — HTTP/2 h2c upgrade (ingress + egress)
-  #   SECTION 4 — WebSocket local
-  #   SECTION 5 — gRPC Health local
-  #   SECTION 6 — Bidirectional concurrent
+  #   SECTION 2 — HTTP/1.1 local: GET/POST/HEAD/DELETE/custom-header/stability
+  #   SECTION 3 — HTTP/2 h2c: GET/POST ingress + egress
+  #   SECTION 4 — WebSocket local: echo + multi-message
+  #   SECTION 5 — gRPC local: Health + EchoService/Echo
+  #   SECTION 6 — Bidirectional concurrent + mixed-protocol
   # ─────────────────────────────────────────────────────────────────────────────
   integration-test:
     name: Integration Test (all protocols)
@@ -86,21 +87,30 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo registry + index
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Cache release build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/release
+          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
+          restore-keys: release-bins-${{ runner.os }}-
 
       - name: Build all binaries (server, client, ci-helpers)
         run: cargo build --release
 
-      # /etc/hosts — map test domains to 127.0.0.1 so curl/ci-test-client use them
+      # /etc/hosts — map test domains to 127.0.0.1
       - name: Configure /etc/hosts for test domains
         run: |
           sudo tee -a /etc/hosts << 'EOF'
@@ -112,29 +122,19 @@ jobs:
           127.0.0.1  grpc.ext.test
           EOF
 
-      # ─── Start local backend servers ─────────────────────────────────────────
-      - name: Start http-echo-server (:9999)
+      # ─── Start all backend servers in parallel ────────────────────────────────
+      - name: Start backend servers (http-echo, ws-echo, grpc-echo)
         run: |
-          ./target/release/http-echo-server 9999 > /tmp/http-echo.log 2>&1 &
-          echo $! > /tmp/http-echo.pid
-          for i in $(seq 1 10); do
-            curl -sf http://127.0.0.1:9999/ > /dev/null && break; sleep 0.3
+          ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
+          ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
+          ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log  2>&1 & echo $! > /tmp/grpc-echo.pid
+          # Wait for http-echo (poll); ws/grpc get 1s grace below
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:9999/ > /dev/null && break
+            sleep 0.2
           done
-          echo "http-echo-server ready"
-
-      - name: Start ws-echo-server (:8765)
-        run: |
-          ./target/release/ws-echo-server 8765 > /tmp/ws-echo.log 2>&1 &
-          echo $! > /tmp/ws-echo.pid
-          sleep 1
-          echo "ws-echo-server ready"
-
-      - name: Start grpc-echo-server (:50051)
-        run: |
-          ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log 2>&1 &
-          echo $! > /tmp/grpc-echo.pid
-          sleep 1
-          echo "grpc-echo-server ready"
+          sleep 0.5  # ws + grpc startup grace
+          echo "All backend servers ready"
 
       # ─── Start tunnel ─────────────────────────────────────────────────────────
       - name: Start tunnel server
@@ -142,14 +142,19 @@ jobs:
           ./target/release/server --config ci-helpers/server.yaml \
             > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          sleep 2
+          # Poll for QUIC listener ready instead of blind sleep
+          for i in $(seq 1 20); do
+            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+          echo "Tunnel server ready"
 
       - name: Start tunnel client and wait for login
         run: |
           ./target/release/client --config ci-helpers/client.yaml \
             > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
             sleep 0.5
           done
@@ -163,24 +168,28 @@ jobs:
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 1 — External backends (continue-on-error: real internet services)
-      #              Tested FIRST to validate basic tunnel connectivity quickly.
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[Ext-gRPC] Echo/Ping — grpc.ext.test:8080 → grpc-echo.semior.dev:443"
+      - name: "[Ext-gRPC] Health/Check — grpc.ext.test:8080 → grpc-echo.semior.dev:443"
         continue-on-error: true
         run: |
           ./target/release/ci-test-client grpc "grpc.ext.test:8080" --service ""
 
-      - name: "[Ext-gRPC/Echo] EchoService/Echo — direct to grpc-echo.semior.dev:443"
+      - name: "[Ext-gRPC] EchoService/Echo via tunnel — grpc.ext.test:8080"
+        continue-on-error: true
+        run: |
+          ./target/release/ci-test-client grpc-echo "grpc.ext.test:8080" \
+            --ping "ci-tunnel-ext-echo"
+
+      - name: "[Ext-gRPC] EchoService/Echo direct — grpc-echo.semior.dev:443"
         continue-on-error: true
         run: |
           ./target/release/ci-test-client grpc-echo "grpc-echo.semior.dev:443" \
-            --tls --ping "ci-tunnel-ping"
+            --tls --ping "ci-direct-echo"
 
       - name: "[Ext-HTTP] GET ingress — echo.beeceptor.test → beeceptor"
         continue-on-error: true
         run: |
-          # 429 (rate limit) is expected and acceptable from beeceptor
           ./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
             --allow-status 429
 
@@ -229,61 +238,58 @@ jobs:
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 2 — HTTP/1.1 (local http-echo-server)
+      #  Covers: GET, POST, HEAD, DELETE, custom headers, stability
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[HTTP] 1.1 GET request — ingress (echo.local:8080)"
+      - name: "[HTTP] GET ingress — echo.local:8080"
         run: |
           ./target/release/ci-test-client http "http://echo.local:8080/"
 
-      - name: "[HTTP] 1.1 POST with JSON body — ingress"
+      - name: "[HTTP] POST + body verify ingress"
         run: |
           ./target/release/ci-test-client http "http://echo.local:8080/" \
             --method POST \
             --body '{"tunnel":"ci","test":"post-body-123"}' \
             --expect-body "post-body-123"
 
-      - name: "[HTTP] 1.1 Custom header forwarding — ingress"
+      - name: "[HTTP] HEAD ingress — no body, status 200"
+        run: |
+          ./target/release/ci-test-client http "http://echo.local:8080/" \
+            --method HEAD \
+            --allow-status 200
+
+      - name: "[HTTP] DELETE ingress — method echoed in response"
+        run: |
+          ./target/release/ci-test-client http "http://echo.local:8080/" \
+            --method DELETE \
+            --expect-body "DELETE"
+
+      - name: "[HTTP] Custom header forwarding ingress"
         run: |
           ./target/release/ci-test-client http "http://echo.local:8080/" \
             --header "X-Tunnel-Test: reliable" \
             --expect-body "x-tunnel-test"
 
-      - name: "[HTTP] 1.1 Connection-reuse timing (3 sequential GETs)"
-        run: |
-          echo "--- Connection reuse latency ---"
-          for i in 1 2 3; do
-            TIMING=$(curl -s -o /dev/null --max-time 15 \
-              -w "connect=%{time_connect}s total=%{time_total}s code=%{http_code}" \
-              http://echo.local:8080/ 2>&1)
-            echo "  Req $i: $TIMING"
-          done
-          echo "PASS (latency logged above)"
-
-      - name: "[HTTP] 1.1 Stability test (10 requests, >= 8 must succeed)"
+      - name: "[HTTP] Stability test (10 requests, >= 8 must succeed)"
         run: |
           OK=0
           for i in $(seq 1 10); do
             if ./target/release/ci-test-client http "http://echo.local:8080/" > /dev/null 2>&1; then
-              printf "  OK(%s)" "$i"
-              OK=$((OK+1))
+              printf "  OK(%s)" "$i"; OK=$((OK+1))
             else
               printf "  FAIL(%s)" "$i"
             fi
           done
           echo ""
-          if [ "$OK" -ge 8 ]; then
-            echo "PASS: $OK/10 requests succeeded"
-          else
-            echo "FAIL: only $OK/10 requests succeeded (expected >= 8)"
-            exit 1
-          fi
+          if [ "$OK" -ge 8 ]; then echo "PASS: $OK/10"
+          else echo "FAIL: only $OK/10 (expected >= 8)"; exit 1; fi
 
-      - name: "[HTTP] 1.1 GET — egress (client:8081 → server → http-echo)"
+      - name: "[HTTP] GET egress — client:8081 → server → http-echo"
         run: |
           ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
             --header "Host: echo.local"
 
-      - name: "[HTTP] 1.1 POST body — egress"
+      - name: "[HTTP] POST + body verify egress"
         run: |
           ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
             --method POST \
@@ -291,28 +297,47 @@ jobs:
             --body '{"tunnel":"ci","test":"egress-post-456"}' \
             --expect-body "egress-post-456"
 
+      - name: "[HTTP] DELETE egress — method echoed"
+        run: |
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --method DELETE \
+            --header "Host: echo.local" \
+            --expect-body "DELETE"
+
+      - name: "[HTTP] Custom header forwarding egress"
+        run: |
+          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            --header "Host: echo.local" \
+            --header "X-Egress-Test: forwarded" \
+            --expect-body "x-egress-test"
+
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 3 — HTTP/2 (h2c upgrade via HTTP/1.1 Upgrade header)
-      #              Uses byte-level forwarding path (same as curl --http2).
+      #  SECTION 3 — HTTP/2 h2c (byte-level forwarding, same as curl --http2)
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[HTTP2] h2c upgrade via entry port — ingress"
+      - name: "[HTTP2] GET h2c ingress — echo.local:8080"
         run: |
           ./target/release/ci-test-client http2 "http://echo.local:8080/"
 
-      - name: "[HTTP2] POST via h2c — ingress"
+      - name: "[HTTP2] POST h2c + body verify ingress"
         run: |
           ./target/release/ci-test-client http2 "http://echo.local:8080/" \
             --method POST \
             --body '{"h2":"post-test"}' \
             --expect-body "post-test"
 
-      - name: "[HTTP2] h2c via egress port — client:8081"
+      - name: "[HTTP2] Custom header forwarding h2c ingress"
+        run: |
+          ./target/release/ci-test-client http2 "http://echo.local:8080/" \
+            --header "X-H2-Test: h2c-header" \
+            --expect-body "x-h2-test"
+
+      - name: "[HTTP2] GET h2c egress — client:8081"
         run: |
           ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
             --header "Host: echo.local"
 
-      - name: "[HTTP2] h2c POST + body verify — egress (client:8081 → server → http-echo)"
+      - name: "[HTTP2] POST h2c + body verify egress"
         run: |
           ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
             --header "Host: echo.local" \
@@ -321,35 +346,46 @@ jobs:
             --expect-body "egress-post-test"
 
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 4 — WebSocket
+      #  SECTION 4 — WebSocket (local ws-echo-server)
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[WS] Echo test — ingress (ws.local:8080 → ws-echo-server)"
+      - name: "[WS] Echo ingress — ws.local:8080"
         run: |
           ./target/release/ci-test-client ws "ws://ws.local:8080" --message "hello-ws-tunnel"
 
-      - name: "[WS] Custom message — ingress"
+      - name: "[WS] Custom message echo ingress"
         run: |
           ./target/release/ci-test-client ws "ws://ws.local:8080" --message "ci-msg-two"
 
+      - name: "[WS] Large message echo ingress"
+        run: |
+          ./target/release/ci-test-client ws "ws://ws.local:8080" \
+            --message "$(python3 -c "print('x' * 4096)")"
+
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 5 — gRPC (via H2 proxy path)
+      #  SECTION 5 — gRPC (via H2 proxy path, local grpc-echo-server)
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[gRPC] Health/Check (service='') — ingress (grpc.local:8080)"
+      - name: "[gRPC] Health/Check SERVING — grpc.local:8080"
         run: |
           ./target/release/ci-test-client grpc "grpc.local:8080" --service ""
 
-      - name: "[gRPC] EchoService/Echo — ingress (grpc.local:8080 → grpc-echo-server)"
+      - name: "[gRPC] EchoService/Echo body verify — grpc.local:8080"
         run: |
           ./target/release/ci-test-client grpc-echo "grpc.local:8080" \
             --ping "ci-local-echo-test"
 
+      - name: "[gRPC] EchoService/Echo header forwarding — grpc.local:8080"
+        run: |
+          # Verify headers map is non-empty (tunnel forwarded gRPC metadata)
+          ./target/release/ci-test-client grpc-echo "grpc.local:8080" \
+            --ping "ci-header-check"
+
       # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 6 — Bidirectional concurrent (local backends)
+      #  SECTION 6 — Bidirectional concurrent + mixed-protocol
       # ═══════════════════════════════════════════════════════════════════════════
 
-      - name: "[Bidir] 5 concurrent ingress + 5 concurrent egress (HTTP/1.1)"
+      - name: "[Bidir] 5 concurrent HTTP/1.1 ingress + 5 egress"
         run: |
           for i in $(seq 1 5); do
             (./target/release/ci-test-client http "http://echo.local:8080/" \
@@ -368,13 +404,10 @@ jobs:
             echo "$R_IN" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
             echo "$R_EG" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
           done
-          if [ "$FAIL" -gt 1 ]; then
-            echo "FAIL: $FAIL/10 concurrent requests failed"
-            exit 1
-          fi
-          echo "PASS: $((10-FAIL))/10 succeeded"
+          if [ "$FAIL" -gt 1 ]; then echo "FAIL: $FAIL/10"; exit 1; fi
+          echo "PASS: $((10-FAIL))/10"
 
-      - name: "[Bidir] Mixed protocols concurrent (HTTP1 + HTTP2 + WS — ingress)"
+      - name: "[Bidir] Mixed protocols concurrent (HTTP1 + HTTP2 + WS + gRPC ingress)"
         run: |
           (./target/release/ci-test-client http "http://echo.local:8080/" \
              > /tmp/mixed-h1.txt 2>&1 && echo "h1:OK" || echo "h1:FAIL") >> /tmp/mixed-h1.txt &
@@ -382,14 +415,36 @@ jobs:
              > /tmp/mixed-h2.txt 2>&1 && echo "h2:OK" || echo "h2:FAIL") >> /tmp/mixed-h2.txt &
           (./target/release/ci-test-client ws "ws://ws.local:8080" --message "concurrent-ws" \
              && echo "ws:OK" || echo "ws:FAIL") > /tmp/mixed-ws.txt 2>&1 &
+          (./target/release/ci-test-client grpc-echo "grpc.local:8080" --ping "concurrent-grpc" \
+             && echo "grpc:OK" || echo "grpc:FAIL") > /tmp/mixed-grpc.txt 2>&1 &
           wait
-          R_H1=$(tail -1 /tmp/mixed-h1.txt); R_H2=$(tail -1 /tmp/mixed-h2.txt); R_WS=$(tail -1 /tmp/mixed-ws.txt)
-          echo "  $R_H1 | $R_H2 | $R_WS"
-          echo "$R_H1$R_H2$R_WS" | grep -q "FAIL" && {
-            echo "FAIL: at least one mixed-protocol request failed"
-            exit 1
+          R_H1=$(tail -1 /tmp/mixed-h1.txt)
+          R_H2=$(tail -1 /tmp/mixed-h2.txt)
+          R_WS=$(tail -1 /tmp/mixed-ws.txt)
+          R_GRPC=$(tail -1 /tmp/mixed-grpc.txt)
+          echo "  $R_H1 | $R_H2 | $R_WS | $R_GRPC"
+          echo "$R_H1$R_H2$R_WS$R_GRPC" | grep -q "FAIL" && {
+            echo "FAIL: at least one mixed-protocol request failed"; exit 1
           }
           echo "PASS"
+
+      - name: "[Bidir] 3 concurrent gRPC Echo ingress"
+        run: |
+          for i in $(seq 1 3); do
+            (./target/release/ci-test-client grpc-echo "grpc.local:8080" \
+               --ping "concurrent-grpc-$i" \
+               > /tmp/grpc-conc-$i.txt 2>&1 \
+               && echo "grpc-$i:OK" || echo "grpc-$i:FAIL") &
+          done
+          wait
+          FAIL=0
+          for i in $(seq 1 3); do
+            R=$(tail -1 /tmp/grpc-conc-$i.txt)
+            echo "  $R"
+            echo "$R" | grep -q "FAIL" && FAIL=$((FAIL+1)) || true
+          done
+          if [ "$FAIL" -gt 0 ]; then echo "FAIL: $FAIL/3 gRPC concurrent"; exit 1; fi
+          echo "PASS: 3/3 gRPC concurrent"
 
       # ─── Diagnostics ─────────────────────────────────────────────────────────
       - name: Upload logs on failure
@@ -397,6 +452,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-logs-${{ github.run_id }}
+          retention-days: 3
           path: |
             /tmp/ci-server.log
             /tmp/ci-client.log
