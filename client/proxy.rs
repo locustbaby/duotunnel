@@ -48,6 +48,12 @@ pub async fn handle_work_stream(
                 let normalized_addr = upstream_addr
                     .replace("wss://", "https://")
                     .replace("ws://", "http://");
+                // Ensure the address has a scheme; bare "host:port" must become "http://host:port"
+                let normalized_addr = if normalized_addr.contains("://") {
+                    normalized_addr
+                } else {
+                    format!("http://{}", normalized_addr)
+                };
                 let upstream_uri: hyper::Uri = match normalized_addr.parse() {
                     Ok(uri) => uri,
                     Err(e) => {
