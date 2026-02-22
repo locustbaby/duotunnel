@@ -53,6 +53,10 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
     let watch_dir = std::path::Path::new(&config_path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
+    if !watch_dir.exists() {
+        warn!(path = %config_path, dir = %watch_dir.display(), "hot-reload disabled: config directory not found");
+        return Ok(());
+    }
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
     info!(path = %config_path, "hot-reload watcher started");
 
