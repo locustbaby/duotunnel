@@ -32,3 +32,4 @@ hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", 
 http-body-util = "0.1"
 serde_json = "1"
 bytes = "1"
+rustls = { version = "0.23", features = ["ring"] }
