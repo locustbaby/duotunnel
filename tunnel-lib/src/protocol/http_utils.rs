@@ -8,20 +8,15 @@ const HOP_BY_HOP_REQUEST: &[&str] = &[
     "proxy-authorization",
     "transfer-encoding",
     "upgrade",
-    // "te", // Handled manually to allow "trailers"
     "trailer",
     "host",
 ];
 
-const HOP_BY_HOP_RESPONSE: &[&str] = &[
-    "transfer-encoding",
-    "content-length",
-];
+const HOP_BY_HOP_RESPONSE: &[&str] = &["transfer-encoding", "content-length"];
 
 pub fn sanitize_request_headers(headers: &mut HeaderMap) {
-    // 1. Remove headers listed in Connection header (RFC 7230 Section 6.1)
     let mut headers_to_remove = Vec::new();
-    
+
     if let Some(connection) = headers.get(header::CONNECTION) {
         if let Ok(conn_str) = connection.to_str() {
             for header_name in conn_str.split(',') {
@@ -34,26 +29,24 @@ pub fn sanitize_request_headers(headers: &mut HeaderMap) {
             }
         }
     }
-    
+
     for name in headers_to_remove {
         headers.remove(name);
     }
 
-    // 2. Remove standard hop-by-hop headers
     for name in HOP_BY_HOP_REQUEST {
         if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
             headers.remove(&header_name);
         }
     }
 
-    // 3. Special handling for TE header: only "trailers" is allowed in HTTP/2 (RFC 7540 Section 8.1.2.2)
     if let Some(te) = headers.get(header::TE) {
         let is_trailers = if let Ok(te_str) = te.to_str() {
             te_str.eq_ignore_ascii_case("trailers")
         } else {
             false
         };
-        
+
         if !is_trailers {
             headers.remove(header::TE);
         }

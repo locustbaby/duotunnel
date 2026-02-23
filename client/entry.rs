@@ -1,12 +1,14 @@
 use anyhow::Result;
+use bytes::Bytes;
 use quinn::Connection;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, debug};
-use tunnel_lib::{send_routing_info, RoutingInfo, relay_quic_to_tcp, detect_protocol_and_host, TcpParams};
-use bytes::Bytes;
+use tracing::{debug, info, warn};
+use tunnel_lib::{
+    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, RoutingInfo, TcpParams,
+};
 
 pub async fn start_entry_listener(
     conn: Connection,
@@ -47,7 +49,7 @@ pub async fn start_entry_listener(
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let _ = tcp_params; // keep alive for the duration of the connection
+                    let _ = tcp_params;
                     if let Err(e) = handle_entry_connection(conn, stream, peek_buf_size).await {
                         debug!(error = %e, "entry connection error");
                     }
@@ -84,8 +86,6 @@ async fn handle_entry_connection(
 
     send_routing_info(&mut send, &routing_info).await?;
 
-    // Use relay_quic_to_tcp which calls TcpStream::into_split() — zero-cost split,
-    // no Arc<Mutex> overhead compared to the generic relay_bidirectional.
     let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
 
     debug!(sent = sent, received = received, protocol = %protocol, "entry relay completed");

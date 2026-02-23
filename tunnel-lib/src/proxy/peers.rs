@@ -1,15 +1,14 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use bytes::Bytes;
-use quinn::{SendStream, RecvStream};
+use quinn::{RecvStream, SendStream};
 
 #[async_trait]
 pub trait UpstreamPeer: Send + Sync {
-    /// Connect to the upstream and relay traffic
     async fn connect(
-        &self, 
-        send: SendStream, 
-        recv: RecvStream, 
-        initial_data: Option<Bytes>
+        &self,
+        send: SendStream,
+        recv: RecvStream,
+        initial_data: Option<Bytes>,
     ) -> Result<()>;
 }

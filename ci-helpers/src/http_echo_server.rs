@@ -1,3 +1,8 @@
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Bytes, Incoming};
+use hyper::{Request, Response};
+use hyper_util::rt::TokioIo;
+use hyper_util::server::conn::auto::Builder;
 /// Minimal HTTP/1.1 + HTTP/2 echo server for CI integration tests.
 ///
 /// Returns a JSON body echoing the request method, path, and all headers.
@@ -6,11 +11,6 @@
 /// Usage: http-echo-server [port]
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpListener;
 
 async fn handle(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {

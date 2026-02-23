@@ -1,15 +1,15 @@
 use super::peers::UpstreamPeer;
 use crate::engine::{bridge, relay::relay_with_initial};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use quinn::{SendStream, RecvStream};
-use std::net::SocketAddr;
-use tokio::net::TcpStream;
-use tracing::{info, debug};
-use tokio_rustls::TlsConnector;
+use quinn::{RecvStream, SendStream};
 use rustls::pki_types::ServerName;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpstreamScheme {
@@ -32,7 +32,6 @@ impl UpstreamScheme {
         } else if addr.starts_with("ws://") {
             (Self::Ws, addr.trim_start_matches("ws://"))
         } else if has_port_443(addr) {
-            // Use precise port matching to avoid false positives like host:4430
             (Self::Tls, addr)
         } else {
             (Self::Tcp, addr)
@@ -69,33 +68,28 @@ impl UpstreamScheme {
     }
 }
 
-/// Extract host from an address string, handling IPv6 bracket notation.
 fn extract_host_part(addr: &str) -> String {
     if let Some(rest) = addr.strip_prefix('[') {
-        // IPv6: [::1]:8080 → "::1"
         rest.split(']').next().unwrap_or(addr).to_string()
     } else {
         addr.split(':').next().unwrap_or(addr).to_string()
     }
 }
 
-/// Returns true if the address has an explicit port component.
 fn has_explicit_port(addr: &str) -> bool {
     if addr.starts_with('[') {
-        addr.contains("]:") // IPv6 with port: [::1]:8080
+        addr.contains("]:")
     } else {
         addr.contains(':')
     }
 }
 
-/// Returns true only when the port is exactly 443 (not :4430, :44300, etc.)
 fn has_port_443(addr: &str) -> bool {
     extract_port_number(addr) == Some(443)
 }
 
 fn extract_port_number(addr: &str) -> Option<u16> {
     if addr.starts_with('[') {
-        // IPv6: [::1]:8080 — take everything after the last ':'
         addr.rsplit(':').next()?.parse().ok()
     } else {
         addr.split(':').nth(1)?.parse().ok()
@@ -104,21 +98,16 @@ fn extract_port_number(addr: &str) -> Option<u16> {
 
 pub struct TcpPeer {
     pub target_addr: SocketAddr,
-    /// TCP socket options applied to the upstream connection. Defaults to `TcpParams::default()`.
+
     pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
 
-/// TLS peer with a pre-built connector shared across all `connect()` calls.
-/// Building `rustls::ClientConfig` clones ~150 WebPKI root certs — doing it once
-/// per peer instance (at construction time) instead of per connection eliminates
-/// significant per-request CPU and memory overhead.
 pub struct TlsTcpPeer {
     pub target_addr: SocketAddr,
     pub tls_host: String,
-    /// Pre-built connector. `Arc<ClientConfig>` is reference-counted internally,
-    /// so cloning the connector is O(1) and does not re-allocate the root store.
+
     pub connector: Arc<TlsConnector>,
-    /// TCP socket options applied to the upstream connection.
+
     pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
 
@@ -128,7 +117,12 @@ impl TlsTcpPeer {
         tls_host: String,
         alpn: Option<Vec<Vec<u8>>>,
     ) -> Result<Self> {
-        Self::new_with_params(target_addr, tls_host, alpn, crate::transport::tcp_params::TcpParams::default())
+        Self::new_with_params(
+            target_addr,
+            tls_host,
+            alpn,
+            crate::transport::tcp_params::TcpParams::default(),
+        )
     }
 
     pub fn new_with_params(
@@ -166,15 +160,17 @@ impl UpstreamPeer for TcpPeer {
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         debug!("connecting to tcp upstream: {}", self.target_addr);
-        let tcp_stream = TcpStream::connect(self.target_addr).await
+        let tcp_stream = TcpStream::connect(self.target_addr)
+            .await
             .context("failed to connect to tcp upstream")?;
-        self.tcp_params.apply(&tcp_stream).context("failed to apply TCP params to upstream")?;
+        self.tcp_params
+            .apply(&tcp_stream)
+            .context("failed to apply TCP params to upstream")?;
 
         let initial_slice = initial_data.as_deref();
 
         info!(target = %self.target_addr, "starting bidirectional relay (raw tcp, into_split)");
-        // Use bridge::relay_with_first_data which calls TcpStream::into_split() — zero-cost
-        // split without Arc<Mutex> overhead of the generic tokio::io::split().
+
         bridge::relay_with_first_data(recv, send, tcp_stream, initial_slice).await?;
 
         Ok(())
@@ -189,16 +185,25 @@ impl UpstreamPeer for TlsTcpPeer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
-        debug!("connecting to TLS tcp upstream: {} (SNI: {})", self.target_addr, self.tls_host);
+        debug!(
+            "connecting to TLS tcp upstream: {} (SNI: {})",
+            self.target_addr, self.tls_host
+        );
 
-        let tcp_stream = TcpStream::connect(self.target_addr).await
+        let tcp_stream = TcpStream::connect(self.target_addr)
+            .await
             .context("failed to connect to tcp upstream")?;
-        self.tcp_params.apply(&tcp_stream).context("failed to apply TCP params to TLS upstream")?;
+        self.tcp_params
+            .apply(&tcp_stream)
+            .context("failed to apply TCP params to TLS upstream")?;
 
         let server_name = ServerName::try_from(self.tls_host.clone())
             .map_err(|_| anyhow::anyhow!("invalid TLS server name: {}", self.tls_host))?;
 
-        let tls_stream = self.connector.connect(server_name, tcp_stream).await
+        let tls_stream = self
+            .connector
+            .connect(server_name, tcp_stream)
+            .await
             .context("TLS handshake failed")?;
 
         let initial_slice = initial_data.as_deref();

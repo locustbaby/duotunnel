@@ -1,21 +1,14 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
 use dashmap::DashMap;
 use quinn::Connection;
-use tracing::{info, warn, debug};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
+use tracing::{debug, info, warn};
 
-/// Stores metadata for client unregistration lookup
 struct ClientInfo {
     group_id: String,
     conn: Connection,
 }
 
-/// Thread-safe client group with O(1) stable round-robin selection.
-///
-/// Uses `RwLock<Vec<(String, Connection)>>` instead of `DashMap` so that
-/// `select_healthy` can index by position in O(1) with a deterministic order.
-/// Write operations (add/remove) are rare — only on connect/disconnect — so
-/// write-lock contention is negligible.
 pub struct ClientGroup {
     clients: RwLock<Vec<(String, Connection)>>,
     counter: AtomicUsize,
@@ -31,7 +24,7 @@ impl ClientGroup {
 
     pub fn add(&self, client_id: String, conn: Connection) {
         let mut c = self.clients.write().unwrap();
-        // Replace if the same client_id already exists (idempotent upsert)
+
         c.retain(|(id, _)| id != &client_id);
         c.push((client_id, conn));
     }
@@ -47,10 +40,6 @@ impl ClientGroup {
         self.clients.read().unwrap().is_empty()
     }
 
-    /// Select a healthy client using O(1) round-robin.
-    ///
-    /// Iterates at most `len` slots starting from the atomic counter position,
-    /// skipping any connection that has already been closed.
     pub fn select_healthy(&self) -> Option<Connection> {
         let c = self.clients.read().unwrap();
         let len = c.len();
@@ -70,11 +59,9 @@ impl ClientGroup {
     }
 }
 
-/// Lock-free client registry using DashMap
 pub struct ClientRegistry {
-    /// Group ID -> ClientGroup
     groups: DashMap<String, Arc<ClientGroup>>,
-    /// Client ID -> ClientInfo (for unregistration lookup)
+
     clients: DashMap<String, ClientInfo>,
 }
 
@@ -86,13 +73,6 @@ impl ClientRegistry {
         }
     }
 
-    /// Atomically replace an existing registration or create a new one.
-    ///
-    /// Uses `DashMap::entry()` which holds a shard-level lock across the
-    /// check-and-swap, eliminating the race window that existed with the
-    /// previous get → unregister → register three-step sequence.
-    ///
-    /// Returns the old `Connection` if one was displaced (caller should close it).
     pub fn replace_or_register(
         &self,
         client_id: String,
@@ -107,7 +87,6 @@ impl ClientRegistry {
                 let old_group_id = old_info.group_id.clone();
                 let old_conn = old_info.conn.clone();
 
-                // Remove from the old group before overwriting
                 if let Some(grp) = self.groups.get(&old_group_id) {
                     grp.remove(&client_id);
                     if grp.is_empty() {
@@ -133,7 +112,6 @@ impl ClientRegistry {
             }
         };
 
-        // Add to the (possibly new) group
         self.groups
             .entry(group_id)
             .or_insert_with(|| Arc::new(ClientGroup::new()))
@@ -147,7 +125,6 @@ impl ClientRegistry {
         self.replace_or_register(client_id, group_id, conn);
     }
 
-    /// Get the connection for a specific client (for duplicate detection)
     pub fn get_client_connection(&self, client_id: &str) -> Option<Connection> {
         self.clients.get(client_id).map(|info| info.conn.clone())
     }
@@ -168,7 +145,6 @@ impl ClientRegistry {
         }
     }
 
-    /// Select a healthy client from the specified group using round-robin
     pub fn select_client_for_group(&self, group_id: &str) -> Option<Connection> {
         let group = self.groups.get(group_id)?;
         let conn = group.select_healthy();

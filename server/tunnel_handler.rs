@@ -1,9 +1,9 @@
-use anyhow::Result;
-use tracing::{info, debug};
-use tunnel_lib::recv_routing_info;
-use tunnel_lib::proxy::core::{ProxyEngine, Protocol};
-use std::sync::Arc;
 use crate::egress::{ServerEgressApp, ServerEgressMap};
+use anyhow::Result;
+use std::sync::Arc;
+use tracing::{debug, info};
+use tunnel_lib::proxy::core::{Protocol, ProxyEngine};
+use tunnel_lib::recv_routing_info;
 
 pub async fn handle_tunnel_stream(
     send: quinn::SendStream,
@@ -11,7 +11,7 @@ pub async fn handle_tunnel_stream(
     egress_map: Arc<ServerEgressMap>,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
-    
+
     info!(
         target_host = ?routing_info.host,
         protocol = %routing_info.protocol,
@@ -32,7 +32,9 @@ pub async fn handle_tunnel_stream(
     let app = ServerEgressApp::new(egress_map);
     let engine = ProxyEngine::new(app);
 
-    engine.run_stream(send, recv, client_addr, Some(routing_info)).await?;
+    engine
+        .run_stream(send, recv, client_addr, Some(routing_info))
+        .await?;
 
     debug!("egress stream completed");
 

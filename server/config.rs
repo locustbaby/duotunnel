@@ -1,13 +1,12 @@
+use anyhow::Result;
+use figment::{
+    providers::{Env, Format, Yaml},
+    Figment,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
-use anyhow::Result;
-use figment::{Figment, providers::{Format, Yaml, Env}};
-use tunnel_lib::config::{TcpConfig, QuicConfig, HttpPoolConfig, ProxyBufferConfig};
+use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 use tunnel_lib::PkiParams;
-
-// ============================================================
-// Top-level file structure
-// ============================================================
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfigFile {
@@ -18,10 +17,6 @@ pub struct ServerConfigFile {
     pub tunnel_management: TunnelManagement,
 }
 
-// ============================================================
-// SECTION 1 — System config (static after startup)
-// ============================================================
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerBasicConfig {
     pub tunnel_port: u16,
@@ -29,10 +24,10 @@ pub struct ServerBasicConfig {
     pub entry_port: Option<u16>,
     #[serde(default)]
     pub log_level: Option<String>,
-    /// Enable tracing spans (verbose — development only).
+
     #[serde(default)]
     pub trace_enabled: bool,
-    /// Authentication tokens: group_id → token
+
     #[serde(default)]
     pub auth_tokens: HashMap<String, String>,
     #[serde(default = "default_max_connections")]
@@ -42,8 +37,6 @@ pub struct ServerBasicConfig {
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
-    // --- Sub-configs (all optional; fall back to Default if section absent) ---
-
     #[serde(default)]
     pub quic: QuicConfig,
     #[serde(default)]
@@ -52,16 +45,14 @@ pub struct ServerBasicConfig {
     pub http_pool: HttpPoolConfig,
     #[serde(default)]
     pub proxy_buffers: ProxyBufferConfig,
-    /// PKI / cert-cache tuning. `PkiParams` is used directly — no wrapper type.
+
     #[serde(default)]
     pub pki: PkiParams,
 }
 
-fn default_max_connections() -> usize { 10_000 }
-
-// ============================================================
-// SECTION 2 — Server egress upstream (hot-reloadable)
-// ============================================================
+fn default_max_connections() -> usize {
+    10_000
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ServerEgressUpstream {
@@ -82,10 +73,6 @@ pub struct EgressHttpRule {
     pub match_host: String,
     pub action_upstream: String,
 }
-
-// ============================================================
-// SECTION 3 — Tunnel management (hot-reloadable)
-// ============================================================
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TunnelManagement {
@@ -159,7 +146,9 @@ pub struct UpstreamDef {
     pub lb_policy: String,
 }
 
-fn default_lb_policy() -> String { "round_robin".to_string() }
+fn default_lb_policy() -> String {
+    "round_robin".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerDef {
@@ -168,15 +157,7 @@ pub struct ServerDef {
     pub resolve: bool,
 }
 
-// ============================================================
-// Loading + validation
-// ============================================================
-
 impl ServerConfigFile {
-    /// Load configuration with Figment:
-    /// 1. YAML file as base
-    /// 2. Env vars with prefix `TUNNEL_SERVER__` for selected sensitive fields
-    ///    (log_level, auth_tokens). Only fields with a matching env var are overridden.
     pub fn load(path: &str) -> Result<Self> {
         let resolved = tunnel_lib::resolve_config_path(path)?;
 
@@ -193,8 +174,6 @@ impl ServerConfigFile {
         Ok(config)
     }
 
-    /// Validate semantic constraints that serde cannot enforce.
-    /// Collects all errors and reports them in one message.
     fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
@@ -211,7 +190,8 @@ impl ServerConfigFile {
         for (name, upstream) in &self.server_egress_upstream.upstreams {
             if upstream.servers.is_empty() {
                 errors.push(format!(
-                    "server_egress_upstream.upstreams.{}: must have at least one server", name
+                    "server_egress_upstream.upstreams.{}: must have at least one server",
+                    name
                 ));
             }
         }
@@ -239,25 +219,26 @@ impl ServerConfigFile {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Config validation failed:\n  - {}", errors.join("\n  - ")))
+            Err(anyhow::anyhow!(
+                "Config validation failed:\n  - {}",
+                errors.join("\n  - ")
+            ))
         }
     }
 
-    /// Validate authentication token for a group (constant-time comparison).
     pub fn validate_token(&self, group_id: &str, token: &str) -> bool {
         use subtle::ConstantTimeEq;
         if self.server.auth_tokens.is_empty() {
             return true;
         }
-        self.server.auth_tokens.get(group_id)
+        self.server
+            .auth_tokens
+            .get(group_id)
             .map(|expected| bool::from(expected.as_bytes().ct_eq(token.as_bytes())))
             .unwrap_or(false)
     }
 }
 
-/// Build the `ClientConfig` message sent to a client on login.
-/// Takes only the hot-reloadable `TunnelManagement` so it can be called
-/// with a freshly-loaded snapshot during hot reload.
 pub fn build_client_config_for_group(
     tm: &TunnelManagement,
     group_id: &str,
@@ -266,24 +247,33 @@ pub fn build_client_config_for_group(
 
     let proxies = collect_proxies_for_group(tm, group_id);
 
-    let upstreams = group_config.upstreams.iter().map(|(name, def)| {
-        tunnel_lib::UpstreamConfig {
+    let upstreams = group_config
+        .upstreams
+        .iter()
+        .map(|(name, def)| tunnel_lib::UpstreamConfig {
             name: name.clone(),
-            servers: def.servers.iter().map(|s| tunnel_lib::UpstreamServer {
-                address: s.address.clone(),
-                resolve: s.resolve,
-            }).collect(),
+            servers: def
+                .servers
+                .iter()
+                .map(|s| tunnel_lib::UpstreamServer {
+                    address: s.address.clone(),
+                    resolve: s.resolve,
+                })
+                .collect(),
             lb_policy: def.lb_policy.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
-    let rules: Vec<tunnel_lib::RuleConfig> = group_config.rules.vhost.iter().map(|r| {
-        tunnel_lib::RuleConfig {
+    let rules: Vec<tunnel_lib::RuleConfig> = group_config
+        .rules
+        .vhost
+        .iter()
+        .map(|r| tunnel_lib::RuleConfig {
             rule_type: "vhost".to_string(),
             match_host: r.match_host.clone(),
             action_upstream: r.action_upstream.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     Some(tunnel_lib::ClientConfig {
         config_version: group_config.config_version.clone(),
@@ -293,12 +283,17 @@ pub fn build_client_config_for_group(
     })
 }
 
-fn collect_proxies_for_group(tm: &TunnelManagement, group_id: &str) -> Vec<tunnel_lib::ProxyConfig> {
+fn collect_proxies_for_group(
+    tm: &TunnelManagement,
+    group_id: &str,
+) -> Vec<tunnel_lib::ProxyConfig> {
     let mut proxies = Vec::new();
 
     for rule in &tm.server_ingress_routing.rules.vhost {
         if rule.action_client_group == group_id {
-            let proxy_name = rule.action_proxy_name.clone()
+            let proxy_name = rule
+                .action_proxy_name
+                .clone()
                 .unwrap_or_else(|| rule.match_host.clone());
             proxies.push(tunnel_lib::ProxyConfig {
                 name: proxy_name,

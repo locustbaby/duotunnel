@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use tunnel_lib::proxy;
 
-use crate::{ServerState, metrics};
+use crate::{metrics, ServerState};
 
 pub async fn run_tcp_listener(
     state: Arc<ServerState>,
@@ -67,7 +67,9 @@ async fn handle_tcp_connection(
 
     debug!(protocol = %protocol, host = ?host, "detected protocol on tcp listener");
 
-    let client_conn = state.registry.select_client_for_group(&group_id)
+    let client_conn = state
+        .registry
+        .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
     proxy::forward_to_client(
@@ -80,5 +82,6 @@ async fn handle_tcp_connection(
             host,
         },
         stream,
-    ).await
+    )
+    .await
 }

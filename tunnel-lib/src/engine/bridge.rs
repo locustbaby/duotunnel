@@ -87,7 +87,10 @@ pub async fn relay_quic_to_tcp(
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e1), Err(e2)) => {
-            debug!("relay_quic_to_tcp: both directions failed; suppressed: {}", e2);
+            debug!(
+                "relay_quic_to_tcp: both directions failed; suppressed: {}",
+                e2
+            );
             Err(e1.into())
         }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
@@ -123,7 +126,10 @@ pub async fn relay_with_first_data(
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e1), Err(e2)) => {
-            debug!("relay_with_first_data: both directions failed; suppressed: {}", e2);
+            debug!(
+                "relay_with_first_data: both directions failed; suppressed: {}",
+                e2
+            );
             Err(e1.into())
         }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
@@ -150,8 +156,6 @@ mod tests {
         assert_eq!(&buf, data);
     }
 
-    // ── relay_unidirectional: byte count ─────────────────────────────────────
-
     #[tokio::test]
     async fn test_relay_unidirectional_returns_byte_count() {
         let data = b"count me";
@@ -162,13 +166,10 @@ mod tests {
             src.shutdown().await.unwrap();
         });
 
-        // relay_unidirectional reads from `dst` (acting as reader) into a sink.
-        // Use a duplex as the writer so we can discard bytes.
         let (mut sink_read, sink_write) = tokio::io::duplex(64);
         let count = relay_unidirectional(dst, sink_write).await.unwrap();
         assert_eq!(count, data.len() as u64);
 
-        // Confirm the data actually arrived at the sink
         let mut received = Vec::new();
         sink_read.read_to_end(&mut received).await.unwrap();
         assert_eq!(&received, data);
@@ -177,19 +178,15 @@ mod tests {
     #[tokio::test]
     async fn test_relay_unidirectional_empty_stream() {
         let (mut src, dst) = tokio::io::duplex(64);
-        src.shutdown().await.unwrap(); // EOF immediately
+        src.shutdown().await.unwrap();
 
         let (_, sink_write) = tokio::io::duplex(64);
         let count = relay_unidirectional(dst, sink_write).await.unwrap();
         assert_eq!(count, 0, "empty stream must transfer 0 bytes");
     }
 
-    // ── relay: bidirectional ─────────────────────────────────────────────────
-
     #[tokio::test]
     async fn test_relay_bidirectional_both_directions() {
-        // side_a writes A_DATA → should arrive at side_b.
-        // side_b writes B_DATA → should arrive at side_a.
         let a_data = b"from-a-to-b";
         let b_data = b"from-b-to-a";
 
@@ -199,27 +196,21 @@ mod tests {
         let (mut side_a_read, mut side_a_write) = tokio::io::split(side_a);
         let (mut side_b_read, mut side_b_write) = tokio::io::split(side_b);
 
-        // Writer task for side_a
         tokio::spawn(async move {
             side_a_write.write_all(a_data).await.unwrap();
             side_a_write.shutdown().await.unwrap();
         });
 
-        // Writer task for side_b
         tokio::spawn(async move {
             side_b_write.write_all(b_data).await.unwrap();
             side_b_write.shutdown().await.unwrap();
         });
 
-        // Run the relay between the two relay ends
         let (sent, recv) = relay(relay_a, relay_b).await.unwrap();
 
-        // sent = bytes from relay_a → relay_b (i.e. a_data)
-        // recv = bytes from relay_b → relay_a (i.e. b_data)
         assert_eq!(sent, a_data.len() as u64, "sent byte count mismatch");
         assert_eq!(recv, b_data.len() as u64, "recv byte count mismatch");
 
-        // Verify data arrived on the correct side
         let mut a_received = Vec::new();
         side_a_read.read_to_end(&mut a_received).await.unwrap();
         assert_eq!(&a_received, b_data);
@@ -231,14 +222,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_relay_bidirectional_large_payload() {
-        // 256 KB in each direction — exercises internal buffering.
-        //
-        // Topology (4 duplex endpoints, all independent):
-        //   side_a (writer + reader) ←→ relay_a ←[relay]→ relay_b ←→ side_b (writer + reader)
-        //
-        // Writers and readers run in separate tasks so they don't block each other:
-        //   side_a_write --256KB--> relay_a --relay--> relay_b --> side_b_read
-        //   side_b_write --256KB--> relay_b --relay--> relay_a --> side_a_read
         let size = 256 * 1024usize;
         let a_data: Vec<u8> = (0u8..=255).cycle().take(size).collect();
         let b_data: Vec<u8> = (0u8..=255).cycle().take(size).collect();
@@ -249,8 +232,6 @@ mod tests {
         let (mut side_a_read, mut side_a_write) = tokio::io::split(side_a);
         let (mut side_b_read, mut side_b_write) = tokio::io::split(side_b);
 
-        // Spawn writers and readers as separate tasks — they must run concurrently with
-        // relay() to avoid blocking on full duplex buffers.
         let a_clone = a_data.clone();
         let a_writer = tokio::spawn(async move {
             side_a_write.write_all(&a_clone).await.unwrap();
@@ -263,7 +244,6 @@ mod tests {
             side_b_write.shutdown().await.unwrap();
         });
 
-        // Readers drain what relay delivers; without this the relay's output buffers fill up.
         let a_reader = tokio::spawn(async move {
             let mut buf = Vec::new();
             side_a_read.read_to_end(&mut buf).await.unwrap();
@@ -294,7 +274,6 @@ mod tests {
         let (side_a, relay_a) = tokio::io::duplex(64);
         let (side_b, relay_b) = tokio::io::duplex(64);
 
-        // Immediately shut down both sides — relay sees EOF on first read
         let (_, mut side_a_write) = tokio::io::split(side_a);
         let (_, mut side_b_write) = tokio::io::split(side_b);
         side_a_write.shutdown().await.unwrap();

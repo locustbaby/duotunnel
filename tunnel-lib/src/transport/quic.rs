@@ -1,31 +1,25 @@
-use anyhow::{Result, anyhow};
-use quinn::{Endpoint, ServerConfig, ClientConfig, Connection, SendStream, RecvStream};
-use quinn::crypto::rustls::{QuicServerConfig, QuicClientConfig};
+use anyhow::{anyhow, Result};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::CertificateDer;
+use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::convert::TryInto;
-use tracing::{info, debug, error};
+use tracing::{debug, error, info};
 
-/// Tunable QUIC transport parameters.
-///
-/// All fields have sensible defaults matching the previously hard-coded values,
-/// so existing callers are fully backward compatible.
 #[derive(Debug, Clone)]
 pub struct QuicTransportParams {
-    /// Maximum concurrent bidirectional streams (default: 1000)
     pub max_concurrent_streams: u32,
-    /// Per-stream receive window in bytes (default: 1 MB)
+
     pub stream_receive_window_bytes: u64,
-    /// Per-connection receive window in bytes (default: 8 MB)
+
     pub connection_receive_window_bytes: u64,
-    /// Per-connection send window in bytes (default: 8 MB)
+
     pub send_window_bytes: u64,
-    /// Keep-alive interval in seconds (default: 20)
+
     pub keepalive_secs: u64,
-    /// Idle timeout in seconds (default: 60)
+
     pub idle_timeout_secs: u64,
-    /// Optional congestion controller: `"bbr"` or `None` for default NewReno
     pub congestion: Option<String>,
 }
 
@@ -33,9 +27,9 @@ impl Default for QuicTransportParams {
     fn default() -> Self {
         Self {
             max_concurrent_streams: 1000,
-            stream_receive_window_bytes: 1024 * 1024,         // 1 MB
-            connection_receive_window_bytes: 8 * 1024 * 1024, // 8 MB
-            send_window_bytes: 8 * 1024 * 1024,               // 8 MB
+            stream_receive_window_bytes: 1024 * 1024,
+            connection_receive_window_bytes: 8 * 1024 * 1024,
+            send_window_bytes: 8 * 1024 * 1024,
             keepalive_secs: 20,
             idle_timeout_secs: 60,
             congestion: None,
@@ -43,7 +37,6 @@ impl Default for QuicTransportParams {
     }
 }
 
-/// Apply `QuicTransportParams` to a `TransportConfig`.
 fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTransportParams) {
     tc.max_concurrent_bidi_streams(params.max_concurrent_streams.into());
     tc.max_concurrent_uni_streams(params.max_concurrent_streams.into());
@@ -61,22 +54,20 @@ fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTranspor
         if mode.eq_ignore_ascii_case("bbr") {
             tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
         }
-        // Unknown values: silently fall back to default (NewReno)
     }
 }
 
-/// Build a `ServerConfig` using default transport parameters.
 pub fn create_server_config() -> Result<ServerConfig> {
     let (certs, key) = crate::infra::pki::generate_self_signed_cert()?;
-    
+
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    
+
     server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-    
-    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
-    
+
+    let mut server_config =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
 
     let mut transport_config = quinn::TransportConfig::default();
     apply_transport_params(&mut transport_config, &QuicTransportParams::default());
@@ -85,9 +76,6 @@ pub fn create_server_config() -> Result<ServerConfig> {
     Ok(server_config)
 }
 
-/// Build a `ServerConfig` with custom transport parameters.
-///
-/// Used by callers that source parameters from a config file.
 pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerConfig> {
     let (certs, key) = crate::infra::pki::generate_self_signed_cert()?;
 
@@ -96,7 +84,8 @@ pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerC
         .with_single_cert(certs, key)?;
     server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
 
-    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+    let mut server_config =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
     apply_transport_params(&mut transport_config, params);
     server_config.transport_config(Arc::new(transport_config));
@@ -108,11 +97,10 @@ pub fn create_client_config() -> Result<ClientConfig> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
-    
+
     client_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-    
+
     let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
-    
 
     let mut transport_config = quinn::TransportConfig::default();
     apply_transport_params(&mut transport_config, &QuicTransportParams::default());
@@ -121,11 +109,6 @@ pub fn create_client_config() -> Result<ClientConfig> {
     Ok(client_config)
 }
 
-/// Build a `ClientConfig` with custom transport parameters.
-///
-/// The TLS layer always uses `SkipServerVerification` (dev mode).
-/// Callers needing proper TLS validation build their own `ClientConfig` and
-/// only call this for the transport tuning portion (see `client/main.rs`).
 pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::TransportConfig> {
     let mut tc = quinn::TransportConfig::default();
     apply_transport_params(&mut tc, params);
@@ -179,7 +162,6 @@ pub struct QuicServer {
 }
 
 impl QuicServer {
-
     pub async fn bind(addr: SocketAddr) -> Result<Self> {
         let server_config = create_server_config()?;
         let endpoint = Endpoint::server(server_config, addr)?;
@@ -187,21 +169,21 @@ impl QuicServer {
         Ok(Self { endpoint })
     }
 
-
     pub async fn accept(&self) -> Option<Connection> {
         match self.endpoint.accept().await {
-            Some(connecting) => {
-                match connecting.await {
-                    Ok(connection) => {
-                        debug!("Accepted QUIC connection from {}", connection.remote_address());
-                        Some(connection)
-                    }
-                    Err(e) => {
-                        error!("Failed to complete QUIC connection: {}", e);
-                        None
-                    }
+            Some(connecting) => match connecting.await {
+                Ok(connection) => {
+                    debug!(
+                        "Accepted QUIC connection from {}",
+                        connection.remote_address()
+                    );
+                    Some(connection)
                 }
-            }
+                Err(e) => {
+                    error!("Failed to complete QUIC connection: {}", e);
+                    None
+                }
+            },
             None => None,
         }
     }
@@ -212,14 +194,12 @@ pub struct QuicClient {
 }
 
 impl QuicClient {
-
     pub fn new() -> Result<Self> {
         let client_config = create_client_config()?;
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
         Ok(Self { endpoint })
     }
-
 
     pub async fn connect(&self, addr: SocketAddr, server_name: &str) -> Result<Connection> {
         debug!("Connecting to QUIC server at {}", addr);
@@ -231,13 +211,11 @@ impl QuicClient {
 
 pub mod stream {
     use super::*;
-    use bytes::{BytesMut, BufMut};
-
+    use bytes::{BufMut, BytesMut};
 
     pub async fn open_bi(conn: &Connection) -> Result<(SendStream, RecvStream)> {
         Ok(conn.open_bi().await?)
     }
-
 
     pub async fn accept_bi(conn: &Connection) -> Result<(SendStream, RecvStream)> {
         match conn.accept_bi().await {
@@ -245,7 +223,6 @@ pub mod stream {
             Err(e) => Err(anyhow!("Failed to accept bidirectional stream: {}", e)),
         }
     }
-
 
     pub async fn send_data(send: &mut SendStream, data: &[u8]) -> Result<()> {
         let len = data.len() as u32;
@@ -256,19 +233,15 @@ pub mod stream {
         Ok(())
     }
 
-
     pub async fn recv_data(recv: &mut RecvStream) -> Result<Vec<u8>> {
-
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
-
 
         let mut data = vec![0u8; len];
         recv.read_exact(&mut data).await?;
         Ok(data)
     }
-
 
     pub fn finish(send: &mut SendStream) -> Result<()> {
         send.finish()?;

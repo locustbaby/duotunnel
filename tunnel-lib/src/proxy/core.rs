@@ -1,8 +1,8 @@
-use async_trait::async_trait;
-use anyhow::Result;
-use std::net::SocketAddr;
-use bytes::Bytes;
 use super::peers::UpstreamPeer;
+use anyhow::Result;
+use async_trait::async_trait;
+use bytes::Bytes;
+use std::net::SocketAddr;
 
 use crate::models::msg::RoutingInfo;
 
@@ -24,7 +24,6 @@ pub struct Context {
 
 #[async_trait]
 pub trait ProxyApp: Send + Sync {
-    /// Determine the upstream peer based on context
     async fn upstream_peer(&self, context: &mut Context) -> Result<Box<dyn UpstreamPeer>>;
 }
 
@@ -38,8 +37,8 @@ impl<A: ProxyApp> ProxyEngine<A> {
     }
 
     pub async fn run_stream(
-        &self, 
-        send: quinn::SendStream, 
+        &self,
+        send: quinn::SendStream,
         mut recv: quinn::RecvStream,
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
@@ -91,10 +90,13 @@ fn is_websocket_upgrade(data: &[u8]) -> bool {
     let mut req = httparse::Request::new(&mut headers);
     if req.parse(data).is_ok() {
         for h in req.headers {
-             if h.name.eq_ignore_ascii_case("Upgrade") && 
-                std::str::from_utf8(h.value).unwrap_or("").eq_ignore_ascii_case("websocket") {
-                 return true;
-             }
+            if h.name.eq_ignore_ascii_case("Upgrade")
+                && std::str::from_utf8(h.value)
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("websocket")
+            {
+                return true;
+            }
         }
     }
     false

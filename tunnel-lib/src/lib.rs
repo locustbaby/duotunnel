@@ -1,39 +1,39 @@
-pub mod models;
-pub mod infra;
-pub mod transport;
-pub mod protocol;
-pub mod engine;
-pub mod proxy;
-pub mod egress;
 pub mod config;
+pub mod egress;
+pub mod engine;
+pub mod infra;
+pub mod models;
+pub mod protocol;
+pub mod proxy;
+pub mod transport;
 
-// Re-exports
 pub use models::msg::{
-    MessageType, Login, LoginResp, ClientConfig, ProxyConfig, 
-    UpstreamConfig, UpstreamServer, RuleConfig, RoutingInfo,
-    send_message, recv_message, recv_message_type,
-    send_routing_info, recv_routing_info,
+    recv_message, recv_message_type, recv_routing_info, send_message, send_routing_info,
+    ClientConfig, Login, LoginResp, MessageType, ProxyConfig, RoutingInfo, RuleConfig,
+    UpstreamConfig, UpstreamServer,
 };
 
-pub use engine::bridge::{relay as bridge_relay, relay_quic_to_tcp, relay_with_first_data, QuicBiStream};
+pub use engine::bridge::{
+    relay as bridge_relay, relay_quic_to_tcp, relay_with_first_data, QuicBiStream,
+};
 
 pub use transport::listener::{
-    start_tcp_listener, peek_bytes,
-    VhostRouter, PortRouter, SharedVhostRouter, new_shared_vhost_router,
-    extract_host_from_http, extract_method_path_from_http,
+    extract_host_from_http, extract_method_path_from_http, new_shared_vhost_router, peek_bytes,
+    start_tcp_listener, PortRouter, SharedVhostRouter, VhostRouter,
 };
 
-pub use transport::addr::{parse_upstream, normalize_host, UpstreamAddr};
-pub use transport::quic::{QuicTransportParams, build_transport_config};
-pub use transport::tcp_params::TcpParams;
-pub use protocol::rewrite::Rewriter;
-pub use protocol::detect::detect_protocol_and_host;
+pub use egress::http::{
+    create_https_client, create_https_client_with, forward_http, HttpClientParams,
+};
 pub use engine::relay::{relay_bidirectional, relay_with_initial};
-pub use egress::http::{forward_http, create_https_client, create_https_client_with, HttpClientParams};
+pub use infra::pki::{init_cert_cache, PkiParams};
+pub use protocol::detect::detect_protocol_and_host;
+pub use protocol::rewrite::Rewriter;
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
-pub use infra::pki::{PkiParams, init_cert_cache};
-pub use transport::quinn_io::{QuinnStream, PrefixedReadWrite};
+pub use transport::addr::{normalize_host, parse_upstream, UpstreamAddr};
+pub use transport::quic::{build_transport_config, QuicTransportParams};
+pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
+pub use transport::tcp_params::TcpParams;
 
-// Shared config sub-types (used by both server and client crates)
-pub use config::{TcpConfig, QuicConfig, HttpPoolConfig, ProxyBufferConfig, resolve_config_path};
+pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};

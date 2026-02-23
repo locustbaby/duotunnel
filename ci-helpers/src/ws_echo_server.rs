@@ -1,3 +1,4 @@
+use futures_util::{SinkExt, StreamExt};
 /// Minimal WebSocket echo server for CI integration tests.
 ///
 /// Listens on 127.0.0.1:<port> (default 8765).
@@ -7,7 +8,6 @@
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
-use futures_util::{SinkExt, StreamExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

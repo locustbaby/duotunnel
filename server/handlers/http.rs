@@ -1,12 +1,12 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
-use tunnel_lib::proxy;
 use tunnel_lib::extract_host_from_http;
+use tunnel_lib::proxy;
 
-use crate::{ServerState, metrics};
+use crate::{metrics, ServerState};
 
 pub async fn run_http_listener(state: Arc<ServerState>, port: u16) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
@@ -65,32 +65,39 @@ async fn handle_http_connection(state: Arc<ServerState>, stream: TcpStream) -> R
         if protocol == "h2" {
             handle_plaintext_h2_connection(state, stream).await
         } else {
-            let host = detected_host.or_else(|| extract_host_from_http(&buf[..n]))
+            let host = detected_host
+                .or_else(|| extract_host_from_http(&buf[..n]))
                 .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
-            handle_plaintext_h1_connection(state, stream, host, protocol.to_string(), peer_addr, n).await
+            handle_plaintext_h1_connection(state, stream, host, protocol.to_string(), peer_addr, n)
+                .await
         }
     }
 }
 
-/// Handle TLS-terminated connections with H2 authority rewriting
 async fn handle_tls_connection(
     state: Arc<ServerState>,
     stream: TcpStream,
     host: String,
     peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
+    use http_body_util::{BodyExt, Full};
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
-    use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
 
     debug!(host = %host, "TLS connection detected, terminating");
 
-    let group_id = state.routing.load().vhost_router.get(&host)
+    let group_id = state
+        .routing
+        .load()
+        .vhost_router
+        .get(&host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
 
-    let client_conn = state.registry.select_client_for_group(&group_id)
+    let client_conn = state
+        .registry
+        .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
     let (certs, key) = tunnel_lib::infra::pki::generate_self_signed_cert_for_host(&host)?;
@@ -120,9 +127,14 @@ async fn handle_tls_connection(
             let mut uri_parts = parts.uri.clone().into_parts();
             uri_parts.authority = Some(target_host.parse().unwrap());
             parts.uri = hyper::Uri::from_parts(uri_parts).unwrap_or(parts.uri);
-            parts.headers.insert(hyper::header::HOST, target_host.parse().unwrap());
+            parts
+                .headers
+                .insert(hyper::header::HOST, target_host.parse().unwrap());
 
-            debug!("L7 Proxy: rewriting authority to {}, forwarding {} {}", target_host, parts.method, parts.uri);
+            debug!(
+                "L7 Proxy: rewriting authority to {}, forwarding {} {}",
+                target_host, parts.method, parts.uri
+            );
 
             let routing_info = tunnel_lib::RoutingInfo {
                 proxy_name,
@@ -141,7 +153,11 @@ async fn handle_tls_connection(
                     tracing::error!("L7 Proxy upstream error: {}", e);
                     Ok(Response::builder()
                         .status(502)
-                        .body(Full::new(bytes::Bytes::from("Bad Gateway")).map_err(|_| unreachable!()).boxed_unsync())
+                        .body(
+                            Full::new(bytes::Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
                         .unwrap())
                 }
             }
@@ -157,15 +173,11 @@ async fn handle_tls_connection(
     Ok(())
 }
 
-/// Handle plaintext H2 connections with per-request routing
-async fn handle_plaintext_h2_connection(
-    state: Arc<ServerState>,
-    stream: TcpStream,
-) -> Result<()> {
+async fn handle_plaintext_h2_connection(state: Arc<ServerState>, stream: TcpStream) -> Result<()> {
+    use http_body_util::{BodyExt, Full};
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
-    use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
 
     debug!("plaintext H2 detected, using L7 proxy");
@@ -173,16 +185,26 @@ async fn handle_plaintext_h2_connection(
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();
         async move {
-            let authority = req.uri().authority().map(|a| a.to_string())
-                .or_else(|| req.headers().get(hyper::header::HOST).and_then(|h| h.to_str().ok()).map(|s| s.to_string()));
+            let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
+                req.headers()
+                    .get(hyper::header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string())
+            });
 
             let host = match authority {
                 Some(h) => h,
                 None => {
-                    return Ok::<_, hyper::Error>(Response::builder()
-                        .status(400)
-                        .body(Full::new(bytes::Bytes::from("Missing authority")).map_err(|_| unreachable!()).boxed_unsync())
-                        .unwrap());
+                    return Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(400)
+                            .body(
+                                Full::new(bytes::Bytes::from("Missing authority"))
+                                    .map_err(|_| unreachable!())
+                                    .boxed_unsync(),
+                            )
+                            .unwrap(),
+                    );
                 }
             };
 
@@ -193,7 +215,11 @@ async fn handle_plaintext_h2_connection(
                 None => {
                     return Ok(Response::builder()
                         .status(404)
-                        .body(Full::new(bytes::Bytes::from("No route")).map_err(|_| unreachable!()).boxed_unsync())
+                        .body(
+                            Full::new(bytes::Bytes::from("No route"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
                         .unwrap());
                 }
             };
@@ -203,13 +229,20 @@ async fn handle_plaintext_h2_connection(
                 None => {
                     return Ok(Response::builder()
                         .status(503)
-                        .body(Full::new(bytes::Bytes::from("No client")).map_err(|_| unreachable!()).boxed_unsync())
+                        .body(
+                            Full::new(bytes::Bytes::from("No client"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
                         .unwrap());
                 }
             };
 
             let (parts, body) = req.into_parts();
-            debug!("L7 Proxy (plaintext H2): {} {} -> {}", parts.method, parts.uri, host);
+            debug!(
+                "L7 Proxy (plaintext H2): {} {} -> {}",
+                parts.method, parts.uri, host
+            );
 
             let routing_info = tunnel_lib::RoutingInfo {
                 proxy_name: host.clone(),
@@ -228,7 +261,11 @@ async fn handle_plaintext_h2_connection(
                     tracing::error!("L7 Proxy upstream error: {}", e);
                     Ok(Response::builder()
                         .status(502)
-                        .body(Full::new(bytes::Bytes::from("Bad Gateway")).map_err(|_| unreachable!()).boxed_unsync())
+                        .body(
+                            Full::new(bytes::Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
                         .unwrap())
                 }
             }
@@ -244,7 +281,6 @@ async fn handle_plaintext_h2_connection(
     Ok(())
 }
 
-/// Handle plaintext H1/WebSocket connections with byte-level forwarding
 async fn handle_plaintext_h1_connection(
     state: Arc<ServerState>,
     mut stream: TcpStream,
@@ -257,10 +293,16 @@ async fn handle_plaintext_h1_connection(
 
     debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
 
-    let group_id = state.routing.load().vhost_router.get(&host)
+    let group_id = state
+        .routing
+        .load()
+        .vhost_router
+        .get(&host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
 
-    let client_conn = state.registry.select_client_for_group(&group_id)
+    let client_conn = state
+        .registry
+        .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
     let proxy_name = host.clone();
@@ -279,5 +321,6 @@ async fn handle_plaintext_h1_connection(
         },
         stream,
         &data[..peeked_bytes],
-    ).await
+    )
+    .await
 }

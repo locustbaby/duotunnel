@@ -1,8 +1,8 @@
+use crate::{send_routing_info, RoutingInfo};
 use anyhow::Result;
 use quinn::Connection;
 use tokio::net::TcpStream;
-use tracing::{info, debug};
-use crate::{RoutingInfo, send_routing_info};
+use tracing::{debug, info};
 
 pub async fn forward_to_client(
     client_conn: &Connection,
@@ -23,12 +23,7 @@ pub async fn forward_to_client(
 
     let (mut tcp_read, mut tcp_write) = external_stream.into_split();
 
-    // No BufReader/BufWriter: QUIC already has internal stream buffering,
-    // and TcpStream uses kernel socket buffers. An extra userspace layer
-    // only adds memory and an unnecessary copy.
-    let quic_to_tcp = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await
-    };
+    let quic_to_tcp = async { tokio::io::copy(&mut recv, &mut tcp_write).await };
 
     let tcp_to_quic = async {
         let bytes = tokio::io::copy(&mut tcp_read, &mut send).await?;
@@ -65,9 +60,7 @@ pub async fn forward_with_initial_data(
 
     let (mut tcp_read, mut tcp_write) = external_stream.into_split();
 
-    let quic_to_tcp = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await
-    };
+    let quic_to_tcp = async { tokio::io::copy(&mut recv, &mut tcp_write).await };
 
     let tcp_to_quic = async {
         let bytes = tokio::io::copy(&mut tcp_read, &mut send).await?;

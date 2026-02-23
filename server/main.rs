@@ -3,19 +3,19 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{info, error};
+use tracing::{error, info};
 
 mod config;
-mod registry;
 mod egress;
-mod tunnel_handler;
 mod handlers;
-mod metrics;
 mod hot_reload;
+mod metrics;
+mod registry;
+mod tunnel_handler;
 
-use config::{ServerConfigFile, TunnelManagement, ServerEgressUpstream};
-use registry::{SharedRegistry, new_shared_registry};
-use tunnel_lib::{VhostRouter, HttpClientParams};
+use config::{ServerConfigFile, ServerEgressUpstream, TunnelManagement};
+use registry::{new_shared_registry, SharedRegistry};
+use tunnel_lib::{HttpClientParams, VhostRouter};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -24,11 +24,6 @@ struct Args {
     config: String,
 }
 
-/// Snapshot of all hot-reloadable routing state.
-///
-/// Handlers call `state.routing.load()` to get a consistent view; the returned
-/// `Guard` keeps the old snapshot alive for in-flight requests while a hot reload
-/// atomically swaps in a new one.
 pub struct RoutingSnapshot {
     pub vhost_router: Arc<VhostRouter<String>>,
     pub tunnel_management: Arc<TunnelManagement>,
@@ -36,26 +31,22 @@ pub struct RoutingSnapshot {
 }
 
 pub struct ServerState {
-    /// Static config (restart required to change).
     pub config: Arc<ServerConfigFile>,
     pub registry: SharedRegistry,
-    /// Semaphore for limiting QUIC connections
+
     pub quic_semaphore: Arc<Semaphore>,
-    /// Semaphore for limiting TCP connections
+
     pub tcp_semaphore: Arc<Semaphore>,
-    /// TCP socket parameters applied to accepted/connected streams
+
     pub tcp_params: tunnel_lib::TcpParams,
-    /// Proxy buffer sizes for protocol detection and HTTP parsing
+
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
 
-    /// Hot-reloadable routing snapshot (vhost router + tunnel management + egress map).
-    /// Use `.load()` for a lock-free read; `.store()` to atomically replace on reload.
     pub routing: Arc<ArcSwap<RoutingSnapshot>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Install the ring crypto provider for rustls
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -70,8 +61,6 @@ async fn main() -> Result<()> {
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
 
-    // Initialise cert cache with configured TTL before any TLS connections.
-    // config.server.pki is already a PkiParams — pass it directly.
     tunnel_lib::init_cert_cache(&config.server.pki);
 
     let http_params = HttpClientParams::from(&config.server.http_pool);
@@ -97,16 +86,12 @@ async fn main() -> Result<()> {
         "Connection limits configured"
     );
 
-    // Spawn hot-reload watcher for server_egress_upstream + tunnel_management
     hot_reload::spawn_config_watcher(args.config.clone(), state.clone());
 
-    // Start QUIC server
     let quic_state = state.clone();
-    let quic_handle = tokio::spawn(async move {
-        handlers::quic::run_quic_server(quic_state).await
-    });
+    let quic_handle =
+        tokio::spawn(async move { handlers::quic::run_quic_server(quic_state).await });
 
-    // Start HTTP entry listener
     if let Some(entry_port) = config.server.entry_port {
         let http_state = state.clone();
         tokio::spawn(async move {
@@ -116,7 +101,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start TCP listeners for each rule — snapshot current rules at startup
     {
         let routing = state.routing.load();
         for rule in &routing.tunnel_management.server_ingress_routing.rules.tcp {
@@ -125,14 +109,15 @@ async fn main() -> Result<()> {
             let proxy_name = rule.action_proxy_name.clone();
             let group_id = rule.action_client_group.clone();
             tokio::spawn(async move {
-                if let Err(e) = handlers::tcp::run_tcp_listener(tcp_state, port, proxy_name, group_id).await {
+                if let Err(e) =
+                    handlers::tcp::run_tcp_listener(tcp_state, port, proxy_name, group_id).await
+                {
                     error!(port = %port, error = %e, "TCP listener failed");
                 }
             });
         }
     }
 
-    // Start Prometheus metrics server
     if let Some(metrics_port) = config.server.metrics_port {
         tokio::spawn(async move {
             if let Err(e) = handlers::metrics::run_metrics_server(metrics_port).await {
@@ -146,8 +131,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build a fresh `RoutingSnapshot` from the hot-reloadable config sections.
-/// Called at startup and on each successful hot reload.
 pub fn build_routing_snapshot(
     tm: &TunnelManagement,
     egress: &ServerEgressUpstream,
@@ -173,4 +156,3 @@ fn build_vhost_router(tm: &TunnelManagement) -> VhostRouter<String> {
     info!(routes = router.len(), "vhost router initialized");
     router
 }
-

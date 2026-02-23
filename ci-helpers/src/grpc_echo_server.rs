@@ -12,7 +12,7 @@
 ///   }
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{transport::Server, Request, Response, Status};
 use tonic_health::{server::health_reporter, ServingStatus};
 
 // ─── Protobuf types (hand-rolled with prost) ─────────────────────────────────
@@ -40,10 +40,7 @@ struct EchoService;
 
 #[tonic::async_trait]
 impl grpc_echo_server_trait::EchoServiceServer for EchoService {
-    async fn echo(
-        &self,
-        request: Request<EchoRequest>,
-    ) -> Result<Response<EchoResponse>, Status> {
+    async fn echo(&self, request: Request<EchoRequest>) -> Result<Response<EchoResponse>, Status> {
         let remote = request
             .remote_addr()
             .map(|a| a.to_string())
@@ -92,11 +89,14 @@ mod grpc_echo_server_trait {
 
     impl<T: EchoServiceServer> EchoServiceServerImpl<T> {
         pub fn new(inner: T) -> Self {
-            Self { inner: std::sync::Arc::new(inner) }
+            Self {
+                inner: std::sync::Arc::new(inner),
+            }
         }
     }
 
-    impl<T: EchoServiceServer> tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::BoxBody>>
+    impl<T: EchoServiceServer>
+        tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::BoxBody>>
         for EchoServiceServerImpl<T>
     {
         type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
@@ -121,13 +121,20 @@ mod grpc_echo_server_trait {
                 let path = req.uri().path().to_string();
                 match path.as_str() {
                     "/grpc_echo.v1.EchoService/Echo" => {
-                        let codec = tonic::codec::ProstCodec::<EchoResponse, EchoRequest>::default();
+                        let codec =
+                            tonic::codec::ProstCodec::<EchoResponse, EchoRequest>::default();
                         let mut grpc = tonic::server::Grpc::new(codec);
                         struct Handler<T>(std::sync::Arc<T>);
                         #[tonic::async_trait]
                         impl<T: EchoServiceServer> tonic::server::UnaryService<EchoRequest> for Handler<T> {
                             type Response = EchoResponse;
-                            type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
+                            type Future = std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = Result<Response<Self::Response>, Status>,
+                                        > + Send,
+                                >,
+                            >;
                             fn call(&mut self, req: Request<EchoRequest>) -> Self::Future {
                                 let inner = self.0.clone();
                                 Box::pin(async move { inner.echo(req).await })
@@ -136,12 +143,10 @@ mod grpc_echo_server_trait {
                         let resp = grpc.unary(Handler(inner), req).await;
                         Ok(resp)
                     }
-                    _ => {
-                        Ok(tonic::codegen::http::Response::builder()
-                            .status(tonic::codegen::http::StatusCode::from_u16(404).unwrap())
-                            .body(tonic::body::empty_body())
-                            .unwrap())
-                    }
+                    _ => Ok(tonic::codegen::http::Response::builder()
+                        .status(tonic::codegen::http::StatusCode::from_u16(404).unwrap())
+                        .body(tonic::body::empty_body())
+                        .unwrap()),
                 }
             })
         }
@@ -149,7 +154,9 @@ mod grpc_echo_server_trait {
 
     impl<T: EchoServiceServer> Clone for EchoServiceServerImpl<T> {
         fn clone(&self) -> Self {
-            Self { inner: self.inner.clone() }
+            Self {
+                inner: self.inner.clone(),
+            }
         }
     }
 
@@ -170,7 +177,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
 
     let (mut reporter, health_service) = health_reporter();
-    reporter.set_service_status("", ServingStatus::Serving).await;
+    reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
 
     let echo_service = grpc_echo_server_trait::EchoServiceServerImpl::new(EchoService);
 

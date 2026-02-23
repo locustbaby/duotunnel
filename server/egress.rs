@@ -1,20 +1,23 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{ProxyApp, Context, Protocol};
+use tunnel_lib::proxy::core::{Context, Protocol, ProxyApp};
+use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::UpstreamPeer;
 use tunnel_lib::proxy::tcp::{TcpPeer, TlsTcpPeer, UpstreamScheme};
-use tunnel_lib::proxy::http::HttpPeer;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 
 use crate::config::ServerEgressUpstream;
 use tunnel_lib::{HttpClientParams, UpstreamGroup};
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+type HttpsClient = Client<
+    hyper_rustls::HttpsConnector<HttpConnector>,
+    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+>;
 
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
@@ -28,7 +31,9 @@ impl ServerEgressMap {
         let mut http_rules = HashMap::new();
 
         for (name, upstream_def) in &egress.upstreams {
-            let servers: Vec<String> = upstream_def.servers.iter()
+            let servers: Vec<String> = upstream_def
+                .servers
+                .iter()
                 .map(|s| s.address.clone())
                 .collect();
             upstreams.insert(name.clone(), UpstreamGroup::new(servers));
@@ -40,7 +45,11 @@ impl ServerEgressMap {
 
         let https_client = tunnel_lib::create_https_client_with(http_params);
 
-        Self { upstreams, http_rules, https_client }
+        Self {
+            upstreams,
+            http_rules,
+            https_client,
+        }
     }
 
     pub fn get_upstream_address(&self, host: &str) -> Option<String> {
@@ -73,13 +82,19 @@ impl ServerEgressApp {
 #[async_trait]
 impl ProxyApp for ServerEgressApp {
     async fn upstream_peer(&self, context: &mut Context) -> Result<Box<dyn UpstreamPeer>> {
-        let routing = context.routing_info.as_ref()
+        let routing = context
+            .routing_info
+            .as_ref()
             .ok_or_else(|| anyhow!("missing routing info in context"))?;
 
-        let host = routing.host.as_deref()
+        let host = routing
+            .host
+            .as_deref()
             .ok_or_else(|| anyhow!("no host in routing info"))?;
 
-        let upstream_addr = self.map.get_upstream_address(host)
+        let upstream_addr = self
+            .map
+            .get_upstream_address(host)
             .ok_or_else(|| anyhow!("no egress route for host: {}", host))?;
 
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
@@ -89,12 +104,16 @@ impl ProxyApp for ServerEgressApp {
             Protocol::WebSocket => {
                 info!("WebSocket egress, using TCP forwarding");
 
-                let target_addr = if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>() {
+                let target_addr = if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>()
+                {
                     addr
                 } else {
-                    let mut addrs = tokio::net::lookup_host(&connect_addr_str).await
+                    let mut addrs = tokio::net::lookup_host(&connect_addr_str)
+                        .await
                         .map_err(|e| anyhow!("failed to resolve: {}: {}", connect_addr_str, e))?;
-                    addrs.next().ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?
+                    addrs
+                        .next()
+                        .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?
                 };
 
                 if is_https {
@@ -109,15 +128,19 @@ impl ProxyApp for ServerEgressApp {
                         tcp_params: tunnel_lib::TcpParams::default(),
                     }))
                 }
-            },
+            }
             Protocol::H1 | Protocol::H2 | Protocol::Unknown => {
-                let scheme_str = if is_https { "https".to_string() } else { "http".to_string() };
+                let scheme_str = if is_https {
+                    "https".to_string()
+                } else {
+                    "http".to_string()
+                };
                 Ok(Box::new(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme: scheme_str,
                 }))
-            },
+            }
             _ => Err(anyhow!("unsupported protocol for egress")),
         }
     }

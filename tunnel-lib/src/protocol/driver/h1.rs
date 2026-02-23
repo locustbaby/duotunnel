@@ -1,4 +1,5 @@
 use super::{ProtocolDriver, ProxyRequest};
+use crate::protocol::http_utils::{sanitize_request_headers, sanitize_response_headers};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -6,7 +7,6 @@ use http::{HeaderMap, Method, Response, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use quinn::{RecvStream, SendStream};
-use crate::protocol::http_utils::{sanitize_request_headers, sanitize_response_headers};
 
 pub struct Http1Driver {
     send: SendStream,
@@ -18,11 +18,11 @@ pub struct Http1Driver {
 
 impl Http1Driver {
     pub fn new(
-        send: SendStream, 
-        recv: RecvStream, 
-        scheme: String, 
-        authority: String, 
-        initial_bytes: Option<Bytes>
+        send: SendStream,
+        recv: RecvStream,
+        scheme: String,
+        authority: String,
+        initial_bytes: Option<Bytes>,
     ) -> Self {
         Self {
             send,
@@ -48,44 +48,33 @@ impl ProtocolDriver for Http1Driver {
     async fn read_request(&mut self) -> Result<Option<ProxyRequest>> {
         let mut recv = self.recv.take().context("RecvStream already consumed")?;
 
-        // 1. Read Headers (or use initial bytes)
         let mut first_buf = vec![0u8; 8192];
         let mut pos = 0;
-        
-        // 1. Fill with initial bytes
+
         if let Some(data) = self.initial_bytes.take() {
             let n = std::cmp::min(data.len(), first_buf.len());
             first_buf[..n].copy_from_slice(&data[..n]);
             pos = n;
         }
 
-        // 2. Loop until headers parsed
-        // 2. Loop until headers parsed
         loop {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
-            
-            // httparse reads from the slice.
+
             match req.parse(&first_buf[..pos]) {
                 Ok(httparse::Status::Complete(_n)) => {
-                    // We need to keep 'req' accessible or extract fields NOW.
-                    // But 'req' borrows 'headers' which is local to loop.
-                    // We must break and re-parse?
-                    // Or extract fields here and break.
-                    // BUT 'req' fields borrow from 'first_buf'.
-                    // We can break, and then re-parse outside loop knowing it will succeed.
                     break;
                 }
                 Ok(httparse::Status::Partial) => {
                     if pos >= first_buf.len() {
                         return Err(anyhow::anyhow!("Headers exceeding buffer size"));
                     }
-                    // Read more
+
                     match recv.read(&mut first_buf[pos..]).await? {
                         Some(n) => pos += n,
                         None => {
                             if pos == 0 {
-                                return Ok(None); // EOF at start
+                                return Ok(None);
                             }
                             return Err(anyhow::anyhow!("Unexpected EOF in headers"));
                         }
@@ -94,22 +83,19 @@ impl ProtocolDriver for Http1Driver {
                 Err(e) => return Err(e.into()),
             }
         }
-        
-        // Re-parse to extract fields (since loop scope dropped req)
+
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         let body_start = match req.parse(&first_buf[..pos])? {
             httparse::Status::Complete(n) => n,
             _ => unreachable!("Headers already validated as complete"),
         };
-        
-        let n = pos; // Total bytes read (headers + partial body)
 
+        let n = pos;
 
         let method_str = req.method.context("no method")?;
         let path = req.path.context("no path")?;
-        
-        // Construct URI
+
         let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
         let uri: Uri = uri_str.parse()?;
 
@@ -121,7 +107,7 @@ impl ProtocolDriver for Http1Driver {
             "HEAD" => Method::HEAD,
             "OPTIONS" => Method::OPTIONS,
             "PATCH" => Method::PATCH,
-            _ => Method::GET, // Fallback
+            _ => Method::GET,
         };
 
         let mut header_map = HeaderMap::new();
@@ -136,11 +122,9 @@ impl ProtocolDriver for Http1Driver {
             }
         }
 
-        // Sanitize headers for H1
         sanitize_request_headers(&mut header_map);
 
-        // Prepare Body Stream
-        let remaining_first = first_buf[body_start..n].to_vec(); // Clone remaining bytes
+        let remaining_first = first_buf[body_start..n].to_vec();
 
         let content_length: usize = header_map
             .get(http::header::CONTENT_LENGTH)
@@ -149,33 +133,37 @@ impl ProtocolDriver for Http1Driver {
             .unwrap_or(0);
 
         let stream = futures_util::stream::try_unfold(
-            (recv, Some(Bytes::from(remaining_first)), 0usize, content_length),
+            (
+                recv,
+                Some(Bytes::from(remaining_first)),
+                0usize,
+                content_length,
+            ),
             |(mut recv, first_chunk, mut read, total)| async move {
-                // 1. Process initial chunk
                 if let Some(chunk) = first_chunk {
-                     let len = chunk.len();
-                     if len > 0 {
-                         read += len;
-                         return Ok(Some((hyper::body::Frame::data(chunk), (recv, None, read, total))));
-                     }
+                    let len = chunk.len();
+                    if len > 0 {
+                        read += len;
+                        return Ok(Some((
+                            hyper::body::Frame::data(chunk),
+                            (recv, None, read, total),
+                        )));
+                    }
                 }
-                
-                // 2. Read from stream
-                // Simple logic: if content-length known, read until limit.
-                // If 0, and not chunked, assume empty?
-                // proxy.rs logic was: if content_length > 0, read. Else empty.
-                // Note: proxy.rs also had infinite read fallback? Let's check proxy.rs.
-                
+
                 if total > 0 && read >= total {
                     return Ok(None);
                 }
-                
+
                 let mut buf = vec![0u8; 8192];
                 match recv.read(&mut buf).await {
                     Ok(Some(n)) => {
                         read += n;
                         let data = Bytes::copy_from_slice(&buf[..n]);
-                        Ok(Some((hyper::body::Frame::data(data), (recv, None, read, total))))
+                        Ok(Some((
+                            hyper::body::Frame::data(data),
+                            (recv, None, read, total),
+                        )))
                     }
                     Ok(None) => Ok(None),
                     Err(e) => Err(std::io::Error::other(e)),
@@ -186,11 +174,9 @@ impl ProtocolDriver for Http1Driver {
         let body = if content_length > 0 {
             http_body_util::StreamBody::new(stream).boxed_unsync()
         } else {
-            // Check if we should read until EOF? 
-            // Current proxy.rs says: `if content_length > 0 { ... } else { empty }`
-            // But it also had an `else` block for streaming if Connection: close?
-            // Let's assume standard behavior: if no CL and no Transfer-Encoding, body is empty.
-            http_body_util::Empty::new().map_err(|e| match e {}).boxed_unsync()
+            http_body_util::Empty::new()
+                .map_err(|e| match e {})
+                .boxed_unsync()
         };
 
         Ok(Some(ProxyRequest {
@@ -203,8 +189,9 @@ impl ProtocolDriver for Http1Driver {
     }
 
     async fn write_response(&mut self, response: Response<Incoming>) -> Result<()> {
-        let status_line = format!("HTTP/1.1 {} {}\r\n", 
-            response.status().as_u16(), 
+        let status_line = format!(
+            "HTTP/1.1 {} {}\r\n",
+            response.status().as_u16(),
             response.status().canonical_reason().unwrap_or("OK")
         );
         self.send.write_all(status_line.as_bytes()).await?;
@@ -215,8 +202,10 @@ impl ProtocolDriver for Http1Driver {
             let header_line = format!("{}: {}\r\n", name, value_str);
             self.send.write_all(header_line.as_bytes()).await?;
         }
-        
-        self.send.write_all(b"Transfer-Encoding: chunked\r\n").await?;
+
+        self.send
+            .write_all(b"Transfer-Encoding: chunked\r\n")
+            .await?;
         self.send.write_all(b"\r\n").await?;
 
         let mut body = response.into_body();

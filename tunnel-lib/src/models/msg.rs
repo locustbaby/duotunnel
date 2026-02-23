@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use anyhow::{Result, anyhow};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,16 +170,23 @@ mod tests {
         assert_eq!(info.host, decoded.host);
     }
 
-    // ── MessageType::from_u8 ─────────────────────────────────────────────────
-
     #[test]
     fn test_message_type_from_u8_all_valid() {
         assert!(matches!(MessageType::from_u8(0x01), Ok(MessageType::Login)));
-        assert!(matches!(MessageType::from_u8(0x02), Ok(MessageType::LoginResp)));
-        assert!(matches!(MessageType::from_u8(0x10), Ok(MessageType::RoutingInfo)));
+        assert!(matches!(
+            MessageType::from_u8(0x02),
+            Ok(MessageType::LoginResp)
+        ));
+        assert!(matches!(
+            MessageType::from_u8(0x10),
+            Ok(MessageType::RoutingInfo)
+        ));
         assert!(matches!(MessageType::from_u8(0x04), Ok(MessageType::Ping)));
         assert!(matches!(MessageType::from_u8(0x05), Ok(MessageType::Pong)));
-        assert!(matches!(MessageType::from_u8(0x06), Ok(MessageType::ConfigPush)));
+        assert!(matches!(
+            MessageType::from_u8(0x06),
+            Ok(MessageType::ConfigPush)
+        ));
     }
 
     #[test]
@@ -189,8 +196,6 @@ mod tests {
         assert!(MessageType::from_u8(0x03).is_err());
         assert!(MessageType::from_u8(0x07).is_err());
     }
-
-    // ── Option<String> = None fields ─────────────────────────────────────────
 
     #[test]
     fn test_login_group_id_none() {
@@ -220,8 +225,6 @@ mod tests {
         assert_eq!(decoded.protocol, "tcp");
     }
 
-    // ── Full wire-protocol round-trip via send_message / recv_message ────────
-
     #[tokio::test]
     async fn test_send_recv_login_full_frame() {
         let login = Login {
@@ -231,8 +234,10 @@ mod tests {
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(1024);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
-        drop(writer); // signal EOF
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
+        drop(writer);
 
         let msg_type = recv_message_type(&mut reader).await.unwrap();
         assert_eq!(msg_type, MessageType::Login);
@@ -257,7 +262,9 @@ mod tests {
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::LoginResp, &resp).await.unwrap();
+        send_message(&mut writer, MessageType::LoginResp, &resp)
+            .await
+            .unwrap();
         drop(writer);
 
         let msg_type = recv_message_type(&mut reader).await.unwrap();
@@ -278,10 +285,12 @@ mod tests {
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::LoginResp, &resp).await.unwrap();
+        send_message(&mut writer, MessageType::LoginResp, &resp)
+            .await
+            .unwrap();
         drop(writer);
 
-        recv_message_type(&mut reader).await.unwrap(); // consume type byte
+        recv_message_type(&mut reader).await.unwrap();
         let decoded: LoginResp = recv_message(&mut reader).await.unwrap();
         assert!(!decoded.success);
         assert_eq!(decoded.error.as_deref(), Some("auth failed"));
@@ -330,7 +339,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_routing_info_wrong_type_returns_error() {
-        // Send a Login message but try to recv_routing_info — should fail
         let login = Login {
             client_id: "c".to_string(),
             group_id: None,
@@ -338,35 +346,42 @@ mod tests {
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(1024);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
         drop(writer);
 
         let result = recv_routing_info(&mut reader).await;
-        assert!(result.is_err(), "recv_routing_info on a Login message must fail");
+        assert!(
+            result.is_err(),
+            "recv_routing_info on a Login message must fail"
+        );
     }
 
     #[tokio::test]
     async fn test_recv_message_size_limit() {
-        // Construct a frame manually with len = 10MB + 1 (exceeds limit)
         use tokio::io::AsyncWriteExt;
         let (mut writer, mut reader) = tokio::io::duplex(64);
-        // Write: [type=0x01][len=10MB+1]  — no payload bytes written (reader will error on EOF)
+
         let too_large: u32 = 10 * 1024 * 1024 + 1;
         writer.write_u32(too_large).await.unwrap();
         drop(writer);
 
         let result: Result<Login> = recv_message(&mut reader).await;
-        assert!(result.is_err(), "message exceeding 10MB limit must be rejected");
+        assert!(
+            result.is_err(),
+            "message exceeding 10MB limit must be rejected"
+        );
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("too large") || msg.contains("10"), "error should mention size: {}", msg);
+        assert!(
+            msg.contains("too large") || msg.contains("10"),
+            "error should mention size: {}",
+            msg
+        );
     }
-
-    // ── Ping / Pong wire round-trip (empty payload via ClientConfig::default) ─
 
     #[tokio::test]
     async fn test_multiple_messages_sequential_on_same_pipe() {
-        // Verify framing: two messages sent back-to-back on the same stream
-        // are decoded independently without bleed-over.
         let login = Login {
             client_id: "c1".to_string(),
             group_id: None,
@@ -381,17 +396,17 @@ mod tests {
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
         send_routing_info(&mut writer, &info).await.unwrap();
         drop(writer);
 
-        // Read first message
         let t1 = recv_message_type(&mut reader).await.unwrap();
         assert_eq!(t1, MessageType::Login);
         let decoded_login: Login = recv_message(&mut reader).await.unwrap();
         assert_eq!(decoded_login.client_id, "c1");
 
-        // Read second message — must be RoutingInfo, not garbled
         let decoded_info = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded_info.proxy_name, "p");
         assert_eq!(decoded_info.host.as_deref(), Some("foo.com"));

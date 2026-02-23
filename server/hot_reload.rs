@@ -1,27 +1,14 @@
-//! Hot-reload watcher for `server_egress_upstream` and `tunnel_management`.
-//!
-//! Uses `notify` to watch the config file's parent directory (which handles
-//! editor rename-over-save patterns, e.g. vim's `:w` strategy).
-//!
-//! On a file-change event a 50ms debounce fires, the two hot-reloadable sections
-//! are re-parsed, a new `RoutingSnapshot` is built, and `state.routing.store()`
-//! atomically installs it.  In-flight requests hold a `Guard` to the old snapshot
-//! until they complete.  Parse errors are logged and the old snapshot is kept.
-
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::{ServerState, build_routing_snapshot};
 use crate::config::ServerConfigFile;
+use crate::{build_routing_snapshot, ServerState};
 use tunnel_lib::HttpClientParams;
 
-/// Spawn the background task that watches `config_path` and hot-reloads
-/// `server_egress_upstream` + `tunnel_management` on change.
-/// This function returns immediately; the watcher runs as a detached task.
 pub fn spawn_config_watcher(config_path: String, state: Arc<ServerState>) {
     tokio::spawn(async move {
         if let Err(e) = watch_loop(config_path, state).await {
@@ -33,7 +20,6 @@ pub fn spawn_config_watcher(config_path: String, state: Arc<ServerState>) {
 async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<()>(1);
 
-    // notify callbacks fire on a background thread; bridge via channel.
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res {
@@ -49,7 +35,6 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
         notify::Config::default(),
     )?;
 
-    // Watch the parent directory so rename-over saves (vim, etc.) are caught.
     let watch_dir = std::path::Path::new(&config_path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -61,12 +46,10 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
     info!(path = %config_path, "hot-reload watcher started");
 
     loop {
-        // Wait for first event
         if rx.recv().await.is_none() {
-            break; // sender dropped → state was dropped → server is shutting down
+            break;
         }
 
-        // Debounce: wait 50ms and drain any extra events that arrived in the burst
         tokio::time::sleep(Duration::from_millis(50)).await;
         while rx.try_recv().is_ok() {}
 
@@ -74,7 +57,9 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
 
         match reload_routing(&config_path, &state) {
             Ok(()) => info!(path = %config_path, "hot reload successful"),
-            Err(e) => warn!(path = %config_path, error = %e, "hot reload failed, keeping previous config"),
+            Err(e) => {
+                warn!(path = %config_path, error = %e, "hot reload failed, keeping previous config")
+            }
         }
     }
 

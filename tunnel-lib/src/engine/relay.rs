@@ -1,5 +1,5 @@
 use anyhow::Result;
-use quinn::{SendStream, RecvStream};
+use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
@@ -29,8 +29,6 @@ where
 
     debug!(quic_to_stream = ?r1, stream_to_quic = ?r2, "relay completed");
 
-    // Propagate errors rather than silently returning 0. Both futures run to
-    // completion regardless (tokio::join!), so we see both results.
     match (r1, r2) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e), _) | (_, Err(e)) => Err(e.into()),

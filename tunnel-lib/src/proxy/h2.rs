@@ -6,15 +6,18 @@ use futures_util::Stream;
 use h2::server::handshake;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
 use quinn::{RecvStream, SendStream};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, error, info};
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+type HttpsClient = Client<
+    hyper_rustls::HttpsConnector<HttpConnector>,
+    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+>;
 
 pub struct H2Peer {
     pub target_host: String,
@@ -63,7 +66,11 @@ impl UpstreamPeer for H2Peer {
                     "{}://{}{}",
                     scheme,
                     target_host,
-                    parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+                    parts
+                        .uri
+                        .path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/")
                 );
 
                 let mut builder = hyper::Request::builder()
@@ -72,22 +79,20 @@ impl UpstreamPeer for H2Peer {
                     .version(hyper::Version::HTTP_2);
 
                 for (name, value) in parts.headers.iter() {
-                    // Filter pseudo-headers and connection-specific headers
-                    if name != "host" 
-                        && !name.as_str().starts_with(':') 
-                        && name != "connection" 
-                        && name != "upgrade" 
-                        && name != "keep-alive" 
-                        && name != "proxy-connection" 
-                        && name != "te" 
-                        && name != "transfer-encoding" 
+                    if name != "host"
+                        && !name.as_str().starts_with(':')
+                        && name != "connection"
+                        && name != "upgrade"
+                        && name != "keep-alive"
+                        && name != "proxy-connection"
+                        && name != "te"
+                        && name != "transfer-encoding"
                     {
                         builder = builder.header(name, value);
                     }
                 }
                 builder = builder.header("host", &target_host);
 
-                // Stream request body logic
                 let stream_body = stream_body_from_h2(body);
                 let boxed_body = http_body_util::combinators::UnsyncBoxBody::new(stream_body);
 
@@ -103,10 +108,10 @@ impl UpstreamPeer for H2Peer {
                     Ok(resp) => resp,
                     Err(e) => {
                         error!("Upstream request failed: {}", e);
-                        // Try to send 502
+
                         let _ = respond.send_response(
-                            hyper::Response::builder().status(502).body(()).unwrap(), 
-                            true
+                            hyper::Response::builder().status(502).body(()).unwrap(),
+                            true,
                         );
                         return;
                     }
@@ -116,7 +121,7 @@ impl UpstreamPeer for H2Peer {
 
                 let (resp_parts, mut resp_body) = response.into_parts();
                 let mut h2_response = hyper::Response::builder().status(resp_parts.status);
-                
+
                 for (name, value) in resp_parts.headers.iter() {
                     if !name.as_str().starts_with(':') {
                         h2_response = h2_response.header(name, value);
@@ -132,7 +137,6 @@ impl UpstreamPeer for H2Peer {
                     }
                 };
 
-                // Stream response body logic
                 while let Some(frame_res) = resp_body.frame().await {
                     match frame_res {
                         Ok(frame) => {
@@ -140,23 +144,16 @@ impl UpstreamPeer for H2Peer {
                                 let data = frame.into_data().unwrap();
                                 let len = data.len();
 
-                                // Wait until the remote's flow-control window is large
-                                // enough to hold the entire frame before calling
-                                // send_data(). Without this loop, send_data() may
-                                // internally buffer data beyond the granted window,
-                                // leading to unbounded memory growth when the receiver
-                                // is slower than the upstream (OOM risk).
-                                //
-                                // reserve_capacity() signals how much we *want*; each
-                                // poll_capacity() wake-up may only grant a portion, so
-                                // we loop until the cumulative granted capacity covers
-                                // the full frame length.
                                 send_stream.reserve_capacity(len);
                                 loop {
                                     if send_stream.capacity() >= len {
                                         break;
                                     }
-                                    match futures_util::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                                    match futures_util::future::poll_fn(|cx| {
+                                        send_stream.poll_capacity(cx)
+                                    })
+                                    .await
+                                    {
                                         None => {
                                             error!("H2 flow control: send stream closed before capacity granted");
                                             return;
@@ -165,26 +162,24 @@ impl UpstreamPeer for H2Peer {
                                             error!("H2 flow control error: {}", e);
                                             return;
                                         }
-                                        Some(Ok(_)) => {
-                                            // More capacity granted; re-check the total.
-                                        }
+                                        Some(Ok(_)) => {}
                                     }
                                 }
 
                                 if let Err(e) = send_stream.send_data(data, false) {
-                                     error!("Failed to send response data: {}", e);
-                                     return;
+                                    error!("Failed to send response data: {}", e);
+                                    return;
                                 }
                             } else if frame.is_trailers() {
                                 let trailers = frame.into_trailers().unwrap();
                                 if let Err(e) = send_stream.send_trailers(trailers) {
-                                     error!("Failed to send response trailers: {}", e);
-                                     return;
+                                    error!("Failed to send response trailers: {}", e);
+                                    return;
                                 }
-                                // Trailers imply EOS
-                                return; 
+
+                                return;
                             }
-                        },
+                        }
                         Err(e) => {
                             error!("Error reading response body: {}", e);
                             return;
@@ -192,9 +187,8 @@ impl UpstreamPeer for H2Peer {
                     }
                 }
 
-                // End of stream
                 if let Err(e) = send_stream.send_data(Bytes::new(), true) {
-                     debug!("Failed to send EOS (might be already closed): {}", e);
+                    debug!("Failed to send EOS (might be already closed): {}", e);
                 }
             });
         }
@@ -203,35 +197,25 @@ impl UpstreamPeer for H2Peer {
     }
 }
 
-// Adapter to turn h2::RecvStream into a Stream of hyper Frames
-fn stream_body_from_h2(mut body: h2::RecvStream) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + 'static> {
-    let stream = futures_util::stream::poll_fn(move |cx| {
-        // Check for data
-        match body.poll_data(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                let _ = body.flow_control().release_capacity(bytes.len());
-                Poll::Ready(Some(Ok(Frame::data(bytes))))
-            }
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Some(Err(std::io::Error::other(e))))
-            }
-            Poll::Ready(None) => {
-                // Data stream ended, check trailers
-                match body.poll_trailers(cx) {
-                    Poll::Ready(Ok(Some(trailers))) => {
-                        Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-                    }
-                    Poll::Ready(Ok(None)) => Poll::Ready(None),
-                    Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
-            Poll::Pending => Poll::Pending,
+fn stream_body_from_h2(
+    mut body: h2::RecvStream,
+) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + 'static> {
+    let stream = futures_util::stream::poll_fn(move |cx| match body.poll_data(cx) {
+        Poll::Ready(Some(Ok(bytes))) => {
+            let _ = body.flow_control().release_capacity(bytes.len());
+            Poll::Ready(Some(Ok(Frame::data(bytes))))
         }
+        Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
+        Poll::Ready(None) => match body.poll_trailers(cx) {
+            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            Poll::Ready(Ok(None)) => Poll::Ready(None),
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
+            Poll::Pending => Poll::Pending,
+        },
+        Poll::Pending => Poll::Pending,
     });
     StreamBody::new(stream)
 }
-
 
 struct QuicIo {
     send: SendStream,

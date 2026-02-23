@@ -1,20 +1,17 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{info, warn, debug, error};
+use tracing::{debug, error, info, warn};
 
 use tunnel_lib::{
-    MessageType, Login, LoginResp, ClientConfig,
-    send_message, recv_message, recv_message_type,
+    recv_message, recv_message_type, send_message, ClientConfig, Login, LoginResp, MessageType,
 };
 
-use crate::{ServerState, tunnel_handler, metrics};
 use crate::config::build_client_config_for_group;
+use crate::{metrics, tunnel_handler, ServerState};
 
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
 
-    // Build server config with QUIC transport params from config file.
-    // Falls back to sensible defaults for any unset field.
     let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
@@ -44,10 +41,7 @@ pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     Ok(())
 }
 
-async fn handle_quic_connection(
-    state: Arc<ServerState>,
-    incoming: quinn::Incoming,
-) -> Result<()> {
+async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = %remote_addr, "new QUIC connection");
@@ -61,7 +55,10 @@ async fn handle_quic_connection(
     }
 
     let login: Login = recv_message(&mut recv).await?;
-    let group_id = login.group_id.clone().unwrap_or_else(|| "default".to_string());
+    let group_id = login
+        .group_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
 
     info!(
         client_id = %login.client_id,
@@ -69,7 +66,6 @@ async fn handle_quic_connection(
         "client login attempt"
     );
 
-    // Validate authentication token
     if !state.config.validate_token(&group_id, &login.token) {
         warn!(
             client_id = %login.client_id,
@@ -90,8 +86,7 @@ async fn handle_quic_connection(
 
     let client_config = {
         let routing = state.routing.load();
-        build_client_config_for_group(&routing.tunnel_management, &group_id)
-            .unwrap_or_default()
+        build_client_config_for_group(&routing.tunnel_management, &group_id).unwrap_or_default()
     };
 
     let resp = LoginResp {
@@ -107,14 +102,11 @@ async fn handle_quic_connection(
         "client authenticated and registered"
     );
 
-    // Atomically replace any existing registration for this client_id.
-    // replace_or_register uses DashMap::entry() to eliminate the race window
-    // that would exist with a separate get → unregister → register sequence.
-    if let Some(old_conn) = state.registry.replace_or_register(
-        login.client_id.clone(),
-        group_id.clone(),
-        conn.clone(),
-    ) {
+    if let Some(old_conn) =
+        state
+            .registry
+            .replace_or_register(login.client_id.clone(), group_id.clone(), conn.clone())
+    {
         warn!(
             client_id = %login.client_id,
             "duplicate client ID detected, closing old connection"

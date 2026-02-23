@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tokio::net::TcpListener;
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::metrics;

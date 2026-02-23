@@ -17,9 +17,7 @@ pub struct ProxyRequest {
 
 #[async_trait]
 pub trait ProtocolDriver {
-    /// Read the next request from the downstream connection
     async fn read_request(&mut self) -> Result<Option<ProxyRequest>>;
 
-    /// Write a response back to the downstream connection
     async fn write_response(&mut self, response: http::Response<Incoming>) -> Result<()>;
 }

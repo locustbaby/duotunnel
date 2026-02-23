@@ -1,29 +1,27 @@
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::{Request, Method, Uri, HeaderMap, header};
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
+use hyper::{header, HeaderMap, Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
-use quinn::{SendStream, RecvStream};
-use tracing::{info, debug};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use quinn::{RecvStream, SendStream};
 use std::time::Duration;
+use tracing::{debug, info};
 
-use crate::transport::addr::parse_upstream;
 use crate::protocol::rewrite::Rewriter;
+use crate::transport::addr::parse_upstream;
 
-pub type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+pub type HttpsClient = Client<
+    hyper_rustls::HttpsConnector<HttpConnector>,
+    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+>;
 
-/// Tunable parameters for the outbound HTTP/HTTPS connection pool.
-///
-/// Shared by server egress, client egress, and the standalone egress helper.
-/// All fields have defaults preserving the previous hard-coded behaviour.
 #[derive(Debug, Clone)]
 pub struct HttpClientParams {
-    /// Idle-connection TTL before eviction from the pool (seconds). Default: 90.
     pub pool_idle_timeout_secs: u64,
-    /// Maximum idle connections kept per host. Default: 10.
+
     pub pool_max_idle_per_host: usize,
 }
 
@@ -78,7 +76,10 @@ pub async fn forward_http(
     let parse_result = req.parse(first_chunk)?;
 
     let method = req.method.ok_or_else(|| anyhow::anyhow!("no method"))?;
-    let mut path = req.path.ok_or_else(|| anyhow::anyhow!("no path"))?.to_string();
+    let mut path = req
+        .path
+        .ok_or_else(|| anyhow::anyhow!("no path"))?
+        .to_string();
 
     let mut hyper_headers = HeaderMap::new();
     for h in req.headers.iter() {
@@ -102,17 +103,17 @@ pub async fn forward_http(
     let scheme = if parsed.is_https { "https" } else { "http" };
     let uri: Uri = format!("{}://{}{}", scheme, parsed.host, path).parse()?;
 
-    // Method::from_bytes handles all valid HTTP methods including PROPFIND,
-    // MKCOL, CONNECT, TRACE, and custom extension methods.
     let hyper_method = Method::from_bytes(method.as_bytes())
         .map_err(|_| anyhow::anyhow!("invalid HTTP method: {}", method))?;
 
-    // Return an error instead of panicking when headers don't fit in the 8KB buffer.
     let body_start = match parse_result {
         httparse::Status::Complete(n) => n,
-        httparse::Status::Partial => return Err(anyhow::anyhow!(
-            "HTTP request headers exceed {} bytes read buffer", first_chunk.len()
-        )),
+        httparse::Status::Partial => {
+            return Err(anyhow::anyhow!(
+                "HTTP request headers exceed {} bytes read buffer",
+                first_chunk.len()
+            ))
+        }
     };
     let remaining_first = &first_chunk[body_start..];
 
@@ -122,15 +123,28 @@ pub async fn forward_http(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let req_body_stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<hyper::body::Frame<Bytes>, std::io::Error>> + Send>> = if content_length > 0 {
+    let req_body_stream: std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<Item = Result<hyper::body::Frame<Bytes>, std::io::Error>>
+                + Send,
+        >,
+    > = if content_length > 0 {
         let stream = futures_util::stream::try_unfold(
-            (recv, Some(Bytes::copy_from_slice(remaining_first)), 0usize, content_length),
+            (
+                recv,
+                Some(Bytes::copy_from_slice(remaining_first)),
+                0usize,
+                content_length,
+            ),
             |(mut recv, first_chunk, mut read, total)| async move {
                 if let Some(chunk) = first_chunk {
                     let len = chunk.len();
                     if len > 0 {
                         read += len;
-                        return Ok(Some((hyper::body::Frame::data(chunk), (recv, None, read, total))));
+                        return Ok(Some((
+                            hyper::body::Frame::data(chunk),
+                            (recv, None, read, total),
+                        )));
                     }
                 }
 
@@ -146,7 +160,10 @@ pub async fn forward_http(
                     Ok(Some(n)) if n > 0 => {
                         read += n;
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
-                        Ok(Some((hyper::body::Frame::data(chunk), (recv, None, read, total))))
+                        Ok(Some((
+                            hyper::body::Frame::data(chunk),
+                            (recv, None, read, total),
+                        )))
                     }
                     Ok(_) => Ok(None),
                     Err(e) => Err(std::io::Error::other(e)),
@@ -161,9 +178,7 @@ pub async fn forward_http(
     let req_body = http_body_util::StreamBody::new(req_body_stream);
     let req_body = http_body_util::combinators::UnsyncBoxBody::new(req_body);
 
-    let mut request_builder = Request::builder()
-        .method(hyper_method)
-        .uri(uri);
+    let mut request_builder = Request::builder().method(hyper_method).uri(uri);
 
     if let Some(headers) = request_builder.headers_mut() {
         *headers = hyper_headers;
@@ -178,16 +193,19 @@ pub async fn forward_http(
         "HTTP response received"
     );
 
-    let status_line = format!("HTTP/1.1 {} {}\r\n", 
-        response.status().as_u16(), 
+    let status_line = format!(
+        "HTTP/1.1 {} {}\r\n",
+        response.status().as_u16(),
         response.status().canonical_reason().unwrap_or("OK")
     );
     send.write_all(status_line.as_bytes()).await?;
 
     for (name, value) in response.headers() {
-        // Use from_utf8_lossy so non-ASCII header values (e.g. some Set-Cookie fields)
-        // are forwarded as-is instead of causing the entire response to be aborted.
-        let header_line = format!("{}: {}\r\n", name, String::from_utf8_lossy(value.as_bytes()));
+        let header_line = format!(
+            "{}: {}\r\n",
+            name,
+            String::from_utf8_lossy(value.as_bytes())
+        );
         send.write_all(header_line.as_bytes()).await?;
     }
     send.write_all(b"\r\n").await?;
