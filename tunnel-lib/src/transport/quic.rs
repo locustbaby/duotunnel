@@ -1,3 +1,9 @@
+// quinn-udp (a quinn dependency) automatically enables UDP Generic
+// Segmentation Offload (GSO) and Generic Receive Offload (GRO) on
+// Linux ≥ 5.4 and on macOS.  These allow the kernel/NIC to batch
+// multiple QUIC datagrams in a single syscall, cutting syscall overhead
+// by up to 8× at high packet rates.  No additional code is required —
+// quinn detects support at runtime and falls back gracefully.
 use anyhow::{anyhow, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
@@ -27,12 +33,18 @@ impl Default for QuicTransportParams {
     fn default() -> Self {
         Self {
             max_concurrent_streams: 1000,
-            stream_receive_window_bytes: 1024 * 1024,
-            connection_receive_window_bytes: 8 * 1024 * 1024,
-            send_window_bytes: 8 * 1024 * 1024,
+            // 4 MB per-stream window — headroom for ~40 ms RTT at 800 Mbps.
+            stream_receive_window_bytes: 4 * 1024 * 1024,
+            // 32 MB connection window — supports many concurrent streams at
+            // high bandwidth without flow-control stalls.
+            connection_receive_window_bytes: 32 * 1024 * 1024,
+            send_window_bytes: 32 * 1024 * 1024,
             keepalive_secs: 20,
             idle_timeout_secs: 60,
-            congestion: None,
+            // BBR: lower queue occupancy and better throughput on WAN links
+            // compared to Cubic.  quinn's BBR implementation uses the same
+            // BBRv1 algorithm as the Linux kernel.
+            congestion: Some("bbr".to_string()),
         }
     }
 }

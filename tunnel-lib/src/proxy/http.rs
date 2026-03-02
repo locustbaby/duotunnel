@@ -1,7 +1,5 @@
-use super::peers::UpstreamPeer;
 use crate::protocol::driver::{h1::Http1Driver, ProtocolDriver};
 use anyhow::Result;
-use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Request;
@@ -19,10 +17,9 @@ pub struct HttpPeer {
     pub scheme: String,
 }
 
-#[async_trait]
-impl UpstreamPeer for HttpPeer {
-    async fn connect(
-        &self,
+impl HttpPeer {
+    pub async fn connect_inner(
+        self,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,

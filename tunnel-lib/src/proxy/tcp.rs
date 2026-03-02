@@ -1,7 +1,5 @@
-use super::peers::UpstreamPeer;
 use crate::engine::{bridge, relay::relay_with_initial};
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use bytes::Bytes;
 use quinn::{RecvStream, SendStream};
 use rustls::pki_types::ServerName;
@@ -151,10 +149,9 @@ impl TlsTcpPeer {
     }
 }
 
-#[async_trait]
-impl UpstreamPeer for TcpPeer {
-    async fn connect(
-        &self,
+impl TcpPeer {
+    pub async fn connect_inner(
+        self,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
@@ -177,10 +174,9 @@ impl UpstreamPeer for TcpPeer {
     }
 }
 
-#[async_trait]
-impl UpstreamPeer for TlsTcpPeer {
-    async fn connect(
-        &self,
+impl TlsTcpPeer {
+    pub async fn connect_inner(
+        self,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,

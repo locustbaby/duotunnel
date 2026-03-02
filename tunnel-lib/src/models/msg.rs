@@ -92,9 +92,14 @@ where
     M: Serialize,
 {
     let payload = bincode::serialize(msg)?;
-    writer.write_u8(msg_type as u8).await?;
-    writer.write_u32(payload.len() as u32).await?;
-    writer.write_all(&payload).await?;
+    // Combine the 5-byte header (1-byte type + 4-byte length) with the
+    // payload into a single allocation so the underlying write path can
+    // flush everything in one syscall instead of three.
+    let mut frame = Vec::with_capacity(5 + payload.len());
+    frame.push(msg_type as u8);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    writer.write_all(&frame).await?;
     Ok(())
 }
 

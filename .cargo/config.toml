@@ -1,0 +1,12 @@
+# Build-time CPU tuning
+#
+# target-cpu=native: emit instructions for the local CPU's full ISA
+# (AES-NI, AVX2, SHA-NI, etc.).  rustls/ring will use hardware AES and
+# SHA without any code changes.  The compiler can also auto-vectorize
+# loops in protocol detection and buffer copies.
+#
+# NOTE: binaries built this way are NOT portable to older CPUs.
+# For cross-compiled or distributed builds, remove this file or set
+# CARGO_ENCODED_RUSTFLAGS="" to override.
+[build]
+rustflags = ["-C", "target-cpu=native"]

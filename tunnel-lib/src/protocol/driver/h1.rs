@@ -2,7 +2,7 @@ use super::{ProtocolDriver, ProxyRequest};
 use crate::protocol::http_utils::{sanitize_request_headers, sanitize_response_headers};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use http::{HeaderMap, Method, Response, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -155,8 +155,11 @@ impl ProtocolDriver for Http1Driver {
                     return Ok(None);
                 }
 
-                let mut buf = vec![0u8; 8192];
-                match recv.read(&mut buf).await {
+                let mut buf = BytesMut::with_capacity(8192);
+                // SAFETY: quinn fills the slice before returning n; we freeze
+                // only [0..n] via copy_from_slice below.
+                unsafe { buf.set_len(8192) };
+                match recv.read(&mut buf[..]).await {
                     Ok(Some(n)) => {
                         read += n;
                         let data = Bytes::copy_from_slice(&buf[..n]);
@@ -189,37 +192,56 @@ impl ProtocolDriver for Http1Driver {
     }
 
     async fn write_response(&mut self, response: Response<Incoming>) -> Result<()> {
-        let status_line = format!(
-            "HTTP/1.1 {} {}\r\n",
-            response.status().as_u16(),
-            response.status().canonical_reason().unwrap_or("OK")
-        );
-        self.send.write_all(status_line.as_bytes()).await?;
-
+        // ── Response headers ─────────────────────────────────────────────
+        // Batch all header lines into a single BytesMut and flush once,
+        // instead of one write_all() per header (which can be 15-20 writes).
+        let status = response.status();
         let sanitized_headers = sanitize_response_headers(response.headers());
+
+        // Estimate capacity: status line (~30B) + avg 30B/header + fixed suffix
+        let mut header_buf = BytesMut::with_capacity(
+            32 + sanitized_headers.len() * 48 + 32,
+        );
+
+        // Status line
+        use std::fmt::Write as FmtWrite;
+        write!(
+            header_buf,
+            "HTTP/1.1 {} {}\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("OK")
+        )
+        .unwrap();
+
         for (name, value) in &sanitized_headers {
-            let value_str = value.to_str().unwrap_or("");
-            let header_line = format!("{}: {}\r\n", name, value_str);
-            self.send.write_all(header_line.as_bytes()).await?;
+            header_buf.put_slice(name.as_str().as_bytes());
+            header_buf.put_slice(b": ");
+            header_buf.put_slice(value.as_bytes());
+            header_buf.put_slice(b"\r\n");
         }
+        header_buf.put_slice(b"transfer-encoding: chunked\r\n\r\n");
 
-        self.send
-            .write_all(b"Transfer-Encoding: chunked\r\n")
-            .await?;
-        self.send.write_all(b"\r\n").await?;
+        self.send.write_all(&header_buf).await?;
 
+        // ── Response body (chunked) ───────────────────────────────────────
+        // Each chunk: "<hex-len>\r\n<data>\r\n"
+        // We gather the three parts into a single buffer per chunk, cutting
+        // two redundant write_all() calls per body frame.
         let mut body = response.into_body();
         let mut accumulated_trailers = HeaderMap::new();
+        // Reusable chunk-framing buffer (avoids repeated allocation)
+        let mut chunk_buf = BytesMut::with_capacity(8192 + 24);
 
         loop {
             match body.frame().await {
                 Some(Ok(frame)) => {
                     if let Some(chunk) = frame.data_ref() {
                         if !chunk.is_empty() {
-                            let chunk_header = format!("{:x}\r\n", chunk.len());
-                            self.send.write_all(chunk_header.as_bytes()).await?;
-                            self.send.write_all(chunk).await?;
-                            self.send.write_all(b"\r\n").await?;
+                            chunk_buf.clear();
+                            write!(chunk_buf, "{:x}\r\n", chunk.len()).unwrap();
+                            chunk_buf.put_slice(chunk);
+                            chunk_buf.put_slice(b"\r\n");
+                            self.send.write_all(&chunk_buf).await?;
                         }
                     }
                     if let Ok(trailers) = frame.into_trailers() {
@@ -231,17 +253,22 @@ impl ProtocolDriver for Http1Driver {
             }
         }
 
-        self.send.write_all(b"0\r\n").await?;
-
-        if !accumulated_trailers.is_empty() {
+        // ── Chunked terminator + optional trailers ────────────────────────
+        if accumulated_trailers.is_empty() {
+            self.send.write_all(b"0\r\n\r\n").await?;
+        } else {
+            let mut tail = BytesMut::with_capacity(8 + accumulated_trailers.len() * 48);
+            tail.put_slice(b"0\r\n");
             for (name, value) in &accumulated_trailers {
-                let value_str = value.to_str().unwrap_or("");
-                let trailer_line = format!("{}: {}\r\n", name, value_str);
-                self.send.write_all(trailer_line.as_bytes()).await?;
+                tail.put_slice(name.as_str().as_bytes());
+                tail.put_slice(b": ");
+                tail.put_slice(value.as_bytes());
+                tail.put_slice(b"\r\n");
             }
+            tail.put_slice(b"\r\n");
+            self.send.write_all(&tail).await?;
         }
 
-        self.send.write_all(b"\r\n").await?;
         Ok(())
     }
 }

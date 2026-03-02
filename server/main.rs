@@ -1,3 +1,10 @@
+// jemalloc: lower fragmentation and faster allocation under concurrent load.
+// Enabled on Linux/musl targets; falls back to system allocator elsewhere
+// (macOS already uses a fast allocator; Windows is excluded).
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_env = "msvc")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use clap::Parser;

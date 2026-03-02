@@ -1,7 +1,9 @@
+use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use quinn::Connection;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 struct ClientInfo {
@@ -9,47 +11,74 @@ struct ClientInfo {
     conn: Connection,
 }
 
+/// A group of QUIC connections that share a `group_id`.
+///
+/// Layout notes:
+/// - `conns` and `ids` are stored as separate `Vec`s (SoA) so that the hot
+///   path (`select_healthy`) only touches connection handles, leaving the
+///   cold `String` id data in a different cacheline.
+/// - `counter` is wrapped in `CachePadded` to prevent false-sharing with
+///   `conns`/`ids` when multiple cores increment it concurrently.
 pub struct ClientGroup {
-    clients: RwLock<Vec<(String, Connection)>>,
-    counter: AtomicUsize,
+    /// Active QUIC connections — touched on every routing decision.
+    conns: RwLock<Vec<Connection>>,
+    /// Corresponding client IDs — touched only on register/unregister.
+    ids: RwLock<Vec<String>>,
+    /// Round-robin cursor, padded to its own cacheline.
+    counter: CachePadded<AtomicUsize>,
 }
 
 impl ClientGroup {
     pub fn new() -> Self {
         Self {
-            clients: RwLock::new(Vec::new()),
-            counter: AtomicUsize::new(0),
+            conns: RwLock::new(Vec::new()),
+            ids: RwLock::new(Vec::new()),
+            counter: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn add(&self, client_id: String, conn: Connection) {
-        let mut c = self.clients.write().unwrap();
-
-        c.retain(|(id, _)| id != &client_id);
-        c.push((client_id, conn));
+        // Check if we're replacing an existing client_id
+        {
+            let mut ids = self.ids.write();
+            if let Some(pos) = ids.iter().position(|id| id == &client_id) {
+                ids[pos] = client_id.clone();
+                drop(ids);
+                self.conns.write()[pos] = conn;
+                return;
+            }
+            ids.push(client_id);
+        }
+        self.conns.write().push(conn);
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
-        let mut c = self.clients.write().unwrap();
-        let before = c.len();
-        c.retain(|(id, _)| id != client_id);
-        c.len() < before
+        let mut ids = self.ids.write();
+        if let Some(pos) = ids.iter().position(|id| id == client_id) {
+            ids.swap_remove(pos);
+            drop(ids);
+            self.conns.write().swap_remove(pos);
+            return true;
+        }
+        false
     }
 
     pub fn is_empty(&self) -> bool {
-        self.clients.read().unwrap().is_empty()
+        self.conns.read().is_empty()
     }
 
+    /// Round-robin selection, skipping closed connections.
+    /// Only acquires the read lock on `conns` — never touches `ids`.
     pub fn select_healthy(&self) -> Option<Connection> {
-        let c = self.clients.read().unwrap();
-        let len = c.len();
+        let conns = self.conns.read();
+        let len = conns.len();
         if len == 0 {
             return None;
         }
 
         let start = self.counter.fetch_add(1, Ordering::Relaxed);
         for i in 0..len {
-            let (_, conn) = &c[(start + i) % len];
+            let conn = &conns[(start + i) % len];
             if conn.close_reason().is_none() {
                 return Some(conn.clone());
             }
@@ -61,7 +90,6 @@ impl ClientGroup {
 
 pub struct ClientRegistry {
     groups: DashMap<String, Arc<ClientGroup>>,
-
     clients: DashMap<String, ClientInfo>,
 }
 

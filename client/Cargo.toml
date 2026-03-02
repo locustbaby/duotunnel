@@ -36,3 +36,4 @@ async-trait = "0.1"
 http = "1.0"
 arc-swap = "1.7"
 figment = { version = "0.10", features = ["yaml", "env"] }
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
