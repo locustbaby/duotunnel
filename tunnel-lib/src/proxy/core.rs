@@ -1,7 +1,6 @@
-use super::peers::UpstreamPeer;
+use super::peers::PeerKind;
 use anyhow::Result;
-use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::BytesMut;
 use std::net::SocketAddr;
 
 use crate::models::msg::RoutingInfo;
@@ -18,13 +17,15 @@ pub enum Protocol {
 pub struct Context {
     pub client_addr: SocketAddr,
     pub protocol: Protocol,
-    pub initial_bytes: Option<Bytes>,
+    pub initial_bytes: Option<bytes::Bytes>,
     pub routing_info: Option<RoutingInfo>,
 }
 
-#[async_trait]
 pub trait ProxyApp: Send + Sync {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<Box<dyn UpstreamPeer>>;
+    fn upstream_peer(
+        &self,
+        context: &mut Context,
+    ) -> impl std::future::Future<Output = Result<PeerKind>> + Send;
 }
 
 pub struct ProxyEngine<A: ProxyApp> {
@@ -43,9 +44,17 @@ impl<A: ProxyApp> ProxyEngine<A> {
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
-        let mut buf = vec![0u8; 4096];
-        let n = recv.read(&mut buf).await?.unwrap_or(0);
-        let initial_bytes = Bytes::copy_from_slice(&buf[..n]);
+        // Single allocation via BytesMut; freeze() hands ownership to Bytes
+        // without a second copy.
+        let mut buf = BytesMut::with_capacity(4096);
+        // SAFETY: quinn's RecvStream::read fills the slice before returning
+        // the byte count; we truncate to n immediately after.
+        unsafe {
+            buf.set_len(4096);
+        }
+        let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
+        buf.truncate(n);
+        let initial_bytes: bytes::Bytes = buf.freeze();
 
         let protocol = if let Some(ref ri) = routing_info {
             match ri.protocol.as_str() {

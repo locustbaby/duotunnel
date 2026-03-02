@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, ProxyApp};
 use tunnel_lib::proxy::http::HttpPeer;
-use tunnel_lib::proxy::peers::UpstreamPeer;
+use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::{ClientConfig, HttpClientParams, UpstreamGroup};
 
 pub use tunnel_lib::egress::http::HttpsClient;
@@ -88,9 +87,8 @@ impl ClientApp {
     }
 }
 
-#[async_trait]
 impl ProxyApp for ClientApp {
-    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<Box<dyn UpstreamPeer>> {
+    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerKind> {
         let routing = context
             .routing_info
             .as_ref()
@@ -118,7 +116,7 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(Box::new(HttpPeer {
+                Ok(PeerKind::Http(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme,
@@ -130,7 +128,7 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(Box::new(tunnel_lib::proxy::h2::H2Peer {
+                Ok(PeerKind::H2(tunnel_lib::proxy::h2::H2Peer {
                     target_host: connect_addr_str,
                     scheme,
                     client: self.map.https_client.clone(),
@@ -158,7 +156,7 @@ impl ProxyApp for ClientApp {
                 };
 
                 if is_https {
-                    Ok(Box::new(
+                    Ok(PeerKind::Tls(
                         tunnel_lib::proxy::tcp::TlsTcpPeer::new_with_params(
                             target_addr,
                             tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
@@ -167,7 +165,7 @@ impl ProxyApp for ClientApp {
                         )?,
                     ))
                 } else {
-                    Ok(Box::new(tunnel_lib::proxy::tcp::TcpPeer {
+                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer {
                         target_addr,
                         tcp_params: self.tcp_params.clone(),
                     }))
@@ -218,9 +216,19 @@ impl ProxyApp for ClientApp {
                         https_client: HttpsClient,
                     }
 
-                    #[async_trait::async_trait]
                     impl tunnel_lib::proxy::peers::UpstreamPeer for MitmH2Peer {
-                        async fn connect(
+                        fn connect_boxed<'a>(
+                            &'a self,
+                            send: quinn::SendStream,
+                            recv: quinn::RecvStream,
+                            initial_data: Option<bytes::Bytes>,
+                        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+                            Box::pin(self.do_connect(send, recv, initial_data))
+                        }
+                    }
+
+                    impl MitmH2Peer {
+                        async fn do_connect(
                             &self,
                             send: quinn::SendStream,
                             recv: quinn::RecvStream,
@@ -313,16 +321,16 @@ impl ProxyApp for ClientApp {
 
                             Ok(())
                         }
-                    }
+                    }  // impl MitmH2Peer
 
-                    Ok(Box::new(MitmH2Peer {
+                    Ok(PeerKind::Dyn(Box::new(MitmH2Peer {
                         acceptor,
                         target_addr,
                         tls_host: tls_host.unwrap_or_else(|| "".to_string()),
                         https_client: self.map.https_client.clone(),
-                    }))
+                    })))
                 } else {
-                    Ok(Box::new(tunnel_lib::proxy::tcp::TcpPeer {
+                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer {
                         target_addr,
                         tcp_params: self.tcp_params.clone(),
                     }))
@@ -334,7 +342,7 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(Box::new(HttpPeer {
+                Ok(PeerKind::Http(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme,

@@ -10,7 +10,10 @@ members = [
 resolver = "2"
 
 [profile.release]
-lto = "thin"           # Cross-crate inlining without full LTO compile time cost
+lto = "fat"            # Full cross-crate LTO: enables whole-program inlining and
+                       # dead-code elimination across all crates.  ~5-15% better
+                       # throughput vs "thin" at the cost of slower release builds.
 opt-level = 3
 codegen-units = 1      # Single codegen unit enables better inlining
 strip = "debuginfo"    # Smaller binaries; retain symbol names for stack traces
+panic = "abort"        # No unwinding machinery; smaller binary + faster panic path

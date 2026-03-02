@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use bytes::Bytes;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -8,7 +7,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy::core::{Context, Protocol, ProxyApp};
 use tunnel_lib::proxy::http::HttpPeer;
-use tunnel_lib::proxy::peers::UpstreamPeer;
+use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::proxy::tcp::{TcpPeer, TlsTcpPeer, UpstreamScheme};
 
 use crate::config::ServerEgressUpstream;
@@ -79,9 +78,8 @@ impl ServerEgressApp {
     }
 }
 
-#[async_trait]
 impl ProxyApp for ServerEgressApp {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<Box<dyn UpstreamPeer>> {
+    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerKind> {
         let routing = context
             .routing_info
             .as_ref()
@@ -117,13 +115,13 @@ impl ProxyApp for ServerEgressApp {
                 };
 
                 if is_https {
-                    Ok(Box::new(TlsTcpPeer::new(
+                    Ok(PeerKind::Tls(TlsTcpPeer::new(
                         target_addr,
                         tls_host.unwrap_or_default(),
                         scheme.alpn(),
                     )?))
                 } else {
-                    Ok(Box::new(TcpPeer {
+                    Ok(PeerKind::Tcp(TcpPeer {
                         target_addr,
                         tcp_params: tunnel_lib::TcpParams::default(),
                     }))
@@ -135,7 +133,7 @@ impl ProxyApp for ServerEgressApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(Box::new(HttpPeer {
+                Ok(PeerKind::Http(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme: scheme_str,

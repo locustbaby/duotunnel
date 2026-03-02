@@ -288,6 +288,73 @@ While building upon frp's foundation, DuoTunnel introduces several architectural
 
 We're grateful to the frp team for pioneering this space and providing a solid reference implementation.
 
+## Performance Tuning
+
+### Optimised Release Build
+
+```bash
+cargo build --release
+# Binaries are built with:
+#   -C target-cpu=native   (AES-NI, AVX2, SHA-NI auto-enabled via .cargo/config.toml)
+#   lto = "fat"            (whole-program inlining across all crates)
+#   codegen-units = 1
+#   panic = "abort"
+```
+
+### Profile-Guided Optimisation (PGO) — +10–20% throughput
+
+PGO feeds real traffic profiles to LLVM for branch-prediction and inlining decisions.
+
+```bash
+bash scripts/pgo-build.sh
+# Interactive: builds instrumented binaries → prompts you to run traffic → rebuilds with profiles
+```
+
+### OS / Kernel Tuning — +20–40% at high concurrency
+
+Apply sysctl, IRQ affinity, and CPU-governor tuning with a single script:
+
+```bash
+sudo bash scripts/tune-os.sh          # auto-detects NIC
+sudo bash scripts/tune-os.sh eth0     # explicit NIC
+```
+
+What it sets:
+| Setting | Value | Effect |
+|---------|-------|--------|
+| `net.core.rmem_max` | 16 MB | Matches 4 MB socket buffers (kernel doubles) |
+| `net.core.somaxconn` | 65535 | Large accept queue (matches SO_REUSEPORT backlog) |
+| `net.ipv4.tcp_tw_reuse` | 1 | Fast TIME_WAIT reuse for outbound proxy connections |
+| `net.core.busy_poll` | 50 µs | Reduced median latency |
+| `net.ipv4.tcp_fastopen` | 3 | Save 1 RTT on first connection |
+| THP | madvise | Eliminate compaction latency spikes |
+| CPU governor | performance | Prevent frequency ramp-up latency |
+| NIC ring buffers | max | No packet drops under burst |
+| RPS/RFS | all CPUs | Software multi-queue on single-queue NICs |
+| IRQ affinity | 1 core/queue | Eliminate cross-core interrupt bounce |
+
+To persist across reboots, copy the sysctl lines to `/etc/sysctl.d/99-tunnel.conf`.
+
+### In-code Optimisations (already applied)
+
+| Optimisation | Location | Benefit |
+|---|---|---|
+| `SO_REUSEPORT` + backlog=4096 | `transport/listener.rs` | 4–8× multi-core accept scaling |
+| `SO_KEEPALIVE` + `TCP_USER_TIMEOUT` | `transport/tcp_params.rs` | Fast dead-connection detection |
+| 4 MB default socket buffers | `transport/tcp_params.rs` | High-BDP link throughput |
+| BBR congestion control (QUIC) | `transport/quic.rs` | Lower queue, better WAN throughput |
+| 4/32 MB QUIC windows | `transport/quic.rs` | No flow-control stalls |
+| `target-cpu=native` | `.cargo/config.toml` | Hardware AES-NI / AVX2 / SHA-NI |
+| `lto=fat` + `panic=abort` | `Cargo.toml` | ~5–15% cross-crate inlining gain |
+| jemalloc global allocator | `server/main.rs`, `client/main.rs` | Lower fragmentation under load |
+| `PeerKind` enum dispatch | `proxy/peers.rs` | Zero `Box<dyn>` on hot path |
+| H1 header batch write | `protocol/driver/h1.rs` | 15–20 syscalls → 1 per response |
+| `BytesMut` single-alloc read | `proxy/core.rs`, `h1.rs` | Eliminates double-copy on recv |
+| `parking_lot::RwLock` + `CachePadded` | `server/registry.rs` | Reduces false-sharing |
+| SoA `ClientGroup` layout | `server/registry.rs` | Hot path touches only connections |
+| `send_message` single `write_all` | `models/msg.rs` | 3 syscalls → 1 per frame |
+| QUIC GSO/GRO (auto) | `quinn-udp` | Batch UDP I/O on Linux ≥ 5.4 |
+
 ## References
 
 - [frp](https://github.com/fatedier/frp) - Original inspiration

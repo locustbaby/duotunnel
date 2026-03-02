@@ -1,12 +1,39 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Build a TCP listener with SO_REUSEPORT (and SO_REUSEADDR) enabled.
+///
+/// SO_REUSEPORT lets multiple sockets bind the same port so the kernel
+/// distributes `accept()` calls across CPU cores without a single lock.
+/// Falls back to a plain `TcpListener::bind` if the platform doesn't
+/// support the option (e.g. older kernels).
+fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    if let Err(e) = socket.set_reuse_port(true) {
+        warn!("SO_REUSEPORT unavailable ({}), continuing without it", e);
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    // backlog 4096 — large enough for bursty accept queues
+    socket.listen(4096)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    Ok(TcpListener::from_std(std_listener)?)
+}
 
 pub async fn start_tcp_listener<F, Fut>(port: u16, handler: F, protocol_name: &str) -> Result<()>
 where
@@ -14,7 +41,7 @@ where
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await?;
+    let listener = build_reuseport_listener(addr)?;
     info!("{} listener started on 0.0.0.0:{}", protocol_name, port);
 
     loop {

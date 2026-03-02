@@ -1,6 +1,4 @@
-use super::peers::UpstreamPeer;
 use anyhow::Result;
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::Stream;
 use h2::server::handshake;
@@ -25,10 +23,9 @@ pub struct H2Peer {
     pub client: HttpsClient,
 }
 
-#[async_trait]
-impl UpstreamPeer for H2Peer {
-    async fn connect(
-        &self,
+impl H2Peer {
+    pub async fn connect_inner(
+        self,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
