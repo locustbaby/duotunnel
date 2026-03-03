@@ -62,6 +62,12 @@ select:focus{outline:none;border-color:var(--blue)}
 tr.clickable{cursor:pointer;transition:background .1s}
 tr.clickable:hover{background:rgba(77,166,255,.08)}
 .cat-desc{font-size:11px;color:var(--text2);margin-bottom:4px;font-style:italic}
+.leg-wrap{display:flex;flex-wrap:wrap;gap:4px 12px;padding:8px 4px 2px;flex-shrink:0}
+.leg-item{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:var(--text2);padding:2px 6px;border-radius:3px;transition:opacity .15s,background .15s;user-select:none}
+.leg-item:hover{background:rgba(77,166,255,.07);color:var(--text)}
+.leg-item.leg-active{color:var(--text)}
+.leg-swatch{display:inline-block;width:14px;height:10px;border-radius:2px;flex-shrink:0}
+.leg-label{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -143,7 +149,7 @@ function phaseAnnotations(entry) {
 
 const CO = {
   responsive:true, maintainAspectRatio:false,
-  plugins:{legend:{labels:{color:'#6b7d93',font:{size:10}}}},
+  plugins:{legend:{display:false}},
   scales:{
     x:{ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}},
     y:{ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
@@ -152,7 +158,76 @@ const CO = {
 
 let liveCharts = [];
 function destroyCharts() { liveCharts.forEach(c => c.destroy()); liveCharts = []; }
-function mkChart(id, cfg) { const cv = document.getElementById(id); if (!cv) return; const c = new Chart(cv, cfg); liveCharts.push(c); return c; }
+
+// Build Grafana-style legend below chart
+function buildLegend(chart, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Track which index is solo-highlighted (-1 = all visible)
+  let activeIdx = -1;
+
+  function refresh() {
+    chart.data.datasets.forEach((ds, i) => {
+      const dimmed = activeIdx !== -1 && i !== activeIdx;
+      // Store original colors on first call
+      if (!ds._origBorder) ds._origBorder = ds.borderColor;
+      if (!ds._origBg) ds._origBg = ds.backgroundColor;
+      ds.borderColor = dimmed ? toAlpha(ds._origBorder, 0.15) : ds._origBorder;
+      ds.backgroundColor = dimmed ? toAlpha(ds._origBg || ds._origBorder, 0.04) : (ds._origBg || 'transparent');
+    });
+    chart.update('none');
+
+    // Update legend item appearance
+    container.querySelectorAll('.leg-item').forEach((el, i) => {
+      const dimmed = activeIdx !== -1 && i !== activeIdx;
+      el.style.opacity = dimmed ? '0.3' : '1';
+      el.classList.toggle('leg-active', activeIdx === i);
+    });
+  }
+
+  chart.data.datasets.forEach((ds, i) => {
+    const color = ds.borderColor || '#6b7d93';
+    const isDash = ds.borderDash && ds.borderDash.length > 0;
+    const item = document.createElement('span');
+    item.className = 'leg-item';
+    item.dataset.idx = i;
+    item.innerHTML = `<span class="leg-swatch" style="background:${isDash ? 'transparent' : color};border:1.5px ${isDash ? 'dashed' : 'solid'} ${color};"></span><span class="leg-label">${ds.label || ''}</span>`;
+    item.addEventListener('click', () => {
+      activeIdx = activeIdx === i ? -1 : i;
+      refresh();
+    });
+    container.appendChild(item);
+  });
+}
+
+function toAlpha(color, alpha) {
+  if (!color) return `rgba(107,125,147,${alpha})`;
+  // already rgba
+  if (color.startsWith('rgba(')) return color.replace(/,\s*[\d.]+\)$/, `,${alpha})`);
+  // rgb(r,g,b)
+  if (color.startsWith('rgb(')) return color.replace('rgb(', 'rgba(').replace(')', `,${alpha})`);
+  // hex #rrggbb
+  if (color.startsWith('#')) {
+    const r = parseInt(color.slice(1,3),16);
+    const g = parseInt(color.slice(3,5),16);
+    const b = parseInt(color.slice(5,7),16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return color;
+}
+
+function mkChart(id, cfg) {
+  const cv = document.getElementById(id);
+  if (!cv) return;
+  const c = new Chart(cv, cfg);
+  liveCharts.push(c);
+  // Build legend in sibling .leg-wrap element
+  const legId = id + '-leg';
+  buildLegend(c, legId);
+  return c;
+}
 
 function findEntry(sha) { return entries.find(e => shaFull(e) === sha || sha7(e) === sha); }
 function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? entries[idx - 1] : null; }
@@ -191,13 +266,13 @@ function renderOverview() {
 
   <div class="sec">Latency Trends (p95 ms)</div>
   <div class="row full">
-    <div class="panel tall"><h3>Basic — ramping 10→40/s, baseline latency</h3><div class="chart-area"><canvas id="trendBasic"></canvas></div></div>
+    <div class="panel tall"><h3>Basic — ramping 10→40/s, baseline latency</h3><div class="chart-area"><canvas id="trendBasic"></canvas></div><div id="trendBasic-leg" class="leg-wrap"></div></div>
   </div>
   <div class="row full">
-    <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div></div>
+    <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div><div id="trendBody-leg" class="leg-wrap"></div></div>
   </div>
   <div class="row full">
-    <div class="panel tall"><h3>Stress — 1K/2K/3K QPS saturation</h3><div class="chart-area"><canvas id="trendStress"></canvas></div></div>
+    <div class="panel tall"><h3>Stress — 1K/2K/3K QPS saturation</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
   </div>
 
   <div class="sec">All Runs</div>
@@ -356,16 +431,16 @@ function renderDetail(entry) {
   if (res) {
     html += `<div class="sec">Resources</div>`;
     html += `<div class="row">
-      <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div></div>
-      <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div></div>
+      <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div><div id="cpuChart-leg" class="leg-wrap"></div></div>
+      <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div><div id="memChart-leg" class="leg-wrap"></div></div>
     </div>`;
 
     const hasNet = res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length);
     const hasIO = res.server?.read_kbs?.length || res.client?.read_kbs?.length;
     if (hasNet || hasIO) {
       html += `<div class="row">`;
-      if (hasNet) html += `<div class="panel"><h3>Network Throughput (KB/s)</h3><div class="chart-area"><canvas id="netChart"></canvas></div></div>`;
-      if (hasIO) html += `<div class="panel"><h3>Disk IO (KB/s)</h3><div class="chart-area"><canvas id="ioChart"></canvas></div></div>`;
+      if (hasNet) html += `<div class="panel"><h3>Network Throughput (KB/s)</h3><div class="chart-area"><canvas id="netChart"></canvas></div><div id="netChart-leg" class="leg-wrap"></div></div>`;
+      if (hasIO) html += `<div class="panel"><h3>Disk IO (KB/s)</h3><div class="chart-area"><canvas id="ioChart"></canvas></div><div id="ioChart-leg" class="leg-wrap"></div></div>`;
       if (hasNet && !hasIO) html += `<div></div>`;
       if (!hasNet && hasIO) html += `<div></div>`;
       html += `</div>`;
