@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>duotunnel — Benchmark Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
+<script src="data.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0e14;--surface:#111820;--border:#1e2a3a;--border2:#2a3a4d;
+  --text:#e0e8f0;--text2:#6b7d93;--text3:#4a5a6d;
+  --blue:#4da6ff;--green:#34d399;--orange:#f5a623;--red:#ef5350;--purple:#a78bfa;
+  --blue-dim:rgba(77,166,255,.12);
+  --panel:340px;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none;cursor:pointer}
+a:hover{text-decoration:underline}
+.wrap{max-width:1400px;margin:0 auto;padding:32px 24px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;flex-wrap:wrap;gap:12px}
+header h1{font-size:22px;font-weight:700;letter-spacing:-.3px}
+header h1 span{color:var(--text2);font-weight:400;margin-left:6px}
+.meta{font-size:12px;color:var(--text2);font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+@media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px}
+.card .lb{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:500}
+.card .val{font-size:30px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
+.card .d{font-size:11px;margin-top:6px;font-weight:500}
+.d-up{color:var(--green)}.d-down{color:var(--red)}.d-flat{color:var(--text3)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:960px){.row{grid-template-columns:1fr}}
+.row.full>*{grid-column:1/-1}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;height:var(--panel);display:flex;flex-direction:column}
+.panel.tall{height:400px}
+.panel.auto{height:auto}
+.panel h3{font-size:12px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.chart-area{flex:1;min-height:0;position:relative}
+canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+.sec{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.tbl-wrap{flex:1;min-height:0;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:6px 10px;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;font-size:10px;position:sticky;top:0;background:var(--surface);z-index:1}
+td{padding:6px 10px;border-bottom:1px solid var(--border);font-family:'SF Mono',SFMono-Regular,Consolas,monospace;font-size:11px}
+tr:last-child td{border-bottom:none}
+.c-good{color:var(--green)}.c-bad{color:var(--red)}.c-dim{color:var(--text3)}
+.bar{display:inline-block;height:10px;border-radius:2px;vertical-align:middle;margin-right:6px}
+select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;cursor:pointer;flex-shrink:0}
+select:focus{outline:none;border-color:var(--blue)}
+.empty{text-align:center;padding:80px 20px;color:var(--text2)}
+.empty h2{margin-bottom:8px;font-weight:600}
+.pill{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+.pill-http{background:rgba(77,166,255,.15);color:var(--blue)}
+.pill-grpc{background:rgba(52,211,153,.15);color:var(--green)}
+.pill-ws{background:rgba(245,166,35,.15);color:var(--orange)}
+.breadcrumb{font-size:12px;color:var(--text2);margin-bottom:20px}
+.breadcrumb a{color:var(--blue)}
+.row-active{background:rgba(77,166,255,.06)}
+tr.clickable{cursor:pointer;transition:background .1s}
+tr.clickable:hover{background:rgba(77,166,255,.08)}
+.cat-desc{font-size:11px;color:var(--text2);margin-bottom:4px;font-style:italic}
+.leg-wrap{display:flex;flex-wrap:wrap;gap:4px 12px;padding:8px 4px 2px;flex-shrink:0}
+.leg-item{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:var(--text2);padding:2px 6px;border-radius:3px;transition:opacity .15s,background .15s;user-select:none}
+.leg-item:hover{background:rgba(77,166,255,.07);color:var(--text)}
+.leg-item.leg-active{color:var(--text)}
+.leg-swatch{display:inline-block;width:14px;height:10px;border-radius:2px;flex-shrink:0}
+.leg-label{white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>duotunnel<span>benchmark</span></h1>
+    <div class="meta" id="meta"></div>
+  </header>
+  <div id="app"></div>
+</div>
+<script>
+(function(){
+
+const root = document.getElementById('app');
+const metaEl = document.getElementById('meta');
+const entries = (window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) || [];
+if (!entries.length) {
+  root.innerHTML = '<div class="empty"><h2>No benchmark data yet</h2><p>Push to main to trigger a benchmark run.</p></div>';
+  return;
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function r2(v) { return Math.round(v * 100) / 100; }
+function fmt(v) { return v == null ? '—' : typeof v === 'number' ? v.toLocaleString(undefined, {maximumFractionDigits:1}) : v; }
+function sha7(e) { const c = e.commit; return typeof c === 'object' ? (c.id||'').substring(0,7) : (c||'').substring(0,7); }
+function shaFull(e) { const c = e.commit; return typeof c === 'object' ? (c.id||'') : (c||''); }
+function commitUrl(e) { const c = e.commit; return typeof c === 'object' ? (c.url||'') : ''; }
+function commitMsg(e) { const c = e.commit; return typeof c === 'object' ? (c.message||'') : ''; }
+function pillFor(proto) { return `<span class="pill pill-${proto.toLowerCase()}">${proto}</span>`; }
+
+function delta(cur, pre, invert) {
+  if (pre == null || pre === 0) return '<span class="d d-flat">—</span>';
+  const pct = r2((cur - pre) / pre * 100);
+  const good = invert ? pct < 0 : pct > 0;
+  const cls = Math.abs(pct) < 1 ? 'd-flat' : good ? 'd-up' : 'd-down';
+  return `<span class="d ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
+}
+
+function deltaVal(cur, pre, invert) {
+  if (pre == null) return '—';
+  const diff = r2(cur - pre);
+  const good = invert ? diff < 0 : diff > 0;
+  const cls = Math.abs(diff) < 0.01 ? 'c-dim' : good ? 'c-good' : 'c-bad';
+  return `<span class="${cls}">${diff > 0 ? '+' : ''}${diff}</span>`;
+}
+
+function latencyBar(val, max, proto) {
+  const colors = {HTTP:'var(--blue)',gRPC:'var(--green)',WS:'var(--orange)'};
+  const w = max > 0 ? Math.max(2, Math.round(val / max * 80)) : 0;
+  return `<span class="bar" style="width:${w}px;background:${colors[proto]||'var(--text3)'}"></span>`;
+}
+
+const PHASE_COLORS = [
+  'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
+  'rgba(239,83,80,.08)','rgba(167,139,250,.08)',
+];
+const FALLBACK_PHASES = [
+  {name:'Basic',start:0,end:23},{name:'Body/Payload',start:30,end:49},
+  {name:'1K QPS',start:60,end:75},{name:'2K QPS',start:80,end:95},{name:'3K QPS',start:100,end:115},
+];
+
+function phaseAnnotations(entry) {
+  const a = {};
+  const offset = entry?.resources?.k6OffsetSeconds || 0;
+  const phaseDefs = entry?.phases || FALLBACK_PHASES;
+  phaseDefs.forEach((p, i) => {
+    const s = p.start + offset;
+    const e = p.end + offset;
+    const col = PHASE_COLORS[i % PHASE_COLORS.length];
+    a['phase'+i] = {type:'box',xMin:s,xMax:e,backgroundColor:col,borderWidth:0};
+    const nsc = (p.scenarios||[]).length;
+    const label = nsc ? `${p.name} (${nsc})` : p.name;
+    a['phaseLabel'+i] = {type:'label',xValue:(s+e)/2,yValue:'max',content:label,color:'#4a5a6d',font:{size:8,weight:'bold'},position:'start'};
+    a['phaseLine'+i+'s'] = {type:'line',xMin:s,xMax:s,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
+    a['phaseLine'+i+'e'] = {type:'line',xMin:e,xMax:e,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
+  });
+  return a;
+}
+
+const CO = {
+  responsive:true, maintainAspectRatio:false,
+  plugins:{legend:{display:false}},
+  scales:{
+    x:{ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}},
+    y:{ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
+  },
+};
+
+let liveCharts = [];
+function destroyCharts() { liveCharts.forEach(c => c.destroy()); liveCharts = []; }
+
+// Build Grafana-style legend below chart
+// Click = toggle show/hide; double-click = solo (hide all others)
+function buildLegend(chart, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+
+  const n = chart.data.datasets.length;
+
+  function syncItems() {
+    container.querySelectorAll('.leg-item').forEach((el, i) => {
+      const hidden = chart.data.datasets[i].hidden;
+      el.style.opacity = hidden ? '0.3' : '1';
+      el.classList.toggle('leg-active', !hidden);
+    });
+    chart.update();
+  }
+
+  chart.data.datasets.forEach((ds, i) => {
+    const color = ds.borderColor || '#6b7d93';
+    const isDash = ds.borderDash && ds.borderDash.length > 0;
+    const item = document.createElement('span');
+    item.className = 'leg-item leg-active';
+    item.dataset.idx = i;
+    item.innerHTML = `<span class="leg-swatch" style="background:${isDash?'transparent':color};border:1.5px ${isDash?'dashed':'solid'} ${color};"></span><span class="leg-label">${ds.label||''}</span>`;
+
+    let clickTimer = null;
+    item.addEventListener('click', () => {
+      // debounce to distinguish single vs double click
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        // toggle this dataset
+        chart.data.datasets[i].hidden = !chart.data.datasets[i].hidden;
+        syncItems();
+      }, 220);
+    });
+    item.addEventListener('dblclick', () => {
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+      // solo: if already solo, restore all; else hide all others
+      const isSolo = chart.data.datasets.every((ds, j) => j === i ? !ds.hidden : ds.hidden);
+      chart.data.datasets.forEach((ds, j) => { ds.hidden = isSolo ? false : j !== i; });
+      syncItems();
+    });
+
+    container.appendChild(item);
+  });
+}
+
+function toAlpha(color, alpha) {
+  if (!color) return `rgba(107,125,147,${alpha})`;
+  // already rgba
+  if (color.startsWith('rgba(')) return color.replace(/,\s*[\d.]+\)$/, `,${alpha})`);
+  // rgb(r,g,b)
+  if (color.startsWith('rgb(')) return color.replace('rgb(', 'rgba(').replace(')', `,${alpha})`);
+  // hex #rrggbb
+  if (color.startsWith('#')) {
+    const r = parseInt(color.slice(1,3),16);
+    const g = parseInt(color.slice(3,5),16);
+    const b = parseInt(color.slice(5,7),16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return color;
+}
+
+function mkChart(id, cfg) {
+  const cv = document.getElementById(id);
+  if (!cv) return;
+  const c = new Chart(cv, cfg);
+  liveCharts.push(c);
+  // Build legend in sibling .leg-wrap element
+  const legId = id + '-leg';
+  buildLegend(c, legId);
+  return c;
+}
+
+function findEntry(sha) { return entries.find(e => shaFull(e) === sha || sha7(e) === sha); }
+function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? entries[idx - 1] : null; }
+
+const catDescs = {
+  basic: 'Ramping rate (10→40/s). Multiple protocols running concurrently at moderate load to test baseline latency.',
+  body_size: 'Fixed rate (10–30/s). Concurrent payloads of 1K/10K/100K to measure throughput vs body size.',
+  stress: 'Fixed rate at 1000/2000/3000 QPS. Ingress + egress pairs run concurrently at each tier to find saturation point.',
+};
+
+function navigate() {
+  const hash = location.hash.replace('#','');
+  destroyCharts();
+  if (hash && hash !== 'overview') {
+    const entry = findEntry(hash);
+    if (entry) { renderDetail(entry); return; }
+  }
+  renderOverview();
+}
+
+function renderOverview() {
+  const latest = entries[entries.length - 1];
+  const prev = prevOf(latest);
+  const sum = latest.summary || {};
+  const prevSum = prev ? (prev.summary || {}) : {};
+
+  metaEl.innerHTML = `Latest: <a href="#${sha7(latest)}">${sha7(latest)}</a> ${esc(commitMsg(latest))} · ${new Date(latest.timestamp).toLocaleString()}`;
+
+  let html = `
+  <div class="cards">
+    <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)} <span style="font-size:14px;font-weight:400;color:var(--text2)">req/s</span></div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
+    <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
+    <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
+    <div class="card"><div class="lb">Scenarios</div><div class="val">${(latest.scenarios||[]).length}</div><span class="d d-flat">${entries.length} runs</span></div>
+  </div>
+
+  <div class="sec">Latency Trends (p95 ms)</div>
+  <div class="row full">
+    <div class="panel tall"><h3>Basic — ramping 10→40/s, baseline latency</h3><div class="chart-area"><canvas id="trendBasic"></canvas></div><div id="trendBasic-leg" class="leg-wrap"></div></div>
+  </div>
+  <div class="row full">
+    <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div><div id="trendBody-leg" class="leg-wrap"></div></div>
+  </div>
+  <div class="row full">
+    <div class="panel tall"><h3>Stress — 1K/2K/3K QPS saturation</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
+  </div>
+
+  <div class="sec">All Runs</div>
+  <div class="row full">
+    <div class="panel auto">
+      <h3>Click a row to see details</h3>
+      <div class="tbl-wrap" id="histTable"></div>
+    </div>
+  </div>`;
+
+  root.innerHTML = html;
+
+  (function(){
+    const lbl = entries.map(sha7);
+    const catScenarios = {basic:[], body_size:[], stress:[]};
+    const seen = {};
+    entries.forEach(e => (e.scenarios||[]).forEach(s => {
+      if (!seen[s.name] && s.category && catScenarios[s.category]) {
+        catScenarios[s.category].push(s.name);
+        seen[s.name] = true;
+      }
+    }));
+    Object.values(catScenarios).forEach(arr => arr.sort());
+
+    const palette = [
+      '#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24',
+      '#818cf8','#fb923c','#22d3ee','#a3e635','#e879f9','#94a3b8',
+    ];
+    const dashes = [[], [6,3], [2,2], [8,4,2,4], [4,4]];
+
+    function renderCatChart(canvasId, names) {
+      if (!names.length || entries.length < 2) {
+        const el = document.getElementById(canvasId);
+        if (el) el.closest('.panel').querySelector('h3').textContent += ' — need ≥ 2 runs';
+        return;
+      }
+      const ds = names.map((name, i) => ({
+        label: name.replace(/_/g, ' '),
+        data: entries.map(e => { const s = (e.scenarios||[]).find(x => x.name === name); return s ? s.p95 : null; }),
+        borderColor: palette[i % palette.length],
+        backgroundColor: 'transparent',
+        borderDash: dashes[Math.floor(i / palette.length) % dashes.length],
+        tension: .3,
+        pointRadius: 2,
+        borderWidth: 1.5,
+        spanGaps: true,
+      }));
+      mkChart(canvasId, {type:'line', data:{labels:lbl, datasets:ds}, options:{
+        ...CO,
+        onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },
+        plugins:{...CO.plugins, tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>ctx.raw!=null?`${ctx.dataset.label}: ${ctx.raw} ms`:''}}},
+        scales:{x:CO.scales.x, y:{...CO.scales.y, title:{display:true,text:'ms',color:'#6b7d93'}}},
+      }});
+    }
+
+    renderCatChart('trendBasic', catScenarios.basic);
+    renderCatChart('trendBody', catScenarios.body_size);
+    renderCatChart('trendStress', catScenarios.stress);
+  })();
+
+  (function(){
+    const el = document.getElementById('histTable');
+    if (!el) return;
+    let h = '<table><thead><tr><th>Commit</th><th>Date</th><th>RPS (req/s)</th><th>Δ</th><th>Err %</th><th>Δ</th><th>Reqs</th><th>Scenarios</th></tr></thead><tbody>';
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const p = i > 0 ? entries[i-1] : null;
+      const s7 = sha7(e);
+      const rps = e.summary?.totalRPS??0;
+      const err = e.summary?.totalErr??0;
+      const reqs = e.summary?.totalRequests??0;
+      const nsc = (e.scenarios||[]).length;
+      let dR='—', dE='—';
+      if (p) {
+        const pR = p.summary?.totalRPS??0;
+        const pE = p.summary?.totalErr??0;
+        if (pR>0) { const d=r2(rps-pR); dR=`<span class="${d>0?'c-good':d<0?'c-bad':'c-dim'}">${d>0?'+':''}${d}</span>`; }
+        const dEv=r2(err-pE); dE=`<span class="${dEv<0?'c-good':dEv>0?'c-bad':'c-dim'}">${dEv>0?'+':''}${dEv}%</span>`;
+      }
+      const active = i === entries.length - 1 ? ' row-active' : '';
+      h += `<tr class="clickable${active}" data-sha="${s7}"><td>${s7}</td><td style="color:var(--text2)">${new Date(e.timestamp).toLocaleString(undefined, {year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
+    }
+    h += '</tbody></table>';
+    el.innerHTML = h;
+    el.addEventListener('click', e => { const tr = e.target.closest('tr.clickable'); if (tr) location.hash = tr.dataset.sha; });
+  })();
+}
+
+function renderDetail(entry) {
+  const prev = prevOf(entry);
+  const sc = entry.scenarios || [];
+  const sum = entry.summary || {};
+  const prevSum = prev ? (prev.summary || {}) : {};
+  const res = entry.resources || null;
+  const s7 = sha7(entry);
+  const url = commitUrl(entry);
+
+  const ghLink = url ? `<a href="${url}" target="_blank">${s7}</a>` : s7;
+  metaEl.innerHTML = `${ghLink} ${esc(commitMsg(entry))} · ${new Date(entry.timestamp).toLocaleString()}`;
+
+  const prevScMap = {};
+  if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[s.name] = s; });
+  const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
+
+  let html = `
+  <div class="breadcrumb"><a onclick="location.hash='overview';return false;" href="#overview">← All Runs</a> / ${s7}</div>
+  <div class="cards">
+    <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)} <span style="font-size:14px;font-weight:400;color:var(--text2)">req/s</span></div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
+    <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
+    <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
+    <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
+  </div>
+
+  <div class="sec">Scenario Results</div>
+  <div class="row full">
+    <div class="panel auto">
+      <h3>All Scenarios — ${s7}</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>p50 (ms)</th><th>p95 (ms)</th><th>Latency</th><th>RPS (req/s)</th><th>Reqs</th><th>Err %</th>${prev ? '<th>Δ p50 (ms)</th><th>Δ p95 (ms)</th><th>Δ RPS</th>' : ''}</tr></thead>
+          <tbody>`;
+
+  const categories = ['basic','body_size','stress'];
+  const catLabels = {basic:'Basic',body_size:'Body Size',stress:'Stress'};
+  const colSpan = prev ? 12 : 9;
+  for (const cat of categories) {
+    const group = sc.filter(s => s.category === cat);
+    if (!group.length) continue;
+    html += `<tr><td colspan="${colSpan}" style="padding:12px 10px 2px;border-bottom:none">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${catLabels[cat]||cat}</div>
+      <div class="cat-desc">${catDescs[cat] || ''}</div>
+    </td></tr>`;
+    for (const s of group) {
+      const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
+      const ps = prevScMap[s.name];
+      html += `<tr>
+        <td style="color:var(--text)">${s.name}</td>
+        <td>${pillFor(s.protocol)}</td>
+        <td style="color:var(--text2)">${s.direction}</td>
+        <td>${s.p50} <span class="c-dim">ms</span></td>
+        <td>${s.p95} <span class="c-dim">ms</span></td>
+        <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95} <span class="c-dim">ms</span></td>
+        <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
+        <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
+        <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>`;
+      if (prev) {
+        html += `<td>${ps ? deltaVal(s.p50, ps.p50, true) : '—'}</td>`;
+        html += `<td>${ps ? deltaVal(s.p95, ps.p95, true) : '—'}</td>`;
+        html += `<td>${ps ? deltaVal(s.rps, ps.rps, false) : '—'}</td>`;
+      }
+      html += `</tr>`;
+    }
+  }
+  html += `</tbody></table></div></div></div>`;
+
+  if (res) {
+    const proc = res.processes || {};
+    const hasNet    = res.network   && (res.network.rx_kbs?.length   || res.network.tx_kbs?.length);
+    const hasIO     = Object.values(proc).some(p => p.read_kbs?.length || p.write_kbs?.length);
+    const hasCtxsw  = Object.values(proc).some(p => p.cswch?.length);
+    const hasTCP    = res.tcp_conns && (res.tcp_conns.estab?.length   || res.tcp_conns.timewait?.length);
+    const hasPSI    = res.psi       && (res.psi.cpu?.length);
+    const hasPaging = res.paging    && (res.paging.majflt?.length     || res.paging.minflt?.length);
+
+    function row(...panels) {
+      // panels: [{id, title, extra?}] — renders up to 2 per row
+      let h = '';
+      for (let i = 0; i < panels.length; i += 2) {
+        h += `<div class="row">`;
+        for (let j = i; j < Math.min(i+2, panels.length); j++) {
+          const {id, title} = panels[j];
+          h += `<div class="panel"><h3>${title}</h3><div class="chart-area"><canvas id="${id}"></canvas></div><div id="${id}-leg" class="leg-wrap"></div></div>`;
+        }
+        if (panels.length - i === 1) h += `<div></div>`;
+        h += `</div>`;
+      }
+      return h;
+    }
+
+    html += `<div class="sec">Resources</div>`;
+    html += row({id:'cpuChart',  title:'CPU Usage (% of machine)'},
+                {id:'memChart',  title:'Memory RSS (MB)'});
+    if (hasNet || hasIO)
+      html += row(...[hasNet && {id:'netChart', title:'Network Throughput (KB/s)'},
+                      hasIO  && {id:'ioChart',  title:'Disk IO (KB/s)'}].filter(Boolean));
+    if (hasCtxsw || hasTCP)
+      html += row(...[hasCtxsw && {id:'ctxswChart', title:'Context Switches / s'},
+                      hasTCP   && {id:'tcpChart',   title:'TCP Connections'}].filter(Boolean));
+    if (hasPSI || hasPaging)
+      html += row(...[hasPSI    && {id:'psiChart',    title:'PSI — Pressure Stall (% full)'},
+                      hasPaging && {id:'pagingChart', title:'Page Faults / s'}].filter(Boolean));
+  }
+
+  const idx = entries.indexOf(entry);
+  const prevEntry = idx > 0 ? entries[idx - 1] : null;
+  const nextEntry = idx < entries.length - 1 ? entries[idx + 1] : null;
+  html += `<div style="display:flex;justify-content:space-between;margin-top:24px">`;
+  html += prevEntry ? `<a onclick="location.hash='${sha7(prevEntry)}';return false;" href="#${sha7(prevEntry)}">← ${sha7(prevEntry)}</a>` : `<span class="c-dim">oldest</span>`;
+  html += nextEntry ? `<a onclick="location.hash='${sha7(nextEntry)}';return false;" href="#${sha7(nextEntry)}">${sha7(nextEntry)} →</a>` : `<span class="c-dim">latest</span>`;
+  html += `</div>`;
+
+  root.innerHTML = html;
+
+  if (res) {
+    const annotations = phaseAnnotations(entry);
+    const TSO = {  // base time-scale options
+      ...CO,
+      showLine: true,
+      plugins: {...CO.plugins, annotation: {annotations},
+        tooltip: {mode:'index', intersect:false}},
+      scales: {
+        x: {...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}},
+        y: {...CO.scales.y},
+      },
+    };
+    function yTitle(text) {
+      return {scales:{...TSO.scales,y:{...TSO.scales.y,title:{display:true,text,color:'#6b7d93'}}}};
+    }
+    function linePts(pts, color, label, extra={}) {
+      return {label, data:pts.map(p=>({x:p.t,y:p.v})),
+        borderColor:color, backgroundColor:'transparent',
+        tension:.3, pointRadius:0, borderWidth:1.5, ...extra};
+    }
+
+    // Shared process series definition (colour palette)
+    const PSERIES = [
+      {key:'server',    label:'Server',    color:'#4da6ff'},
+      {key:'client',    label:'Client',    color:'#34d399'},
+      {key:'http_echo', label:'HTTP Echo', color:'#a78bfa'},
+      {key:'ws_echo',   label:'WS Echo',   color:'#f472b6'},
+      {key:'grpc_echo', label:'gRPC Echo', color:'#fb923c'},
+      {key:'k6',        label:'k6',        color:'#f5a623'},
+      {key:'other',     label:'Other',     color:'#4a5a6d'},
+    ];
+    const proc = res.processes || {};
+
+    // ── CPU stacked area ──────────────────────────────────────────────────
+    const cpuTimes = [...new Set(
+      PSERIES.flatMap(s=>(proc[s.key]?.cpu||[]).map(p=>p.t))
+    )].sort((a,b)=>a-b);
+    const cpuDS = [];
+    if (cpuTimes.length) {
+      for (const s of PSERIES) {
+        const pts = proc[s.key]?.cpu||[];
+        if (!pts.length) continue;
+        const byT = Object.fromEntries(pts.map(p=>[p.t,p.v]));
+        cpuDS.push({label:s.label, data:cpuTimes.map(t=>({x:t,y:byT[t]??null})),
+          borderColor:s.color, backgroundColor:s.color+'28',
+          fill:true, tension:.3, pointRadius:0, borderWidth:1.5});
+      }
+      if (res.system?.cpu?.length)
+        cpuDS.push({label:'System total', data:res.system.cpu.map(p=>({x:p.t,y:p.v})),
+          borderColor:'#ffffff', backgroundColor:'transparent', fill:false,
+          tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
+    }
+    if (cpuDS.length) mkChart('cpuChart',{type:'line',data:{datasets:cpuDS},options:{
+      ...TSO,
+      scales:{...TSO.scales,y:{...TSO.scales.y,stacked:true,min:0,max:100,
+        title:{display:true,text:'% of machine',color:'#6b7d93'}}},
+      plugins:{...TSO.plugins,tooltip:{mode:'index',intersect:false,
+        callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
+    }});
+
+    // ── Memory RSS ────────────────────────────────────────────────────────
+    const memDS = PSERIES.flatMap(s => {
+      const pts = proc[s.key]?.rss||[];
+      return pts.length ? [linePts(pts, s.color, s.label)] : [];
+    });
+    if (memDS.length) mkChart('memChart',{type:'line',data:{datasets:memDS},
+      options:{...TSO,...yTitle('MB')}});
+
+    // ── Network ───────────────────────────────────────────────────────────
+    if (res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length)) {
+      const netDS = [];
+      if (res.network.rx_kbs?.length) netDS.push(linePts(res.network.rx_kbs,'#4da6ff','RX'));
+      if (res.network.tx_kbs?.length) netDS.push(linePts(res.network.tx_kbs,'#34d399','TX'));
+      mkChart('netChart',{type:'line',data:{datasets:netDS},options:{...TSO,...yTitle('KB/s')}});
+    }
+
+    // ── Disk IO — per process (fixed: uses res.processes.*.read_kbs) ──────
+    const ioDS = [];
+    for (const s of PSERIES) {
+      const p = proc[s.key];
+      if (!p) continue;
+      if (p.read_kbs?.length)  ioDS.push(linePts(p.read_kbs,  s.color, `${s.label} R`));
+      if (p.write_kbs?.length) ioDS.push(linePts(p.write_kbs, s.color, `${s.label} W`,
+        {borderDash:[4,2], borderWidth:1}));
+    }
+    if (ioDS.length) mkChart('ioChart',{type:'line',data:{datasets:ioDS},
+      options:{...TSO,...yTitle('KB/s')}});
+
+    // ── Context switches — voluntary (solid) + involuntary (dashed) ───────
+    const csDS = [];
+    for (const s of PSERIES) {
+      const p = proc[s.key];
+      if (!p) continue;
+      if (p.cswch?.length)   csDS.push(linePts(p.cswch,   s.color, `${s.label} vol`));
+      if (p.nvcswch?.length) csDS.push(linePts(p.nvcswch, s.color, `${s.label} invol`,
+        {borderDash:[3,2], borderWidth:1}));
+    }
+    if (csDS.length) mkChart('ctxswChart',{type:'line',data:{datasets:csDS},
+      options:{...TSO,...yTitle('/s')}});
+
+    // ── TCP connections ───────────────────────────────────────────────────
+    if (res.tcp_conns) {
+      const tcpDS = [];
+      const tc = res.tcp_conns;
+      if (tc.estab?.length)    tcpDS.push(linePts(tc.estab,    '#4da6ff', 'Established'));
+      if (tc.timewait?.length) tcpDS.push(linePts(tc.timewait, '#f5a623', 'TIME_WAIT'));
+      if (tc.closed?.length)   tcpDS.push(linePts(tc.closed,   '#4a5a6d', 'Closed'));
+      if (tcpDS.length) mkChart('tcpChart',{type:'line',data:{datasets:tcpDS},
+        options:{...TSO,...yTitle('connections')}});
+    }
+
+    // ── PSI (pressure stall) ──────────────────────────────────────────────
+    if (res.psi?.cpu?.length) {
+      const psiDS = [
+        linePts(res.psi.cpu, '#4da6ff', 'CPU'),
+        ...(res.psi.mem?.length ? [linePts(res.psi.mem,'#34d399','Memory')] : []),
+        ...(res.psi.io?.length  ? [linePts(res.psi.io, '#f5a623','IO')]     : []),
+      ];
+      mkChart('psiChart',{type:'line',data:{datasets:psiDS},
+        options:{...TSO,scales:{...TSO.scales,y:{...TSO.scales.y,min:0,
+          title:{display:true,text:'% stall (full)',color:'#6b7d93'}}}}});
+    }
+
+    // ── Page faults ───────────────────────────────────────────────────────
+    if (res.paging) {
+      const pgDS = [];
+      if (res.paging.majflt?.length) pgDS.push(linePts(res.paging.majflt,'#ef5350','Major'));
+      if (res.paging.minflt?.length) pgDS.push(linePts(res.paging.minflt,'#4da6ff','Minor (fault/s)'));
+      if (pgDS.length) mkChart('pagingChart',{type:'line',data:{datasets:pgDS},
+        options:{...TSO,...yTitle('/s')}});
+    }
+  }
+}
+
+window.addEventListener('hashchange', navigate);
+navigate();
+
+})();
+</script>
+</body>
+</html>

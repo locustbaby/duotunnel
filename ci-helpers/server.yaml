@@ -1,6 +1,7 @@
 server:
   tunnel_port: 10086
   entry_port: 8080
+  metrics_port: 9090
   log_level: "info"
   quic:
     keepalive_secs: 10

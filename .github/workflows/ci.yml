@@ -3,8 +3,24 @@ name: CI
 on:
   push:
     branches: [main, "fix/**", "feat/**"]
+    paths:
+      - "server/**"
+      - "client/**"
+      - "tunnel-lib/**"
+      - "ci-helpers/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "server/**"
+      - "client/**"
+      - "tunnel-lib/**"
+      - "ci-helpers/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,18 +37,18 @@ jobs:
     name: Unit Tests & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: clippy
 
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
 
       - name: Cache cargo registry + index
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -82,16 +98,16 @@ jobs:
     name: Integration Test (all protocols)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
 
       - name: Cache cargo registry + index
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -101,7 +117,7 @@ jobs:
           restore-keys: cargo-registry-
 
       - name: Cache release build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target/release
           key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
@@ -124,6 +140,7 @@ jobs:
 
       # ─── Start all backend servers in parallel ────────────────────────────────
       - name: Start backend servers (http-echo, ws-echo, grpc-echo)
+        timeout-minutes: 1
         run: |
           ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
           ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
@@ -138,6 +155,7 @@ jobs:
 
       # ─── Start tunnel ─────────────────────────────────────────────────────────
       - name: Start tunnel server
+        timeout-minutes: 1
         run: |
           ./target/release/server --config ci-helpers/server.yaml \
             > /tmp/ci-server.log 2>&1 &
@@ -150,6 +168,7 @@ jobs:
           echo "Tunnel server ready"
 
       - name: Start tunnel client and wait for login
+        timeout-minutes: 1
         run: |
           ./target/release/client --config ci-helpers/client.yaml \
             > /tmp/ci-client.log 2>&1 &
@@ -449,9 +468,355 @@ jobs:
       # ─── Diagnostics ─────────────────────────────────────────────────────────
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ci-logs-${{ github.run_id }}
+          retention-days: 3
+          path: |
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/http-echo.log
+            /tmp/ws-echo.log
+            /tmp/grpc-echo.log
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 3: Stress test — k6 multi-protocol benchmark (local backends only)
+  #
+  # Runs in PARALLEL with integration-test.
+  # Uses constant-arrival-rate executor (fixed QPS, accurate latency).
+  #
+  # Scenarios (all via local echo backends):
+  #   HTTP ingress GET/POST    — echo.local:8080 → QUIC → client → echo:9999
+  #   HTTP egress  GET/POST    — 127.0.0.1:8081  → QUIC → server → echo:9999
+  #   WebSocket ingress        — ws.local:8080   → QUIC → client → ws-echo:8765
+  #   gRPC Health + Echo       — grpc.local:8080 → QUIC → client → grpc:50051
+  #   Bidirectional            — ingress + egress simultaneously
+  #
+  # Thresholds: p99 < 500ms, error rate < 5%  (fail CI if exceeded)
+  # Resource usage (CPU/RSS) sampled before + after via /proc
+  # ─────────────────────────────────────────────────────────────────────────────
+  stress-test:
+    name: Stress Test (k6 multi-protocol)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Cache cargo registry + index
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Cache release build artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target/release
+          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
+          restore-keys: release-bins-${{ runner.os }}-
+
+      - name: Build all binaries
+        run: cargo build --release
+
+      - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Install sysstat
+        run: sudo apt-get install -y -qq sysstat
+
+      - name: Configure /etc/hosts
+        run: |
+          sudo tee -a /etc/hosts << 'EOF'
+          127.0.0.1  echo.local
+          127.0.0.1  ws.local
+          127.0.0.1  grpc.local
+          EOF
+
+      - name: Start all backends + tunnel
+        timeout-minutes: 2
+        run: |
+          ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
+          ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
+          ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log  2>&1 & echo $! > /tmp/grpc-echo.pid
+          for i in $(seq 1 20); do
+            curl -sf --max-time 2 http://127.0.0.1:9999/ > /dev/null && break
+            sleep 0.2
+          done
+          sleep 0.5
+
+          ./target/release/server --config ci-helpers/server.yaml > /tmp/ci-server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 20); do
+            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          echo $! > /tmp/client.pid
+          for i in $(seq 1 40); do
+            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            sleep 0.5
+          done
+          if ! grep -q "Login successful" /tmp/ci-client.log; then
+            echo "ERROR: client did not login"
+            cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+          echo "All backends + tunnel ready"
+
+      - name: Warmup — verify tunnel is serving
+        timeout-minutes: 2
+        run: |
+          warmup_probe() {
+            echo "Probing ingress (echo.local:8080)..."
+            for i in $(seq 1 10); do
+              if curl -sf --max-time 3 http://echo.local:8080/ > /dev/null 2>&1; then
+                echo "  ingress OK after probe $i"
+                break
+              fi
+              sleep 0.5
+            done
+            echo "Probing egress (127.0.0.1:8081)..."
+            for i in $(seq 1 10); do
+              if curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8081/ > /dev/null 2>&1; then
+                echo "  egress OK after probe $i"
+                break
+              fi
+              sleep 0.5
+            done
+            curl -sf --max-time 5 http://echo.local:8080/ > /dev/null && \
+            curl -sf --max-time 5 -H "Host: echo.local" http://127.0.0.1:8081/ > /dev/null
+          }
+
+          if warmup_probe; then
+            echo "Tunnel warm and serving"
+            exit 0
+          fi
+
+          echo "WARNING: warmup failed, restarting client then server..."
+          echo "=== client log ===" && tail -30 /tmp/ci-client.log || true
+          echo "=== server log ===" && tail -30 /tmp/ci-server.log || true
+
+          kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 0.5
+          kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 0.5
+
+          echo "Restarting server..."
+          ./target/release/server --config ci-helpers/server.yaml > /tmp/ci-server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 20); do
+            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+
+          echo "Restarting client..."
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          echo $! > /tmp/client.pid
+          for i in $(seq 1 40); do
+            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            sleep 0.5
+          done
+          if ! grep -q "Login successful" /tmp/ci-client.log; then
+            echo "ERROR: client did not login after restart"
+            cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+
+          echo "Retrying warmup after restart..."
+          if warmup_probe; then
+            echo "Tunnel warm and serving (after restart)"
+            exit 0
+          fi
+
+          echo "FAIL: tunnel not serving after restart"
+          echo "=== client log ===" && cat /tmp/ci-client.log
+          echo "=== server log ===" && cat /tmp/ci-server.log
+          exit 1
+
+      - name: Metrics — before benchmark
+        run: |
+          echo "── Server metrics before k6 ──"
+          curl -sf http://127.0.0.1:9090/metrics || echo "(metrics endpoint not available)"
+
+      - name: Start resource sampling
+        run: |
+          mpstat 2 > /tmp/mpstat.log 2>&1 &
+          echo $! > /tmp/mpstat.pid
+          # -p ALL captures every process; parser filters to known names
+          pidstat -p ALL -u -r 2 > /tmp/pidstat.log 2>&1 &
+          echo $! > /tmp/pidstat.pid
+          pidstat -p ALL -d 2 > /tmp/pidstat-io.log 2>&1 &
+          echo $! > /tmp/pidstat-io.pid
+          # context switches (voluntary + involuntary) per process
+          pidstat -p ALL -w 2 > /tmp/pidstat-ctxsw.log 2>&1 &
+          echo $! > /tmp/pidstat-ctxsw.pid
+          vmstat 2 > /tmp/vmstat.log 2>&1 &
+          echo $! > /tmp/vmstat.pid
+          sar -n DEV 2 > /tmp/sar-net.log 2>&1 &
+          echo $! > /tmp/sar-net.pid
+          # page faults
+          sar -B 2 > /tmp/sar-paging.log 2>&1 &
+          echo $! > /tmp/sar-paging.pid
+          # TCP connection state counts every 2s (ss -s snapshot loop)
+          (while true; do
+            echo "$(date +%s) $(ss -s 2>/dev/null | grep -E 'estab|timewait|closed' | tr '\n' '|')"
+            sleep 2
+          done) > /tmp/ss-timeseries.log 2>&1 &
+          echo $! > /tmp/ss-loop.pid
+          # PSI (pressure stall info) — available on kernel >= 4.20
+          if [ -f /proc/pressure/cpu ]; then
+            (while true; do
+              TS=$(date +%s)
+              CPU=$(cat /proc/pressure/cpu 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
+              MEM=$(cat /proc/pressure/memory 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
+              IO=$(cat /proc/pressure/io 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
+              echo "$TS cpu=$CPU mem=$MEM io=$IO"
+              sleep 2
+            done) > /tmp/psi-timeseries.log 2>&1 &
+            echo $! > /tmp/psi-loop.pid
+          else
+            echo "PSI not available" > /tmp/psi-timeseries.log
+          fi
+          nproc > /tmp/nproc
+          date +%s > /tmp/sampling_start_epoch
+          echo "Sampling started (mpstat + pidstat ALL -u/-r/-d/-w + sar-net + sar-B + ss + PSI)"
+
+      - name: Run k6 stress test
+        working-directory: ci-helpers/k6
+        run: |
+          date +%s > /tmp/k6_start_epoch
+          k6 run -e GITHUB_SHA=${{ github.sha }} bench.js &
+          echo $! > /tmp/k6.pid
+          wait "$(cat /tmp/k6.pid)"
+
+      - name: Stop resource sampling
+        if: always()
+        run: |
+          kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/mpstat.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/pidstat.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/pidstat-io.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/pidstat-ctxsw.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/vmstat.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/sar-net.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/sar-paging.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/ss-loop.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/psi-loop.pid 2>/dev/null)" 2>/dev/null || true
+          pkill -9 -f "mpstat" 2>/dev/null || true
+          pkill -9 -f "pidstat" 2>/dev/null || true
+          pkill -9 -f "sar -n" 2>/dev/null || true
+          pkill -9 -f "sar -B" 2>/dev/null || true
+          sleep 0.5
+
+      - name: Resource report — CPU (mpstat)
+        if: always()
+        run: |
+          echo "── CPU utilization during k6 (mpstat 2s interval) ──"
+          cat /tmp/mpstat.log || echo "(no data)"
+
+      - name: Resource report — per-process (pidstat)
+        if: always()
+        run: |
+          echo "── server + client CPU% and RSS during k6 (pidstat 2s interval) ──"
+          cat /tmp/pidstat.log || echo "(no data)"
+
+      - name: Resource report — system (vmstat)
+        if: always()
+        run: |
+          echo "── System overview during k6 (vmstat 2s interval) ──"
+          cat /tmp/vmstat.log || echo "(no data)"
+
+      - name: Metrics — after benchmark
+        if: always()
+        run: |
+          echo "── Server metrics after k6 ──"
+          curl -sf http://127.0.0.1:9090/metrics || echo "(metrics endpoint not available)"
+
+      - name: Parse resource data
+        if: always()
+        run: |
+          K6_OFFSET=0
+          if [ -f /tmp/sampling_start_epoch ] && [ -f /tmp/k6_start_epoch ]; then
+            S=$(cat /tmp/sampling_start_epoch)
+            K=$(cat /tmp/k6_start_epoch)
+            K6_OFFSET=$(( K - S ))
+          fi
+          python3 "${{ github.workspace }}/ci-helpers/parse-resources.py" \
+            --pidstat      /tmp/pidstat.log \
+            --mpstat       /tmp/mpstat.log \
+            --pidstat-io   /tmp/pidstat-io.log \
+            --pidstat-ctxsw /tmp/pidstat-ctxsw.log \
+            --sar-net      /tmp/sar-net.log \
+            --sar-paging   /tmp/sar-paging.log \
+            --ss           /tmp/ss-timeseries.log \
+            --psi          /tmp/psi-timeseries.log \
+            --k6-offset    "$K6_OFFSET" \
+            --nproc        /tmp/nproc \
+            --output       /tmp/resource-data.json \
+            || echo "Resource parsing failed (non-fatal)"
+
+      - name: Check benchmark output exists
+        id: bench_check
+        if: always()
+        run: |
+          if [ -s /tmp/bench-results.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish benchmark to gh-pages
+        if: github.ref == 'refs/heads/main' && steps.bench_check.outputs.exists == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd /tmp
+          git clone --branch gh-pages --single-branch --depth 1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" gh-pages-repo \
+            || { mkdir gh-pages-repo && cd gh-pages-repo && git init && git checkout --orphan gh-pages && cd /tmp; }
+          cd gh-pages-repo
+          mkdir -p bench
+          cp "${{ github.workspace }}/bench/index.html" bench/index.html
+          python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
+            --result /tmp/bench-results.json \
+            --data   bench/data.js \
+            --sha    "${{ github.sha }}" \
+            --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
+            --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
+            --resources /tmp/resource-data.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench/
+          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
+          git commit -m "bench: update data for $(echo '${{ github.sha }}' | cut -c1-7)"
+          git push origin gh-pages
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-test-logs-${{ github.run_id }}
           retention-days: 3
           path: |
             /tmp/ci-server.log

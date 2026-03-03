@@ -17,6 +17,8 @@ pub struct HttpPeer {
     pub scheme: String,
 }
 
+// TODO: support HTTP/1.1 keep-alive — loop over multiple requests per connection
+//       instead of handling one request then calling finish().
 impl HttpPeer {
     pub async fn connect_inner(
         self,

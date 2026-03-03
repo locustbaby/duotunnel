@@ -1,0 +1,23 @@
+syntax = "proto3";
+package grpc_echo.v1;
+
+service EchoService {
+  rpc Echo (EchoRequest) returns (EchoResponse);
+  rpc ServerStreamEcho (StreamEchoRequest) returns (stream EchoResponse);
+  rpc BidiStreamEcho (stream EchoRequest) returns (stream EchoResponse);
+}
+
+message EchoRequest {
+  string ping = 1;
+}
+
+message StreamEchoRequest {
+  string ping = 1;
+  int32 count = 2;
+}
+
+message EchoResponse {
+  map<string, string> headers = 1;
+  string body = 2;
+  string remote_addr = 3;
+}
