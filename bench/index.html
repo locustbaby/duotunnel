@@ -12,11 +12,11 @@
   --bg:#0a0e14;--surface:#111820;--border:#1e2a3a;--border2:#2a3a4d;
   --text:#e0e8f0;--text2:#6b7d93;--text3:#4a5a6d;
   --blue:#4da6ff;--green:#34d399;--orange:#f5a623;--red:#ef5350;--purple:#a78bfa;
-  --blue-dim:rgba(77,166,255,.12);--green-dim:rgba(52,211,153,.12);
+  --blue-dim:rgba(77,166,255,.12);
   --panel:340px;
 }
 body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
-a{color:var(--blue);text-decoration:none}
+a{color:var(--blue);text-decoration:none;cursor:pointer}
 a:hover{text-decoration:underline}
 .wrap{max-width:1400px;margin:0 auto;padding:32px 24px}
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;flex-wrap:wrap;gap:12px}
@@ -35,7 +35,7 @@ header h1 span{color:var(--text2);font-weight:400;margin-left:6px}
 .row.full>*{grid-column:1/-1}
 .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;height:var(--panel);display:flex;flex-direction:column}
 .panel.tall{height:400px}
-.panel.auto{height:auto;max-height:500px}
+.panel.auto{height:auto}
 .panel h3{font-size:12px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
 .chart-area{flex:1;min-height:0;position:relative}
 canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
@@ -46,7 +46,6 @@ th{text-align:left;padding:6px 10px;color:var(--text2);font-weight:600;border-bo
 td{padding:6px 10px;border-bottom:1px solid var(--border);font-family:'SF Mono',SFMono-Regular,Consolas,monospace;font-size:11px}
 tr:last-child td{border-bottom:none}
 .c-good{color:var(--green)}.c-bad{color:var(--red)}.c-dim{color:var(--text3)}
-.c-http{color:var(--blue)}.c-grpc{color:var(--green)}.c-ws{color:var(--orange)}
 .bar{display:inline-block;height:10px;border-radius:2px;vertical-align:middle;margin-right:6px}
 select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;cursor:pointer;flex-shrink:0}
 select:focus{outline:none;border-color:var(--blue)}
@@ -56,6 +55,11 @@ select:focus{outline:none;border-color:var(--blue)}
 .pill-http{background:rgba(77,166,255,.15);color:var(--blue)}
 .pill-grpc{background:rgba(52,211,153,.15);color:var(--green)}
 .pill-ws{background:rgba(245,166,35,.15);color:var(--orange)}
+.breadcrumb{font-size:12px;color:var(--text2);margin-bottom:20px}
+.breadcrumb a{color:var(--blue)}
+.row-active{background:rgba(77,166,255,.06)}
+tr.clickable{cursor:pointer;transition:background .1s}
+tr.clickable:hover{background:rgba(77,166,255,.08)}
 </style>
 </head>
 <body>
@@ -68,32 +72,23 @@ select:focus{outline:none;border-color:var(--blue)}
 </div>
 <script>
 (function(){
+
 const root = document.getElementById('app');
+const metaEl = document.getElementById('meta');
 const entries = (window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) || [];
 if (!entries.length) {
   root.innerHTML = '<div class="empty"><h2>No benchmark data yet</h2><p>Push to main to trigger a benchmark run.</p></div>';
   return;
 }
 
-const latest = entries[entries.length - 1];
-const prev = entries.length > 1 ? entries[entries.length - 2] : null;
-const sc = latest.scenarios || [];
-const sum = latest.summary || {};
-const res = latest.resources || null;
-
-const metaEl = document.getElementById('meta');
-const cm = latest.commit || {};
-if (typeof cm === 'object' && cm.id) {
-  const s7 = cm.id.substring(0, 7);
-  const lnk = cm.url ? `<a href="${cm.url}">${s7}</a>` : s7;
-  metaEl.innerHTML = `${lnk} ${esc(cm.message || '')} · ${new Date(latest.timestamp).toLocaleString()}`;
-} else {
-  metaEl.textContent = ((typeof cm === 'string' ? cm : '').substring(0, 7)) + ' · ' + new Date(latest.timestamp).toLocaleString();
-}
-
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function r2(v) { return Math.round(v * 100) / 100; }
 function fmt(v) { return v == null ? '—' : typeof v === 'number' ? v.toLocaleString(undefined, {maximumFractionDigits:1}) : v; }
+function sha7(e) { const c = e.commit; return typeof c === 'object' ? (c.id||'').substring(0,7) : (c||'').substring(0,7); }
+function shaFull(e) { const c = e.commit; return typeof c === 'object' ? (c.id||'') : (c||''); }
+function commitUrl(e) { const c = e.commit; return typeof c === 'object' ? (c.url||'') : ''; }
+function commitMsg(e) { const c = e.commit; return typeof c === 'object' ? (c.message||'') : ''; }
+function pillFor(proto) { return `<span class="pill pill-${proto.toLowerCase()}">${proto}</span>`; }
 
 function delta(cur, pre, invert) {
   if (pre == null || pre === 0) return '<span class="d d-flat">—</span>';
@@ -103,9 +98,12 @@ function delta(cur, pre, invert) {
   return `<span class="d ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
 }
 
-function pillFor(proto) {
-  const p = proto.toLowerCase().replace(/\s/g,'');
-  return `<span class="pill pill-${p}">${proto}</span>`;
+function deltaVal(cur, pre, invert) {
+  if (pre == null) return '—';
+  const diff = r2(cur - pre);
+  const good = invert ? diff < 0 : diff > 0;
+  const cls = Math.abs(diff) < 0.01 ? 'c-dim' : good ? 'c-good' : 'c-bad';
+  return `<span class="${cls}">${diff > 0 ? '+' : ''}${diff}</span>`;
 }
 
 function latencyBar(val, max, proto) {
@@ -113,79 +111,6 @@ function latencyBar(val, max, proto) {
   const w = max > 0 ? Math.max(2, Math.round(val / max * 80)) : 0;
   return `<span class="bar" style="width:${w}px;background:${colors[proto]||'var(--text3)'}"></span>`;
 }
-
-const prevSum = prev ? (prev.summary || {}) : {};
-
-const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
-
-let html = `
-<div class="cards">
-  <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)}</div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
-  <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
-  <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
-  <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${entries.length} runs</span></div>
-</div>
-
-<div class="sec">Scenario Results</div>
-<div class="row full">
-  <div class="panel auto" style="max-height:none">
-    <h3>All Scenarios</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>p50 (ms)</th><th>p95 (ms)</th><th>Latency</th><th>RPS</th><th>Requests</th><th>Err %</th></tr></thead>
-        <tbody>`;
-
-const categories = ['basic','body_size','stress'];
-const catLabels = {basic:'Basic',body_size:'Body Size',stress:'Stress'};
-for (const cat of categories) {
-  const group = sc.filter(s => s.category === cat);
-  if (!group.length) continue;
-  html += `<tr><td colspan="9" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;border-bottom:none">${catLabels[cat]||cat}</td></tr>`;
-  for (const s of group) {
-    const errCls = s.err > 0 ? (s.err > 5 ? 'c-bad' : 'c-bad') : 'c-dim';
-    html += `<tr>
-      <td style="color:var(--text)">${s.name}</td>
-      <td>${pillFor(s.protocol)}</td>
-      <td style="color:var(--text2)">${s.direction}</td>
-      <td>${s.p50}</td>
-      <td>${s.p95}</td>
-      <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95}</td>
-      <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
-      <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
-      <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>
-    </tr>`;
-  }
-}
-
-html += `</tbody></table></div></div></div>`;
-
-if (res) {
-  html += `
-  <div class="sec">Resources</div>
-  <div class="row">
-    <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div></div>
-    <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div></div>
-  </div>`;
-}
-
-html += `
-<div class="sec">Trends</div>
-<div class="row full">
-  <div class="panel tall"><h3>Historical Overview</h3><div class="chart-area"><canvas id="trendChart"></canvas></div></div>
-</div>
-<div class="row full">
-  <div class="panel tall"><h3>Scenario Trend</h3><select id="scSel"></select><div class="chart-area"><canvas id="scTrend"></canvas></div></div>
-</div>
-
-<div class="sec">History</div>
-<div class="row full">
-  <div class="panel auto" style="max-height:none">
-    <h3>Run History</h3>
-    <div class="tbl-wrap" id="histTable"></div>
-  </div>
-</div>`;
-
-root.innerHTML = html;
 
 const CO = {
   responsive:true, maintainAspectRatio:false,
@@ -196,103 +121,247 @@ const CO = {
   },
 };
 
-function mkChart(id, cfg) {
-  const cv = document.getElementById(id);
-  if (!cv) return;
-  return new Chart(cv, cfg);
+let liveCharts = [];
+function destroyCharts() { liveCharts.forEach(c => c.destroy()); liveCharts = []; }
+function mkChart(id, cfg) { const cv = document.getElementById(id); if (!cv) return; const c = new Chart(cv, cfg); liveCharts.push(c); return c; }
+
+function findEntry(sha) {
+  return entries.find(e => shaFull(e) === sha || sha7(e) === sha);
 }
 
-if (res) {
-  const cpuDS = [];
-  if (res.server?.cpu?.length) cpuDS.push({label:'Server',data:res.server.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-  if (res.client?.cpu?.length) cpuDS.push({label:'Client',data:res.client.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-  if (res.system?.cpu?.length) cpuDS.push({label:'System',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
-  if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
-
-  const memDS = [];
-  if (res.server?.rss?.length) memDS.push({label:'Server',data:res.server.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-  if (res.client?.rss?.length) memDS.push({label:'Client',data:res.client.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-  if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+function prevOf(entry) {
+  const idx = entries.indexOf(entry);
+  return idx > 0 ? entries[idx - 1] : null;
 }
 
-if (entries.length >= 2) {
-  const lbl = entries.map(e => { const c = e.commit; return typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7); });
-  const rpsD = entries.map(e => e.summary?.totalRPS ?? null);
-  const errD = entries.map(e => e.summary?.totalErr ?? null);
-  function avgP95(entry, cat) { const s=(entry.scenarios||[]).filter(x=>x.category===cat); return s.length ? r2(s.reduce((a,x)=>a+x.p95,0)/s.length) : null; }
-  const bP95 = entries.map(e => avgP95(e,'basic'));
-  const sP95 = entries.map(e => avgP95(e,'stress'));
-
-  mkChart('trendChart',{type:'line',data:{labels:lbl,datasets:[
-    {label:'Total RPS',data:rpsD,borderColor:'#4da6ff',backgroundColor:'transparent',yAxisID:'y',tension:.3,pointRadius:3,borderWidth:2},
-    {label:'Error %',data:errD,borderColor:'#ef5350',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:3,borderWidth:2},
-    {label:'Basic avg p95',data:bP95,borderColor:'#34d399',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
-    {label:'Stress avg p95',data:sP95,borderColor:'#f5a623',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
-  ]},options:{...CO,scales:{
-    x:CO.scales.x,
-    y:{type:'linear',position:'left',title:{display:true,text:'RPS',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
-    y1:{type:'linear',position:'right',title:{display:true,text:'ms / %',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{drawOnChartArea:false},beginAtZero:true},
-  }}});
-} else {
-  const el = document.getElementById('trendChart');
-  if (el) el.closest('.panel').querySelector('h3').textContent = 'Historical Overview — need >= 2 runs';
-}
-
-(function scenarioTrend(){
-  const sel = document.getElementById('scSel');
-  if (!sel) return;
-  const names = [...new Set(entries.flatMap(e=>(e.scenarios||[]).map(s=>s.name)))].sort();
-  if (!names.length) return;
-  names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n.replace(/_/g,' ');sel.appendChild(o);});
-
-  let cur = null;
-  function draw(name) {
-    if (cur) cur.destroy();
-    const lbl = entries.map(e=>{const c=e.commit;return typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7);});
-    const p50 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p50:null;});
-    const p95 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p95:null;});
-    const p99 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?.p99??null;});
-    const ds = [
-      {label:'p50',data:p50,borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
-      {label:'p95',data:p95,borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
-    ];
-    if (p99.some(v=>v!=null)) ds.push({label:'p99',data:p99,borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,2]});
-    cur = mkChart('scTrend',{type:'line',data:{labels:lbl,datasets:ds},options:{...CO,plugins:{...CO.plugins,tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.raw} ms`}}},scales:{x:CO.scales.x,y:{...CO.scales.y,title:{display:true,text:'ms',color:'#6b7d93'}}}}});
+function navigate() {
+  const hash = location.hash.replace('#','');
+  destroyCharts();
+  if (hash && hash !== 'overview') {
+    const entry = findEntry(hash);
+    if (entry) { renderDetail(entry); return; }
   }
-  sel.addEventListener('change',()=>draw(sel.value));
-  draw(names[0]);
-})();
+  renderOverview();
+}
 
-(function historyTable(){
-  const el = document.getElementById('histTable');
-  if (!el) return;
-  const last = entries.slice(-15);
-  let h = '<table><thead><tr><th>Commit</th><th>Date</th><th>RPS</th><th>Δ</th><th>Err %</th><th>Δ</th><th>Reqs</th><th>Scenarios</th></tr></thead><tbody>';
-  for (let i = last.length - 1; i >= 0; i--) {
-    const e = last[i];
-    const p = i > 0 ? last[i-1] : null;
-    const c = e.commit || {};
-    const sha = typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7);
-    const url = typeof c==='object'&&c.url?c.url:'';
-    const link = url ? `<a href="${url}">${sha}</a>` : sha;
-    const date = new Date(e.timestamp).toLocaleDateString();
-    const rps = e.summary?.totalRPS??0;
-    const err = e.summary?.totalErr??0;
-    const reqs = e.summary?.totalRequests??0;
-    const nsc = (e.scenarios||[]).length;
+function renderOverview() {
+  const latest = entries[entries.length - 1];
+  const prev = prevOf(latest);
+  const sum = latest.summary || {};
+  const prevSum = prev ? (prev.summary || {}) : {};
 
-    let dR='—', dE='—';
-    if (p) {
-      const pR = p.summary?.totalRPS??0;
-      const pE = p.summary?.totalErr??0;
-      if (pR>0) { const d=r2(rps-pR); dR=`<span class="${d>0?'c-good':d<0?'c-bad':'c-dim'}">${d>0?'+':''}${d}</span>`; }
-      const dEv=r2(err-pE); dE=`<span class="${dEv<0?'c-good':dEv>0?'c-bad':'c-dim'}">${dEv>0?'+':''}${dEv}%</span>`;
+  metaEl.innerHTML = `Latest: <a href="#${sha7(latest)}">${sha7(latest)}</a> ${esc(commitMsg(latest))} · ${new Date(latest.timestamp).toLocaleString()}`;
+
+  let html = `
+  <div class="cards">
+    <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)}</div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
+    <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
+    <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
+    <div class="card"><div class="lb">Scenarios</div><div class="val">${(latest.scenarios||[]).length}</div><span class="d d-flat">${entries.length} runs</span></div>
+  </div>
+
+  <div class="sec">Trends</div>
+  <div class="row full">
+    <div class="panel tall"><h3>Historical Overview</h3><div class="chart-area"><canvas id="trendChart"></canvas></div></div>
+  </div>
+  <div class="row full">
+    <div class="panel tall"><h3>Scenario Trend</h3><select id="scSel"></select><div class="chart-area"><canvas id="scTrend"></canvas></div></div>
+  </div>
+
+  <div class="sec">All Runs</div>
+  <div class="row full">
+    <div class="panel auto">
+      <h3>Click a row to see details</h3>
+      <div class="tbl-wrap" id="histTable"></div>
+    </div>
+  </div>`;
+
+  root.innerHTML = html;
+
+  if (entries.length >= 2) {
+    const lbl = entries.map(sha7);
+    const rpsD = entries.map(e => e.summary?.totalRPS ?? null);
+    const errD = entries.map(e => e.summary?.totalErr ?? null);
+    function avgP95(entry, cat) { const s=(entry.scenarios||[]).filter(x=>x.category===cat); return s.length ? r2(s.reduce((a,x)=>a+x.p95,0)/s.length) : null; }
+
+    mkChart('trendChart',{type:'line',data:{labels:lbl,datasets:[
+      {label:'Total RPS',data:rpsD,borderColor:'#4da6ff',backgroundColor:'transparent',yAxisID:'y',tension:.3,pointRadius:3,borderWidth:2},
+      {label:'Error %',data:errD,borderColor:'#ef5350',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:3,borderWidth:2},
+      {label:'Basic avg p95',data:entries.map(e=>avgP95(e,'basic')),borderColor:'#34d399',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
+      {label:'Stress avg p95',data:entries.map(e=>avgP95(e,'stress')),borderColor:'#f5a623',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
+    ]},options:{...CO,onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },scales:{
+      x:CO.scales.x,
+      y:{type:'linear',position:'left',title:{display:true,text:'RPS',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
+      y1:{type:'linear',position:'right',title:{display:true,text:'ms / %',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{drawOnChartArea:false},beginAtZero:true},
+    }}});
+  } else {
+    const el = document.getElementById('trendChart');
+    if (el) el.closest('.panel').querySelector('h3').textContent = 'Historical Overview — need >= 2 runs';
+  }
+
+  (function(){
+    const sel = document.getElementById('scSel');
+    if (!sel) return;
+    const names = [...new Set(entries.flatMap(e=>(e.scenarios||[]).map(s=>s.name)))].sort();
+    if (!names.length) return;
+    names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n.replace(/_/g,' ');sel.appendChild(o);});
+    let cur = null;
+    function draw(name) {
+      if (cur) { cur.destroy(); liveCharts = liveCharts.filter(c=>c!==cur); }
+      const lbl = entries.map(sha7);
+      const p50 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p50:null;});
+      const p95 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p95:null;});
+      const p99 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?.p99??null;});
+      const ds = [
+        {label:'p50',data:p50,borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
+        {label:'p95',data:p95,borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
+      ];
+      if (p99.some(v=>v!=null)) ds.push({label:'p99',data:p99,borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,2]});
+      cur = mkChart('scTrend',{type:'line',data:{labels:lbl,datasets:ds},options:{...CO,plugins:{...CO.plugins,tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.raw} ms`}}},scales:{x:CO.scales.x,y:{...CO.scales.y,title:{display:true,text:'ms',color:'#6b7d93'}}}}});
     }
-    h += `<tr><td>${link}</td><td style="color:var(--text2)">${date}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
+    sel.addEventListener('change',()=>draw(sel.value));
+    draw(names[0]);
+  })();
+
+  (function(){
+    const el = document.getElementById('histTable');
+    if (!el) return;
+    let h = '<table><thead><tr><th>Commit</th><th>Date</th><th>RPS</th><th>Δ</th><th>Err %</th><th>Δ</th><th>Reqs</th><th>Scenarios</th></tr></thead><tbody>';
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const p = i > 0 ? entries[i-1] : null;
+      const s7 = sha7(e);
+      const rps = e.summary?.totalRPS??0;
+      const err = e.summary?.totalErr??0;
+      const reqs = e.summary?.totalRequests??0;
+      const nsc = (e.scenarios||[]).length;
+
+      let dR='—', dE='—';
+      if (p) {
+        const pR = p.summary?.totalRPS??0;
+        const pE = p.summary?.totalErr??0;
+        if (pR>0) { const d=r2(rps-pR); dR=`<span class="${d>0?'c-good':d<0?'c-bad':'c-dim'}">${d>0?'+':''}${d}</span>`; }
+        const dEv=r2(err-pE); dE=`<span class="${dEv<0?'c-good':dEv>0?'c-bad':'c-dim'}">${dEv>0?'+':''}${dEv}%</span>`;
+      }
+      const active = i === entries.length - 1 ? ' row-active' : '';
+      h += `<tr class="clickable${active}" data-sha="${s7}"><td>${s7}</td><td style="color:var(--text2)">${new Date(e.timestamp).toLocaleDateString()}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
+    }
+    h += '</tbody></table>';
+    el.innerHTML = h;
+    el.addEventListener('click', e => {
+      const tr = e.target.closest('tr.clickable');
+      if (tr) location.hash = tr.dataset.sha;
+    });
+  })();
+}
+
+function renderDetail(entry) {
+  const prev = prevOf(entry);
+  const sc = entry.scenarios || [];
+  const sum = entry.summary || {};
+  const prevSum = prev ? (prev.summary || {}) : {};
+  const res = entry.resources || null;
+  const s7 = sha7(entry);
+  const url = commitUrl(entry);
+
+  const ghLink = url ? `<a href="${url}" target="_blank">${s7}</a>` : s7;
+  metaEl.innerHTML = `${ghLink} ${esc(commitMsg(entry))} · ${new Date(entry.timestamp).toLocaleString()}`;
+
+  const prevScMap = {};
+  if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[s.name] = s; });
+
+  const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
+
+  let html = `
+  <div class="breadcrumb"><a onclick="location.hash='overview';return false;" href="#overview">← All Runs</a> / ${s7}</div>
+
+  <div class="cards">
+    <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)}</div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
+    <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
+    <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
+    <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
+  </div>
+
+  <div class="sec">Scenario Results</div>
+  <div class="row full">
+    <div class="panel auto">
+      <h3>All Scenarios — ${s7}</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>p50</th><th>p95</th><th>Latency</th><th>RPS</th><th>Reqs</th><th>Err %</th>${prev ? '<th>Δ p50</th><th>Δ p95</th><th>Δ RPS</th>' : ''}</tr></thead>
+          <tbody>`;
+
+  const categories = ['basic','body_size','stress'];
+  const catLabels = {basic:'Basic',body_size:'Body Size',stress:'Stress'};
+  const colSpan = prev ? 12 : 9;
+  for (const cat of categories) {
+    const group = sc.filter(s => s.category === cat);
+    if (!group.length) continue;
+    html += `<tr><td colspan="${colSpan}" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;border-bottom:none">${catLabels[cat]||cat}</td></tr>`;
+    for (const s of group) {
+      const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
+      const ps = prevScMap[s.name];
+      html += `<tr>
+        <td style="color:var(--text)">${s.name}</td>
+        <td>${pillFor(s.protocol)}</td>
+        <td style="color:var(--text2)">${s.direction}</td>
+        <td>${s.p50}</td>
+        <td>${s.p95}</td>
+        <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95}</td>
+        <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
+        <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
+        <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>`;
+      if (prev) {
+        html += `<td>${ps ? deltaVal(s.p50, ps.p50, true) : '—'}</td>`;
+        html += `<td>${ps ? deltaVal(s.p95, ps.p95, true) : '—'}</td>`;
+        html += `<td>${ps ? deltaVal(s.rps, ps.rps, false) : '—'}</td>`;
+      }
+      html += `</tr>`;
+    }
   }
-  h += '</tbody></table>';
-  el.innerHTML = h;
-})();
+
+  html += `</tbody></table></div></div></div>`;
+
+  if (res) {
+    html += `
+    <div class="sec">Resources</div>
+    <div class="row">
+      <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div></div>
+      <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div></div>
+    </div>`;
+  }
+
+  const idx = entries.indexOf(entry);
+  const prevEntry = idx > 0 ? entries[idx - 1] : null;
+  const nextEntry = idx < entries.length - 1 ? entries[idx + 1] : null;
+
+  html += `<div style="display:flex;justify-content:space-between;margin-top:24px">`;
+  html += prevEntry
+    ? `<a onclick="location.hash='${sha7(prevEntry)}';return false;" href="#${sha7(prevEntry)}">← ${sha7(prevEntry)}</a>`
+    : `<span class="c-dim">oldest</span>`;
+  html += nextEntry
+    ? `<a onclick="location.hash='${sha7(nextEntry)}';return false;" href="#${sha7(nextEntry)}">${sha7(nextEntry)} →</a>`
+    : `<span class="c-dim">latest</span>`;
+  html += `</div>`;
+
+  root.innerHTML = html;
+
+  if (res) {
+    const cpuDS = [];
+    if (res.server?.cpu?.length) cpuDS.push({label:'Server',data:res.server.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+    if (res.client?.cpu?.length) cpuDS.push({label:'Client',data:res.client.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+    if (res.system?.cpu?.length) cpuDS.push({label:'System',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
+    if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
+
+    const memDS = [];
+    if (res.server?.rss?.length) memDS.push({label:'Server',data:res.server.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+    if (res.client?.rss?.length) memDS.push({label:'Client',data:res.client.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+    if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+  }
+}
+
+window.addEventListener('hashchange', navigate);
+navigate();
 
 })();
 </script>
