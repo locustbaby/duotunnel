@@ -358,7 +358,7 @@ function renderOverview() {
         const dEv=r2(err-pE); dE=`<span class="${dEv<0?'c-good':dEv>0?'c-bad':'c-dim'}">${dEv>0?'+':''}${dEv}%</span>`;
       }
       const active = i === entries.length - 1 ? ' row-active' : '';
-      h += `<tr class="clickable${active}" data-sha="${s7}"><td>${s7}</td><td style="color:var(--text2)">${new Date(e.timestamp).toLocaleDateString()}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
+      h += `<tr class="clickable${active}" data-sha="${s7}"><td>${s7}</td><td style="color:var(--text2)">${new Date(e.timestamp).toLocaleString(undefined, {year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
     }
     h += '</tbody></table>';
     el.innerHTML = h;
