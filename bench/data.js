@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772526251652,
+  "lastUpdate": 1772526714421,
   "repoUrl": "https://github.com/locustbaby/duotunnel",
   "entries": {
     "Benchmark": [
@@ -1219,6 +1219,250 @@ window.BENCHMARK_DATA = {
           {
             "name": "http_error_rate",
             "value": 1.47,
+            "unit": "%"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "committer": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "distinct": true,
+          "id": "83e16df7641ea6609daf8830db5f29294fcba8fc",
+          "message": "ci: fix telemetry 403 + k6 high-cardinality metrics\n\n- Add actions:write permission for workflow-telemetry Job Summary\n- Add name tags to dynamic-URL HTTP requests to prevent 800K+ unique\n  time series in k6\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-03T16:28:09+08:00",
+          "tree_id": "7ea412cdda933857324de9fac4201be5988f696f",
+          "url": "https://github.com/locustbaby/duotunnel/commit/83e16df7641ea6609daf8830db5f29294fcba8fc"
+        },
+        "date": 1772526713481,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ingress_http_get p50",
+            "value": 0.74,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_get p95",
+            "value": 1.56,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_post p50",
+            "value": 0.66,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_post p95",
+            "value": 1.47,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_get p50",
+            "value": 0.56,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_get p95",
+            "value": 1.12,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_post p50",
+            "value": 0.55,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_post p95",
+            "value": 0.7,
+            "unit": "ms"
+          },
+          {
+            "name": "bidir_mixed p50",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "bidir_mixed p95",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_1k p50",
+            "value": 0.68,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_1k p95",
+            "value": 1.99,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_10k p50",
+            "value": 1.1,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_10k p95",
+            "value": 2.5,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_100k p50",
+            "value": 3.09,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_100k p95",
+            "value": 43.02,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_post_10k p50",
+            "value": 1.07,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_post_10k p95",
+            "value": 2.13,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_health p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_health p95",
+            "value": 43,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_echo p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_echo p95",
+            "value": 43,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_large_payload p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_large_payload p95",
+            "value": 42.8,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_high_qps p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_high_qps p95",
+            "value": 42,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_ingress p50",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_ingress p95",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_multi_msg p50",
+            "value": 44,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_multi_msg p95",
+            "value": 45,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_1000qps p50",
+            "value": 0.72,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_1000qps p95",
+            "value": 1.22,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_1000qps p50",
+            "value": 0.65,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_1000qps p95",
+            "value": 1.09,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_2000qps p50",
+            "value": 1.39,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_2000qps p95",
+            "value": 6.95,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_2000qps p50",
+            "value": 1.26,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_2000qps p95",
+            "value": 6.69,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_3000qps p50",
+            "value": 25.15,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_3000qps p95",
+            "value": 59.23,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_3000qps p50",
+            "value": 25.76,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_3000qps p95",
+            "value": 61.35,
+            "unit": "ms"
+          },
+          {
+            "name": "total_http_rps",
+            "value": 1529.3,
+            "unit": "req/s"
+          },
+          {
+            "name": "http_error_rate",
+            "value": 0.12,
             "unit": "%"
           }
         ]
