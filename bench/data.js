@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772527379038,
+  "lastUpdate": 1772527483132,
   "repoUrl": "https://github.com/locustbaby/duotunnel",
   "entries": {
     "Benchmark": [
@@ -113,6 +113,120 @@ window.BENCHMARK_DATA = {
           {
             "name": "total err",
             "value": 0,
+            "unit": "%"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "committer": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "distinct": true,
+          "id": "a78665eaec44ddd6be78029540fef00951abfff9",
+          "message": "ci: harden CI — SHA pins, timeouts, sysstat sampling\n\n- Pin all third-party actions to full commit SHA\n- Only trigger CI on business code changes (paths filter)\n- Add timeout-minutes to startup/warmup steps\n- Auto-restart client+server on warmup failure (#2)\n- Add mpstat/pidstat/vmstat sampling during k6 benchmark\n- Fix k6 high-cardinality metrics with URL name tags\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-03T16:40:29+08:00",
+          "tree_id": "d58e9e41c18ab05fed60eeef7a435cfabc47f20e",
+          "url": "https://github.com/locustbaby/duotunnel/commit/a78665eaec44ddd6be78029540fef00951abfff9"
+        },
+        "date": 1772527482804,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "HTTP basic p50",
+            "value": 0.56,
+            "unit": "ms"
+          },
+          {
+            "name": "HTTP basic p95",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "gRPC p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "gRPC p95",
+            "value": 42.19,
+            "unit": "ms"
+          },
+          {
+            "name": "WS p50",
+            "value": 22,
+            "unit": "ms"
+          },
+          {
+            "name": "WS p95",
+            "value": 23,
+            "unit": "ms"
+          },
+          {
+            "name": "body 1K p95",
+            "value": 2.06,
+            "unit": "ms"
+          },
+          {
+            "name": "body 10K p95",
+            "value": 2.68,
+            "unit": "ms"
+          },
+          {
+            "name": "body 100K p95",
+            "value": 43.02,
+            "unit": "ms"
+          },
+          {
+            "name": "1000 QPS p50",
+            "value": 0.67,
+            "unit": "ms"
+          },
+          {
+            "name": "1000 QPS p95",
+            "value": 1.14,
+            "unit": "ms"
+          },
+          {
+            "name": "2000 QPS p50",
+            "value": 1.31,
+            "unit": "ms"
+          },
+          {
+            "name": "2000 QPS p95",
+            "value": 6.78,
+            "unit": "ms"
+          },
+          {
+            "name": "3000 QPS p50",
+            "value": 28.23,
+            "unit": "ms"
+          },
+          {
+            "name": "3000 QPS p95",
+            "value": 60.02,
+            "unit": "ms"
+          },
+          {
+            "name": "bidir p95",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "total RPS",
+            "value": 1523.54,
+            "unit": "req/s"
+          },
+          {
+            "name": "total err",
+            "value": 0.09,
             "unit": "%"
           }
         ]
