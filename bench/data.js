@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772524707306,
+  "lastUpdate": 1772524903860,
   "repoUrl": "https://github.com/locustbaby/duotunnel",
   "entries": {
     "Benchmark": [
@@ -731,6 +731,250 @@ window.BENCHMARK_DATA = {
           {
             "name": "http_error_rate",
             "value": 1.17,
+            "unit": "%"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "committer": {
+            "email": "chuanfeng.liu@zilliz.com",
+            "name": "Sheldon",
+            "username": "locustbaby"
+          },
+          "distinct": true,
+          "id": "00d42051f1188c5b413d0722004757fa35265d6d",
+          "message": "ci: only trigger on business code changes\n\nSkip CI for docs, scripts, README, and other non-code changes.\nTriggers on: server/, client/, tunnel-lib/, ci-helpers/, Cargo.*,\nand the workflow file itself.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-03T15:57:27+08:00",
+          "tree_id": "38fbfdc1aa5e2b8e618075011855e4452013834e",
+          "url": "https://github.com/locustbaby/duotunnel/commit/00d42051f1188c5b413d0722004757fa35265d6d"
+        },
+        "date": 1772524903352,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ingress_http_get p50",
+            "value": 0.7,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_get p95",
+            "value": 1.39,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_post p50",
+            "value": 0.66,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_http_post p95",
+            "value": 1.61,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_get p50",
+            "value": 0.54,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_get p95",
+            "value": 1.12,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_post p50",
+            "value": 0.55,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_http_post p95",
+            "value": 0.75,
+            "unit": "ms"
+          },
+          {
+            "name": "bidir_mixed p50",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "bidir_mixed p95",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_1k p50",
+            "value": 0.72,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_1k p95",
+            "value": 2.36,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_10k p50",
+            "value": 1.17,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_10k p95",
+            "value": 2.39,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_100k p50",
+            "value": 2.96,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_post_100k p95",
+            "value": 42.94,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_post_10k p50",
+            "value": 1.1,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_post_10k p95",
+            "value": 2.37,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_health p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_health p95",
+            "value": 43,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_echo p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_echo p95",
+            "value": 43,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_large_payload p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_large_payload p95",
+            "value": 43,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_high_qps p50",
+            "value": 2,
+            "unit": "ms"
+          },
+          {
+            "name": "grpc_high_qps p95",
+            "value": 42,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_ingress p50",
+            "value": 0,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_ingress p95",
+            "value": 1,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_multi_msg p50",
+            "value": 44,
+            "unit": "ms"
+          },
+          {
+            "name": "ws_multi_msg p95",
+            "value": 45,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_1000qps p50",
+            "value": 0.72,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_1000qps p95",
+            "value": 1.95,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_1000qps p50",
+            "value": 0.64,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_1000qps p95",
+            "value": 1.79,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_2000qps p50",
+            "value": 1.58,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_2000qps p95",
+            "value": 21.26,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_2000qps p50",
+            "value": 1.47,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_2000qps p95",
+            "value": 21.51,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_3000qps p50",
+            "value": 46.63,
+            "unit": "ms"
+          },
+          {
+            "name": "ingress_3000qps p95",
+            "value": 106.92,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_3000qps p50",
+            "value": 40.22,
+            "unit": "ms"
+          },
+          {
+            "name": "egress_3000qps p95",
+            "value": 99.51,
+            "unit": "ms"
+          },
+          {
+            "name": "total_http_rps",
+            "value": 1405.5,
+            "unit": "req/s"
+          },
+          {
+            "name": "http_error_rate",
+            "value": 2.19,
             "unit": "%"
           }
         ]
