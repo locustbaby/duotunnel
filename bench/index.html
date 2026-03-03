@@ -9,640 +9,291 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#0a0e14;--surface:#111820;--surface2:#1a2230;--border:#1e2a3a;--border2:#2a3a4d;
+  --bg:#0a0e14;--surface:#111820;--border:#1e2a3a;--border2:#2a3a4d;
   --text:#e0e8f0;--text2:#6b7d93;--text3:#4a5a6d;
-  --blue:#4da6ff;--green:#34d399;--orange:#f5a623;--red:#ef5350;--purple:#a78bfa;--cyan:#22d3ee;
+  --blue:#4da6ff;--green:#34d399;--orange:#f5a623;--red:#ef5350;--purple:#a78bfa;
   --blue-dim:rgba(77,166,255,.12);--green-dim:rgba(52,211,153,.12);
-  --red-dim:rgba(239,83,80,.12);--orange-dim:rgba(245,166,35,.12);
-  --panel-h:340px;--panel-h-sm:280px;--panel-h-lg:360px;
+  --panel:340px;
 }
 body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
 a{color:var(--blue);text-decoration:none}
 a:hover{text-decoration:underline}
-.container{max-width:1400px;margin:0 auto;padding:32px 24px}
+.wrap{max-width:1400px;margin:0 auto;padding:32px 24px}
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;flex-wrap:wrap;gap:12px}
 header h1{font-size:22px;font-weight:700;letter-spacing:-.3px}
 header h1 span{color:var(--text2);font-weight:400;margin-left:6px}
-.commit-info{font-size:12px;color:var(--text2);font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
-.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:24px}
-.filters button{
-  background:var(--surface);border:1px solid var(--border);color:var(--text2);
-  padding:5px 14px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;
-  transition:all .15s;letter-spacing:.3px;text-transform:uppercase;
-}
-.filters button:hover{border-color:var(--border2);color:var(--text)}
-.filters button.active{color:var(--blue);border-color:rgba(77,166,255,.4);background:var(--blue-dim)}
-.sep{width:1px;background:var(--border);margin:0 6px;align-self:stretch}
+.meta{font-size:12px;color:var(--text2);font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:500px){.cards{grid-template-columns:1fr}}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px}
-.card .label{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:500}
-.card .value{font-size:30px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
-.card .delta{font-size:11px;margin-top:6px;font-weight:500}
-.delta.up{color:var(--green)}
-.delta.down{color:var(--red)}
-.delta.neutral{color:var(--text3)}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
-.full{grid-column:1/-1}
-.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;height:var(--panel-h);display:flex;flex-direction:column}
-.chart-box.h-sm{height:var(--panel-h-sm)}
-.chart-box.h-lg{height:var(--panel-h-lg)}
-.chart-box.h-auto{height:auto}
-.chart-box h3{font-size:12px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
-.chart-wrap{flex:1;min-height:0;position:relative}
+.card .lb{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:500}
+.card .val{font-size:30px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
+.card .d{font-size:11px;margin-top:6px;font-weight:500}
+.d-up{color:var(--green)}.d-down{color:var(--red)}.d-flat{color:var(--text3)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:960px){.row{grid-template-columns:1fr}}
+.row.full>*{grid-column:1/-1}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;height:var(--panel);display:flex;flex-direction:column}
+.panel.tall{height:400px}
+.panel.auto{height:auto;max-height:500px}
+.panel h3{font-size:12px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.chart-area{flex:1;min-height:0;position:relative}
 canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
-.section-title{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.sec{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.tbl-wrap{flex:1;min-height:0;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:6px 10px;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;font-size:10px;position:sticky;top:0;background:var(--surface);z-index:1}
+td{padding:6px 10px;border-bottom:1px solid var(--border);font-family:'SF Mono',SFMono-Regular,Consolas,monospace;font-size:11px}
+tr:last-child td{border-bottom:none}
+.c-good{color:var(--green)}.c-bad{color:var(--red)}.c-dim{color:var(--text3)}
+.c-http{color:var(--blue)}.c-grpc{color:var(--green)}.c-ws{color:var(--orange)}
+.bar{display:inline-block;height:10px;border-radius:2px;vertical-align:middle;margin-right:6px}
+select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;cursor:pointer;flex-shrink:0}
+select:focus{outline:none;border-color:var(--blue)}
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{margin-bottom:8px;font-weight:600}
-.tbl-wrap{overflow-x:auto;flex:1;min-height:0}
-table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;padding:8px 12px;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;font-size:10px;position:sticky;top:0;background:var(--surface)}
-td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--text);font-family:'SF Mono',SFMono-Regular,Consolas,monospace;font-size:11px}
-tr:last-child td{border-bottom:none}
-.td-good{color:var(--green)}
-.td-bad{color:var(--red)}
-.td-neutral{color:var(--text3)}
-select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;cursor:pointer;flex-shrink:0}
-select:focus{outline:none;border-color:var(--blue)}
-.placeholder{color:var(--text3);font-size:12px;padding:32px;text-align:center}
+.pill{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+.pill-http{background:rgba(77,166,255,.15);color:var(--blue)}
+.pill-grpc{background:rgba(52,211,153,.15);color:var(--green)}
+.pill-ws{background:rgba(245,166,35,.15);color:var(--orange)}
 </style>
 </head>
 <body>
-<div class="container">
+<div class="wrap">
   <header>
     <h1>duotunnel<span>benchmark</span></h1>
-    <div class="commit-info" id="commitInfo"></div>
+    <div class="meta" id="meta"></div>
   </header>
   <div id="app"></div>
 </div>
 <script>
 (function(){
-  const root = document.getElementById('app');
-  const entries = (window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) || [];
-  if (!entries.length) {
-    root.innerHTML = '<div class="empty"><h2>No benchmark data yet</h2><p>Push to main to trigger a benchmark run.</p></div>';
-    return;
+const root = document.getElementById('app');
+const entries = (window.BENCHMARK_DATA && window.BENCHMARK_DATA.entries) || [];
+if (!entries.length) {
+  root.innerHTML = '<div class="empty"><h2>No benchmark data yet</h2><p>Push to main to trigger a benchmark run.</p></div>';
+  return;
+}
+
+const latest = entries[entries.length - 1];
+const prev = entries.length > 1 ? entries[entries.length - 2] : null;
+const sc = latest.scenarios || [];
+const sum = latest.summary || {};
+const res = latest.resources || null;
+
+const metaEl = document.getElementById('meta');
+const cm = latest.commit || {};
+if (typeof cm === 'object' && cm.id) {
+  const s7 = cm.id.substring(0, 7);
+  const lnk = cm.url ? `<a href="${cm.url}">${s7}</a>` : s7;
+  metaEl.innerHTML = `${lnk} ${esc(cm.message || '')} · ${new Date(latest.timestamp).toLocaleString()}`;
+} else {
+  metaEl.textContent = ((typeof cm === 'string' ? cm : '').substring(0, 7)) + ' · ' + new Date(latest.timestamp).toLocaleString();
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function r2(v) { return Math.round(v * 100) / 100; }
+function fmt(v) { return v == null ? '—' : typeof v === 'number' ? v.toLocaleString(undefined, {maximumFractionDigits:1}) : v; }
+
+function delta(cur, pre, invert) {
+  if (pre == null || pre === 0) return '<span class="d d-flat">—</span>';
+  const pct = r2((cur - pre) / pre * 100);
+  const good = invert ? pct < 0 : pct > 0;
+  const cls = Math.abs(pct) < 1 ? 'd-flat' : good ? 'd-up' : 'd-down';
+  return `<span class="d ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
+}
+
+function pillFor(proto) {
+  const p = proto.toLowerCase().replace(/\s/g,'');
+  return `<span class="pill pill-${p}">${proto}</span>`;
+}
+
+function latencyBar(val, max, proto) {
+  const colors = {HTTP:'var(--blue)',gRPC:'var(--green)',WS:'var(--orange)'};
+  const w = max > 0 ? Math.max(2, Math.round(val / max * 80)) : 0;
+  return `<span class="bar" style="width:${w}px;background:${colors[proto]||'var(--text3)'}"></span>`;
+}
+
+const prevSum = prev ? (prev.summary || {}) : {};
+
+const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
+
+let html = `
+<div class="cards">
+  <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)}</div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
+  <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
+  <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
+  <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${entries.length} runs</span></div>
+</div>
+
+<div class="sec">Scenario Results</div>
+<div class="row full">
+  <div class="panel auto" style="max-height:none">
+    <h3>All Scenarios</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>p50 (ms)</th><th>p95 (ms)</th><th>Latency</th><th>RPS</th><th>Requests</th><th>Err %</th></tr></thead>
+        <tbody>`;
+
+const categories = ['basic','body_size','stress'];
+const catLabels = {basic:'Basic',body_size:'Body Size',stress:'Stress'};
+for (const cat of categories) {
+  const group = sc.filter(s => s.category === cat);
+  if (!group.length) continue;
+  html += `<tr><td colspan="9" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;border-bottom:none">${catLabels[cat]||cat}</td></tr>`;
+  for (const s of group) {
+    const errCls = s.err > 0 ? (s.err > 5 ? 'c-bad' : 'c-bad') : 'c-dim';
+    html += `<tr>
+      <td style="color:var(--text)">${s.name}</td>
+      <td>${pillFor(s.protocol)}</td>
+      <td style="color:var(--text2)">${s.direction}</td>
+      <td>${s.p50}</td>
+      <td>${s.p95}</td>
+      <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95}</td>
+      <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
+      <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
+      <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>
+    </tr>`;
   }
+}
 
-  const latest = entries[entries.length - 1];
-  const prev = entries.length > 1 ? entries[entries.length - 2] : null;
-  const scenarios = latest.scenarios || [];
-  const summary = latest.summary || {};
-  const resources = latest.resources || null;
-  const scenarioConfig = latest.scenarioConfig || null;
+html += `</tbody></table></div></div></div>`;
 
-  const commitEl = document.getElementById('commitInfo');
-  const c = latest.commit || {};
-  if (typeof c === 'object' && c.id) {
-    const short = c.id.substring(0, 7);
-    const link = c.url ? `<a href="${c.url}">${short}</a>` : short;
-    commitEl.innerHTML = `${link} ${esc(c.message || '')} · ${new Date(latest.timestamp).toLocaleString()}`;
-  } else {
-    const sha = typeof c === 'string' ? c : '';
-    commitEl.textContent = sha.substring(0, 7) + ' · ' + new Date(latest.timestamp).toLocaleString();
-  }
+if (res) {
+  html += `
+  <div class="sec">Resources</div>
+  <div class="row">
+    <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div></div>
+    <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div></div>
+  </div>`;
+}
 
-  function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-  function r2(v) { return Math.round(v * 100) / 100; }
+html += `
+<div class="sec">Trends</div>
+<div class="row full">
+  <div class="panel tall"><h3>Historical Overview</h3><div class="chart-area"><canvas id="trendChart"></canvas></div></div>
+</div>
+<div class="row full">
+  <div class="panel tall"><h3>Scenario Trend</h3><select id="scSel"></select><div class="chart-area"><canvas id="scTrend"></canvas></div></div>
+</div>
 
-  const PROTO_COLORS = {
-    HTTP:  { solid: '#4da6ff', bg: 'rgba(77,166,255,.7)',  dim: 'rgba(77,166,255,.3)' },
-    gRPC:  { solid: '#34d399', bg: 'rgba(52,211,153,.7)',  dim: 'rgba(52,211,153,.3)' },
-    WS:    { solid: '#f5a623', bg: 'rgba(245,166,35,.7)',  dim: 'rgba(245,166,35,.3)' },
-  };
+<div class="sec">History</div>
+<div class="row full">
+  <div class="panel auto" style="max-height:none">
+    <h3>Run History</h3>
+    <div class="tbl-wrap" id="histTable"></div>
+  </div>
+</div>`;
 
-  let activeProtocols = new Set(['HTTP', 'gRPC', 'WS']);
-  let activeDirections = new Set(['ingress', 'egress', 'bidir']);
+root.innerHTML = html;
 
-  function filtered() {
-    return scenarios.filter(s => activeProtocols.has(s.protocol) && activeDirections.has(s.direction));
-  }
+const CO = {
+  responsive:true, maintainAspectRatio:false,
+  plugins:{legend:{labels:{color:'#6b7d93',font:{size:10}}}},
+  scales:{
+    x:{ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}},
+    y:{ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
+  },
+};
 
-  function deltaStr(cur, prev, unit, invert) {
-    if (prev == null || prev === 0) return '<span class="delta neutral">—</span>';
-    const diff = cur - prev;
-    const pct = r2(diff / prev * 100);
-    const sign = diff > 0 ? '+' : '';
-    const good = invert ? diff < 0 : diff > 0;
-    const cls = Math.abs(pct) < 1 ? 'neutral' : good ? 'up' : 'down';
-    return `<span class="delta ${cls}">${sign}${pct}%${unit ? ' ' + unit : ''}</span>`;
-  }
+function mkChart(id, cfg) {
+  const cv = document.getElementById(id);
+  if (!cv) return;
+  return new Chart(cv, cfg);
+}
 
-  function buildHTML() {
-    const prevSummary = prev ? (prev.summary || {}) : {};
-    const errClass = summary.totalErr > 2 ? 'td-bad' : 'td-good';
+if (res) {
+  const cpuDS = [];
+  if (res.server?.cpu?.length) cpuDS.push({label:'Server',data:res.server.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+  if (res.client?.cpu?.length) cpuDS.push({label:'Client',data:res.client.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+  if (res.system?.cpu?.length) cpuDS.push({label:'System',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
+  if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
 
-    let html = `
-      <div class="filters" id="filters">
-        <button data-proto="HTTP" class="active">HTTP</button>
-        <button data-proto="gRPC" class="active">gRPC</button>
-        <button data-proto="WS" class="active">WS</button>
-        <div class="sep"></div>
-        <button data-dir="ingress" class="active">Ingress</button>
-        <button data-dir="egress" class="active">Egress</button>
-        <button data-dir="bidir" class="active">Bidir</button>
-      </div>
-      <div class="cards">
-        <div class="card">
-          <div class="label">Total RPS</div>
-          <div class="value">${fmt(summary.totalRPS)}</div>
-          ${deltaStr(summary.totalRPS || 0, prevSummary.totalRPS, '', false)}
-        </div>
-        <div class="card">
-          <div class="label">Error Rate</div>
-          <div class="value ${errClass}">${summary.totalErr ?? 0}%</div>
-          ${deltaStr(summary.totalErr || 0, prevSummary.totalErr, '', true)}
-        </div>
-        <div class="card">
-          <div class="label">Total Requests</div>
-          <div class="value">${fmt(summary.totalRequests)}</div>
-          ${deltaStr(summary.totalRequests || 0, prevSummary.totalRequests, '', false)}
-        </div>
-        <div class="card">
-          <div class="label">Scenarios</div>
-          <div class="value">${scenarios.length}</div>
-          <span class="delta neutral">${entries.length} runs</span>
-        </div>
-      </div>
+  const memDS = [];
+  if (res.server?.rss?.length) memDS.push({label:'Server',data:res.server.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+  if (res.client?.rss?.length) memDS.push({label:'Client',data:res.client.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+  if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+}
 
-      <div class="section-title">Latency</div>
-      <div class="grid">
-        <div class="chart-box h-lg full"><h3>Scenario Latency (ms) — p50 / p95 / p99</h3><div class="chart-wrap"><canvas id="latencyChart"></canvas></div></div>
-        <div class="chart-box"><h3>QPS Stress — Latency</h3><div class="chart-wrap"><canvas id="qpsChart"></canvas></div></div>
-        <div class="chart-box"><h3>Body Size — Latency</h3><div class="chart-wrap"><canvas id="bodyChart"></canvas></div></div>
-      </div>
+if (entries.length >= 2) {
+  const lbl = entries.map(e => { const c = e.commit; return typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7); });
+  const rpsD = entries.map(e => e.summary?.totalRPS ?? null);
+  const errD = entries.map(e => e.summary?.totalErr ?? null);
+  function avgP95(entry, cat) { const s=(entry.scenarios||[]).filter(x=>x.category===cat); return s.length ? r2(s.reduce((a,x)=>a+x.p95,0)/s.length) : null; }
+  const bP95 = entries.map(e => avgP95(e,'basic'));
+  const sP95 = entries.map(e => avgP95(e,'stress'));
 
-      <div class="section-title">Throughput & Errors</div>
-      <div class="grid">
-        <div class="chart-box"><h3>Throughput (RPS)</h3><div class="chart-wrap"><canvas id="rpsChart"></canvas></div></div>
-        <div class="chart-box"><h3>Error Rate (%)</h3><div class="chart-wrap"><canvas id="errChart"></canvas></div></div>
-        <div class="chart-box"><h3>QPS Stress — Error Rate</h3><div class="chart-wrap"><canvas id="qpsErrChart"></canvas></div></div>
-        <div class="chart-box" style="display:flex;align-items:center;justify-content:center">
-          <div class="placeholder">Resource charts below</div>
-        </div>
-      </div>`;
+  mkChart('trendChart',{type:'line',data:{labels:lbl,datasets:[
+    {label:'Total RPS',data:rpsD,borderColor:'#4da6ff',backgroundColor:'transparent',yAxisID:'y',tension:.3,pointRadius:3,borderWidth:2},
+    {label:'Error %',data:errD,borderColor:'#ef5350',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:3,borderWidth:2},
+    {label:'Basic avg p95',data:bP95,borderColor:'#34d399',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
+    {label:'Stress avg p95',data:sP95,borderColor:'#f5a623',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
+  ]},options:{...CO,scales:{
+    x:CO.scales.x,
+    y:{type:'linear',position:'left',title:{display:true,text:'RPS',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
+    y1:{type:'linear',position:'right',title:{display:true,text:'ms / %',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{drawOnChartArea:false},beginAtZero:true},
+  }}});
+} else {
+  const el = document.getElementById('trendChart');
+  if (el) el.closest('.panel').querySelector('h3').textContent = 'Historical Overview — need >= 2 runs';
+}
 
-    if (resources) {
-      html += `
-      <div class="section-title">Resources</div>
-      <div class="grid">
-        <div class="chart-box"><h3>CPU Usage (%)</h3><div class="chart-wrap"><canvas id="cpuChart"></canvas></div></div>
-        <div class="chart-box"><h3>Memory RSS (MB)</h3><div class="chart-wrap"><canvas id="memChart"></canvas></div></div>
-      </div>`;
-    }
+(function scenarioTrend(){
+  const sel = document.getElementById('scSel');
+  if (!sel) return;
+  const names = [...new Set(entries.flatMap(e=>(e.scenarios||[]).map(s=>s.name)))].sort();
+  if (!names.length) return;
+  names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n.replace(/_/g,' ');sel.appendChild(o);});
 
-    html += `
-      <div class="section-title">Trends</div>
-      <div class="grid">
-        <div class="chart-box h-lg full"><h3>Historical Trend — Key Metrics</h3><div class="chart-wrap"><canvas id="trendChart"></canvas></div></div>
-        <div class="chart-box h-lg full"><h3>Single Scenario Trend</h3><select id="scenarioSelect"></select><div class="chart-wrap"><canvas id="scenarioTrendChart"></canvas></div></div>
-      </div>
-
-      <div class="section-title">Data</div>
-      <div class="grid">
-        <div class="chart-box h-lg full"><h3>Delta Table (last 10 runs)</h3><div class="tbl-wrap" id="deltaTable"></div></div>`;
-
-    if (scenarioConfig) {
-      html += `
-        <div class="chart-box h-auto full"><h3>Test Configuration</h3><div class="tbl-wrap" id="configTable"></div></div>`;
-    }
-
-    html += `</div>`;
-    return html;
-  }
-
-  function fmt(v) {
-    if (v == null) return '—';
-    if (typeof v === 'number') return v.toLocaleString(undefined, {maximumFractionDigits: 1});
-    return v;
-  }
-
-  const chartOpts = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { labels: { color: '#6b7d93', font: { size: 10 } } } },
-    scales: {
-      x: { ticks: { color: '#6b7d93', font: { size: 9 } }, grid: { color: 'rgba(30,42,58,.6)' } },
-      y: { ticks: { color: '#6b7d93' }, grid: { color: 'rgba(30,42,58,.6)' }, beginAtZero: true },
-    },
-  };
-
-  let charts = [];
-  function destroyCharts() { charts.forEach(c => c.destroy()); charts = []; }
-
-  function makeChart(id, config) {
-    const canvas = document.getElementById(id);
-    if (!canvas) return null;
-    const c = new Chart(canvas, config);
-    charts.push(c);
-    return c;
-  }
-
-  function render() {
-    destroyCharts();
-    root.innerHTML = buildHTML();
-    bindFilters();
-    renderLatency();
-    renderQPS();
-    renderBody();
-    renderRPS();
-    renderErrors();
-    renderQPSErr();
-    if (resources) { renderCPU(); renderMem(); }
-    renderTrend();
-    renderScenarioTrend();
-    renderDeltaTable();
-    if (scenarioConfig) renderConfigTable();
-  }
-
-  function bindFilters() {
-    document.getElementById('filters').addEventListener('click', e => {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-      const proto = btn.dataset.proto;
-      const dir = btn.dataset.dir;
-      if (proto) {
-        if (activeProtocols.has(proto)) activeProtocols.delete(proto); else activeProtocols.add(proto);
-        btn.classList.toggle('active');
-      }
-      if (dir) {
-        if (activeDirections.has(dir)) activeDirections.delete(dir); else activeDirections.add(dir);
-        btn.classList.toggle('active');
-      }
-      destroyCharts();
-      renderLatency();
-      renderQPS();
-      renderBody();
-      renderRPS();
-      renderErrors();
-      renderQPSErr();
-      if (resources) { renderCPU(); renderMem(); }
-      renderTrend();
-      renderScenarioTrend();
-    });
-  }
-
-  function renderLatency() {
-    const f = filtered();
-    const labels = f.map(s => s.name.replace(/_/g, ' '));
-    const hasP99 = f.some(s => s.p99 != null);
-
-    const datasets = [
-      { label: 'p50', data: f.map(s => s.p50), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)'), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 },
-      { label: 'p95', data: f.map(s => s.p95), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.dim || 'rgba(255,255,255,.2)'), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 },
+  let cur = null;
+  function draw(name) {
+    if (cur) cur.destroy();
+    const lbl = entries.map(e=>{const c=e.commit;return typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7);});
+    const p50 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p50:null;});
+    const p95 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p95:null;});
+    const p99 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?.p99??null;});
+    const ds = [
+      {label:'p50',data:p50,borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
+      {label:'p95',data:p95,borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
     ];
-    if (hasP99) {
-      datasets.push({ label: 'p99', data: f.map(s => s.p99 ?? null), backgroundColor: f.map(s => { const c = PROTO_COLORS[s.protocol]; return c ? c.solid.replace(')', ',.15)').replace('rgb', 'rgba') : 'rgba(255,255,255,.1)'; }), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 });
-    }
-
-    makeChart('latencyChart', {
-      type: 'bar',
-      data: { labels, datasets },
-      options: {
-        indexAxis: 'y',
-        ...chartOpts,
-        plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } },
-        scales: {
-          x: { ...chartOpts.scales.x, title: { display: true, text: 'ms', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 9 }, autoSkip: false } },
-        },
-      },
-    });
+    if (p99.some(v=>v!=null)) ds.push({label:'p99',data:p99,borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,2]});
+    cur = mkChart('scTrend',{type:'line',data:{labels:lbl,datasets:ds},options:{...CO,plugins:{...CO.plugins,tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.raw} ms`}}},scales:{x:CO.scales.x,y:{...CO.scales.y,title:{display:true,text:'ms',color:'#6b7d93'}}}}});
   }
+  sel.addEventListener('change',()=>draw(sel.value));
+  draw(names[0]);
+})();
 
-  function renderQPS() {
-    const tiers = [1000, 2000, 3000];
-    const labels = tiers.map(t => t + ' QPS');
-    const inP50 = [], inP95 = [], egP50 = [], egP95 = [];
-    for (const qps of tiers) {
-      const ing = scenarios.find(s => s.name === `ingress_${qps}qps`);
-      const eg = scenarios.find(s => s.name === `egress_${qps}qps`);
-      inP50.push(ing ? ing.p50 : null);
-      inP95.push(ing ? ing.p95 : null);
-      egP50.push(eg ? eg.p50 : null);
-      egP95.push(eg ? eg.p95 : null);
+(function historyTable(){
+  const el = document.getElementById('histTable');
+  if (!el) return;
+  const last = entries.slice(-15);
+  let h = '<table><thead><tr><th>Commit</th><th>Date</th><th>RPS</th><th>Δ</th><th>Err %</th><th>Δ</th><th>Reqs</th><th>Scenarios</th></tr></thead><tbody>';
+  for (let i = last.length - 1; i >= 0; i--) {
+    const e = last[i];
+    const p = i > 0 ? last[i-1] : null;
+    const c = e.commit || {};
+    const sha = typeof c==='object'?(c.id||'').substring(0,7):(c||'').substring(0,7);
+    const url = typeof c==='object'&&c.url?c.url:'';
+    const link = url ? `<a href="${url}">${sha}</a>` : sha;
+    const date = new Date(e.timestamp).toLocaleDateString();
+    const rps = e.summary?.totalRPS??0;
+    const err = e.summary?.totalErr??0;
+    const reqs = e.summary?.totalRequests??0;
+    const nsc = (e.scenarios||[]).length;
+
+    let dR='—', dE='—';
+    if (p) {
+      const pR = p.summary?.totalRPS??0;
+      const pE = p.summary?.totalErr??0;
+      if (pR>0) { const d=r2(rps-pR); dR=`<span class="${d>0?'c-good':d<0?'c-bad':'c-dim'}">${d>0?'+':''}${d}</span>`; }
+      const dEv=r2(err-pE); dE=`<span class="${dEv<0?'c-good':dEv>0?'c-bad':'c-dim'}">${dEv>0?'+':''}${dEv}%</span>`;
     }
-    makeChart('qpsChart', {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Ingress p50', data: inP50, backgroundColor: 'rgba(77,166,255,.7)', borderRadius: 3 },
-          { label: 'Ingress p95', data: inP95, backgroundColor: 'rgba(77,166,255,.3)', borderRadius: 3 },
-          { label: 'Egress p50', data: egP50, backgroundColor: 'rgba(167,139,250,.7)', borderRadius: 3 },
-          { label: 'Egress p95', data: egP95, backgroundColor: 'rgba(167,139,250,.3)', borderRadius: 3 },
-        ],
-      },
-      options: { ...chartOpts, plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } } },
-    });
+    h += `<tr><td>${link}</td><td style="color:var(--text2)">${date}</td><td>${fmt(rps)}</td><td>${dR}</td><td>${err}%</td><td>${dE}</td><td>${fmt(reqs)}</td><td>${nsc}</td></tr>`;
   }
+  h += '</tbody></table>';
+  el.innerHTML = h;
+})();
 
-  function renderBody() {
-    const bodySizes = ['ingress_post_1k', 'ingress_post_10k', 'ingress_post_100k', 'egress_post_10k', 'grpc_large_payload'];
-    const bodyLabels = { ingress_post_1k: '1K', ingress_post_10k: '10K', ingress_post_100k: '100K', egress_post_10k: 'Egress 10K', grpc_large_payload: 'gRPC 10K' };
-    const found = bodySizes.map(n => scenarios.find(s => s.name === n)).filter(Boolean);
-    if (!found.length) return;
-    const labels = found.map(s => bodyLabels[s.name] || s.name);
-    const datasets = [
-      { label: 'p50', data: found.map(s => s.p50), backgroundColor: found.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)'), borderRadius: 3 },
-      { label: 'p95', data: found.map(s => s.p95), backgroundColor: found.map(s => PROTO_COLORS[s.protocol]?.dim || 'rgba(255,255,255,.2)'), borderRadius: 3 },
-    ];
-    makeChart('bodyChart', {
-      type: 'bar',
-      data: { labels, datasets },
-      options: { ...chartOpts, plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } } },
-    });
-  }
-
-  function renderRPS() {
-    const f = filtered();
-    const labels = f.map(s => s.name.replace(/_/g, ' '));
-    const data = f.map(s => s.rps);
-    const colors = f.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)');
-    makeChart('rpsChart', {
-      type: 'bar',
-      data: { labels, datasets: [{ label: 'RPS', data, backgroundColor: colors, borderRadius: 3, barPercentage: 0.6, categoryPercentage: 0.8 }] },
-      options: {
-        indexAxis: 'y',
-        ...chartOpts,
-        plugins: { ...chartOpts.plugins, legend: { display: false } },
-        scales: {
-          x: { ...chartOpts.scales.x, title: { display: true, text: 'req/s', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 8 }, autoSkip: false } },
-        },
-      },
-    });
-  }
-
-  function renderErrors() {
-    const f = filtered().filter(s => s.err > 0);
-    const canvas = document.getElementById('errChart');
-    if (!canvas) return;
-    if (!f.length) {
-      canvas.parentElement.querySelector('h3').textContent = 'Error Rate — all zero';
-      canvas.style.display = 'none';
-      return;
-    }
-    const labels = f.map(s => s.name.replace(/_/g, ' '));
-    const data = f.map(s => s.err);
-    makeChart('errChart', {
-      type: 'bar',
-      data: { labels, datasets: [{ label: 'Error %', data, backgroundColor: 'rgba(239,83,80,.7)', borderRadius: 3, barPercentage: 0.6 }] },
-      options: {
-        indexAxis: 'y',
-        ...chartOpts,
-        plugins: { ...chartOpts.plugins, legend: { display: false } },
-      },
-    });
-  }
-
-  function renderQPSErr() {
-    const tiers = [1000, 2000, 3000];
-    const labels = tiers.map(t => t + ' QPS');
-    const inErr = [], egErr = [];
-    for (const qps of tiers) {
-      const ing = scenarios.find(s => s.name === `ingress_${qps}qps`);
-      const eg = scenarios.find(s => s.name === `egress_${qps}qps`);
-      inErr.push(ing ? ing.err : null);
-      egErr.push(eg ? eg.err : null);
-    }
-    makeChart('qpsErrChart', {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Ingress err%', data: inErr, backgroundColor: 'rgba(239,83,80,.7)', borderRadius: 3 },
-          { label: 'Egress err%', data: egErr, backgroundColor: 'rgba(239,83,80,.35)', borderRadius: 3 },
-        ],
-      },
-      options: chartOpts,
-    });
-  }
-
-  function renderCPU() {
-    if (!resources) return;
-    const datasets = [];
-    if (resources.server?.cpu?.length) {
-      datasets.push({
-        label: 'Server', data: resources.server.cpu.map(p => ({x: p.t, y: p.v})),
-        borderColor: '#4da6ff', backgroundColor: 'transparent', tension: .3, pointRadius: 1, borderWidth: 1.5,
-      });
-    }
-    if (resources.client?.cpu?.length) {
-      datasets.push({
-        label: 'Client', data: resources.client.cpu.map(p => ({x: p.t, y: p.v})),
-        borderColor: '#34d399', backgroundColor: 'transparent', tension: .3, pointRadius: 1, borderWidth: 1.5,
-      });
-    }
-    if (resources.system?.cpu?.length) {
-      datasets.push({
-        label: 'System', data: resources.system.cpu.map(p => ({x: p.t, y: p.v})),
-        borderColor: '#f5a623', backgroundColor: 'transparent', tension: .3, pointRadius: 1, borderWidth: 1.5, borderDash: [4, 2],
-      });
-    }
-    if (!datasets.length) return;
-    makeChart('cpuChart', {
-      type: 'scatter',
-      data: { datasets },
-      options: {
-        ...chartOpts,
-        showLine: true,
-        scales: {
-          x: { ...chartOpts.scales.x, type: 'linear', title: { display: true, text: 'seconds', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, title: { display: true, text: 'CPU %', color: '#6b7d93' } },
-        },
-      },
-    });
-  }
-
-  function renderMem() {
-    if (!resources) return;
-    const datasets = [];
-    if (resources.server?.rss?.length) {
-      datasets.push({
-        label: 'Server', data: resources.server.rss.map(p => ({x: p.t, y: p.v})),
-        borderColor: '#4da6ff', backgroundColor: 'transparent', tension: .3, pointRadius: 1, borderWidth: 1.5,
-      });
-    }
-    if (resources.client?.rss?.length) {
-      datasets.push({
-        label: 'Client', data: resources.client.rss.map(p => ({x: p.t, y: p.v})),
-        borderColor: '#34d399', backgroundColor: 'transparent', tension: .3, pointRadius: 1, borderWidth: 1.5,
-      });
-    }
-    if (!datasets.length) return;
-    makeChart('memChart', {
-      type: 'scatter',
-      data: { datasets },
-      options: {
-        ...chartOpts,
-        showLine: true,
-        scales: {
-          x: { ...chartOpts.scales.x, type: 'linear', title: { display: true, text: 'seconds', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, title: { display: true, text: 'MB', color: '#6b7d93' } },
-        },
-      },
-    });
-  }
-
-  function renderTrend() {
-    if (entries.length < 2) {
-      const el = document.getElementById('trendChart');
-      if (el) el.closest('.chart-box').querySelector('h3').textContent = 'Historical Trend — need >= 2 data points';
-      return;
-    }
-    const labels = entries.map(e => {
-      const c = e.commit;
-      return typeof c === 'object' ? (c.id || '').substring(0, 7) : (c || '').substring(0, 7);
-    });
-    const totalRPS = entries.map(e => e.summary?.totalRPS ?? null);
-    const totalErr = entries.map(e => e.summary?.totalErr ?? null);
-
-    function avgP95(entry, cat) {
-      const s = (entry.scenarios || []).filter(sc => sc.category === cat);
-      if (!s.length) return null;
-      return r2(s.reduce((a, sc) => a + sc.p95, 0) / s.length);
-    }
-    const basicP95 = entries.map(e => avgP95(e, 'basic'));
-    const stressP95 = entries.map(e => avgP95(e, 'stress'));
-
-    makeChart('trendChart', {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Total RPS', data: totalRPS, borderColor: '#4da6ff', backgroundColor: 'transparent', yAxisID: 'y', tension: .3, pointRadius: 3, borderWidth: 2 },
-          { label: 'Error %', data: totalErr, borderColor: '#ef5350', backgroundColor: 'transparent', yAxisID: 'y1', tension: .3, pointRadius: 3, borderWidth: 2 },
-          { label: 'Basic avg p95', data: basicP95, borderColor: '#34d399', backgroundColor: 'transparent', yAxisID: 'y1', tension: .3, pointRadius: 2, borderWidth: 1.5, borderDash: [4, 2] },
-          { label: 'Stress avg p95', data: stressP95, borderColor: '#f5a623', backgroundColor: 'transparent', yAxisID: 'y1', tension: .3, pointRadius: 2, borderWidth: 1.5, borderDash: [4, 2] },
-        ],
-      },
-      options: {
-        ...chartOpts,
-        scales: {
-          x: chartOpts.scales.x,
-          y:  { type: 'linear', position: 'left', title: { display: true, text: 'RPS', color: '#6b7d93' }, ticks: { color: '#6b7d93' }, grid: { color: 'rgba(30,42,58,.6)' }, beginAtZero: true },
-          y1: { type: 'linear', position: 'right', title: { display: true, text: 'ms / %', color: '#6b7d93' }, ticks: { color: '#6b7d93' }, grid: { drawOnChartArea: false }, beginAtZero: true },
-        },
-      },
-    });
-  }
-
-  function renderScenarioTrend() {
-    const sel = document.getElementById('scenarioSelect');
-    if (!sel) return;
-
-    const allNames = [...new Set(entries.flatMap(e => (e.scenarios || []).map(s => s.name)))].sort();
-    if (!allNames.length) return;
-
-    allNames.forEach(n => {
-      const opt = document.createElement('option');
-      opt.value = n;
-      opt.textContent = n.replace(/_/g, ' ');
-      sel.appendChild(opt);
-    });
-
-    function drawScenarioTrend(name) {
-      const existing = charts.find(c => c.canvas && c.canvas.id === 'scenarioTrendChart');
-      if (existing) { existing.destroy(); charts = charts.filter(c => c !== existing); }
-
-      const labels = entries.map(e => {
-        const c = e.commit;
-        return typeof c === 'object' ? (c.id || '').substring(0, 7) : (c || '').substring(0, 7);
-      });
-
-      const p50 = entries.map(e => { const s = (e.scenarios || []).find(sc => sc.name === name); return s ? s.p50 : null; });
-      const p95 = entries.map(e => { const s = (e.scenarios || []).find(sc => sc.name === name); return s ? s.p95 : null; });
-      const p99 = entries.map(e => { const s = (e.scenarios || []).find(sc => sc.name === name); return s?.p99 ?? null; });
-      const hasP99 = p99.some(v => v != null);
-
-      const datasets = [
-        { label: 'p50', data: p50, borderColor: '#4da6ff', backgroundColor: 'transparent', tension: .3, pointRadius: 3, borderWidth: 2 },
-        { label: 'p95', data: p95, borderColor: '#34d399', backgroundColor: 'transparent', tension: .3, pointRadius: 3, borderWidth: 2 },
-      ];
-      if (hasP99) {
-        datasets.push({ label: 'p99', data: p99, borderColor: '#f5a623', backgroundColor: 'transparent', tension: .3, pointRadius: 3, borderWidth: 2, borderDash: [4, 2] });
-      }
-
-      makeChart('scenarioTrendChart', {
-        type: 'line',
-        data: { labels, datasets },
-        options: {
-          ...chartOpts,
-          plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } },
-          scales: {
-            x: chartOpts.scales.x,
-            y: { ...chartOpts.scales.y, title: { display: true, text: 'ms', color: '#6b7d93' } },
-          },
-        },
-      });
-    }
-
-    sel.addEventListener('change', () => drawScenarioTrend(sel.value));
-    drawScenarioTrend(allNames[0]);
-  }
-
-  function renderDeltaTable() {
-    const container = document.getElementById('deltaTable');
-    if (!container) return;
-
-    const last10 = entries.slice(-10);
-    if (last10.length < 1) { container.innerHTML = '<div class="placeholder">No data</div>'; return; }
-
-    let html = '<table><thead><tr><th>Commit</th><th>Date</th><th>RPS</th><th>Δ RPS</th><th>Err %</th><th>Δ Err</th><th>Requests</th></tr></thead><tbody>';
-
-    for (let i = 0; i < last10.length; i++) {
-      const e = last10[i];
-      const p = i > 0 ? last10[i - 1] : null;
-      const c = e.commit || {};
-      const sha = typeof c === 'object' ? (c.id || '').substring(0, 7) : (c || '').substring(0, 7);
-      const url = typeof c === 'object' && c.url ? c.url : '';
-      const commitLink = url ? `<a href="${url}">${sha}</a>` : sha;
-      const date = new Date(e.timestamp).toLocaleDateString();
-      const rps = e.summary?.totalRPS ?? 0;
-      const err = e.summary?.totalErr ?? 0;
-      const reqs = e.summary?.totalRequests ?? 0;
-
-      let dRPS = '', dErr = '';
-      if (p) {
-        const pRPS = p.summary?.totalRPS ?? 0;
-        const pErr = p.summary?.totalErr ?? 0;
-        if (pRPS > 0) {
-          const diff = r2(rps - pRPS);
-          const cls = diff > 0 ? 'td-good' : diff < 0 ? 'td-bad' : 'td-neutral';
-          dRPS = `<span class="${cls}">${diff > 0 ? '+' : ''}${diff}</span>`;
-        }
-        const diffErr = r2(err - pErr);
-        const cls2 = diffErr < 0 ? 'td-good' : diffErr > 0 ? 'td-bad' : 'td-neutral';
-        dErr = `<span class="${cls2}">${diffErr > 0 ? '+' : ''}${diffErr}%</span>`;
-      }
-
-      html += `<tr><td>${commitLink}</td><td>${date}</td><td>${fmt(rps)}</td><td>${dRPS || '—'}</td><td>${err}%</td><td>${dErr || '—'}</td><td>${fmt(reqs)}</td></tr>`;
-    }
-
-    html += '</tbody></table>';
-    container.innerHTML = html;
-  }
-
-  function renderConfigTable() {
-    const container = document.getElementById('configTable');
-    if (!container || !scenarioConfig) return;
-
-    let html = '<table><thead><tr><th>Scenario</th><th>Executor</th><th>Rate</th><th>Duration</th><th>Start</th><th>Max VUs</th></tr></thead><tbody>';
-
-    for (const [name, cfg] of Object.entries(scenarioConfig)) {
-      const rate = cfg.rate ? cfg.rate + '/s' : cfg.startRate ? cfg.startRate + '/s (ramping)' : '—';
-      const dur = cfg.duration || (cfg.stages ? cfg.stages.map(s => s.duration).join(' → ') : '—');
-      html += `<tr><td>${name.replace(/_/g, ' ')}</td><td>${cfg.executor}</td><td>${rate}</td><td>${dur}</td><td>${cfg.startTime || '0s'}</td><td>${cfg.maxVUs || '—'}</td></tr>`;
-    }
-
-    html += '</tbody></table>';
-    container.innerHTML = html;
-  }
-
-  render();
 })();
 </script>
 </body>
