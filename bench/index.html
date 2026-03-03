@@ -168,27 +168,32 @@ function buildLegend(chart, containerId) {
   // Track which index is solo-highlighted (-1 = all visible)
   let activeIdx = -1;
 
+  // Snapshot original colors once up front (before any mutation)
+  const origColors = chart.data.datasets.map(ds => ({
+    border: ds.borderColor,
+    point: ds.pointBorderColor || ds.borderColor,
+    pointBg: ds.pointBackgroundColor || ds.borderColor,
+  }));
+
   function refresh() {
     chart.data.datasets.forEach((ds, i) => {
       const dimmed = activeIdx !== -1 && i !== activeIdx;
-      // Store original colors on first call
-      if (!ds._origBorder) ds._origBorder = ds.borderColor;
-      if (!ds._origBg) ds._origBg = ds.backgroundColor;
-      ds.borderColor = dimmed ? toAlpha(ds._origBorder, 0.15) : ds._origBorder;
-      ds.backgroundColor = dimmed ? toAlpha(ds._origBg || ds._origBorder, 0.04) : (ds._origBg || 'transparent');
+      const orig = origColors[i];
+      ds.borderColor = dimmed ? toAlpha(orig.border, 0.12) : orig.border;
+      ds.pointBorderColor = dimmed ? toAlpha(orig.point, 0.12) : orig.point;
+      ds.pointBackgroundColor = dimmed ? toAlpha(orig.pointBg, 0.12) : orig.pointBg;
     });
-    chart.update('none');
+    chart.update();
 
-    // Update legend item appearance
     container.querySelectorAll('.leg-item').forEach((el, i) => {
       const dimmed = activeIdx !== -1 && i !== activeIdx;
-      el.style.opacity = dimmed ? '0.3' : '1';
+      el.style.opacity = dimmed ? '0.25' : '1';
       el.classList.toggle('leg-active', activeIdx === i);
     });
   }
 
   chart.data.datasets.forEach((ds, i) => {
-    const color = ds.borderColor || '#6b7d93';
+    const color = origColors[i].border || '#6b7d93';
     const isDash = ds.borderDash && ds.borderDash.length > 0;
     const item = document.createElement('span');
     item.className = 'leg-item';
