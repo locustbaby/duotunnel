@@ -159,20 +159,15 @@ const CO = {
 let liveCharts = [];
 function destroyCharts() { liveCharts.forEach(c => c.destroy()); liveCharts = []; }
 
-// Build Grafana-style legend below chart
-// Click = toggle show/hide; double-click = solo (hide all others)
+// Build legend: click = solo that series (others hidden); click again = restore all
 function buildLegend(chart, containerId) {
   const container = document.getElementById(containerId);
   if (!container) return;
   container.innerHTML = '';
 
-  const n = chart.data.datasets.length;
-
   function syncItems() {
     container.querySelectorAll('.leg-item').forEach((el, i) => {
-      const hidden = chart.data.datasets[i].hidden;
-      el.style.opacity = hidden ? '0.3' : '1';
-      el.classList.toggle('leg-active', !hidden);
+      el.style.opacity = chart.data.datasets[i].hidden ? '0.3' : '1';
     });
     chart.update();
   }
@@ -181,29 +176,14 @@ function buildLegend(chart, containerId) {
     const color = ds.borderColor || '#6b7d93';
     const isDash = ds.borderDash && ds.borderDash.length > 0;
     const item = document.createElement('span');
-    item.className = 'leg-item leg-active';
-    item.dataset.idx = i;
+    item.className = 'leg-item';
     item.innerHTML = `<span class="leg-swatch" style="background:${isDash?'transparent':color};border:1.5px ${isDash?'dashed':'solid'} ${color};"></span><span class="leg-label">${ds.label||''}</span>`;
-
-    let clickTimer = null;
     item.addEventListener('click', () => {
-      // debounce to distinguish single vs double click
-      if (clickTimer) return;
-      clickTimer = setTimeout(() => {
-        clickTimer = null;
-        // toggle this dataset
-        chart.data.datasets[i].hidden = !chart.data.datasets[i].hidden;
-        syncItems();
-      }, 220);
-    });
-    item.addEventListener('dblclick', () => {
-      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-      // solo: if already solo, restore all; else hide all others
-      const isSolo = chart.data.datasets.every((ds, j) => j === i ? !ds.hidden : ds.hidden);
-      chart.data.datasets.forEach((ds, j) => { ds.hidden = isSolo ? false : j !== i; });
+      const isSolo = chart.data.datasets.every((d, j) => j === i ? !d.hidden : d.hidden);
+      // if already solo → restore all; else solo this one
+      chart.data.datasets.forEach((d, j) => { d.hidden = isSolo ? false : j !== i; });
       syncItems();
     });
-
     container.appendChild(item);
   });
 }
