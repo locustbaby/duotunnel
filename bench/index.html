@@ -14,6 +14,7 @@
   --blue:#4da6ff;--green:#34d399;--orange:#f5a623;--red:#ef5350;--purple:#a78bfa;--cyan:#22d3ee;
   --blue-dim:rgba(77,166,255,.12);--green-dim:rgba(52,211,153,.12);
   --red-dim:rgba(239,83,80,.12);--orange-dim:rgba(245,166,35,.12);
+  --panel-h:340px;--panel-h-sm:280px;--panel-h-lg:360px;
 }
 body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased}
 a{color:var(--blue);text-decoration:none}
@@ -45,21 +46,25 @@ header h1 span{color:var(--text2);font-weight:400;margin-left:6px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 @media(max-width:900px){.grid{grid-template-columns:1fr}}
 .full{grid-column:1/-1}
-.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
-.chart-box h3{font-size:12px;font-weight:600;margin-bottom:14px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px}
-canvas{width:100%!important}
+.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;height:var(--panel-h);display:flex;flex-direction:column}
+.chart-box.h-sm{height:var(--panel-h-sm)}
+.chart-box.h-lg{height:var(--panel-h-lg)}
+.chart-box.h-auto{height:auto}
+.chart-box h3{font-size:12px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.chart-wrap{flex:1;min-height:0;position:relative}
+canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
 .section-title{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{margin-bottom:8px;font-weight:600}
-.tbl-wrap{overflow-x:auto}
+.tbl-wrap{overflow-x:auto;flex:1;min-height:0}
 table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;padding:8px 12px;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;font-size:10px}
+th{text-align:left;padding:8px 12px;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;font-size:10px;position:sticky;top:0;background:var(--surface)}
 td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--text);font-family:'SF Mono',SFMono-Regular,Consolas,monospace;font-size:11px}
 tr:last-child td{border-bottom:none}
 .td-good{color:var(--green)}
 .td-bad{color:var(--red)}
 .td-neutral{color:var(--text3)}
-select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:12px;cursor:pointer}
+select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;cursor:pointer;flex-shrink:0}
 select:focus{outline:none;border-color:var(--blue)}
 .placeholder{color:var(--text3);font-size:12px;padding:32px;text-align:center}
 </style>
@@ -164,17 +169,17 @@ select:focus{outline:none;border-color:var(--blue)}
 
       <div class="section-title">Latency</div>
       <div class="grid">
-        <div class="chart-box full"><h3>Scenario Latency (ms) — p50 / p95 / p99</h3><canvas id="latencyChart"></canvas></div>
-        <div class="chart-box"><h3>QPS Stress — Latency</h3><canvas id="qpsChart"></canvas></div>
-        <div class="chart-box"><h3>Body Size — Latency</h3><canvas id="bodyChart"></canvas></div>
+        <div class="chart-box h-lg full"><h3>Scenario Latency (ms) — p50 / p95 / p99</h3><div class="chart-wrap"><canvas id="latencyChart"></canvas></div></div>
+        <div class="chart-box"><h3>QPS Stress — Latency</h3><div class="chart-wrap"><canvas id="qpsChart"></canvas></div></div>
+        <div class="chart-box"><h3>Body Size — Latency</h3><div class="chart-wrap"><canvas id="bodyChart"></canvas></div></div>
       </div>
 
       <div class="section-title">Throughput & Errors</div>
       <div class="grid">
-        <div class="chart-box"><h3>Throughput (RPS)</h3><canvas id="rpsChart"></canvas></div>
-        <div class="chart-box"><h3>Error Rate (%)</h3><canvas id="errChart"></canvas></div>
-        <div class="chart-box"><h3>QPS Stress — Error Rate</h3><canvas id="qpsErrChart"></canvas></div>
-        <div class="chart-box" id="emptyBox" style="display:flex;align-items:center;justify-content:center">
+        <div class="chart-box"><h3>Throughput (RPS)</h3><div class="chart-wrap"><canvas id="rpsChart"></canvas></div></div>
+        <div class="chart-box"><h3>Error Rate (%)</h3><div class="chart-wrap"><canvas id="errChart"></canvas></div></div>
+        <div class="chart-box"><h3>QPS Stress — Error Rate</h3><div class="chart-wrap"><canvas id="qpsErrChart"></canvas></div></div>
+        <div class="chart-box" style="display:flex;align-items:center;justify-content:center">
           <div class="placeholder">Resource charts below</div>
         </div>
       </div>`;
@@ -183,25 +188,25 @@ select:focus{outline:none;border-color:var(--blue)}
       html += `
       <div class="section-title">Resources</div>
       <div class="grid">
-        <div class="chart-box"><h3>CPU Usage (%)</h3><canvas id="cpuChart"></canvas></div>
-        <div class="chart-box"><h3>Memory RSS (MB)</h3><canvas id="memChart"></canvas></div>
+        <div class="chart-box"><h3>CPU Usage (%)</h3><div class="chart-wrap"><canvas id="cpuChart"></canvas></div></div>
+        <div class="chart-box"><h3>Memory RSS (MB)</h3><div class="chart-wrap"><canvas id="memChart"></canvas></div></div>
       </div>`;
     }
 
     html += `
       <div class="section-title">Trends</div>
       <div class="grid">
-        <div class="chart-box full"><h3>Historical Trend — Key Metrics</h3><canvas id="trendChart"></canvas></div>
-        <div class="chart-box full"><h3>Single Scenario Trend</h3><select id="scenarioSelect"></select><canvas id="scenarioTrendChart"></canvas></div>
+        <div class="chart-box h-lg full"><h3>Historical Trend — Key Metrics</h3><div class="chart-wrap"><canvas id="trendChart"></canvas></div></div>
+        <div class="chart-box h-lg full"><h3>Single Scenario Trend</h3><select id="scenarioSelect"></select><div class="chart-wrap"><canvas id="scenarioTrendChart"></canvas></div></div>
       </div>
 
       <div class="section-title">Data</div>
       <div class="grid">
-        <div class="chart-box full"><h3>Delta Table (last 10 runs)</h3><div class="tbl-wrap" id="deltaTable"></div></div>`;
+        <div class="chart-box h-lg full"><h3>Delta Table (last 10 runs)</h3><div class="tbl-wrap" id="deltaTable"></div></div>`;
 
     if (scenarioConfig) {
       html += `
-        <div class="chart-box full"><h3>Test Configuration</h3><div class="tbl-wrap" id="configTable"></div></div>`;
+        <div class="chart-box h-auto full"><h3>Test Configuration</h3><div class="tbl-wrap" id="configTable"></div></div>`;
     }
 
     html += `</div>`;
@@ -227,11 +232,9 @@ select:focus{outline:none;border-color:var(--blue)}
   let charts = [];
   function destroyCharts() { charts.forEach(c => c.destroy()); charts = []; }
 
-  function makeChart(id, config, h) {
+  function makeChart(id, config) {
     const canvas = document.getElementById(id);
     if (!canvas) return null;
-    canvas.parentElement.style.minHeight = (h || 300) + 'px';
-    canvas.height = h || 300;
     const c = new Chart(canvas, config);
     charts.push(c);
     return c;
@@ -287,11 +290,11 @@ select:focus{outline:none;border-color:var(--blue)}
     const hasP99 = f.some(s => s.p99 != null);
 
     const datasets = [
-      { label: 'p50', data: f.map(s => s.p50), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)'), borderWidth: 0, borderRadius: 3 },
-      { label: 'p95', data: f.map(s => s.p95), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.dim || 'rgba(255,255,255,.2)'), borderWidth: 0, borderRadius: 3 },
+      { label: 'p50', data: f.map(s => s.p50), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)'), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 },
+      { label: 'p95', data: f.map(s => s.p95), backgroundColor: f.map(s => PROTO_COLORS[s.protocol]?.dim || 'rgba(255,255,255,.2)'), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 },
     ];
     if (hasP99) {
-      datasets.push({ label: 'p99', data: f.map(s => s.p99 ?? null), backgroundColor: f.map(s => { const c = PROTO_COLORS[s.protocol]; return c ? c.solid.replace(')', ',.15)').replace('rgb', 'rgba') : 'rgba(255,255,255,.1)'; }), borderWidth: 0, borderRadius: 3 });
+      datasets.push({ label: 'p99', data: f.map(s => s.p99 ?? null), backgroundColor: f.map(s => { const c = PROTO_COLORS[s.protocol]; return c ? c.solid.replace(')', ',.15)').replace('rgb', 'rgba') : 'rgba(255,255,255,.1)'; }), borderWidth: 0, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.8 });
     }
 
     makeChart('latencyChart', {
@@ -303,10 +306,10 @@ select:focus{outline:none;border-color:var(--blue)}
         plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } },
         scales: {
           x: { ...chartOpts.scales.x, title: { display: true, text: 'ms', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 9 } } },
+          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 9 }, autoSkip: false } },
         },
       },
-    }, Math.max(280, f.length * 22));
+    });
   }
 
   function renderQPS() {
@@ -333,7 +336,7 @@ select:focus{outline:none;border-color:var(--blue)}
         ],
       },
       options: { ...chartOpts, plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } } },
-    }, 280);
+    });
   }
 
   function renderBody() {
@@ -350,7 +353,7 @@ select:focus{outline:none;border-color:var(--blue)}
       type: 'bar',
       data: { labels, datasets },
       options: { ...chartOpts, plugins: { ...chartOpts.plugins, tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw} ms` } } } },
-    }, 280);
+    });
   }
 
   function renderRPS() {
@@ -360,17 +363,17 @@ select:focus{outline:none;border-color:var(--blue)}
     const colors = f.map(s => PROTO_COLORS[s.protocol]?.bg || 'rgba(255,255,255,.5)');
     makeChart('rpsChart', {
       type: 'bar',
-      data: { labels, datasets: [{ label: 'RPS', data, backgroundColor: colors, borderRadius: 3 }] },
+      data: { labels, datasets: [{ label: 'RPS', data, backgroundColor: colors, borderRadius: 3, barPercentage: 0.6, categoryPercentage: 0.8 }] },
       options: {
         indexAxis: 'y',
         ...chartOpts,
         plugins: { ...chartOpts.plugins, legend: { display: false } },
         scales: {
           x: { ...chartOpts.scales.x, title: { display: true, text: 'req/s', color: '#6b7d93' } },
-          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 9 } } },
+          y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, font: { size: 8 }, autoSkip: false } },
         },
       },
-    }, Math.max(250, f.length * 18));
+    });
   }
 
   function renderErrors() {
@@ -379,7 +382,6 @@ select:focus{outline:none;border-color:var(--blue)}
     if (!canvas) return;
     if (!f.length) {
       canvas.parentElement.querySelector('h3').textContent = 'Error Rate — all zero';
-      canvas.parentElement.style.minHeight = '100px';
       canvas.style.display = 'none';
       return;
     }
@@ -387,17 +389,13 @@ select:focus{outline:none;border-color:var(--blue)}
     const data = f.map(s => s.err);
     makeChart('errChart', {
       type: 'bar',
-      data: { labels, datasets: [{ label: 'Error %', data, backgroundColor: 'rgba(239,83,80,.7)', borderRadius: 3 }] },
+      data: { labels, datasets: [{ label: 'Error %', data, backgroundColor: 'rgba(239,83,80,.7)', borderRadius: 3, barPercentage: 0.6 }] },
       options: {
         indexAxis: 'y',
         ...chartOpts,
-        plugins: {
-          ...chartOpts.plugins,
-          legend: { display: false },
-          annotation: { annotations: { threshold: { type: 'line', xMin: 5, xMax: 5, borderColor: 'rgba(239,83,80,.5)', borderWidth: 1, borderDash: [4, 4], label: { display: true, content: '5%', position: 'end', color: '#ef5350', font: { size: 9 } } } } },
-        },
+        plugins: { ...chartOpts.plugins, legend: { display: false } },
       },
-    }, Math.max(150, f.length * 22));
+    });
   }
 
   function renderQPSErr() {
@@ -420,7 +418,7 @@ select:focus{outline:none;border-color:var(--blue)}
         ],
       },
       options: chartOpts,
-    }, 280);
+    });
   }
 
   function renderCPU() {
@@ -456,7 +454,7 @@ select:focus{outline:none;border-color:var(--blue)}
           y: { ...chartOpts.scales.y, title: { display: true, text: 'CPU %', color: '#6b7d93' } },
         },
       },
-    }, 280);
+    });
   }
 
   function renderMem() {
@@ -486,13 +484,13 @@ select:focus{outline:none;border-color:var(--blue)}
           y: { ...chartOpts.scales.y, title: { display: true, text: 'MB', color: '#6b7d93' } },
         },
       },
-    }, 280);
+    });
   }
 
   function renderTrend() {
     if (entries.length < 2) {
-      const canvas = document.getElementById('trendChart');
-      if (canvas) { canvas.parentElement.style.minHeight = '80px'; canvas.parentElement.querySelector('h3').textContent = 'Historical Trend — need >= 2 data points'; }
+      const el = document.getElementById('trendChart');
+      if (el) el.closest('.chart-box').querySelector('h3').textContent = 'Historical Trend — need >= 2 data points';
       return;
     }
     const labels = entries.map(e => {
@@ -529,7 +527,7 @@ select:focus{outline:none;border-color:var(--blue)}
           y1: { type: 'linear', position: 'right', title: { display: true, text: 'ms / %', color: '#6b7d93' }, ticks: { color: '#6b7d93' }, grid: { drawOnChartArea: false }, beginAtZero: true },
         },
       },
-    }, 320);
+    });
   }
 
   function renderScenarioTrend() {
@@ -579,7 +577,7 @@ select:focus{outline:none;border-color:var(--blue)}
             y: { ...chartOpts.scales.y, title: { display: true, text: 'ms', color: '#6b7d93' } },
           },
         },
-      }, 300);
+      });
     }
 
     sel.addEventListener('change', () => drawScenarioTrend(sel.value));
