@@ -8,6 +8,7 @@ on:
       - "client/**"
       - "tunnel-lib/**"
       - "ci-helpers/**"
+      - "bench/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
