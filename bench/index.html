@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>duotunnel — Benchmark Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
 <script src="data.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -60,6 +61,7 @@ select:focus{outline:none;border-color:var(--blue)}
 .row-active{background:rgba(77,166,255,.06)}
 tr.clickable{cursor:pointer;transition:background .1s}
 tr.clickable:hover{background:rgba(77,166,255,.08)}
+.cat-desc{font-size:11px;color:var(--text2);margin-bottom:4px;font-style:italic}
 </style>
 </head>
 <body>
@@ -112,6 +114,23 @@ function latencyBar(val, max, proto) {
   return `<span class="bar" style="width:${w}px;background:${colors[proto]||'var(--text3)'}"></span>`;
 }
 
+const PHASES = [
+  {start:0, end:23, label:'Basic', color:'rgba(77,166,255,.08)'},
+  {start:30, end:49, label:'Body/Payload', color:'rgba(52,211,153,.08)'},
+  {start:60, end:75, label:'1K QPS', color:'rgba(245,166,35,.08)'},
+  {start:80, end:95, label:'2K QPS', color:'rgba(239,83,80,.08)'},
+  {start:100, end:115, label:'3K QPS', color:'rgba(167,139,250,.08)'},
+];
+
+function phaseAnnotations() {
+  const a = {};
+  PHASES.forEach((p, i) => {
+    a['phase'+i] = {type:'box',xMin:p.start,xMax:p.end,backgroundColor:p.color,borderWidth:0};
+    a['phaseLabel'+i] = {type:'label',xValue:(p.start+p.end)/2,yValue:'max',content:p.label,color:'#4a5a6d',font:{size:9,weight:'bold'},position:'start'};
+  });
+  return a;
+}
+
 const CO = {
   responsive:true, maintainAspectRatio:false,
   plugins:{legend:{labels:{color:'#6b7d93',font:{size:10}}}},
@@ -125,14 +144,14 @@ let liveCharts = [];
 function destroyCharts() { liveCharts.forEach(c => c.destroy()); liveCharts = []; }
 function mkChart(id, cfg) { const cv = document.getElementById(id); if (!cv) return; const c = new Chart(cv, cfg); liveCharts.push(c); return c; }
 
-function findEntry(sha) {
-  return entries.find(e => shaFull(e) === sha || sha7(e) === sha);
-}
+function findEntry(sha) { return entries.find(e => shaFull(e) === sha || sha7(e) === sha); }
+function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? entries[idx - 1] : null; }
 
-function prevOf(entry) {
-  const idx = entries.indexOf(entry);
-  return idx > 0 ? entries[idx - 1] : null;
-}
+const catDescs = {
+  basic: 'Ramping rate (10→40/s). Multiple protocols running concurrently at moderate load to test baseline latency.',
+  body_size: 'Fixed rate (10–30/s). Concurrent payloads of 1K/10K/100K to measure throughput vs body size.',
+  stress: 'Fixed rate at 1000/2000/3000 QPS. Ingress + egress pairs run concurrently at each tier to find saturation point.',
+};
 
 function navigate() {
   const hash = location.hash.replace('#','');
@@ -235,7 +254,6 @@ function renderOverview() {
       const err = e.summary?.totalErr??0;
       const reqs = e.summary?.totalRequests??0;
       const nsc = (e.scenarios||[]).length;
-
       let dR='—', dE='—';
       if (p) {
         const pR = p.summary?.totalRPS??0;
@@ -248,10 +266,7 @@ function renderOverview() {
     }
     h += '</tbody></table>';
     el.innerHTML = h;
-    el.addEventListener('click', e => {
-      const tr = e.target.closest('tr.clickable');
-      if (tr) location.hash = tr.dataset.sha;
-    });
+    el.addEventListener('click', e => { const tr = e.target.closest('tr.clickable'); if (tr) location.hash = tr.dataset.sha; });
   })();
 }
 
@@ -269,12 +284,10 @@ function renderDetail(entry) {
 
   const prevScMap = {};
   if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[s.name] = s; });
-
   const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
 
   let html = `
   <div class="breadcrumb"><a onclick="location.hash='overview';return false;" href="#overview">← All Runs</a> / ${s7}</div>
-
   <div class="cards">
     <div class="card"><div class="lb">Total RPS</div><div class="val">${fmt(sum.totalRPS)}</div>${delta(sum.totalRPS||0, prevSum.totalRPS, false)}</div>
     <div class="card"><div class="lb">Error Rate</div><div class="val${(sum.totalErr||0)>2?' c-bad':' c-good'}">${sum.totalErr??0}%</div>${delta(sum.totalErr||0, prevSum.totalErr, true)}</div>
@@ -297,7 +310,10 @@ function renderDetail(entry) {
   for (const cat of categories) {
     const group = sc.filter(s => s.category === cat);
     if (!group.length) continue;
-    html += `<tr><td colspan="${colSpan}" style="padding:10px 10px 4px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;border-bottom:none">${catLabels[cat]||cat}</td></tr>`;
+    html += `<tr><td colspan="${colSpan}" style="padding:12px 10px 2px;border-bottom:none">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${catLabels[cat]||cat}</div>
+      <div class="cat-desc">${catDescs[cat] || ''}</div>
+    </td></tr>`;
     for (const s of group) {
       const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
       const ps = prevScMap[s.name];
@@ -319,44 +335,75 @@ function renderDetail(entry) {
       html += `</tr>`;
     }
   }
-
   html += `</tbody></table></div></div></div>`;
 
   if (res) {
-    html += `
-    <div class="sec">Resources</div>
-    <div class="row">
+    html += `<div class="sec">Resources</div>`;
+    html += `<div class="row">
       <div class="panel"><h3>CPU Usage (%)</h3><div class="chart-area"><canvas id="cpuChart"></canvas></div></div>
       <div class="panel"><h3>Memory RSS (MB)</h3><div class="chart-area"><canvas id="memChart"></canvas></div></div>
     </div>`;
+
+    const hasNet = res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length);
+    const hasIO = res.server?.read_kbs?.length || res.client?.read_kbs?.length;
+    if (hasNet || hasIO) {
+      html += `<div class="row">`;
+      if (hasNet) html += `<div class="panel"><h3>Network Throughput (KB/s)</h3><div class="chart-area"><canvas id="netChart"></canvas></div></div>`;
+      if (hasIO) html += `<div class="panel"><h3>Disk IO (KB/s)</h3><div class="chart-area"><canvas id="ioChart"></canvas></div></div>`;
+      if (hasNet && !hasIO) html += `<div></div>`;
+      if (!hasNet && hasIO) html += `<div></div>`;
+      html += `</div>`;
+    }
   }
 
   const idx = entries.indexOf(entry);
   const prevEntry = idx > 0 ? entries[idx - 1] : null;
   const nextEntry = idx < entries.length - 1 ? entries[idx + 1] : null;
-
   html += `<div style="display:flex;justify-content:space-between;margin-top:24px">`;
-  html += prevEntry
-    ? `<a onclick="location.hash='${sha7(prevEntry)}';return false;" href="#${sha7(prevEntry)}">← ${sha7(prevEntry)}</a>`
-    : `<span class="c-dim">oldest</span>`;
-  html += nextEntry
-    ? `<a onclick="location.hash='${sha7(nextEntry)}';return false;" href="#${sha7(nextEntry)}">${sha7(nextEntry)} →</a>`
-    : `<span class="c-dim">latest</span>`;
+  html += prevEntry ? `<a onclick="location.hash='${sha7(prevEntry)}';return false;" href="#${sha7(prevEntry)}">← ${sha7(prevEntry)}</a>` : `<span class="c-dim">oldest</span>`;
+  html += nextEntry ? `<a onclick="location.hash='${sha7(nextEntry)}';return false;" href="#${sha7(nextEntry)}">${sha7(nextEntry)} →</a>` : `<span class="c-dim">latest</span>`;
   html += `</div>`;
 
   root.innerHTML = html;
 
   if (res) {
+    const annotations = phaseAnnotations();
+    const timeScaleOpts = {
+      ...CO,
+      showLine:true,
+      plugins:{...CO.plugins,annotation:{annotations}},
+      scales:{
+        x:{...CO.scales.x,type:'linear',title:{display:true,text:'seconds',color:'#6b7d93'}},
+        y:{...CO.scales.y},
+      },
+    };
+
     const cpuDS = [];
     if (res.server?.cpu?.length) cpuDS.push({label:'Server',data:res.server.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
     if (res.client?.cpu?.length) cpuDS.push({label:'Client',data:res.client.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
     if (res.system?.cpu?.length) cpuDS.push({label:'System',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
-    if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
+    if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
 
     const memDS = [];
     if (res.server?.rss?.length) memDS.push({label:'Server',data:res.server.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
     if (res.client?.rss?.length) memDS.push({label:'Client',data:res.client.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-    if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...CO,showLine:true,scales:{x:{...CO.scales.x,type:'linear',title:{display:true,text:'sec',color:'#6b7d93'}},y:{...CO.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+    if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+
+    if (res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length)) {
+      const netDS = [];
+      if (res.network.rx_kbs?.length) netDS.push({label:'RX',data:res.network.rx_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+      if (res.network.tx_kbs?.length) netDS.push({label:'TX',data:res.network.tx_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+      mkChart('netChart',{type:'scatter',data:{datasets:netDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'KB/s',color:'#6b7d93'}}}}});
+    }
+
+    if (res.server?.read_kbs?.length || res.client?.read_kbs?.length) {
+      const ioDS = [];
+      if (res.server?.read_kbs?.length) ioDS.push({label:'Server Read',data:res.server.read_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+      if (res.server?.write_kbs?.length) ioDS.push({label:'Server Write',data:res.server.write_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'rgba(77,166,255,.4)',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
+      if (res.client?.read_kbs?.length) ioDS.push({label:'Client Read',data:res.client.read_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
+      if (res.client?.write_kbs?.length) ioDS.push({label:'Client Write',data:res.client.write_kbs.map(p=>({x:p.t,y:p.v})),borderColor:'rgba(52,211,153,.4)',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
+      mkChart('ioChart',{type:'scatter',data:{datasets:ioDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'KB/s',color:'#6b7d93'}}}}});
+    }
   }
 }
 
