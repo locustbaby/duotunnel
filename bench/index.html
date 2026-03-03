@@ -114,19 +114,29 @@ function latencyBar(val, max, proto) {
   return `<span class="bar" style="width:${w}px;background:${colors[proto]||'var(--text3)'}"></span>`;
 }
 
-const PHASES = [
-  {start:0, end:23, label:'Basic', color:'rgba(77,166,255,.08)'},
-  {start:30, end:49, label:'Body/Payload', color:'rgba(52,211,153,.08)'},
-  {start:60, end:75, label:'1K QPS', color:'rgba(245,166,35,.08)'},
-  {start:80, end:95, label:'2K QPS', color:'rgba(239,83,80,.08)'},
-  {start:100, end:115, label:'3K QPS', color:'rgba(167,139,250,.08)'},
+const PHASE_COLORS = [
+  'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
+  'rgba(239,83,80,.08)','rgba(167,139,250,.08)',
+];
+const FALLBACK_PHASES = [
+  {name:'Basic',start:0,end:23},{name:'Body/Payload',start:30,end:49},
+  {name:'1K QPS',start:60,end:75},{name:'2K QPS',start:80,end:95},{name:'3K QPS',start:100,end:115},
 ];
 
-function phaseAnnotations() {
+function phaseAnnotations(entry) {
   const a = {};
-  PHASES.forEach((p, i) => {
-    a['phase'+i] = {type:'box',xMin:p.start,xMax:p.end,backgroundColor:p.color,borderWidth:0};
-    a['phaseLabel'+i] = {type:'label',xValue:(p.start+p.end)/2,yValue:'max',content:p.label,color:'#4a5a6d',font:{size:9,weight:'bold'},position:'start'};
+  const offset = entry?.resources?.k6OffsetSeconds || 0;
+  const phaseDefs = entry?.phases || FALLBACK_PHASES;
+  phaseDefs.forEach((p, i) => {
+    const s = p.start + offset;
+    const e = p.end + offset;
+    const col = PHASE_COLORS[i % PHASE_COLORS.length];
+    a['phase'+i] = {type:'box',xMin:s,xMax:e,backgroundColor:col,borderWidth:0};
+    const nsc = (p.scenarios||[]).length;
+    const label = nsc ? `${p.name} (${nsc})` : p.name;
+    a['phaseLabel'+i] = {type:'label',xValue:(s+e)/2,yValue:'max',content:label,color:'#4a5a6d',font:{size:8,weight:'bold'},position:'start'};
+    a['phaseLine'+i+'s'] = {type:'line',xMin:s,xMax:s,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
+    a['phaseLine'+i+'e'] = {type:'line',xMin:e,xMax:e,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
   });
   return a;
 }
@@ -179,12 +189,15 @@ function renderOverview() {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${(latest.scenarios||[]).length}</div><span class="d d-flat">${entries.length} runs</span></div>
   </div>
 
-  <div class="sec">Trends</div>
+  <div class="sec">Latency Trends (p95 ms)</div>
   <div class="row full">
-    <div class="panel tall"><h3>Historical Overview</h3><div class="chart-area"><canvas id="trendChart"></canvas></div></div>
+    <div class="panel tall"><h3>Basic — ramping 10→40/s, baseline latency</h3><div class="chart-area"><canvas id="trendBasic"></canvas></div></div>
   </div>
   <div class="row full">
-    <div class="panel tall"><h3>Scenario Trend</h3><select id="scSel"></select><div class="chart-area"><canvas id="scTrend"></canvas></div></div>
+    <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div></div>
+  </div>
+  <div class="row full">
+    <div class="panel tall"><h3>Stress — 1K/2K/3K QPS saturation</h3><div class="chart-area"><canvas id="trendStress"></canvas></div></div>
   </div>
 
   <div class="sec">All Runs</div>
@@ -197,49 +210,52 @@ function renderOverview() {
 
   root.innerHTML = html;
 
-  if (entries.length >= 2) {
-    const lbl = entries.map(sha7);
-    const rpsD = entries.map(e => e.summary?.totalRPS ?? null);
-    const errD = entries.map(e => e.summary?.totalErr ?? null);
-    function avgP95(entry, cat) { const s=(entry.scenarios||[]).filter(x=>x.category===cat); return s.length ? r2(s.reduce((a,x)=>a+x.p95,0)/s.length) : null; }
-
-    mkChart('trendChart',{type:'line',data:{labels:lbl,datasets:[
-      {label:'Total RPS',data:rpsD,borderColor:'#4da6ff',backgroundColor:'transparent',yAxisID:'y',tension:.3,pointRadius:3,borderWidth:2},
-      {label:'Error %',data:errD,borderColor:'#ef5350',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:3,borderWidth:2},
-      {label:'Basic avg p95',data:entries.map(e=>avgP95(e,'basic')),borderColor:'#34d399',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
-      {label:'Stress avg p95',data:entries.map(e=>avgP95(e,'stress')),borderColor:'#f5a623',backgroundColor:'transparent',yAxisID:'y1',tension:.3,pointRadius:2,borderWidth:1.5,borderDash:[4,2]},
-    ]},options:{...CO,onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },scales:{
-      x:CO.scales.x,
-      y:{type:'linear',position:'left',title:{display:true,text:'RPS',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{color:'rgba(30,42,58,.5)'},beginAtZero:true},
-      y1:{type:'linear',position:'right',title:{display:true,text:'ms / %',color:'#6b7d93'},ticks:{color:'#6b7d93'},grid:{drawOnChartArea:false},beginAtZero:true},
-    }}});
-  } else {
-    const el = document.getElementById('trendChart');
-    if (el) el.closest('.panel').querySelector('h3').textContent = 'Historical Overview — need >= 2 runs';
-  }
-
   (function(){
-    const sel = document.getElementById('scSel');
-    if (!sel) return;
-    const names = [...new Set(entries.flatMap(e=>(e.scenarios||[]).map(s=>s.name)))].sort();
-    if (!names.length) return;
-    names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n.replace(/_/g,' ');sel.appendChild(o);});
-    let cur = null;
-    function draw(name) {
-      if (cur) { cur.destroy(); liveCharts = liveCharts.filter(c=>c!==cur); }
-      const lbl = entries.map(sha7);
-      const p50 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p50:null;});
-      const p95 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?s.p95:null;});
-      const p99 = entries.map(e=>{const s=(e.scenarios||[]).find(x=>x.name===name);return s?.p99??null;});
-      const ds = [
-        {label:'p50',data:p50,borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
-        {label:'p95',data:p95,borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
-      ];
-      if (p99.some(v=>v!=null)) ds.push({label:'p99',data:p99,borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,2]});
-      cur = mkChart('scTrend',{type:'line',data:{labels:lbl,datasets:ds},options:{...CO,plugins:{...CO.plugins,tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.raw} ms`}}},scales:{x:CO.scales.x,y:{...CO.scales.y,title:{display:true,text:'ms',color:'#6b7d93'}}}}});
+    const lbl = entries.map(sha7);
+    const catScenarios = {basic:[], body_size:[], stress:[]};
+    const seen = {};
+    entries.forEach(e => (e.scenarios||[]).forEach(s => {
+      if (!seen[s.name] && s.category && catScenarios[s.category]) {
+        catScenarios[s.category].push(s.name);
+        seen[s.name] = true;
+      }
+    }));
+    Object.values(catScenarios).forEach(arr => arr.sort());
+
+    const palette = [
+      '#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24',
+      '#818cf8','#fb923c','#22d3ee','#a3e635','#e879f9','#94a3b8',
+    ];
+    const dashes = [[], [6,3], [2,2], [8,4,2,4], [4,4]];
+
+    function renderCatChart(canvasId, names) {
+      if (!names.length || entries.length < 2) {
+        const el = document.getElementById(canvasId);
+        if (el) el.closest('.panel').querySelector('h3').textContent += ' — need ≥ 2 runs';
+        return;
+      }
+      const ds = names.map((name, i) => ({
+        label: name.replace(/_/g, ' '),
+        data: entries.map(e => { const s = (e.scenarios||[]).find(x => x.name === name); return s ? s.p95 : null; }),
+        borderColor: palette[i % palette.length],
+        backgroundColor: 'transparent',
+        borderDash: dashes[Math.floor(i / palette.length) % dashes.length],
+        tension: .3,
+        pointRadius: 2,
+        borderWidth: 1.5,
+        spanGaps: true,
+      }));
+      mkChart(canvasId, {type:'line', data:{labels:lbl, datasets:ds}, options:{
+        ...CO,
+        onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },
+        plugins:{...CO.plugins, tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>ctx.raw!=null?`${ctx.dataset.label}: ${ctx.raw} ms`:''}}},
+        scales:{x:CO.scales.x, y:{...CO.scales.y, title:{display:true,text:'ms',color:'#6b7d93'}}},
+      }});
     }
-    sel.addEventListener('change',()=>draw(sel.value));
-    draw(names[0]);
+
+    renderCatChart('trendBasic', catScenarios.basic);
+    renderCatChart('trendBody', catScenarios.body_size);
+    renderCatChart('trendStress', catScenarios.stress);
   })();
 
   (function(){
@@ -367,7 +383,7 @@ function renderDetail(entry) {
   root.innerHTML = html;
 
   if (res) {
-    const annotations = phaseAnnotations();
+    const annotations = phaseAnnotations(entry);
     const timeScaleOpts = {
       ...CO,
       showLine:true,
