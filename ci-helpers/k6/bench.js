@@ -264,7 +264,7 @@ export const options = {
     },
   },
 
-  noConnectionReuse: true,
+  noConnectionReuse: false,
 
   thresholds: {
     'http_req_failed{scenario:ingress_http_get}': ['rate<0.05'],
