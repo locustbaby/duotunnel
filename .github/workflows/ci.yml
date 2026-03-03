@@ -1,5 +1,4 @@
 name: CI
-# clean rebuild after cache purge
 on:
   push:
     branches: [main, "fix/**", "feat/**"]
@@ -29,6 +28,9 @@ env:
   # Share one sccache server across both jobs via GHA cache
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # Override .cargo/config.toml target-cpu=native — CI runners have
+  # varying CPU micro-architectures so we must build portable binaries.
+  CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
