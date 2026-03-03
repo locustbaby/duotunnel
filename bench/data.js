@@ -1,236 +1,250 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772527483132,
-  "repoUrl": "https://github.com/locustbaby/duotunnel",
-  "entries": {
-    "Benchmark": [
-      {
-        "commit": {
-          "author": {
-            "email": "chuanfeng.liu@zilliz.com",
-            "name": "Sheldon",
-            "username": "locustbaby"
-          },
-          "committer": {
-            "email": "chuanfeng.liu@zilliz.com",
-            "name": "Sheldon",
-            "username": "locustbaby"
-          },
-          "distinct": true,
-          "id": "d15137a60826601d4ebdf1c09c919e6328f61c53",
-          "message": "ci: consolidate benchmark metrics — group by scenario type\n\nReduce from 44 flat metrics to ~17 grouped metrics:\n- HTTP basic: avg of GET/POST ingress+egress\n- gRPC/WS: avg across sub-scenarios\n- Body size: 1K/10K/100K p95\n- QPS tiers: 1000/2000/3000 with p50+p95+err%\n- Overall: total RPS + error rate\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
-          "timestamp": "2026-03-03T16:39:10+08:00",
-          "tree_id": "d58e9e41c18ab05fed60eeef7a435cfabc47f20e",
-          "url": "https://github.com/locustbaby/duotunnel/commit/d15137a60826601d4ebdf1c09c919e6328f61c53"
-        },
-        "date": 1772527378747,
-        "tool": "customSmallerIsBetter",
-        "benches": [
-          {
-            "name": "HTTP basic p50",
-            "value": 0.55,
-            "unit": "ms"
-          },
-          {
-            "name": "HTTP basic p95",
-            "value": 0.9,
-            "unit": "ms"
-          },
-          {
-            "name": "gRPC p50",
-            "value": 2,
-            "unit": "ms"
-          },
-          {
-            "name": "gRPC p95",
-            "value": 42,
-            "unit": "ms"
-          },
-          {
-            "name": "WS p50",
-            "value": 22,
-            "unit": "ms"
-          },
-          {
-            "name": "WS p95",
-            "value": 23,
-            "unit": "ms"
-          },
-          {
-            "name": "body 1K p95",
-            "value": 1.81,
-            "unit": "ms"
-          },
-          {
-            "name": "body 10K p95",
-            "value": 2.46,
-            "unit": "ms"
-          },
-          {
-            "name": "body 100K p95",
-            "value": 42.71,
-            "unit": "ms"
-          },
-          {
-            "name": "1000 QPS p50",
-            "value": 0.66,
-            "unit": "ms"
-          },
-          {
-            "name": "1000 QPS p95",
-            "value": 1.04,
-            "unit": "ms"
-          },
-          {
-            "name": "2000 QPS p50",
-            "value": 1.08,
-            "unit": "ms"
-          },
-          {
-            "name": "2000 QPS p95",
-            "value": 5.23,
-            "unit": "ms"
-          },
-          {
-            "name": "3000 QPS p50",
-            "value": 13.19,
-            "unit": "ms"
-          },
-          {
-            "name": "3000 QPS p95",
-            "value": 46.03,
-            "unit": "ms"
-          },
-          {
-            "name": "bidir p95",
-            "value": 2,
-            "unit": "ms"
-          },
-          {
-            "name": "total RPS",
-            "value": 1543.19,
-            "unit": "req/s"
-          },
-          {
-            "name": "total err",
-            "value": 0,
-            "unit": "%"
-          }
-        ]
+  "entries": [
+    {
+      "timestamp": "2026-03-03T09:05:01.620Z",
+      "commit": {
+        "id": "4c733b708ea910013badbc9b49769b4b59ca3429",
+        "message": "ci: harden CI \u2014 SHA pins, timeouts, sysstat sampling",
+        "url": "https://github.com/locustbaby/duotunnel/commit/4c733b708ea910013badbc9b49769b4b59ca3429"
       },
-      {
-        "commit": {
-          "author": {
-            "email": "chuanfeng.liu@zilliz.com",
-            "name": "Sheldon",
-            "username": "locustbaby"
-          },
-          "committer": {
-            "email": "chuanfeng.liu@zilliz.com",
-            "name": "Sheldon",
-            "username": "locustbaby"
-          },
-          "distinct": true,
-          "id": "a78665eaec44ddd6be78029540fef00951abfff9",
-          "message": "ci: harden CI — SHA pins, timeouts, sysstat sampling\n\n- Pin all third-party actions to full commit SHA\n- Only trigger CI on business code changes (paths filter)\n- Add timeout-minutes to startup/warmup steps\n- Auto-restart client+server on warmup failure (#2)\n- Add mpstat/pidstat/vmstat sampling during k6 benchmark\n- Fix k6 high-cardinality metrics with URL name tags\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
-          "timestamp": "2026-03-03T16:40:29+08:00",
-          "tree_id": "d58e9e41c18ab05fed60eeef7a435cfabc47f20e",
-          "url": "https://github.com/locustbaby/duotunnel/commit/a78665eaec44ddd6be78029540fef00951abfff9"
+      "scenarios": [
+        {
+          "name": "ingress_http_get",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 0.6,
+          "p95": 1.19,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
         },
-        "date": 1772527482804,
-        "tool": "customSmallerIsBetter",
-        "benches": [
-          {
-            "name": "HTTP basic p50",
-            "value": 0.56,
-            "unit": "ms"
-          },
-          {
-            "name": "HTTP basic p95",
-            "value": 1,
-            "unit": "ms"
-          },
-          {
-            "name": "gRPC p50",
-            "value": 2,
-            "unit": "ms"
-          },
-          {
-            "name": "gRPC p95",
-            "value": 42.19,
-            "unit": "ms"
-          },
-          {
-            "name": "WS p50",
-            "value": 22,
-            "unit": "ms"
-          },
-          {
-            "name": "WS p95",
-            "value": 23,
-            "unit": "ms"
-          },
-          {
-            "name": "body 1K p95",
-            "value": 2.06,
-            "unit": "ms"
-          },
-          {
-            "name": "body 10K p95",
-            "value": 2.68,
-            "unit": "ms"
-          },
-          {
-            "name": "body 100K p95",
-            "value": 43.02,
-            "unit": "ms"
-          },
-          {
-            "name": "1000 QPS p50",
-            "value": 0.67,
-            "unit": "ms"
-          },
-          {
-            "name": "1000 QPS p95",
-            "value": 1.14,
-            "unit": "ms"
-          },
-          {
-            "name": "2000 QPS p50",
-            "value": 1.31,
-            "unit": "ms"
-          },
-          {
-            "name": "2000 QPS p95",
-            "value": 6.78,
-            "unit": "ms"
-          },
-          {
-            "name": "3000 QPS p50",
-            "value": 28.23,
-            "unit": "ms"
-          },
-          {
-            "name": "3000 QPS p95",
-            "value": 60.02,
-            "unit": "ms"
-          },
-          {
-            "name": "bidir p95",
-            "value": 2,
-            "unit": "ms"
-          },
-          {
-            "name": "total RPS",
-            "value": 1523.54,
-            "unit": "req/s"
-          },
-          {
-            "name": "total err",
-            "value": 0.09,
-            "unit": "%"
-          }
-        ]
+        {
+          "name": "ingress_http_post",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 0.57,
+          "p95": 1.3,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_http_get",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "basic",
+          "p50": 0.48,
+          "p95": 0.99,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_http_post",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "basic",
+          "p50": 0.47,
+          "p95": 0.57,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "bidir_mixed",
+          "protocol": "HTTP",
+          "direction": "bidir",
+          "category": "basic",
+          "p50": 2,
+          "p95": 2,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_post_1k",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "body_size",
+          "p50": 0.64,
+          "p95": 1.95,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_post_10k",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "body_size",
+          "p50": 1.09,
+          "p95": 2.46,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_post_100k",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "body_size",
+          "p50": 2.82,
+          "p95": 42.56,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_post_10k",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "body_size",
+          "p50": 1.01,
+          "p95": 2.18,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "grpc_health",
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 2,
+          "p95": 42,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "grpc_echo",
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 2,
+          "p95": 42,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "grpc_large_payload",
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "category": "body_size",
+          "p50": 2,
+          "p95": 43,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "grpc_high_qps",
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "category": "stress",
+          "p50": 2,
+          "p95": 42,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ws_ingress",
+          "protocol": "WS",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 0,
+          "p95": 1,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ws_multi_msg",
+          "protocol": "WS",
+          "direction": "ingress",
+          "category": "basic",
+          "p50": 43,
+          "p95": 45,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_1000qps",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "stress",
+          "p50": 0.71,
+          "p95": 1.18,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_1000qps",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "stress",
+          "p50": 0.65,
+          "p95": 1.06,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_2000qps",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "stress",
+          "p50": 1.33,
+          "p95": 6.25,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_2000qps",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "stress",
+          "p50": 1.21,
+          "p95": 5.85,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "ingress_3000qps",
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "category": "stress",
+          "p50": 19.19,
+          "p95": 57.08,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        },
+        {
+          "name": "egress_3000qps",
+          "protocol": "HTTP",
+          "direction": "egress",
+          "category": "stress",
+          "p50": 19.31,
+          "p95": 54.37,
+          "err": 0,
+          "rps": 0,
+          "requests": 0
+        }
+      ],
+      "summary": {
+        "totalRPS": 0,
+        "totalErr": 0,
+        "totalRequests": 0
       }
-    ]
-  }
-}
+    }
+  ]
+};
