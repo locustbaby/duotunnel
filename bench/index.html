@@ -474,16 +474,52 @@ function renderDetail(entry) {
       },
     };
 
+    // CPU — stacked area, each known process + other, normalised 0-100% of machine
+    const CPU_SERIES = [
+      {key:'server',    label:'Server',    color:'#4da6ff'},
+      {key:'client',    label:'Client',    color:'#34d399'},
+      {key:'http_echo', label:'HTTP Echo', color:'#a78bfa'},
+      {key:'ws_echo',   label:'WS Echo',   color:'#f472b6'},
+      {key:'grpc_echo', label:'gRPC Echo', color:'#fb923c'},
+      {key:'k6',        label:'k6',        color:'#f5a623'},
+      {key:'other',     label:'Other',     color:'#4a5a6d'},
+    ];
+    const proc = res.processes || {};
+    const cpuTimes = [...new Set(
+      CPU_SERIES.flatMap(s=>(proc[s.key]?.cpu||[]).map(p=>p.t))
+    )].sort((a,b)=>a-b);
     const cpuDS = [];
-    if (res.server?.cpu?.length) cpuDS.push({label:'Server',data:res.server.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-    if (res.client?.cpu?.length) cpuDS.push({label:'Client',data:res.client.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-    if (res.system?.cpu?.length) cpuDS.push({label:'System',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),borderColor:'#f5a623',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5,borderDash:[4,2]});
-    if (cpuDS.length) mkChart('cpuChart',{type:'scatter',data:{datasets:cpuDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'%',color:'#6b7d93'}}}}});
+    if (cpuTimes.length) {
+      for (const s of CPU_SERIES) {
+        const pts = proc[s.key]?.cpu||[];
+        if (!pts.length) continue;
+        const byT = Object.fromEntries(pts.map(p=>[p.t,p.v]));
+        cpuDS.push({label:s.label,data:cpuTimes.map(t=>({x:t,y:byT[t]??null})),
+          borderColor:s.color,backgroundColor:s.color+'28',
+          fill:true,tension:.3,pointRadius:0,borderWidth:1.5});
+      }
+      if (res.system?.cpu?.length)
+        cpuDS.push({label:'System total',data:res.system.cpu.map(p=>({x:p.t,y:p.v})),
+          borderColor:'#ffffff',backgroundColor:'transparent',fill:false,
+          tension:.3,pointRadius:0,borderWidth:1,borderDash:[4,3]});
+    }
+    if (cpuDS.length) mkChart('cpuChart',{type:'line',data:{datasets:cpuDS},options:{
+      ...timeScaleOpts,
+      scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,stacked:true,min:0,max:100,
+        title:{display:true,text:'% of machine',color:'#6b7d93'}}},
+      plugins:{...timeScaleOpts.plugins,tooltip:{mode:'index',intersect:false,
+        callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
+    }});
 
+    // Memory — all known processes
     const memDS = [];
-    if (res.server?.rss?.length) memDS.push({label:'Server',data:res.server.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#4da6ff',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-    if (res.client?.rss?.length) memDS.push({label:'Client',data:res.client.rss.map(p=>({x:p.t,y:p.v})),borderColor:'#34d399',backgroundColor:'transparent',tension:.3,pointRadius:1,borderWidth:1.5});
-    if (memDS.length) mkChart('memChart',{type:'scatter',data:{datasets:memDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
+    for (const s of CPU_SERIES) {
+      const pts = proc[s.key]?.rss||[];
+      if (!pts.length) continue;
+      memDS.push({label:s.label,data:pts.map(p=>({x:p.t,y:p.v})),
+        borderColor:s.color,backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1.5});
+    }
+    if (memDS.length) mkChart('memChart',{type:'line',data:{datasets:memDS},options:{...timeScaleOpts,scales:{...timeScaleOpts.scales,y:{...timeScaleOpts.scales.y,title:{display:true,text:'MB',color:'#6b7d93'}}}}});
 
     if (res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length)) {
       const netDS = [];
