@@ -205,3 +205,53 @@ let mut first_buf = [0u8; 8192];
 - 减少每请求 heap 分配次数
 - minor page fault 降低
 - 需要同步修改 `pos` 相关逻辑，影响面小
+
+---
+
+## [perf/TODO-14] handle_plaintext_h1_connection discard buffer 改栈分配
+
+**文件**: `server/handlers/http.rs`
+**优先级**: 低
+**状态**: 未修
+
+### 问题
+
+TODO-8 修复了 peek+read_exact 双拷贝，但 drain socket 时仍用堆分配：
+
+```rust
+let mut discard = vec![0u8; initial_data.len()];
+stream.read_exact(&mut discard).await?;
+```
+
+`initial_data.len()` ≤ peek_buf_size（8192），可以用栈 buffer：
+
+```rust
+let mut discard = [0u8; 8192];
+stream.read_exact(&mut discard[..initial_data.len()]).await?;
+```
+
+每个 H1 连接少一次堆分配。
+
+---
+
+## [bench/TODO-15] egress_http_post 溢出 Phase 1 边界
+
+**文件**: `ci-helpers/k6/bench.js`, `bench/index.html`
+**优先级**: 低
+**状态**: 未修
+
+### 问题
+
+`egress_http_post` 的 startTime=6s，stages=[5s ramp, 20s sustain]，结束于 **31s**，
+但 Phase "Basic" 定义为 `end: 29`，溢出 2s。
+
+这是 +5s 之前就存在的问题（之前 6+5+15=26 vs end:24，同样溢出 2s）。
+
+### 影响
+
+仅图表注释框不能完全覆盖该场景，不影响功能和数据。
+
+### 修复方案（二选一）
+
+1. 将 Phase 1 `end` 改为 31（`bench.js` phases + `index.html` FALLBACK_PHASES）
+2. 将 `egress_http_post` 的 startTime 改为 4s（但会和 egress_http_get 重叠）
