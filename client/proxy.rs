@@ -44,8 +44,11 @@ pub async fn handle_work_stream(
             upstream_addr
         );
 
+        let https_client = proxy_map.https_client.clone();
+
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let upstream_addr = upstream_addr.clone();
+            let client = https_client.clone();
             async move {
                 let (mut parts, body) = req.into_parts();
 
@@ -72,16 +75,6 @@ pub async fn handle_work_stream(
                     }
                 };
 
-                let connect_host = upstream_uri.host().unwrap_or("127.0.0.1").to_string();
-                let connect_port = upstream_uri.port_u16().unwrap_or(
-                    if upstream_uri.scheme_str() == Some("https") {
-                        443
-                    } else {
-                        80
-                    },
-                );
-                let is_https = upstream_uri.scheme_str() == Some("https");
-
                 let mut uri_parts = parts.uri.clone().into_parts();
                 uri_parts.scheme = upstream_uri.scheme().cloned();
                 uri_parts.authority = upstream_uri.authority().cloned();
@@ -95,168 +88,21 @@ pub async fn handle_work_stream(
                 }
 
                 debug!(
-                    "Client H2: forwarding {} {} to upstream {}:{}",
-                    parts.method, parts.uri, connect_host, connect_port
+                    "Client H2: forwarding {} {} to upstream",
+                    parts.method, parts.uri
                 );
 
                 let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
                 let upstream_req = Request::from_parts(parts, boxed_body);
 
-                let connect_addr = format!("{connect_host}:{connect_port}");
-                let tcp = match tokio::net::TcpStream::connect(&connect_addr).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("Client H2: TCP connect to {} failed: {}", connect_addr, e);
-                        return Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap());
-                    }
-                };
-
-                if is_https {
-                    use rustls::ClientConfig as RustlsClientConfig;
-                    use rustls::RootCertStore;
-                    use tokio_rustls::TlsConnector;
-
-                    let mut root_store = RootCertStore::empty();
-                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-                    let mut tls_cfg = RustlsClientConfig::builder()
-                        .with_root_certificates(root_store)
-                        .with_no_client_auth();
-                    tls_cfg.alpn_protocols = vec![b"h2".to_vec()];
-
-                    let connector = TlsConnector::from(Arc::new(tls_cfg));
-                    let server_name =
-                        match rustls::pki_types::ServerName::try_from(connect_host.clone()) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Client H2: invalid server name '{}': {}",
-                                    connect_host,
-                                    e
-                                );
-                                return Ok(Response::builder()
-                                    .status(502)
-                                    .body(
-                                        http_body_util::Full::new(bytes::Bytes::from(
-                                            "Bad Gateway",
-                                        ))
-                                        .map_err(|_| unreachable!())
-                                        .boxed_unsync(),
-                                    )
-                                    .unwrap());
-                            }
-                        };
-                    let tls_stream = match connector.connect(server_name, tcp).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(
-                                "Client H2: TLS connect to {} failed: {}",
-                                connect_addr,
-                                e
-                            );
-                            return Ok(Response::builder()
-                                .status(502)
-                                .body(
-                                    http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                        .map_err(|_| unreachable!())
-                                        .boxed_unsync(),
-                                )
-                                .unwrap());
-                        }
-                    };
-                    let io = TokioIo::new(tls_stream);
-                    let (mut sender, conn) = match hyper::client::conn::http2::handshake(
-                        hyper_util::rt::TokioExecutor::new(),
-                        io,
-                    )
-                    .await
-                    {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            tracing::error!(
-                                "Client H2: TLS H2 handshake to {} failed: {}",
-                                connect_addr,
-                                e
-                            );
-                            return Ok(Response::builder()
-                                .status(502)
-                                .body(
-                                    http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                        .map_err(|_| unreachable!())
-                                        .boxed_unsync(),
-                                )
-                                .unwrap());
-                        }
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = conn.await {
-                            debug!("Client H2: TLS upstream connection error: {}", e);
-                        }
-                    });
-                    return match sender.send_request(upstream_req).await {
-                        Ok(resp) => {
-                            let (parts, body) = resp.into_parts();
-                            let boxed = body.map_err(std::io::Error::other).boxed_unsync();
-                            Ok(Response::from_parts(parts, boxed))
-                        }
-                        Err(e) => {
-                            tracing::error!("Client H2: TLS upstream request failed: {}", e);
-                            Ok(Response::builder()
-                                .status(502)
-                                .body(
-                                    http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                        .map_err(|_| unreachable!())
-                                        .boxed_unsync(),
-                                )
-                                .unwrap())
-                        }
-                    };
-                }
-
-                let io = TokioIo::new(tcp);
-                let (mut sender, conn) = match hyper::client::conn::http2::handshake(
-                    hyper_util::rt::TokioExecutor::new(),
-                    io,
-                )
-                .await
-                {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!(
-                            "Client H2: H2 handshake to upstream {} failed: {}",
-                            connect_addr,
-                            e
-                        );
-                        return Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap());
-                    }
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = conn.await {
-                        debug!("Client H2: upstream connection error: {}", e);
-                    }
-                });
-
-                match sender.send_request(upstream_req).await {
+                match client.request(upstream_req).await {
                     Ok(resp) => {
                         let (parts, body) = resp.into_parts();
                         let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                         Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                     }
                     Err(e) => {
-                        tracing::error!("Client H2: upstream request failed: {}", e);
+                        debug!(error = %e, "Client H2: upstream request failed");
                         Ok(Response::builder()
                             .status(502)
                             .body(
