@@ -23,7 +23,8 @@ pub use transport::listener::{
 };
 
 pub use egress::http::{
-    create_https_client, create_https_client_with, forward_http, HttpClientParams,
+    create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
+    forward_http, H2cClient, HttpClientParams,
 };
 pub use engine::relay::{relay_bidirectional, relay_with_initial};
 pub use infra::pki::{init_cert_cache, PkiParams};

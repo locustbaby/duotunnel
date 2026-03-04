@@ -7,12 +7,13 @@ use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::{ClientConfig, HttpClientParams, UpstreamGroup};
 
-pub use tunnel_lib::egress::http::HttpsClient;
+pub use tunnel_lib::egress::http::{H2cClient, HttpsClient};
 
 pub struct LocalProxyMap {
     upstreams: HashMap<String, UpstreamGroup>,
     http_rules: HashMap<String, String>,
     pub https_client: HttpsClient,
+    pub h2c_client: H2cClient,
 }
 
 impl LocalProxyMap {
@@ -30,11 +31,13 @@ impl LocalProxyMap {
         }
 
         let https_client = tunnel_lib::create_https_client_with(http_params);
+        let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
 
         Self {
             upstreams,
             http_rules,
             https_client,
+            h2c_client,
         }
     }
 
@@ -131,7 +134,8 @@ impl ProxyApp for ClientApp {
                 Ok(PeerKind::H2(tunnel_lib::proxy::h2::H2Peer {
                     target_host: connect_addr_str,
                     scheme,
-                    client: self.map.https_client.clone(),
+                    https_client: self.map.https_client.clone(),
+                    h2c_client: self.map.h2c_client.clone(),
                 }))
             }
             Protocol::WebSocket => {
@@ -214,6 +218,7 @@ impl ProxyApp for ClientApp {
                         target_addr: std::net::SocketAddr,
                         tls_host: String,
                         https_client: HttpsClient,
+                        h2c_client: H2cClient,
                     }
 
                     impl tunnel_lib::proxy::peers::UpstreamPeer for MitmH2Peer {
@@ -255,6 +260,7 @@ impl ProxyApp for ClientApp {
                             tunnel_lib::proxy::h2::serve_h2_forward(
                                 accepted_stream,
                                 self.https_client.clone(),
+                                self.h2c_client.clone(),
                                 "https".to_string(),
                                 self.tls_host.clone(),
                             )
@@ -267,6 +273,7 @@ impl ProxyApp for ClientApp {
                         target_addr,
                         tls_host: tls_host.unwrap_or_else(|| "".to_string()),
                         https_client: self.map.https_client.clone(),
+                        h2c_client: self.map.h2c_client.clone(),
                     })))
                 } else {
                     Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer {

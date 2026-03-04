@@ -4,36 +4,34 @@ use http_body_util::BodyExt;
 use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
+use crate::egress::http::{H2cClient, HttpsClient};
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 
-pub type HttpsClient = Client<
-    hyper_rustls::HttpsConnector<HttpConnector>,
-    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
->;
-
 /// Serve an H2 connection on `io`, forwarding each request to `target_host`
-/// via the connection-pooled `client`.
+/// via the connection-pooled clients.
 ///
-/// This is the unified implementation used by both the server egress
-/// (`H2Peer`) and the client H2 path.
+/// Uses `https_client` for `https://` targets (ALPN negotiation) and
+/// `h2c_client` for `http://` targets (h2c prior knowledge).
 pub async fn serve_h2_forward<IO>(
     io: IO,
-    client: HttpsClient,
+    https_client: HttpsClient,
+    h2c_client: H2cClient,
     scheme: String,
     target_host: String,
 ) -> Result<()>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let use_h2c = scheme == "http";
+
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let client = client.clone();
+        let https_client = https_client.clone();
+        let h2c_client = h2c_client.clone();
         let scheme = scheme.clone();
         let target_host = target_host.clone();
         async move {
@@ -62,7 +60,13 @@ where
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
 
-            match client.request(upstream_req).await {
+            let result = if use_h2c {
+                h2c_client.request(upstream_req).await
+            } else {
+                https_client.request(upstream_req).await
+            };
+
+            match result {
                 Ok(resp) => {
                     let (parts, body) = resp.into_parts();
                     let boxed = body.map_err(std::io::Error::other).boxed_unsync();
@@ -94,7 +98,8 @@ where
 pub struct H2Peer {
     pub target_host: String,
     pub scheme: String,
-    pub client: HttpsClient,
+    pub https_client: HttpsClient,
+    pub h2c_client: H2cClient,
 }
 
 impl H2Peer {
@@ -109,9 +114,9 @@ impl H2Peer {
         let stream = QuinnStream { send, recv };
         if let Some(init) = initial_data.filter(|b| !b.is_empty()) {
             let io = PrefixedReadWrite::new(stream, init);
-            serve_h2_forward(io, self.client, self.scheme, self.target_host).await
+            serve_h2_forward(io, self.https_client, self.h2c_client, self.scheme, self.target_host).await
         } else {
-            serve_h2_forward(stream, self.client, self.scheme, self.target_host).await
+            serve_h2_forward(stream, self.https_client, self.h2c_client, self.scheme, self.target_host).await
         }
     }
 }

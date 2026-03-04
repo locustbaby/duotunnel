@@ -62,6 +62,7 @@ pub async fn handle_work_stream(
         tunnel_lib::proxy::h2::serve_h2_forward(
             stream,
             proxy_map.https_client.clone(),
+            proxy_map.h2c_client.clone(),
             scheme,
             authority,
         )

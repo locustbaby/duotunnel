@@ -18,6 +18,11 @@ pub type HttpsClient = Client<
     http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
 >;
 
+pub type H2cClient = Client<
+    HttpConnector,
+    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+>;
+
 #[derive(Debug, Clone)]
 pub struct HttpClientParams {
     pub pool_idle_timeout_secs: u64,
@@ -54,6 +59,21 @@ pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
         .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
         .pool_max_idle_per_host(params.pool_max_idle_per_host)
         .build(https)
+}
+
+pub fn create_h2c_client() -> H2cClient {
+    create_h2c_client_with(&HttpClientParams::default())
+}
+
+pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
+    let mut http = HttpConnector::new();
+    http.set_nodelay(true);
+
+    Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(params.pool_max_idle_per_host)
+        .build(http)
 }
 
 pub async fn forward_http(
