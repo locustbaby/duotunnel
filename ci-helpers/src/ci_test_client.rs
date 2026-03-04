@@ -1,13 +1,15 @@
 // CI test client — replaces wscat / grpcurl / curl in GitHub Actions.
 //
 // Usage:
-//   ci-test-client http       <url> [--method GET|POST] [--body <json>] [--header Key:Value]
-//                                   [--expect-body <substring>] [--allow-status <code>]
-//   ci-test-client http2      <url> [same flags as http — uses h2c upgrade via HTTP/1.1]
-//   ci-test-client ws         <url> [--message <text>]
-//   ci-test-client grpc       <host:port> [--service <svc>]
-//   ci-test-client grpc-echo  <host:port> [--tls] [--insecure] [--ping <text>]
-//                             calls grpc_echo.v1.EchoService/Echo
+//   ci-test-client http              <url> [--method GET|POST] [--body <json>] [--header Key:Value]
+//                                          [--expect-body <substring>] [--allow-status <code>]
+//   ci-test-client http2             <url> [same flags as http — uses h2c upgrade via HTTP/1.1]
+//   ci-test-client h2c-prior         <url> [same flags as http — true h2c prior knowledge]
+//   ci-test-client ws                <url> [--message <text>]
+//   ci-test-client grpc              <host:port> [--service <svc>]
+//   ci-test-client grpc-echo         <host:port> [--tls] [--insecure] [--ping <text>]
+//   ci-test-client grpc-server-stream <host:port> [--tls] [--ping <text>] [--count <n>]
+//   ci-test-client grpc-bidi-stream   <host:port> [--tls] [--ping <text>] [--count <n>]
 //
 // Exit code 0 = PASS, 1 = FAIL.
 
@@ -25,7 +27,7 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: ci-test-client <http|http2|ws|grpc|grpc-echo> <target> [options...]");
+        eprintln!("Usage: ci-test-client <http|http2|h2c-prior|ws|grpc|grpc-echo|grpc-server-stream|grpc-bidi-stream> <target> [options...]");
         process::exit(2);
     }
 
@@ -36,9 +38,12 @@ async fn main() {
     let result = match subcommand {
         "http" => run_http(target, rest, false).await,
         "http2" => run_http(target, rest, true).await,
+        "h2c-prior" => run_h2c_prior(target, rest).await,
         "ws" => run_ws(target, rest).await,
         "grpc" => run_grpc(target, rest).await,
         "grpc-echo" => run_grpc_echo(target, rest).await,
+        "grpc-server-stream" => run_grpc_server_stream(target, rest).await,
+        "grpc-bidi-stream" => run_grpc_bidi_stream(target, rest).await,
         other => Err(format!("unknown subcommand: {other}")),
     };
 
@@ -54,11 +59,11 @@ async fn main() {
     }
 }
 
-// ─── HTTP / HTTP2 ─────────────────────────────────────────────────────────────
+// ─── HTTP / HTTP2 / H2C ───────────────────────────────────────────────────────
 //
-// http2 sends an HTTP/1.1 Upgrade: h2c request so the server's byte-level
-// forwarding path handles it (same as curl --http2).  The response is then
-// validated the same way as plain HTTP/1.1.
+// http:       plain HTTP/1.1
+// http2:      HTTP/1.1 with Upgrade: h2c header (curl --http2 style)
+// h2c-prior:  true H2 prior knowledge — sends H2 preface directly (curl --http2-prior-knowledge)
 
 async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, String> {
     let mut method = "GET".to_string();
@@ -219,6 +224,100 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
             &allow_statuses,
         )
     }
+}
+
+// ─── H2C Prior Knowledge ──────────────────────────────────────────────────────
+//
+// Sends the HTTP/2 connection preface directly (no upgrade), triggering the
+// server's `handle_plaintext_h2_connection` code path.
+
+async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
+    let mut method = "GET".to_string();
+    let mut body_str: Option<String> = None;
+    let mut extra_headers: Vec<(String, String)> = Vec::new();
+    let mut expect_body: Option<String> = None;
+    let mut allow_statuses: Vec<u16> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--method" => { i += 1; method = args[i].clone(); }
+            "--body" => { i += 1; body_str = Some(args[i].clone()); }
+            "--header" => {
+                i += 1;
+                let kv = &args[i];
+                let colon = kv.find(':').ok_or_else(|| format!("bad header: {kv}"))?;
+                extra_headers.push((kv[..colon].to_string(), kv[colon + 1..].trim().to_string()));
+            }
+            "--expect-body" => { i += 1; expect_body = Some(args[i].clone()); }
+            "--allow-status" => {
+                i += 1;
+                allow_statuses.push(args[i].parse::<u16>().map_err(|_| format!("bad status: {}", args[i]))?);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let uri: hyper::Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    let host = uri.host().unwrap_or("localhost").to_string();
+    let port = uri.port_u16().unwrap_or(80);
+    let addr = format!("{host}:{port}");
+
+    let stream = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map_err(|_| format!("connect timeout to {addr}"))?
+    .map_err(|e| format!("connect error: {e}"))?;
+    let _ = stream.set_nodelay(true);
+
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::client::conn::http2;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = http2::handshake(TokioExecutor::new(), io)
+        .await
+        .map_err(|e| format!("h2 handshake: {e}"))?;
+    tokio::spawn(conn);
+
+    let effective_host = extra_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| host.clone());
+
+    let body_bytes = body_str.map(|s| s.into_bytes()).unwrap_or_default();
+
+    let target_uri = format!(
+        "http://{}{}",
+        effective_host,
+        uri.path_and_query().map(|p| p.as_str()).unwrap_or("/")
+    );
+    let mut req = hyper::Request::builder()
+        .method(method.as_str())
+        .uri(&target_uri)
+        .header("content-type", "application/json");
+    for (k, v) in &extra_headers {
+        if !k.eq_ignore_ascii_case("host") {
+            req = req.header(k.as_str(), v.as_str());
+        }
+    }
+    let req = req
+        .body(Full::new(Bytes::from(body_bytes)))
+        .map_err(|e| format!("build request: {e}"))?;
+
+    let resp = tokio::time::timeout(Duration::from_secs(15), sender.send_request(req))
+        .await
+        .map_err(|_| "request timeout".to_string())?
+        .map_err(|e| format!("request error: {e}"))?;
+
+    let status = resp.status().as_u16();
+    let body = read_body(resp.into_body()).await?;
+    validate_response(status, &body, "H2C-prior", expect_body.as_deref(), &allow_statuses)
 }
 
 async fn read_body<B>(body: B) -> Result<String, String>
@@ -406,6 +505,14 @@ struct EchoRequest {
 }
 
 #[derive(Clone, prost::Message)]
+struct StreamEchoRequest {
+    #[prost(string, tag = "1")]
+    pub ping: String,
+    #[prost(int32, tag = "2")]
+    pub count: i32,
+}
+
+#[derive(Clone, prost::Message)]
 struct EchoResponse {
     #[prost(map = "string, string", tag = "1")]
     pub headers: std::collections::HashMap<String, String>,
@@ -433,38 +540,7 @@ async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
         i += 1;
     }
 
-    let endpoint_uri = if use_tls {
-        format!("https://{addr}")
-    } else {
-        format!("http://{addr}")
-    };
-
-    let channel = if use_tls {
-        // Use native system roots for TLS certificate validation
-        let tls_config = tonic::transport::ClientTlsConfig::new().with_native_roots();
-
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            tonic::transport::Channel::from_shared(endpoint_uri)
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .tls_config(tls_config)
-                .map_err(|e| format!("TLS config error: {e}"))?
-                .connect(),
-        )
-        .await
-        .map_err(|_| format!("gRPC echo connect timeout to {addr}"))?
-        .map_err(|e| format!("gRPC echo connect error: {e}"))?
-    } else {
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            tonic::transport::Channel::from_shared(endpoint_uri)
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .connect(),
-        )
-        .await
-        .map_err(|_| format!("gRPC echo connect timeout to {addr}"))?
-        .map_err(|e| format!("gRPC echo connect error: {e}"))?
-    };
+    let channel = connect_grpc_channel(addr, use_tls).await?;
 
     let mut grpc = tonic::client::Grpc::new(channel);
     grpc.ready()
@@ -506,4 +582,193 @@ async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
         echo_resp.headers.len(),
         echo_resp.remote_addr,
     ))
+}
+
+// ─── gRPC Server Streaming ───────────────────────────────────────────────────
+//
+// Calls grpc_echo.v1.EchoService/ServerStreamEcho which returns `count`
+// response messages.  Validates all messages are received with correct body.
+
+async fn run_grpc_server_stream(addr: &str, args: &[String]) -> Result<String, String> {
+    let mut use_tls = false;
+    let mut ping_text = "ci-stream".to_string();
+    let mut count: i32 = 5;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tls" | "--insecure" => use_tls = true,
+            "--ping" => { i += 1; ping_text = args[i].clone(); }
+            "--count" => { i += 1; count = args[i].parse().map_err(|_| format!("bad count: {}", args[i]))?; }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let channel = connect_grpc_channel(addr, use_tls).await?;
+
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|e| format!("gRPC not ready: {e}"))?;
+
+    let request = tonic::Request::new(StreamEchoRequest {
+        ping: ping_text.clone(),
+        count,
+    });
+    let codec = tonic::codec::ProstCodec::<StreamEchoRequest, EchoResponse>::new();
+    let path = tonic::codegen::http::uri::PathAndQuery::from_static(
+        "/grpc_echo.v1.EchoService/ServerStreamEcho",
+    );
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(15),
+        grpc.server_streaming(request, path, codec),
+    )
+    .await
+    .map_err(|_| "gRPC ServerStreamEcho timeout".to_string())?
+    .map_err(|e| format!("gRPC ServerStreamEcho error: status={} message={}", e.code(), e.message()))?;
+
+    let mut stream = resp.into_inner();
+    let mut received = 0;
+    while let Some(msg) = tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .map_err(|_| "stream message timeout".to_string())?
+        .map_err(|e| format!("stream recv error: {e}"))?
+    {
+        let expected_body = format!("{}:{}", ping_text, received);
+        if msg.body != expected_body {
+            return Err(format!(
+                "ServerStreamEcho msg[{}] body mismatch: expected {:?}, got {:?}",
+                received, expected_body, msg.body
+            ));
+        }
+        received += 1;
+    }
+
+    if received != count as usize {
+        return Err(format!(
+            "ServerStreamEcho: expected {} messages, got {}",
+            count, received
+        ));
+    }
+
+    Ok(format!(
+        "ServerStreamEcho ping={:?} count={} → received all {} messages",
+        ping_text, count, received
+    ))
+}
+
+// ─── gRPC Bidi Streaming ─────────────────────────────────────────────────────
+//
+// Calls grpc_echo.v1.EchoService/BidiStreamEcho — sends N messages and
+// validates the server echoes each one back.
+
+async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, String> {
+    let mut use_tls = false;
+    let mut ping_text = "ci-bidi".to_string();
+    let mut count: usize = 5;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tls" | "--insecure" => use_tls = true,
+            "--ping" => { i += 1; ping_text = args[i].clone(); }
+            "--count" => { i += 1; count = args[i].parse().map_err(|_| format!("bad count: {}", args[i]))?; }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let channel = connect_grpc_channel(addr, use_tls).await?;
+
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|e| format!("gRPC not ready: {e}"))?;
+
+    // Build the outbound stream
+    let pings: Vec<EchoRequest> = (0..count)
+        .map(|i| EchoRequest { ping: format!("{}:{}", ping_text, i) })
+        .collect();
+    let outbound = futures_util::stream::iter(pings);
+
+    let request = tonic::Request::new(outbound);
+    let codec = tonic::codec::ProstCodec::<EchoRequest, EchoResponse>::new();
+    let path = tonic::codegen::http::uri::PathAndQuery::from_static(
+        "/grpc_echo.v1.EchoService/BidiStreamEcho",
+    );
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(15),
+        grpc.streaming(request, path, codec),
+    )
+    .await
+    .map_err(|_| "gRPC BidiStreamEcho timeout".to_string())?
+    .map_err(|e| format!("gRPC BidiStreamEcho error: status={} message={}", e.code(), e.message()))?;
+
+    let mut stream = resp.into_inner();
+    let mut received = 0;
+    while let Some(msg) = tokio::time::timeout(Duration::from_secs(10), stream.message())
+        .await
+        .map_err(|_| "bidi stream message timeout".to_string())?
+        .map_err(|e| format!("bidi stream recv error: {e}"))?
+    {
+        let expected_body = format!("{}:{}", ping_text, received);
+        if msg.body != expected_body {
+            return Err(format!(
+                "BidiStreamEcho msg[{}] body mismatch: expected {:?}, got {:?}",
+                received, expected_body, msg.body
+            ));
+        }
+        received += 1;
+    }
+
+    if received != count {
+        return Err(format!(
+            "BidiStreamEcho: expected {} messages, got {}",
+            count, received
+        ));
+    }
+
+    Ok(format!(
+        "BidiStreamEcho ping={:?} count={} → received all {} echoes",
+        ping_text, count, received
+    ))
+}
+
+// ─── Shared gRPC channel helper ──────────────────────────────────────────────
+
+async fn connect_grpc_channel(
+    addr: &str,
+    use_tls: bool,
+) -> Result<tonic::transport::Channel, String> {
+    let endpoint_uri = if use_tls {
+        format!("https://{addr}")
+    } else {
+        format!("http://{addr}")
+    };
+
+    if use_tls {
+        let tls_config = tonic::transport::ClientTlsConfig::new().with_native_roots();
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            tonic::transport::Channel::from_shared(endpoint_uri)
+                .map_err(|e| format!("invalid endpoint: {e}"))?
+                .tls_config(tls_config)
+                .map_err(|e| format!("TLS config error: {e}"))?
+                .connect(),
+        )
+        .await
+        .map_err(|_| format!("gRPC connect timeout to {addr}"))?
+        .map_err(|e| format!("gRPC connect error: {e}"))
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            tonic::transport::Channel::from_shared(endpoint_uri)
+                .map_err(|e| format!("invalid endpoint: {e}"))?
+                .connect(),
+        )
+        .await
+        .map_err(|_| format!("gRPC connect timeout to {addr}"))?
+        .map_err(|e| format!("gRPC connect error: {e}"))
+    }
 }
