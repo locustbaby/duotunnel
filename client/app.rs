@@ -119,11 +119,11 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(PeerKind::Http(HttpPeer {
+                Ok(PeerKind::Http(Box::new(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme,
-                }))
+                })))
             }
             Protocol::H2 => {
                 let scheme = if is_https {
@@ -131,12 +131,12 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(PeerKind::H2(tunnel_lib::proxy::h2::H2Peer {
+                Ok(PeerKind::H2(Box::new(tunnel_lib::proxy::h2::H2Peer {
                     target_host: connect_addr_str,
                     scheme,
                     https_client: self.map.https_client.clone(),
                     h2c_client: self.map.h2c_client.clone(),
-                }))
+                })))
             }
             Protocol::WebSocket => {
                 info!("WebSocket protocol detected, using TCP relay");
@@ -288,11 +288,11 @@ impl ProxyApp for ClientApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(PeerKind::Http(HttpPeer {
+                Ok(PeerKind::Http(Box::new(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme,
-                }))
+                })))
             }
             _ => Err(anyhow!("unsupported protocol")),
         }
