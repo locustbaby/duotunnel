@@ -321,7 +321,7 @@ impl ProtocolDriver for Http1Driver {
         }))
     }
 
-    async fn write_response(&mut self, response: Response<Incoming>) -> Result<()> {
+    async fn write_response(&mut self, mut response: Response<Incoming>) -> Result<()> {
         let status = response.status();
 
         // Check response Connection header for close signal.
@@ -333,9 +333,10 @@ impl ProtocolDriver for Http1Driver {
             }
         }
 
-        let sanitized_headers = sanitize_response_headers(response.headers());
+        sanitize_response_headers(response.headers_mut());
 
-        let mut header_buf = BytesMut::with_capacity(32 + sanitized_headers.len() * 48 + 32);
+        let headers = response.headers();
+        let mut header_buf = BytesMut::with_capacity(32 + headers.len() * 48 + 32);
 
         use std::fmt::Write as FmtWrite;
         write!(
@@ -346,7 +347,7 @@ impl ProtocolDriver for Http1Driver {
         )
         .unwrap();
 
-        for (name, value) in &sanitized_headers {
+        for (name, value) in headers {
             header_buf.put_slice(name.as_str().as_bytes());
             header_buf.put_slice(b": ");
             header_buf.put_slice(value.as_bytes());
