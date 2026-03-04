@@ -211,6 +211,26 @@ impl ProtocolDriver for Http1Driver {
             http_body_util::Empty::new()
                 .map_err(|e| match e {})
                 .boxed_unsync()
+        } else if body_remaining == 0 {
+            // The prefix already contains the entire body.  Reclaim recv
+            // eagerly so it is returned even if hyper drops the body stream
+            // without polling to completion.
+            self.recv = Some(recv);
+
+            let prefix = body_prefix;
+            let stream = futures_util::stream::try_unfold(
+                Some(prefix),
+                |mut state| async move {
+                    if let Some(data) = state.take() {
+                        if !data.is_empty() {
+                            return Ok(Some((hyper::body::Frame::data(data), None)));
+                        }
+                    }
+                    Ok(None)
+                },
+            );
+
+            http_body_util::StreamBody::new(stream).boxed_unsync()
         } else {
             // Body stream temporarily owns recv.
             let (reclaim_tx, reclaim_rx) = oneshot::channel::<Reclaim>();
