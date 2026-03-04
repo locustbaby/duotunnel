@@ -1,0 +1,9 @@
+serverAddr = "127.0.0.1"
+serverPort = 17000
+
+[[proxies]]
+name = "echo-ingress"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo.local"]

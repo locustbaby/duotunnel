@@ -11,6 +11,8 @@ def main():
     p.add_argument("--msg", default="")
     p.add_argument("--url", default="")
     p.add_argument("--resources", default="")
+    p.add_argument("--frp-result", default="")
+    p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -22,6 +24,19 @@ def main():
     if args.resources and os.path.exists(args.resources):
         with open(args.resources) as f:
             entry["resources"] = json.load(f)
+
+    if args.frp_result and os.path.exists(args.frp_result):
+        with open(args.frp_result) as f:
+            frp = json.load(f)
+        for sc in frp.get("scenarios", []):
+            sc["tunnel"] = "frp"
+            entry["scenarios"].append(sc)
+        frp_offset = args.frp_k6_offset
+        for ph in frp.get("phases", []):
+            ph["tunnel"] = "frp"
+            ph["start"] += frp_offset
+            ph["end"] += frp_offset
+            entry.setdefault("phases", []).append(ph)
 
     PREFIX = "window.BENCHMARK_DATA = "
     SUFFIX = ";"

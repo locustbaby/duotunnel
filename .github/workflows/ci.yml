@@ -21,6 +21,12 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
+  workflow_dispatch:
+    inputs:
+      tune_kernel:
+        description: 'Apply kernel tuning (tune-os.sh) before stress test'
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -546,6 +552,10 @@ jobs:
       - name: Install sysstat
         run: sudo apt-get install -y -qq sysstat
 
+      - name: Tune kernel parameters
+        if: ${{ inputs.tune_kernel != 'false' }}
+        run: sudo bash scripts/tune-os.sh
+
       - name: Configure /etc/hosts
         run: |
           sudo tee -a /etc/hosts << 'EOF'
@@ -661,13 +671,32 @@ jobs:
           echo "── Server metrics before k6 ──"
           curl -sf http://127.0.0.1:9090/metrics || echo "(metrics endpoint not available)"
 
+      - name: Collect machine info
+        run: |
+          echo "$(nproc) $(grep MemTotal /proc/meminfo | awk '{print $2}')" > /tmp/machine-info
+
       - name: Start resource sampling
         run: |
           mpstat 2 > /tmp/mpstat.log 2>&1 &
           echo $! > /tmp/mpstat.pid
-          # -p ALL captures every process; parser filters to known names
-          pidstat -p ALL -u -r 2 > /tmp/pidstat.log 2>&1 &
-          echo $! > /tmp/pidstat.pid
+          (
+            echo "CLK_TCK=$(getconf CLK_TCK)"
+            while true; do
+              TS=$(date +%s.%N)
+              for d in /proc/[0-9]*/; do
+                pid=${d#/proc/}; pid=${pid%/}
+                read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
+                comm=$(echo "$stat" | sed 's/.*(\(.*\)).*/\1/')
+                utime=$(echo "$stat" | awk '{print $14}')
+                stime=$(echo "$stat" | awk '{print $15}')
+                rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+                echo "$TS $pid $comm $utime $stime ${rss:-0}"
+              done
+              echo "---"
+              sleep 2
+            done
+          ) > /tmp/proc-cpu.log 2>&1 &
+          echo $! > /tmp/proc-cpu.pid
           pidstat -p ALL -d 2 > /tmp/pidstat-io.log 2>&1 &
           echo $! > /tmp/pidstat-io.pid
           # context switches (voluntary + involuntary) per process
@@ -690,9 +719,9 @@ jobs:
           if [ -f /proc/pressure/cpu ]; then
             (while true; do
               TS=$(date +%s)
-              CPU=$(cat /proc/pressure/cpu 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
-              MEM=$(cat /proc/pressure/memory 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
-              IO=$(cat /proc/pressure/io 2>/dev/null | grep full | awk '{print $5}' | cut -d= -f2)
+              CPU=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/^avg10=/)print substr($i,7)}' /proc/pressure/cpu 2>/dev/null)
+              MEM=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/^avg10=/)print substr($i,7)}' /proc/pressure/memory 2>/dev/null)
+              IO=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/^avg10=/)print substr($i,7)}' /proc/pressure/io 2>/dev/null)
               echo "$TS cpu=$CPU mem=$MEM io=$IO"
               sleep 2
             done) > /tmp/psi-timeseries.log 2>&1 &
@@ -702,7 +731,7 @@ jobs:
           fi
           nproc > /tmp/nproc
           date +%s > /tmp/sampling_start_epoch
-          echo "Sampling started (mpstat + pidstat ALL -u/-r/-d/-w + sar-net + sar-B + ss + PSI)"
+          echo "Sampling started (mpstat + /proc-cpu + pidstat -d/-w + sar-net + sar-B + ss + PSI)"
 
       - name: Run k6 stress test
         working-directory: ci-helpers/k6
@@ -712,13 +741,55 @@ jobs:
           echo $! > /tmp/k6.pid
           wait "$(cat /tmp/k6.pid)"
 
-      - name: Stop resource sampling
+      - name: Stop duotunnel server and client
         if: always()
         run: |
           kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 0.5
+
+      - name: Install frp
+        run: |
+          FRP_VER=0.61.0
+          wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
+          tar -xzf /tmp/frp.tar.gz -C /tmp
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
+
+      - name: Start frp and run frp benchmark
+        run: |
+          frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
+          echo $! > /tmp/frps.pid
+          sleep 1
+          frpc -c ci-helpers/frpc.toml > /tmp/frpc.log 2>&1 &
+          echo $! > /tmp/frpc.pid
+          FRP_READY=0
+          for i in $(seq 1 20); do
+            curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
+            sleep 0.5
+          done
+          if [ "$FRP_READY" -eq 0 ]; then
+            echo "WARNING: frp did not become ready, skipping benchmark"
+            echo "=== frps ===" && cat /tmp/frps.log || true
+            echo "=== frpc ===" && cat /tmp/frpc.log || true
+            exit 0
+          fi
+          echo "frp ready, running benchmark..."
+          date +%s > /tmp/frp_k6_start_epoch
+          cd ci-helpers/k6
+          k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js || true
+
+      - name: Stop frp
+        if: always()
+        run: |
+          kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
+
+      - name: Stop resource sampling
+        if: always()
+        run: |
           kill -9 "$(cat /tmp/mpstat.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/pidstat.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/proc-cpu.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/pidstat-io.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/pidstat-ctxsw.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/vmstat.pid 2>/dev/null)" 2>/dev/null || true
@@ -766,7 +837,7 @@ jobs:
             K6_OFFSET=$(( K - S ))
           fi
           python3 "${{ github.workspace }}/ci-helpers/parse-resources.py" \
-            --pidstat      /tmp/pidstat.log \
+            --proc-cpu     /tmp/proc-cpu.log \
             --mpstat       /tmp/mpstat.log \
             --pidstat-io   /tmp/pidstat-io.log \
             --pidstat-ctxsw /tmp/pidstat-ctxsw.log \
@@ -776,6 +847,7 @@ jobs:
             --psi          /tmp/psi-timeseries.log \
             --k6-offset    "$K6_OFFSET" \
             --nproc        /tmp/nproc \
+            --machine-info /tmp/machine-info \
             --output       /tmp/resource-data.json \
             || echo "Resource parsing failed (non-fatal)"
 
@@ -801,13 +873,23 @@ jobs:
           cd gh-pages-repo
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
+          FRP_ARG=""
+          FRP_OFFSET_ARG=""
+          if [ -s /tmp/bench-results-frp.json ]; then
+            FRP_ARG="--frp-result /tmp/bench-results-frp.json"
+            if [ -f /tmp/frp_k6_start_epoch ] && [ -f /tmp/sampling_start_epoch ]; then
+              FRP_K6_OFFSET=$(( $(cat /tmp/frp_k6_start_epoch) - $(cat /tmp/sampling_start_epoch) ))
+              FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
+            fi
+          fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results.json \
             --data   bench/data.js \
             --sha    "${{ github.sha }}" \
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            --resources /tmp/resource-data.json
+            --resources /tmp/resource-data.json \
+            $FRP_ARG $FRP_OFFSET_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
@@ -815,18 +897,24 @@ jobs:
           git commit -m "bench: update data for $(echo '${{ github.sha }}' | cut -c1-7)"
           git push origin gh-pages
 
-      - name: Upload logs on failure
-        if: failure()
+      - name: Dump tunnel error logs
+        if: always()
+        run: |
+          echo "=== server errors ===" && grep -iE 'error|warn|panic' /tmp/ci-server.log | tail -50 || true
+          echo "=== client errors ===" && grep -iE 'error|warn|panic' /tmp/ci-client.log | tail -50 || true
+
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-test-logs-${{ github.run_id }}
-          retention-days: 3
+          retention-days: 7
           path: |
             /tmp/ci-server.log
             /tmp/ci-client.log
             /tmp/http-echo.log
-            /tmp/ws-echo.log
-            /tmp/grpc-echo.log
+            /tmp/frps.log
+            /tmp/frpc.log
 
       - name: Cleanup
         if: always()

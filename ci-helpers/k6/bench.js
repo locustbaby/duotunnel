@@ -17,9 +17,8 @@ const allScenarios = [
   'ingress_post_1k', 'ingress_post_10k', 'ingress_post_100k', 'egress_post_10k',
   'grpc_health_ingress', 'grpc_echo_ingress', 'grpc_large_payload', 'grpc_high_qps',
   'ws_ingress', 'ws_multi_msg',
-  'ingress_1000qps', 'egress_1000qps',
-  'ingress_2000qps', 'egress_2000qps',
   'ingress_3000qps', 'egress_3000qps',
+  'ingress_3000qps_nokl', 'egress_3000qps_nokl',
 ];
 for (const s of allScenarios) {
   trends[s] = new Trend(`t_${s}`, true);
@@ -202,53 +201,13 @@ export const options = {
       maxVUs: 30,
     },
 
-    ingress_1000qps: {
-      executor: 'constant-arrival-rate',
-      exec: 'ingressHttpGet',
-      rate: 1000,
-      timeUnit: '1s',
-      duration: '15s',
-      startTime: '60s',
-      preAllocatedVUs: 20,
-      maxVUs: 150,
-    },
-    egress_1000qps: {
-      executor: 'constant-arrival-rate',
-      exec: 'egressHttpGet',
-      rate: 1000,
-      timeUnit: '1s',
-      duration: '15s',
-      startTime: '60s',
-      preAllocatedVUs: 20,
-      maxVUs: 150,
-    },
-    ingress_2000qps: {
-      executor: 'constant-arrival-rate',
-      exec: 'ingressHttpGet',
-      rate: 2000,
-      timeUnit: '1s',
-      duration: '15s',
-      startTime: '80s',
-      preAllocatedVUs: 30,
-      maxVUs: 300,
-    },
-    egress_2000qps: {
-      executor: 'constant-arrival-rate',
-      exec: 'egressHttpGet',
-      rate: 2000,
-      timeUnit: '1s',
-      duration: '15s',
-      startTime: '80s',
-      preAllocatedVUs: 30,
-      maxVUs: 300,
-    },
     ingress_3000qps: {
       executor: 'constant-arrival-rate',
       exec: 'ingressHttpGet',
       rate: 3000,
       timeUnit: '1s',
       duration: '15s',
-      startTime: '100s',
+      startTime: '60s',
       preAllocatedVUs: 50,
       maxVUs: 500,
     },
@@ -258,7 +217,27 @@ export const options = {
       rate: 3000,
       timeUnit: '1s',
       duration: '15s',
+      startTime: '80s',
+      preAllocatedVUs: 50,
+      maxVUs: 500,
+    },
+    ingress_3000qps_nokl: {
+      executor: 'constant-arrival-rate',
+      exec: 'ingressHttpGetNoKeepalive',
+      rate: 3000,
+      timeUnit: '1s',
+      duration: '15s',
       startTime: '100s',
+      preAllocatedVUs: 50,
+      maxVUs: 500,
+    },
+    egress_3000qps_nokl: {
+      executor: 'constant-arrival-rate',
+      exec: 'egressHttpGetNoKeepalive',
+      rate: 3000,
+      timeUnit: '1s',
+      duration: '15s',
+      startTime: '120s',
       preAllocatedVUs: 50,
       maxVUs: 500,
     },
@@ -297,6 +276,34 @@ export function ingressHttpGet() {
   const ok = check(res, {
     'ingress GET 200': (r) => r.status === 200,
     'ingress GET echo': (r) => r.body && r.body.includes(id),
+  });
+  track(res, ok);
+}
+
+export function ingressHttpGetNoKeepalive() {
+  const id = `${__VU}-${__ITER}`;
+  const res = http.get(`http://echo.local:8080/?id=${id}`, {
+    timeout: '10s',
+    headers: { Connection: 'close' },
+    tags: { name: 'ingress_get_nokl' },
+  });
+  const ok = check(res, {
+    'ingress GET nokl 200': (r) => r.status === 200,
+    'ingress GET nokl echo': (r) => r.body && r.body.includes(id),
+  });
+  track(res, ok);
+}
+
+export function egressHttpGetNoKeepalive() {
+  const id = `${__VU}-${__ITER}`;
+  const res = http.get(`http://127.0.0.1:8081/?id=${id}`, {
+    headers: { Host: 'echo.local', Connection: 'close' },
+    timeout: '10s',
+    tags: { name: 'egress_get_nokl' },
+  });
+  const ok = check(res, {
+    'egress GET nokl 200': (r) => r.status === 200,
+    'egress GET nokl echo': (r) => r.body && r.body.includes(id),
   });
   track(res, ok);
 }
@@ -581,35 +588,34 @@ export function handleSummary(data) {
   }
 
   const scenarioMeta = {
-    ingress_http_get:    { protocol: 'HTTP', direction: 'ingress', category: 'basic' },
-    ingress_http_post:   { protocol: 'HTTP', direction: 'ingress', category: 'basic' },
-    egress_http_get:     { protocol: 'HTTP', direction: 'egress',  category: 'basic' },
-    egress_http_post:    { protocol: 'HTTP', direction: 'egress',  category: 'basic' },
-    bidir_mixed:         { protocol: 'HTTP', direction: 'bidir',   category: 'basic' },
-    ingress_post_1k:     { protocol: 'HTTP', direction: 'ingress', category: 'body_size' },
-    ingress_post_10k:    { protocol: 'HTTP', direction: 'ingress', category: 'body_size' },
-    ingress_post_100k:   { protocol: 'HTTP', direction: 'ingress', category: 'body_size' },
-    egress_post_10k:     { protocol: 'HTTP', direction: 'egress',  category: 'body_size' },
-    grpc_health_ingress: { protocol: 'gRPC', direction: 'ingress', category: 'basic' },
-    grpc_echo_ingress:   { protocol: 'gRPC', direction: 'ingress', category: 'basic' },
-    grpc_large_payload:  { protocol: 'gRPC', direction: 'ingress', category: 'body_size' },
-    grpc_high_qps:       { protocol: 'gRPC', direction: 'ingress', category: 'stress' },
-    ws_ingress:          { protocol: 'WS',   direction: 'ingress', category: 'basic' },
-    ws_multi_msg:        { protocol: 'WS',   direction: 'ingress', category: 'basic' },
-    ingress_1000qps:     { protocol: 'HTTP', direction: 'ingress', category: 'stress' },
-    egress_1000qps:      { protocol: 'HTTP', direction: 'egress',  category: 'stress' },
-    ingress_2000qps:     { protocol: 'HTTP', direction: 'ingress', category: 'stress' },
-    egress_2000qps:      { protocol: 'HTTP', direction: 'egress',  category: 'stress' },
-    ingress_3000qps:     { protocol: 'HTTP', direction: 'ingress', category: 'stress' },
-    egress_3000qps:      { protocol: 'HTTP', direction: 'egress',  category: 'stress' },
+    ingress_http_get:    { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 20 },
+    ingress_http_post:   { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 20 },
+    egress_http_get:     { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 20 },
+    egress_http_post:    { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 20 },
+    bidir_mixed:         { protocol: 'HTTP', direction: 'bidir',   category: 'basic',     duration: 15 },
+    ingress_post_1k:     { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 15 },
+    ingress_post_10k:    { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 15 },
+    ingress_post_100k:   { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 15 },
+    egress_post_10k:     { protocol: 'HTTP', direction: 'egress',  category: 'body_size', duration: 15 },
+    grpc_health_ingress: { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 15 },
+    grpc_echo_ingress:   { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 15 },
+    grpc_large_payload:  { protocol: 'gRPC', direction: 'ingress', category: 'body_size', duration: 15 },
+    grpc_high_qps:       { protocol: 'gRPC', direction: 'ingress', category: 'stress',    duration: 15 },
+    ws_ingress:          { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 15 },
+    ws_multi_msg:        { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 15 },
+    ingress_3000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 15 },
+    egress_3000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 15 },
+    ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 15 },
+    egress_3000qps_nokl:  { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 15 },
   };
 
   const phases = [
-    {name:'Basic', start:0, end:23, scenarios:['ingress_http_get','ingress_http_post','egress_http_get','egress_http_post','ws_ingress','grpc_health_ingress','grpc_echo_ingress','bidir_mixed']},
+    {name:'Basic', start:0, end:24, scenarios:['ingress_http_get','ingress_http_post','egress_http_get','egress_http_post','ws_ingress','grpc_health_ingress','grpc_echo_ingress','bidir_mixed']},
     {name:'Body/Payload', start:30, end:49, scenarios:['ingress_post_1k','ingress_post_10k','ingress_post_100k','egress_post_10k','ws_multi_msg','grpc_large_payload','grpc_high_qps']},
-    {name:'1K QPS', start:60, end:75, scenarios:['ingress_1000qps','egress_1000qps']},
-    {name:'2K QPS', start:80, end:95, scenarios:['ingress_2000qps','egress_2000qps']},
-    {name:'3K QPS', start:100, end:115, scenarios:['ingress_3000qps','egress_3000qps']},
+    {name:'Ingress 3K', start:60, end:75, scenarios:['ingress_3000qps']},
+    {name:'Egress 3K', start:80, end:95, scenarios:['egress_3000qps']},
+    {name:'Ingress no-KL', start:100, end:115, scenarios:['ingress_3000qps_nokl']},
+    {name:'Egress no-KL', start:120, end:135, scenarios:['egress_3000qps_nokl']},
   ];
 
   const scenarios = [];
@@ -631,12 +637,12 @@ export function handleSummary(data) {
 
     const requests = reqMetric ? reqMetric.values.count : 0;
     const errors = errMetric ? errMetric.values.count : 0;
-    const rps = reqMetric ? r2(reqMetric.values.rate) : 0;
+    const rps = meta.duration ? r2(requests / meta.duration) : r2(reqMetric ? reqMetric.values.rate : 0);
     const err = requests > 0 ? r2(errors / requests * 100) : 0;
 
     totalRequests += requests;
     totalErrors += errors;
-    totalRPS += reqMetric ? reqMetric.values.rate : 0;
+    if (meta.category === 'stress') totalRPS += rps;
 
     scenarios.push({
       name,

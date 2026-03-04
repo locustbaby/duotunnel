@@ -122,11 +122,13 @@ function latencyBar(val, max, proto) {
 
 const PHASE_COLORS = [
   'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
-  'rgba(239,83,80,.08)','rgba(167,139,250,.08)',
+  'rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)',
+  'rgba(56,189,248,.08)','rgba(251,191,36,.08)',
 ];
 const FALLBACK_PHASES = [
-  {name:'Basic',start:0,end:23},{name:'Body/Payload',start:30,end:49},
-  {name:'1K QPS',start:60,end:75},{name:'2K QPS',start:80,end:95},{name:'3K QPS',start:100,end:115},
+  {name:'Basic',start:0,end:24},{name:'Body/Payload',start:30,end:49},
+  {name:'Ingress 3K',start:60,end:75},{name:'Egress 3K',start:80,end:95},
+  {name:'Ingress no-KL',start:100,end:115},{name:'Egress no-KL',start:120,end:135},
 ];
 
 function phaseAnnotations(entry) {
@@ -134,13 +136,22 @@ function phaseAnnotations(entry) {
   const offset = entry?.resources?.k6OffsetSeconds || 0;
   const phaseDefs = entry?.phases || FALLBACK_PHASES;
   phaseDefs.forEach((p, i) => {
-    const s = p.start + offset;
-    const e = p.end + offset;
+    const isFrp = p.tunnel === 'frp';
+    const s = p.start + (isFrp ? 0 : offset);
+    const e = p.end + (isFrp ? 0 : offset);
     const col = PHASE_COLORS[i % PHASE_COLORS.length];
-    a['phase'+i] = {type:'box',xMin:s,xMax:e,backgroundColor:col,borderWidth:0};
     const nsc = (p.scenarios||[]).length;
-    const label = nsc ? `${p.name} (${nsc})` : p.name;
-    a['phaseLabel'+i] = {type:'label',xValue:(s+e)/2,yValue:'max',content:label,color:'#4a5a6d',font:{size:8,weight:'bold'},position:'start'};
+    const prefix = isFrp ? 'frp: ' : '';
+    const label = nsc ? `${prefix}${p.name} (${nsc})` : `${prefix}${p.name}`;
+    const yAdj = (i % 2 === 0) ? 10 : 24;
+    a['phase'+i] = {
+      type: 'box', xMin: s, xMax: e, backgroundColor: col, borderWidth: 0,
+      label: {
+        display: true, content: label,
+        color: 'rgba(180,200,220,0.75)', font: {size: 8, weight: 'bold'},
+        position: {x: 'center', y: 'start'}, yAdjust: yAdj,
+      },
+    };
     a['phaseLine'+i+'s'] = {type:'line',xMin:s,xMax:s,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
     a['phaseLine'+i+'e'] = {type:'line',xMin:e,xMax:e,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
   });
@@ -221,7 +232,7 @@ function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? en
 const catDescs = {
   basic: 'Ramping rate (10→40/s). Multiple protocols running concurrently at moderate load to test baseline latency.',
   body_size: 'Fixed rate (10–30/s). Concurrent payloads of 1K/10K/100K to measure throughput vs body size.',
-  stress: 'Fixed rate at 1000/2000/3000 QPS. Ingress + egress pairs run concurrently at each tier to find saturation point.',
+  stress: 'Fixed rate at 3K QPS with keepalive and no-keepalive. Ingress and egress run serially to isolate per-direction throughput.',
 };
 
 function navigate() {
@@ -258,7 +269,7 @@ function renderOverview() {
     <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div><div id="trendBody-leg" class="leg-wrap"></div></div>
   </div>
   <div class="row full">
-    <div class="panel tall"><h3>Stress — 1K/2K/3K QPS saturation</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
+    <div class="panel tall"><h3>Stress — 3K QPS serial (ingress → egress → no-KL)</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
   </div>
 
   <div class="sec">All Runs</div>
@@ -393,9 +404,11 @@ function renderDetail(entry) {
     </td></tr>`;
     for (const s of group) {
       const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
-      const ps = prevScMap[s.name];
+      const isFrp = s.tunnel === 'frp';
+      const ps = isFrp ? null : prevScMap[s.name];
+      const tunnelTag = isFrp ? ` <span style="font-size:9px;font-weight:600;color:var(--orange);background:rgba(245,166,35,.15);padding:1px 5px;border-radius:3px">frp</span>` : '';
       html += `<tr>
-        <td style="color:var(--text)">${s.name}</td>
+        <td style="color:var(--text)">${s.name}${tunnelTag}</td>
         <td>${pillFor(s.protocol)}</td>
         <td style="color:var(--text2)">${s.direction}</td>
         <td>${s.p50} <span class="c-dim">ms</span></td>
@@ -438,7 +451,13 @@ function renderDetail(entry) {
       return h;
     }
 
-    html += `<div class="sec">Resources</div>`;
+    const machineSpec = (() => {
+      const m = res.machine;
+      if (!m) return '';
+      const ram = m.mem_total_mb >= 1024 ? `${Math.round(m.mem_total_mb/1024)} GB` : `${m.mem_total_mb} MB`;
+      return ` <span style="color:var(--text2);font-weight:400;font-size:11px">· ${m.cpu_cores} vCPU · ${ram} RAM</span>`;
+    })();
+    html += `<div class="sec">Resources${machineSpec}</div>`;
     html += row({id:'cpuChart',  title:'CPU Usage (% of machine)'},
                 {id:'memChart',  title:'Memory RSS (MB)'});
     if (hasNet || hasIO)
@@ -491,6 +510,8 @@ function renderDetail(entry) {
       {key:'ws_echo',   label:'WS Echo',   color:'#f472b6'},
       {key:'grpc_echo', label:'gRPC Echo', color:'#fb923c'},
       {key:'k6',        label:'k6',        color:'#f5a623'},
+      {key:'frps',      label:'frps',      color:'#22d3ee'},
+      {key:'frpc',      label:'frpc',      color:'#a3e635'},
       {key:'other',     label:'Other',     color:'#4a5a6d'},
     ];
     const proc = res.processes || {};
@@ -509,14 +530,28 @@ function renderDetail(entry) {
           borderColor:s.color, backgroundColor:s.color+'28',
           fill:true, tension:.3, pointRadius:0, borderWidth:1.5});
       }
-      if (res.system?.cpu?.length)
-        cpuDS.push({label:'System total', data:res.system.cpu.map(p=>({x:p.t,y:p.v})),
-          borderColor:'#ffffff', backgroundColor:'transparent', fill:false,
-          tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
     }
+    const CPU_BREAKDOWN = [
+      {key:'cpu_usr',   label:'usr',           color:'#4da6ff'},
+      {key:'cpu_sys',   label:'sys',           color:'#34d399'},
+      {key:'cpu_soft',  label:'soft (net irq)',color:'#ef5350'},
+      {key:'cpu_irq',   label:'irq',           color:'#f5a623'},
+      {key:'cpu_iowait',label:'iowait',        color:'#a78bfa'},
+      {key:'cpu_steal', label:'steal',         color:'#4a5a6d'},
+    ];
+    for (const bd of CPU_BREAKDOWN) {
+      const pts = res.system?.[bd.key];
+      if (pts?.length) cpuDS.push({label:bd.label, data:pts.map(p=>({x:p.t,y:p.v})),
+        borderColor:bd.color, backgroundColor:'transparent', fill:false,
+        tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,2], hidden:true});
+    }
+    if (res.system?.cpu?.length)
+      cpuDS.push({label:'System total', data:res.system.cpu.map(p=>({x:p.t,y:p.v})),
+        borderColor:'#ffffff', backgroundColor:'transparent', fill:false,
+        tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
     if (cpuDS.length) mkChart('cpuChart',{type:'line',data:{datasets:cpuDS},options:{
       ...TSO,
-      scales:{...TSO.scales,y:{...TSO.scales.y,stacked:true,min:0,max:100,
+      scales:{...TSO.scales,y:{...TSO.scales.y,stacked:false,min:0,max:100,
         title:{display:true,text:'% of machine',color:'#6b7d93'}}},
       plugins:{...TSO.plugins,tooltip:{mode:'index',intersect:false,
         callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},

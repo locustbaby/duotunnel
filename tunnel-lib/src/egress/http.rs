@@ -39,13 +39,16 @@ pub fn create_https_client() -> HttpsClient {
 }
 
 pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
+    let mut http = HttpConnector::new();
+    http.set_nodelay(true);
+
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .unwrap()
         .https_or_http()
         .enable_http1()
         .enable_http2()
-        .build();
+        .wrap_connector(http);
 
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
