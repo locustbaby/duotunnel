@@ -748,6 +748,26 @@ jobs:
           kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
           sleep 0.5
 
+      - name: Flush TIME_WAIT sockets before frp benchmark
+        run: |
+          echo "TIME_WAIT before cleanup:"
+          ss -s 2>/dev/null | grep -i timewait || true
+          # Kill TIME_WAIT on tunnel-related ports
+          ss --kill state time-wait dst 127.0.0.1:8080 2>/dev/null || true
+          ss --kill state time-wait dst 127.0.0.1:8081 2>/dev/null || true
+          ss --kill state time-wait dst 127.0.0.1:9999 2>/dev/null || true
+          ss --kill state time-wait src 127.0.0.1 sport >= 1024 2>/dev/null || true
+          # Wait and verify cleanup
+          for i in $(seq 1 10); do
+            TW=$(ss -s 2>/dev/null | grep -oP 'timewait \K[0-9]+' || echo "0")
+            echo "  check $i: TIME_WAIT=$TW"
+            [ "$TW" -le 100 ] && break
+            ss --kill state time-wait dst 127.0.0.1 2>/dev/null || true
+            sleep 1
+          done
+          echo "TIME_WAIT after cleanup:"
+          ss -s 2>/dev/null | grep -i timewait || true
+
       - name: Install frp
         run: |
           FRP_VER=0.61.0
@@ -784,6 +804,19 @@ jobs:
         run: |
           kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
+
+      - name: Flush TIME_WAIT sockets after frp benchmark
+        if: always()
+        run: |
+          ss --kill state time-wait dst 127.0.0.1:18090 2>/dev/null || true
+          ss --kill state time-wait dst 127.0.0.1:9999 2>/dev/null || true
+          ss --kill state time-wait src 127.0.0.1 sport >= 1024 2>/dev/null || true
+          for i in $(seq 1 5); do
+            TW=$(ss -s 2>/dev/null | grep -oP 'timewait \K[0-9]+' || echo "0")
+            [ "$TW" -le 100 ] && break
+            ss --kill state time-wait dst 127.0.0.1 2>/dev/null || true
+            sleep 1
+          done
 
       - name: Stop resource sampling
         if: always()

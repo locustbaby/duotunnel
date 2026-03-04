@@ -16,7 +16,6 @@ mod pool;
 mod proxy;
 
 mod entry;
-mod utils;
 
 use app::LocalProxyMap;
 use config::ClientConfigFile;

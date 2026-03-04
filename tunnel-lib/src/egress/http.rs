@@ -8,13 +8,18 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::protocol::rewrite::Rewriter;
 use crate::transport::addr::parse_upstream;
 
 pub type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
+    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+>;
+
+pub type H2cClient = Client<
+    HttpConnector,
     http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
 >;
 
@@ -56,6 +61,21 @@ pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
         .build(https)
 }
 
+pub fn create_h2c_client() -> H2cClient {
+    create_h2c_client_with(&HttpClientParams::default())
+}
+
+pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
+    let mut http = HttpConnector::new();
+    http.set_nodelay(true);
+
+    Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(params.pool_max_idle_per_host)
+        .build(http)
+}
+
 pub async fn forward_http(
     mut recv: RecvStream,
     mut send: SendStream,
@@ -67,7 +87,7 @@ pub async fn forward_http(
 
     let parsed = parse_upstream(upstream_addr);
 
-    let mut first_buf = vec![0u8; 8192];
+    let mut first_buf = [0u8; 8192];
     let n = match recv.read(&mut first_buf).await? {
         Some(n) => n,
         None => return Ok(()),
@@ -138,15 +158,16 @@ pub async fn forward_http(
                 Some(Bytes::copy_from_slice(remaining_first)),
                 0usize,
                 content_length,
+                vec![0u8; 8192],
             ),
-            |(mut recv, first_chunk, mut read, total)| async move {
+            |(mut recv, first_chunk, mut read, total, mut buf)| async move {
                 if let Some(chunk) = first_chunk {
                     let len = chunk.len();
                     if len > 0 {
                         read += len;
                         return Ok(Some((
                             hyper::body::Frame::data(chunk),
-                            (recv, None, read, total),
+                            (recv, None, read, total, buf),
                         )));
                     }
                 }
@@ -157,15 +178,14 @@ pub async fn forward_http(
 
                 let remaining = total - read;
                 let to_read = 8192.min(remaining);
-                let mut buf = vec![0u8; to_read];
 
-                match recv.read(&mut buf).await {
+                match recv.read(&mut buf[..to_read]).await {
                     Ok(Some(n)) if n > 0 => {
                         read += n;
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         Ok(Some((
                             hyper::body::Frame::data(chunk),
-                            (recv, None, read, total),
+                            (recv, None, read, total, buf),
                         )))
                     }
                     Ok(_) => Ok(None),
@@ -190,7 +210,7 @@ pub async fn forward_http(
     let request = request_builder.body(req_body)?;
     let response = client.request(request).await?;
 
-    info!(
+    debug!(
         status = response.status().as_u16(),
         elapsed_ms = start_time.elapsed().as_millis(),
         "HTTP response received"

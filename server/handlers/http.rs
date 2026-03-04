@@ -68,8 +68,15 @@ async fn handle_http_connection(state: Arc<ServerState>, stream: TcpStream) -> R
             let host = detected_host
                 .or_else(|| extract_host_from_http(&buf[..n]))
                 .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
-            handle_plaintext_h1_connection(state, stream, host, protocol.to_string(), peer_addr, n)
-                .await
+            handle_plaintext_h1_connection(
+                state,
+                stream,
+                host,
+                protocol.to_string(),
+                peer_addr,
+                &buf[..n],
+            )
+            .await
         }
     }
 }
@@ -287,7 +294,7 @@ async fn handle_plaintext_h1_connection(
     host: String,
     protocol: String,
     peer_addr: std::net::SocketAddr,
-    peeked_bytes: usize,
+    initial_data: &[u8],
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
 
@@ -307,8 +314,12 @@ async fn handle_plaintext_h1_connection(
 
     let proxy_name = host.clone();
 
-    let mut data = vec![0u8; state.proxy_buffer_params.peek_buf_size];
-    stream.read_exact(&mut data[..peeked_bytes]).await?;
+    // Drain the peeked bytes from the kernel socket buffer. peek() leaves
+    // them in place, so we must consume them before forwarding. We already
+    // have the payload in `initial_data`, so this read is just to advance
+    // the socket position -- the destination buffer is discarded.
+    let mut discard = vec![0u8; initial_data.len()];
+    stream.read_exact(&mut discard).await?;
 
     proxy::forward_with_initial_data(
         &client_conn,
@@ -320,7 +331,7 @@ async fn handle_plaintext_h1_connection(
             host: Some(host),
         },
         stream,
-        &data[..peeked_bytes],
+        initial_data,
     )
     .await
 }

@@ -53,13 +53,10 @@ pub fn sanitize_request_headers(headers: &mut HeaderMap) {
     }
 }
 
-pub fn sanitize_response_headers(headers: &HeaderMap) -> HeaderMap {
-    let mut result = HeaderMap::new();
-    for (name, value) in headers {
-        let name_str = name.as_str();
-        if !HOP_BY_HOP_RESPONSE.contains(&name_str) {
-            result.insert(name.clone(), value.clone());
+pub fn sanitize_response_headers(headers: &mut HeaderMap) {
+    for name in HOP_BY_HOP_RESPONSE {
+        if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.remove(&header_name);
         }
     }
-    result
 }

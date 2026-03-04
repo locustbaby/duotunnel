@@ -19,8 +19,8 @@ use super::tcp::{TcpPeer, TlsTcpPeer};
 pub enum PeerKind {
     Tcp(TcpPeer),
     Tls(TlsTcpPeer),
-    Http(HttpPeer),
-    H2(H2Peer),
+    Http(Box<HttpPeer>),
+    H2(Box<H2Peer>),
     Dyn(Box<dyn UpstreamPeer>),
 }
 

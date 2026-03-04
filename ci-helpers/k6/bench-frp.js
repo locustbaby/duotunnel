@@ -22,7 +22,7 @@ export const options = {
       exec: 'ingressHttpGetKeepalive',
       rate: 3000,
       timeUnit: '1s',
-      duration: '15s',
+      duration: '20s',
       startTime: '0s',
       preAllocatedVUs: 50,
       maxVUs: 500,
@@ -32,8 +32,8 @@ export const options = {
       exec: 'ingressHttpGetNokl',
       rate: 3000,
       timeUnit: '1s',
-      duration: '15s',
-      startTime: '20s',
+      duration: '20s',
+      startTime: '25s',
       preAllocatedVUs: 50,
       maxVUs: 500,
     },
@@ -89,13 +89,13 @@ export function handleSummary(data) {
   }
 
   const scenarioMeta = {
-    ingress_3000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress', duration: 15 },
-    ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress', duration: 15 },
+    ingress_3000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress', duration: 20 },
+    ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress', duration: 20 },
   };
 
   const phases = [
-    {name:'3K KL (frp)',    start:0,  end:15, scenarios:['ingress_3000qps']},
-    {name:'3K no-KL (frp)', start:20, end:35, scenarios:['ingress_3000qps_nokl']},
+    {name:'3K KL (frp)',    start:0,  end:20, scenarios:['ingress_3000qps']},
+    {name:'3K no-KL (frp)', start:25, end:45, scenarios:['ingress_3000qps_nokl']},
   ];
 
   const scenarios = [];

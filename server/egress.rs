@@ -133,11 +133,11 @@ impl ProxyApp for ServerEgressApp {
                 } else {
                     "http".to_string()
                 };
-                Ok(PeerKind::Http(HttpPeer {
+                Ok(PeerKind::Http(Box::new(HttpPeer {
                     client: self.map.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme: scheme_str,
-                }))
+                })))
             }
             _ => Err(anyhow!("unsupported protocol for egress")),
         }
