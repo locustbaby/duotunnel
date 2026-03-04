@@ -2,7 +2,7 @@ use crate::app::{ClientApp, LocalProxyMap};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 use tunnel_lib::proxy::core::ProxyEngine;
 use tunnel_lib::recv_routing_info;
 
@@ -12,13 +12,6 @@ pub async fn handle_work_stream(
     proxy_map: Arc<LocalProxyMap>,
     tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
-    use http_body_util::BodyExt;
-    use hyper::server::conn::http2::Builder as H2Builder;
-    use hyper::service::service_fn;
-    use hyper::{Request, Response};
-    use hyper_util::rt::TokioIo;
-    use tunnel_lib::QuinnStream;
-
     let routing_info = recv_routing_info(&mut recv).await?;
 
     info!(
@@ -44,85 +37,35 @@ pub async fn handle_work_stream(
             upstream_addr
         );
 
-        let https_client = proxy_map.https_client.clone();
+        let normalized_addr = upstream_addr
+            .replace("wss://", "https://")
+            .replace("ws://", "http://");
+        let normalized_addr = if normalized_addr.contains("://") {
+            normalized_addr
+        } else {
+            format!("http://{}", normalized_addr)
+        };
+        let upstream_uri: hyper::Uri = normalized_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid upstream URI '{}': {}", normalized_addr, e))?;
 
-        let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-            let upstream_addr = upstream_addr.clone();
-            let client = https_client.clone();
-            async move {
-                let (mut parts, body) = req.into_parts();
+        let scheme = upstream_uri
+            .scheme_str()
+            .unwrap_or("http")
+            .to_string();
+        let authority = upstream_uri
+            .authority()
+            .map(|a| a.as_str().to_string())
+            .unwrap_or(upstream_addr);
 
-                let normalized_addr = upstream_addr
-                    .replace("wss://", "https://")
-                    .replace("ws://", "http://");
-                let normalized_addr = if normalized_addr.contains("://") {
-                    normalized_addr
-                } else {
-                    format!("http://{}", normalized_addr)
-                };
-                let upstream_uri: hyper::Uri = match normalized_addr.parse() {
-                    Ok(uri) => uri,
-                    Err(e) => {
-                        tracing::error!("invalid upstream URI '{}': {}", normalized_addr, e);
-                        return Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap());
-                    }
-                };
-
-                let mut uri_parts = parts.uri.clone().into_parts();
-                uri_parts.scheme = upstream_uri.scheme().cloned();
-                uri_parts.authority = upstream_uri.authority().cloned();
-                if let Ok(new_uri) = hyper::Uri::from_parts(uri_parts) {
-                    parts.uri = new_uri;
-                }
-                if let Some(auth) = upstream_uri.authority() {
-                    if let Ok(hv) = auth.as_str().parse() {
-                        parts.headers.insert(hyper::header::HOST, hv);
-                    }
-                }
-
-                debug!(
-                    "Client H2: forwarding {} {} to upstream",
-                    parts.method, parts.uri
-                );
-
-                let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
-                let upstream_req = Request::from_parts(parts, boxed_body);
-
-                match client.request(upstream_req).await {
-                    Ok(resp) => {
-                        let (parts, body) = resp.into_parts();
-                        let boxed = body.map_err(std::io::Error::other).boxed_unsync();
-                        Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
-                    }
-                    Err(e) => {
-                        debug!(error = %e, "Client H2: upstream request failed");
-                        Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                http_body_util::Full::new(bytes::Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap())
-                    }
-                }
-            }
-        });
-
-        let quic_stream = QuinnStream { send, recv };
-        let io = TokioIo::new(quic_stream);
-
-        H2Builder::new(hyper_util::rt::TokioExecutor::new())
-            .serve_connection(io, service)
-            .await
-            .map_err(|e| anyhow::anyhow!("Client H2 connection error: {}", e))?;
+        let stream = tunnel_lib::QuinnStream { send, recv };
+        tunnel_lib::proxy::h2::serve_h2_forward(
+            stream,
+            proxy_map.https_client.clone(),
+            scheme,
+            authority,
+        )
+        .await?;
     } else {
         let app = ClientApp::new(proxy_map, tcp_params);
         let engine = ProxyEngine::new(app);

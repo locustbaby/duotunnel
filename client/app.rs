@@ -234,18 +234,11 @@ impl ProxyApp for ClientApp {
                             recv: quinn::RecvStream,
                             initial_data: Option<bytes::Bytes>,
                         ) -> anyhow::Result<()> {
-                            use crate::utils::{PrefixedReadWrite, QuinnStream};
-                            use http_body_util::{BodyExt, Full};
-                            use hyper::server::conn::http2::Builder as H2Builder;
-                            use hyper::service::service_fn;
-                            use hyper::{Request, Response};
-                            use hyper_util::rt::TokioIo;
-
-                            let stream = QuinnStream { send, recv };
+                            let stream = tunnel_lib::QuinnStream { send, recv };
                             let stream = if let Some(init) = initial_data {
-                                PrefixedReadWrite::new(stream, init)
+                                tunnel_lib::PrefixedReadWrite::new(stream, init)
                             } else {
-                                PrefixedReadWrite::new(stream, bytes::Bytes::new())
+                                tunnel_lib::PrefixedReadWrite::new(stream, bytes::Bytes::new())
                             };
 
                             let accepted_stream = self
@@ -259,67 +252,13 @@ impl ProxyApp for ClientApp {
                                 self.tls_host
                             );
 
-                            let target_host = self.tls_host.clone();
-                            let client = self.https_client.clone();
-
-                            let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-                                let target_host = target_host.clone();
-                                let client = client.clone();
-                                async move {
-                                    let (mut parts, body) = req.into_parts();
-
-                                    let mut uri_parts = parts.uri.clone().into_parts();
-                                    uri_parts.scheme = Some(hyper::http::uri::Scheme::HTTPS);
-                                    uri_parts.authority = Some(target_host.parse().unwrap());
-                                    parts.uri = hyper::Uri::from_parts(uri_parts).unwrap();
-
-                                    parts
-                                        .headers
-                                        .insert(hyper::header::HOST, target_host.parse().unwrap());
-
-                                    debug!(
-                                        "MITM H2: forwarding request to {} {}",
-                                        parts.method, parts.uri
-                                    );
-
-                                    let boxed_body =
-                                        body.map_err(std::io::Error::other).boxed_unsync();
-                                    let upstream_req = Request::from_parts(parts, boxed_body);
-
-                                    match client.request(upstream_req).await {
-                                        Ok(resp) => {
-                                            let (parts, body) = resp.into_parts();
-                                            let boxed =
-                                                body.map_err(std::io::Error::other).boxed_unsync();
-                                            Ok::<_, hyper::Error>(Response::from_parts(
-                                                parts, boxed,
-                                            ))
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "MITM H2: upstream request failed: {}",
-                                                e
-                                            );
-                                            Ok(Response::builder()
-                                                .status(502)
-                                                .body(
-                                                    Full::new(bytes::Bytes::from("Bad Gateway"))
-                                                        .map_err(|_| unreachable!())
-                                                        .boxed_unsync(),
-                                                )
-                                                .unwrap())
-                                        }
-                                    }
-                                }
-                            });
-
-                            let io = TokioIo::new(accepted_stream);
-                            H2Builder::new(hyper_util::rt::TokioExecutor::new())
-                                .serve_connection(io, service)
-                                .await
-                                .map_err(|e| anyhow!("H2 connection error: {}", e))?;
-
-                            Ok(())
+                            tunnel_lib::proxy::h2::serve_h2_forward(
+                                accepted_stream,
+                                self.https_client.clone(),
+                                "https".to_string(),
+                                self.tls_host.clone(),
+                            )
+                            .await
                         }
                     }  // impl MitmH2Peer
 

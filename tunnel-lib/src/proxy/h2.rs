@@ -1,21 +1,95 @@
 use anyhow::Result;
 use bytes::Bytes;
-use futures_util::Stream;
-use h2::server::handshake;
-use http_body_util::{BodyExt, StreamBody};
-use hyper::body::Frame;
+use http_body_util::BodyExt;
+use hyper::server::conn::http2::Builder as H2Builder;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use quinn::{RecvStream, SendStream};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::{debug, error, info};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{debug, info};
 
-type HttpsClient = Client<
+use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
+
+pub type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
     http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
 >;
+
+/// Serve an H2 connection on `io`, forwarding each request to `target_host`
+/// via the connection-pooled `client`.
+///
+/// This is the unified implementation used by both the server egress
+/// (`H2Peer`) and the client H2 path.
+pub async fn serve_h2_forward<IO>(
+    io: IO,
+    client: HttpsClient,
+    scheme: String,
+    target_host: String,
+) -> Result<()>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+        let client = client.clone();
+        let scheme = scheme.clone();
+        let target_host = target_host.clone();
+        async move {
+            let (mut parts, body) = req.into_parts();
+
+            let target_uri: hyper::Uri = format!(
+                "{}://{}{}",
+                scheme,
+                target_host,
+                parts
+                    .uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/")
+            )
+            .parse()
+            .unwrap();
+
+            parts.uri = target_uri;
+            if let Ok(hv) = target_host.parse() {
+                parts.headers.insert(hyper::header::HOST, hv);
+            }
+
+            debug!("H2 forward: {} {}", parts.method, parts.uri);
+
+            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+            let upstream_req = Request::from_parts(parts, boxed_body);
+
+            match client.request(upstream_req).await {
+                Ok(resp) => {
+                    let (parts, body) = resp.into_parts();
+                    let boxed = body.map_err(std::io::Error::other).boxed_unsync();
+                    Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
+                }
+                Err(e) => {
+                    debug!(error = %e, "H2 forward: upstream request failed");
+                    Ok(Response::builder()
+                        .status(502)
+                        .body(
+                            http_body_util::Full::new(Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
+                        .unwrap())
+                }
+            }
+        }
+    });
+
+    H2Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(io), service)
+        .await
+        .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;
+
+    Ok(())
+}
 
 pub struct H2Peer {
     pub target_host: String,
@@ -32,256 +106,12 @@ impl H2Peer {
     ) -> Result<()> {
         info!(target = %self.target_host, scheme = %self.scheme, "H2 proxy starting");
 
-        let io = QuicIo::new(send, recv, initial_data);
-
-        let mut h2_conn = match handshake(io).await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("H2 handshake failed: {}", e);
-                return Err(anyhow::anyhow!("H2 handshake failed: {}", e));
-            }
-        };
-
-        while let Some(request) = h2_conn.accept().await {
-            let (req, mut respond) = match request {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("H2 accept error: {}", e);
-                    break;
-                }
-            };
-
-            let client = self.client.clone();
-            let target_host = self.target_host.clone();
-            let scheme = self.scheme.clone();
-
-            tokio::spawn(async move {
-                let (parts, body) = req.into_parts();
-                debug!(method = %parts.method, uri = %parts.uri, "H2 request received");
-
-                let target_uri = format!(
-                    "{}://{}{}",
-                    scheme,
-                    target_host,
-                    parts
-                        .uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                );
-
-                let mut builder = hyper::Request::builder()
-                    .method(parts.method)
-                    .uri(&target_uri)
-                    .version(hyper::Version::HTTP_2);
-
-                for (name, value) in parts.headers.iter() {
-                    if name != "host"
-                        && !name.as_str().starts_with(':')
-                        && name != "connection"
-                        && name != "upgrade"
-                        && name != "keep-alive"
-                        && name != "proxy-connection"
-                        && name != "te"
-                        && name != "transfer-encoding"
-                    {
-                        builder = builder.header(name, value);
-                    }
-                }
-                builder = builder.header("host", &target_host);
-
-                let stream_body = stream_body_from_h2(body);
-                let boxed_body = http_body_util::combinators::UnsyncBoxBody::new(stream_body);
-
-                let upstream_req = match builder.body(boxed_body) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!("Failed to build upstream request: {}", e);
-                        return;
-                    }
-                };
-
-                let response = match client.request(upstream_req).await {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        error!("Upstream request failed: {}", e);
-
-                        let _ = respond.send_response(
-                            hyper::Response::builder().status(502).body(()).unwrap(),
-                            true,
-                        );
-                        return;
-                    }
-                };
-
-                info!(status = %response.status(), "Upstream response received");
-
-                let (resp_parts, mut resp_body) = response.into_parts();
-                let mut h2_response = hyper::Response::builder().status(resp_parts.status);
-
-                for (name, value) in resp_parts.headers.iter() {
-                    if !name.as_str().starts_with(':') {
-                        h2_response = h2_response.header(name, value);
-                    }
-                }
-
-                let h2_resp_empty = h2_response.body(()).unwrap();
-                let mut send_stream = match respond.send_response(h2_resp_empty, false) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to send H2 response headers: {}", e);
-                        return;
-                    }
-                };
-
-                while let Some(frame_res) = resp_body.frame().await {
-                    match frame_res {
-                        Ok(frame) => {
-                            if frame.is_data() {
-                                let data = frame.into_data().unwrap();
-                                let len = data.len();
-
-                                send_stream.reserve_capacity(len);
-                                loop {
-                                    if send_stream.capacity() >= len {
-                                        break;
-                                    }
-                                    match futures_util::future::poll_fn(|cx| {
-                                        send_stream.poll_capacity(cx)
-                                    })
-                                    .await
-                                    {
-                                        None => {
-                                            error!("H2 flow control: send stream closed before capacity granted");
-                                            return;
-                                        }
-                                        Some(Err(e)) => {
-                                            error!("H2 flow control error: {}", e);
-                                            return;
-                                        }
-                                        Some(Ok(_)) => {}
-                                    }
-                                }
-
-                                if let Err(e) = send_stream.send_data(data, false) {
-                                    error!("Failed to send response data: {}", e);
-                                    return;
-                                }
-                            } else if frame.is_trailers() {
-                                let trailers = frame.into_trailers().unwrap();
-                                if let Err(e) = send_stream.send_trailers(trailers) {
-                                    error!("Failed to send response trailers: {}", e);
-                                    return;
-                                }
-
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error reading response body: {}", e);
-                            return;
-                        }
-                    }
-                }
-
-                if let Err(e) = send_stream.send_data(Bytes::new(), true) {
-                    debug!("Failed to send EOS (might be already closed): {}", e);
-                }
-            });
-        }
-
-        Ok(())
-    }
-}
-
-fn stream_body_from_h2(
-    mut body: h2::RecvStream,
-) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + 'static> {
-    let stream = futures_util::stream::poll_fn(move |cx| match body.poll_data(cx) {
-        Poll::Ready(Some(Ok(bytes))) => {
-            let _ = body.flow_control().release_capacity(bytes.len());
-            Poll::Ready(Some(Ok(Frame::data(bytes))))
-        }
-        Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
-        Poll::Ready(None) => match body.poll_trailers(cx) {
-            Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(std::io::Error::other(e)))),
-            Poll::Pending => Poll::Pending,
-        },
-        Poll::Pending => Poll::Pending,
-    });
-    StreamBody::new(stream)
-}
-
-struct QuicIo {
-    send: SendStream,
-    recv: RecvStream,
-    initial_data: Option<Bytes>,
-    initial_pos: usize,
-}
-
-impl QuicIo {
-    fn new(send: SendStream, recv: RecvStream, initial_data: Option<Bytes>) -> Self {
-        Self {
-            send,
-            recv,
-            initial_data,
-            initial_pos: 0,
-        }
-    }
-}
-
-impl AsyncRead for QuicIo {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if let Some(ref initial) = self.initial_data {
-            if self.initial_pos < initial.len() {
-                let remaining = &initial[self.initial_pos..];
-                let to_copy = std::cmp::min(remaining.len(), buf.remaining());
-                buf.put_slice(&remaining[..to_copy]);
-                self.initial_pos += to_copy;
-                return Poll::Ready(Ok(()));
-            }
-        }
-
-        match Pin::new(&mut self.recv).poll_read(cx, buf) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl AsyncWrite for QuicIo {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match Pin::new(&mut self.send).poll_write(cx, buf) {
-            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match Pin::new(&mut self.send).poll_flush(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match Pin::new(&mut self.send).poll_shutdown(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
+        let stream = QuinnStream { send, recv };
+        if let Some(init) = initial_data.filter(|b| !b.is_empty()) {
+            let io = PrefixedReadWrite::new(stream, init);
+            serve_h2_forward(io, self.client, self.scheme, self.target_host).await
+        } else {
+            serve_h2_forward(stream, self.client, self.scheme, self.target_host).await
         }
     }
 }
