@@ -393,9 +393,11 @@ function renderDetail(entry) {
     </td></tr>`;
     for (const s of group) {
       const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
-      const ps = prevScMap[s.name];
+      const isFrp = s.tunnel === 'frp';
+      const ps = isFrp ? null : prevScMap[s.name];
+      const tunnelTag = isFrp ? ` <span style="font-size:9px;font-weight:600;color:var(--orange);background:rgba(245,166,35,.15);padding:1px 5px;border-radius:3px">frp</span>` : '';
       html += `<tr>
-        <td style="color:var(--text)">${s.name}</td>
+        <td style="color:var(--text)">${s.name}${tunnelTag}</td>
         <td>${pillFor(s.protocol)}</td>
         <td style="color:var(--text2)">${s.direction}</td>
         <td>${s.p50} <span class="c-dim">ms</span></td>
