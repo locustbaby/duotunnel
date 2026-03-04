@@ -137,10 +137,17 @@ function phaseAnnotations(entry) {
     const s = p.start + offset;
     const e = p.end + offset;
     const col = PHASE_COLORS[i % PHASE_COLORS.length];
-    a['phase'+i] = {type:'box',xMin:s,xMax:e,backgroundColor:col,borderWidth:0};
     const nsc = (p.scenarios||[]).length;
     const label = nsc ? `${p.name} (${nsc})` : p.name;
-    a['phaseLabel'+i] = {type:'label',xValue:(s+e)/2,yValue:'max',content:label,color:'#4a5a6d',font:{size:8,weight:'bold'},position:'start'};
+    const yAdj = (i % 2 === 0) ? 10 : 24;
+    a['phase'+i] = {
+      type: 'box', xMin: s, xMax: e, backgroundColor: col, borderWidth: 0,
+      label: {
+        display: true, content: label,
+        color: 'rgba(180,200,220,0.75)', font: {size: 8, weight: 'bold'},
+        position: {x: 'center', y: 'start'}, yAdjust: yAdj,
+      },
+    };
     a['phaseLine'+i+'s'] = {type:'line',xMin:s,xMax:s,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
     a['phaseLine'+i+'e'] = {type:'line',xMin:e,xMax:e,borderColor:'rgba(74,90,109,.3)',borderWidth:1,borderDash:[3,3]};
   });
