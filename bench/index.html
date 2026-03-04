@@ -122,11 +122,13 @@ function latencyBar(val, max, proto) {
 
 const PHASE_COLORS = [
   'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
-  'rgba(239,83,80,.08)','rgba(167,139,250,.08)',
+  'rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)',
+  'rgba(56,189,248,.08)','rgba(251,191,36,.08)',
 ];
 const FALLBACK_PHASES = [
-  {name:'Basic',start:0,end:23},{name:'Body/Payload',start:30,end:49},
-  {name:'3K QPS',start:60,end:75},{name:'3K no-KL',start:85,end:100},
+  {name:'Basic',start:0,end:24},{name:'Body/Payload',start:30,end:49},
+  {name:'Ingress 3K',start:60,end:75},{name:'Egress 3K',start:80,end:95},
+  {name:'Ingress no-KL',start:100,end:115},{name:'Egress no-KL',start:120,end:135},
 ];
 
 function phaseAnnotations(entry) {
@@ -134,11 +136,13 @@ function phaseAnnotations(entry) {
   const offset = entry?.resources?.k6OffsetSeconds || 0;
   const phaseDefs = entry?.phases || FALLBACK_PHASES;
   phaseDefs.forEach((p, i) => {
-    const s = p.start + offset;
-    const e = p.end + offset;
+    const isFrp = p.tunnel === 'frp';
+    const s = p.start + (isFrp ? 0 : offset);
+    const e = p.end + (isFrp ? 0 : offset);
     const col = PHASE_COLORS[i % PHASE_COLORS.length];
     const nsc = (p.scenarios||[]).length;
-    const label = nsc ? `${p.name} (${nsc})` : p.name;
+    const prefix = isFrp ? 'frp: ' : '';
+    const label = nsc ? `${prefix}${p.name} (${nsc})` : `${prefix}${p.name}`;
     const yAdj = (i % 2 === 0) ? 10 : 24;
     a['phase'+i] = {
       type: 'box', xMin: s, xMax: e, backgroundColor: col, borderWidth: 0,
@@ -228,7 +232,7 @@ function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? en
 const catDescs = {
   basic: 'Ramping rate (10→40/s). Multiple protocols running concurrently at moderate load to test baseline latency.',
   body_size: 'Fixed rate (10–30/s). Concurrent payloads of 1K/10K/100K to measure throughput vs body size.',
-  stress: 'Fixed rate at 3K QPS with keepalive and no-keepalive. Ingress + egress pairs run concurrently to find saturation point.',
+  stress: 'Fixed rate at 3K QPS with keepalive and no-keepalive. Ingress and egress run serially to isolate per-direction throughput.',
 };
 
 function navigate() {
@@ -265,7 +269,7 @@ function renderOverview() {
     <div class="panel tall"><h3>Body Size — fixed rate, payload scaling</h3><div class="chart-area"><canvas id="trendBody"></canvas></div><div id="trendBody-leg" class="leg-wrap"></div></div>
   </div>
   <div class="row full">
-    <div class="panel tall"><h3>Stress — 3K QPS keepalive + no-keepalive</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
+    <div class="panel tall"><h3>Stress — 3K QPS serial (ingress → egress → no-KL)</h3><div class="chart-area"><canvas id="trendStress"></canvas></div><div id="trendStress-leg" class="leg-wrap"></div></div>
   </div>
 
   <div class="sec">All Runs</div>
