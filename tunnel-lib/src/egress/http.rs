@@ -8,7 +8,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::protocol::rewrite::Rewriter;
 use crate::transport::addr::parse_upstream;
@@ -87,7 +87,7 @@ pub async fn forward_http(
 
     let parsed = parse_upstream(upstream_addr);
 
-    let mut first_buf = vec![0u8; 8192];
+    let mut first_buf = [0u8; 8192];
     let n = match recv.read(&mut first_buf).await? {
         Some(n) => n,
         None => return Ok(()),
@@ -158,15 +158,16 @@ pub async fn forward_http(
                 Some(Bytes::copy_from_slice(remaining_first)),
                 0usize,
                 content_length,
+                vec![0u8; 8192],
             ),
-            |(mut recv, first_chunk, mut read, total)| async move {
+            |(mut recv, first_chunk, mut read, total, mut buf)| async move {
                 if let Some(chunk) = first_chunk {
                     let len = chunk.len();
                     if len > 0 {
                         read += len;
                         return Ok(Some((
                             hyper::body::Frame::data(chunk),
-                            (recv, None, read, total),
+                            (recv, None, read, total, buf),
                         )));
                     }
                 }
