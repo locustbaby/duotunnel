@@ -9,7 +9,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 type HttpsClient = Client<HttpsConnector<HttpConnector>, UnsyncBoxBody<Bytes, std::io::Error>>;
 
@@ -79,12 +79,12 @@ impl HttpPeer {
             let response = match self.client.request(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    info!(error = %e, "H1 upstream request failed, closing connection");
+                    debug!(error = %e, "H1 upstream request failed, closing connection");
                     break;
                 }
             };
 
-            info!(status = %response.status(), "H1 received response");
+            debug!(status = %response.status(), "H1 received response");
 
             if let Err(e) = driver.write_response(response).await {
                 debug!(error = %e, "H1 write_response error, closing");

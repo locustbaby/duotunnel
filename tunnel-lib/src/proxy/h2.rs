@@ -7,7 +7,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::egress::http::{H2cClient, HttpsClient};
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
@@ -109,7 +109,7 @@ impl H2Peer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
-        info!(target = %self.target_host, scheme = %self.scheme, "H2 proxy starting");
+        debug!(target = %self.target_host, scheme = %self.scheme, "H2 proxy starting");
 
         let stream = QuinnStream { send, recv };
         if let Some(init) = initial_data.filter(|b| !b.is_empty()) {

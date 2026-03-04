@@ -178,15 +178,14 @@ pub async fn forward_http(
 
                 let remaining = total - read;
                 let to_read = 8192.min(remaining);
-                let mut buf = vec![0u8; to_read];
 
-                match recv.read(&mut buf).await {
+                match recv.read(&mut buf[..to_read]).await {
                     Ok(Some(n)) if n > 0 => {
                         read += n;
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
                         Ok(Some((
                             hyper::body::Frame::data(chunk),
-                            (recv, None, read, total),
+                            (recv, None, read, total, buf),
                         )))
                     }
                     Ok(_) => Ok(None),
@@ -211,7 +210,7 @@ pub async fn forward_http(
     let request = request_builder.body(req_body)?;
     let response = client.request(request).await?;
 
-    info!(
+    debug!(
         status = response.status().as_u16(),
         elapsed_ms = start_time.elapsed().as_millis(),
         "HTTP response received"
