@@ -1,23 +1,5 @@
 # Tunnel TODO
 
-## 已完成
-
-- ~~[TODO-0] tcp_tw_reuse~~ — tune-os.sh 已包含
-- ~~[TODO-1] H1 keep-alive loop~~ — `HttpPeer::connect_inner()` 已实现循环 + `Http1Driver` reclaim
-- ~~[TODO-2] 热路径日志降级~~ — `b6b42d8` info→debug
-- ~~[TODO-3] tracing 位置和级别~~ — 同 TODO-2
-- ~~[TODO-4] first_buf 栈分配~~ — `d50d291` 改为单次 read + initial_data 传递
-- ~~[TODO-5] peek+read_exact 双拷贝~~ — `d50d291` 改为单次 read + initial_data 传递
-- ~~[TODO-7] forward_http 每请求 Vec 分配~~ — `068bb2a`
-- ~~[TODO-8] sanitize_response_headers clone~~ — `1e1eea9` in-place removal
-- ~~[TODO-9] H2 client 连接池复用~~ — `fb9c4c9`
-- ~~[TODO-10] TCP_NODELAY~~ — `8f23832` upstream HttpConnector
-- ~~[TODO-11] jemalloc~~ — 已启用
-- ~~[TODO-12] fat LTO + codegen-units=1~~ — Cargo.toml release profile
-- ~~[TODO-13] BBR congestion~~ — quinn transport config
-
----
-
 ## Config 调优（不改代码）
 
 ### [TODO-16] QUIC connections: 1 → 4
