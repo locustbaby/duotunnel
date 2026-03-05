@@ -19,6 +19,7 @@ const allScenarios = [
   'ws_ingress', 'ws_multi_msg',
   'ingress_3000qps', 'egress_3000qps',
   'ingress_3000qps_nokl', 'egress_3000qps_nokl',
+  'ingress_8000qps', 'egress_8000qps',
 ];
 for (const s of allScenarios) {
   trends[s] = new Trend(`t_${s}`, true);
@@ -239,6 +240,26 @@ export const options = {
       duration: '20s',
       startTime: '140s',
       preAllocatedVUs: 50,
+      maxVUs: 500,
+    },
+    ingress_8000qps: {
+      executor: 'constant-arrival-rate',
+      exec: 'ingressHttpGet',
+      rate: 8000,
+      timeUnit: '1s',
+      duration: '20s',
+      startTime: '165s',
+      preAllocatedVUs: 100,
+      maxVUs: 500,
+    },
+    egress_8000qps: {
+      executor: 'constant-arrival-rate',
+      exec: 'egressHttpGet',
+      rate: 8000,
+      timeUnit: '1s',
+      duration: '20s',
+      startTime: '190s',
+      preAllocatedVUs: 100,
       maxVUs: 500,
     },
   },
@@ -607,6 +628,8 @@ export function handleSummary(data) {
     egress_3000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
     ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20 },
     egress_3000qps_nokl:  { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
+    ingress_8000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20 },
+    egress_8000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
   };
 
   const phases = [
@@ -616,6 +639,8 @@ export function handleSummary(data) {
     {name:'Ingress no-KL', start:90, end:110, scenarios:['ingress_3000qps_nokl']},
     {name:'Egress 3K', start:115, end:135, scenarios:['egress_3000qps']},
     {name:'Egress no-KL', start:140, end:160, scenarios:['egress_3000qps_nokl']},
+    {name:'Ingress 8K', start:165, end:185, scenarios:['ingress_8000qps']},
+    {name:'Egress 8K', start:190, end:210, scenarios:['egress_8000qps']},
   ];
 
   const scenarios = [];

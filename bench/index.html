@@ -124,11 +124,13 @@ const PHASE_COLORS = [
   'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
   'rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)',
   'rgba(56,189,248,.08)','rgba(251,191,36,.08)',
+  'rgba(132,204,22,.08)','rgba(168,85,247,.08)',
 ];
 const FALLBACK_PHASES = [
   {name:'Basic',start:0,end:29},{name:'Body/Payload',start:35,end:59},
   {name:'Ingress 3K',start:65,end:85},{name:'Ingress no-KL',start:90,end:110},
   {name:'Egress 3K',start:115,end:135},{name:'Egress no-KL',start:140,end:160},
+  {name:'Ingress 8K',start:165,end:185},{name:'Egress 8K',start:190,end:210},
 ];
 
 function phaseAnnotations(entry) {

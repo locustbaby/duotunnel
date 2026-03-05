@@ -6,7 +6,7 @@ server:
   quic:
     keepalive_secs: 10
     idle_timeout_secs: 30
-    max_concurrent_streams: 200
+    max_concurrent_streams: 1000
 
 server_egress_upstream:
   upstreams:

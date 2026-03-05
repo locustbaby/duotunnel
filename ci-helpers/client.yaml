@@ -5,9 +5,10 @@ server_port: 10086
 client_group_id: "ci-group"
 http_entry_port: 8081
 quic:
+  connections: 4
   keepalive_secs: 10
   idle_timeout_secs: 30
-  max_concurrent_streams: 200
+  max_concurrent_streams: 1000
 reconnect:
   initial_delay_ms: 500
   max_delay_ms: 5000
