@@ -160,18 +160,71 @@ Switch the generic relaying function to use type-specific `into_split()`, avoidi
 
 ## Inspiration from Pingora (Industrial Grade Architecture)
 
-### [TODO-35] Thread-Shared Global Connection Pooling
-Based on Pingora's core design. Break the per-task connection pool limit and implement global `Upstream` connection sharing. Reduces TCP/TLS handshake frequency under high concurrency, significantly improving TTFB.
+### [TODO-35] Thread-Shared Global Connection Pooling (Two-Tier Architecture)
+**Priority**: High
+Based on Pingora's `pingora-pool` core design. Instead of a single highly-contended `RwLock<HashMap>` or completely unshared thread-local pools, implement a generic Two-Tier Pool for local egress TCP connections. Use a small, fixed-capacity, cache-friendly lock-free queue (like `crossbeam_queue::ArrayQueue`) as an L1 hot cache for immediate connection retrieval without locking, falling back to a global `Mutex<HashMap>` (L2 cache) only during peak spikes. Additionally, implement active idle monitoring to proactively drop connections closed by peers.
 
 ### [TODO-36] Static Dispatch Refactor: Eliminate Boxed Traits
 **Files**: `tunnel-lib/src/proxy/peers.rs`
+**Priority**: Medium
 Extreme CPU optimization following Pingora practices. Refactor `PeerKind`'s `Dyn(Box<dyn UpstreamPeer>)` to `Enum`-based static dispatch where possible to reduce vtable lookup overhead and improve CPU branch prediction.
 
-### [TODO-37] Seamless Graceful Handover
-Implement a signal-based (e.g., SIGQUIT) graceful exit mechanism. Upon entering the shutdown sequence, reject new tunnel requests but allow existing long-lived connections to finish processing before exiting, ensuring zero business interruption during upgrades.
+### [TODO-37] Seamless Graceful Handover (Hot Upgrades)
+**Priority**: Medium
+Implement a signal-based (e.g., SIGQUIT) graceful exit mechanism and file-descriptor passing via SCM_RIGHTS. Upon entering the shutdown sequence, transfer the listening socket fd to the newly spawned DuoTunnel process while allowing existing long-lived connections to finish processing on the old process, ensuring true zero-downtime binary upgrades.
 
 ### [TODO-38] Vectorized IO Relaying (Vectorized IO / writev)
-On the HTTP relaying path, combined with [TODO-33] zero-copy parsing, use `writev` to send Header offset slices and Body content together. Avoids the overhead of copying multiple memory blocks into a continuous buffer before sending.
+**Priority**: High
+On the HTTP relaying path, combined with [TODO-33] zero-copy parsing, use `writev` (via `tokio::io::AsyncWrite::write_vectored`) to send Header offset slices and Body content together. Avoids the overhead of continuously copying multiple memory blocks into a linear buffer before transmitting them to the NIC.
+
+### [TODO-44] Zero-Cost Lazy Timers (O(1) Timeout Resolution)
+**Priority**: High
+Following `pingora-timeout`, replacing `tokio::time::timeout` for network stream idle detection. Implement a custom wrapper that only registers the timeout with Tokio's reactor wheel if the underlying `Future` (like an IO read) returns `Poll::Pending` on its first poll. Since 99% of hot-path reads complete instantly, this entirely eliminates the overhead of creating and destroying thousands of timer timers per second. Additionally, round timer deadlines to 10ms boundaries to share expiration slots.
+
+### [TODO-39] TCP Fast Open (TFO) for Egress Connections
+**Priority**: Medium
+When the server/client forwards traffic to local/remote upstreams, setting `TCP_FASTOPEN` on the socket allows the 0-RTT transmission of the initial payload during the TCP SYN packet. This will significantly reduce the TTFB for establishing new egress connections.
+
+### [TODO-40] Buffer Slab Allocator / Arena
+**Priority**: Medium
+While `BytesMut` with `Jemalloc` handles memory decently, allocating read/write buffers per connection still hits the heap. Implement a connection-independent, thread-local Slab Allocator or an Arena pool to recycle fixed-size byte arrays instantly, completely bypassing OS heap mechanisms.
+
+### [TODO-41] Thread-per-Core & Anti-Work-Stealing (pingora-runtime)
+**Priority**: Low (High Complexity)
+Transition from Tokio's default work-stealing scheduler to a Strict `Share-Nothing` Thread-per-Core architecture. Similar to Pingora's `NoStealRuntime`, manually spawn multiple single-threaded Tokio executors (`Builder::new_current_thread`) mapped to specific NUMA Nodes. Work-stealing for heavy network IO causes severe CPU L2/L3 Cache misses when tasks cross cores. By locking processing to specific cores and removing global atomic structs like `DashMap`, we can achieve linearly scalable performance and **Deterministic Latency** without switching out of the Tokio ecosystem entirely.
+
+### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
+**Priority**: Low (Experimental)
+Since QUIC relies entirely on UDP packets, the Linux kernel networking stack (sk_buff allocations, iptables, netfilter) introduces major latency. Using `AF_XDP` sockets allows reading the UDP datagrams directly from the NIC driver rings into user space, circumventing the kernel entirely.
+
+### [TODO-43] Memory HugePages Support
+**Priority**: Low
+Enable Transparent HugePages (THP) or explicit 2MB HugePages, and configure `Jemalloc` to use them. For a networking tunnel doing heavy buffer copying, this drastically reduces TLB (Translation Lookaside Buffer) misses in the CPU.
+
+### [TODO-45] Zero-Copy HTTP Header Serialization (pingora-header-serde & KVRef)
+**Priority**: Medium
+Instead of deeply parsing HTTP headers into String maps, use a **KVRef (Key-Value Reference)** approach. Record only the **Offset and Length** of headers within the original receive buffer. For proxying/relaying, untouched headers should be forwarded exactly as they appeared in the raw `[u8]` buffer, combining these slices at the end using `writev` to bypass allocation and concatenation costs entirely, significantly reducing heap fragmentation and GC pressure.
+
+### [TODO-46] Dynamic TCP Congestion Control & Buffer Tuning
+**Priority**: Low
+Expose advanced sys_socket options for egress connections. Similar to Pingora, dynamically set `TCP_NODELAY`, `TCP_KEEPINTVL`, or even tweak `Initcwnd` (Initial Congestion Window) and SNDBUF/RCVBUF on a per-connection basis to better handle Long Fat Networks (LFNs) without relying solely on OS defaults.
+
+### [TODO-47] Memory-efficient Load Balancing Ring (Ring V2)
+**Priority**: Low
+If DuoTunnel evolves to support multi-replica upstream selection for high-availability subdomains, implement a contiguous 1D array-based Hash Ring (Ketama Ring V2). Use binary search over memory-contiguous points to ensure 99%+ CPU L1 cache hits during selection, rather than traversing complex tree or map structures.
+
+---
+
+## Non-Applicable / Reference Architectures 
+
+### [Reference] Case-insensitive Trie for Header Matching (pingora-http)
+Pingora uses a highly compact static dictionary/Trie (e.g., matching `HeaderName::Host` without String allocation) to sniff HTTP headers. *Why it's not applicable*: DuoTunnel's HTTP parsing primarily extracts the `Host` or `Upgrade` header for initial protocol detection and then switches to hyper/h2 or raw TCP relay. We don't act as a full Layer 7 reverse proxy that modifies complex headers natively, so a full Trie is overkill.
+
+### [Reference] TinyLFU Memory Caching (pingora-lru / tinyufo)
+Pingora implements an advanced LFU + Bloom Filter (TinyUFO) with sharded locks for memory caching to prevent cache pollution from single-hit cold traffic. *Why it's not applicable*: DuoTunnel is a transparent Tunnel/Proxy without static content caching or heavy LRU caching semantics. Our only "cache" is the connection pool.
+
+### [Reference] Memory-Contiguous Ketama Hash Ring (pingora-ketama)
+For load balancing, Pingora flattens the Hash Ring into a contiguous 1D array to achieve 99%+ CPU L1 Cache hits during binary search for upstream routing. *Why it's not applicable*: DuoTunnel routes traffic to specific user machines based on exact subdomain mapping (`ClientRegistry`), it does not perform typical weight-based or predictable-hash load balancing across a replica set.
 
 ---
 
