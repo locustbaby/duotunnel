@@ -1,114 +1,185 @@
 # Tunnel TODO
 
-## Config 调优（不改代码）
+## Config Tuning (No Code Changes)
 
 ### [TODO-16] QUIC connections: 1 → 4
 
-**文件**: `ci-helpers/client.yaml`
-**优先级**: 高
+**Files**: `ci-helpers/client.yaml`
+**Priority**: High
 
-client.yaml 里 `quic.connections` 没配，默认 1。所有流量挤在单条 QUIC 连接上，
-是单 UDP socket 串行加解密 + 单连接流控的瓶颈。
+`quic.connections` is not configured in `client.yaml`, defaulting to 1. All traffic is squeezed into a single QUIC connection, creating a bottleneck for single UDP socket serial encryption/decryption and single-connection flow control.
 
-改为 `connections: 4`，让 4 条 QUIC 连接分摊负载。
+Change to `connections: 4` to distribute the load across 4 QUIC connections.
 
 ### [TODO-17] max_concurrent_streams: 200 → 1000
 
-**文件**: `ci-helpers/client.yaml`, `ci-helpers/server.yaml`
-**优先级**: 高
+**Files**: `ci-helpers/client.yaml`, `ci-helpers/server.yaml`
+**Priority**: High
 
-CI 配置里 server 和 client 都设了 200。3K QPS no-keepalive 场景下，
-同时在飞的 stream 容易超 200，超过就 `try_acquire_owned` 直接丢弃连接。
+Both server and client are set to 200 in the CI config. In 3K QPS no-keepalive scenarios, the number of in-flight streams can easily exceed 200, causing `try_acquire_owned` to drop connections directly.
 
-改为 1000。
+Change to 1000.
 
 ---
 
-## 代码优化
+## Code Optimization
 
-### [TODO-14] discard buffer 改栈分配
+### [TODO-14] Change discard buffer to stack allocation
 
-**文件**: `server/handlers/http.rs`
-**优先级**: 低
+**Files**: `server/handlers/http.rs`
+**Priority**: Low
 
-drain socket 时仍用堆分配 `vec![0u8; len]`，len ≤ 8192，可改为栈 buffer。
+When draining the socket, `vec![0u8; len]` is still used (heap allocation). Since len ≤ 8192, this can be changed to a stack buffer.
 
-### [TODO-18] H1 body 读取 BytesMut::zeroed → unsafe set_len
+### [TODO-18] H1 body read: BytesMut::zeroed → unsafe set_len
 
-**文件**: `tunnel-lib/src/protocol/driver/h1.rs:276`
-**优先级**: 中
+**Files**: `tunnel-lib/src/protocol/driver/h1.rs:276`
+**Priority**: Medium
 
-每次 body chunk 读取省一次 memset（8KB）。大 body 请求路径 CPU -30%。
+Saves one `memset` (8KB) for every body chunk read. Large body request path CPU reduced by ~30%.
 
-### [TODO-19] H1 double header parse → 单次
+### [TODO-19] H1 double header parse → single parse
 
-**文件**: `tunnel-lib/src/protocol/driver/h1.rs:104-140`
-**优先级**: 中
+**Files**: `tunnel-lib/src/protocol/driver/h1.rs:104-140`
+**Priority**: Medium
 
-当前流程：循环 parse 直到 Complete（丢弃结果），然后再 parse 一次提取字段。
-改为：loop 内 Complete 时直接记录 header_end，用同一次 parse 的结果。
+Current flow: Loop parse until `Complete` (discard result), then parse again to extract fields.
+Change: Record `header_end` when `Complete` is reached within the loop, and use the results from that same parse.
 
-### [TODO-20] Bytes::copy_from_slice → split_to().freeze() 零拷贝
+### [TODO-20] Bytes::copy_from_slice → split_to().freeze() Zero-copy
 
-**文件**: `tunnel-lib/src/protocol/driver/h1.rs:201,283,287`
-**优先级**: 中
+**Files**: `tunnel-lib/src/protocol/driver/h1.rs:201,283,287`
+**Priority**: Medium
 
-5 处 `Bytes::copy_from_slice` 都是从 BytesMut 拷贝到新 Bytes，
-可以用 `split_to().freeze()` 实现零拷贝（共享底层内存）。
+Found 5 instances where `Bytes::copy_from_slice` copies from `BytesMut` to a new `Bytes`. These can be replaced with `split_to().freeze()` to achieve zero-copy (sharing underlying memory).
 
 ### [TODO-21] tokio::io::copy 8KB → 64KB buffer
 
-**文件**: `tunnel-lib/src/engine/bridge.rs`
-**优先级**: 中
+**Files**: `tunnel-lib/src/engine/bridge.rs`
+**Priority**: Medium
 
-`tokio::io::copy()` 内部默认 8KB buffer。QUIC stream window 4MB、TCP socket buffer 4MB，
-8KB 导致每 8KB 一次 syscall 开销。
+`tokio::io::copy()` defaults to an 8KB internal buffer. Given the QUIC stream window is 4MB and the TCP socket buffer is 4MB, 8KB leads to a syscall overhead for every 8KB.
 
-用 `BufReader::with_capacity(65536)` 包装 reader 后传给 `tokio::io::copy_buf()`。
+Wrap the reader with `BufReader::with_capacity(65536)` before passing it to `tokio::io::copy_buf()`.
 
 ### [TODO-22] relay() split → into_split
 
-**文件**: `tunnel-lib/src/engine/bridge.rs:9-10`
-**优先级**: 低
+**Files**: `tunnel-lib/src/engine/bridge.rs:9-10`
+**Priority**: Low
 
-泛型 `relay()` 用 `tokio::io::split()`（内部 Arc+Mutex），而 `relay_quic_to_tcp()`
-正确用了 `into_split()`（零成本 owned halves）。
+The generic `relay()` use `tokio::io::split()` (internal Arc+Mutex), whereas `relay_quic_to_tcp()` correctly uses `into_split()` (zero-cost owned halves).
 
 ---
 
-## 架构级优化
+## Architecture Level Optimization
 
 ### [TODO-23] server entry listener SO_REUSEPORT
 
-**文件**: `server/handlers/http.rs:13`, `server/handlers/tcp.rs:17`
-**优先级**: 中
+**Files**: `server/handlers/http.rs:13`, `server/handlers/tcp.rs:17`
+**Priority**: Medium
 
-server 入口用 `TcpListener::bind()`，没有 `SO_REUSEPORT`。
-`tunnel-lib/src/transport/listener.rs` 已有 `build_reuse_listener()`，但 server handler 没用它。
+The server entry uses `TcpListener::bind()` without `SO_REUSEPORT`. `tunnel-lib/src/transport/listener.rs` already has `build_reuse_listener()`, but the server handler is not using it.
 
-### [TODO-24] 多 QUIC Endpoint（多 UDP socket）
+### [TODO-24] Multiple QUIC Endpoints (Multiple UDP sockets)
 
-**优先级**: 低
+**Priority**: Low
 
-quinn Endpoint 绑定单个 UDP socket，`recvmsg/sendmsg` 串行化。
-即使开多条 QUIC connection 也走同一个 socket。
-考虑 client 端创建多个 Endpoint（各绑不同端口），配合 SO_REUSEPORT 分散 UDP 处理。
+A quinn `Endpoint` binds to a single UDP socket, serializing `recvmsg/sendmsg`. Even if multiple QUIC connections are opened, they all go through the same socket. Consider having the client create multiple Endpoints (bound to different ports), coupled with `SO_REUSEPORT` to distribute UDP processing.
 
-### [TODO-25] io_uring 替代 epoll
+### [TODO-25] io_uring instead of epoll
 
-**优先级**: 低（实验性）
+**Priority**: Low (Experimental)
 
-用 tokio-uring 或 monoio 替代 tokio 的 epoll 后端。
-目前无 Rust QUIC 库原生支持 io_uring，需等 quinn issue #915 推进。
+Use `tokio-uring` or `monoio` as a replacement for tokio's epoll backend. Currently, no Rust QUIC library natively supports `io_uring`, pending progress on quinn issue #915.
+
+### [TODO-26] Native UDP Proxy Support (Based on QUIC Datagram)
+
+**Priority**: High
+
+Currently only TCP/HTTP is supported. Need to enable QUIC Datagram extension, implement UDP Session management (Session Tracking/Timeout) on the server, and implement UDP re-send logic on the client. Offers lower latency than simulating UDP over Streams, with no head-of-line blocking.
+
+### [TODO-27] QUIC Certificate & 0-RTT State Persistence (Memory Persistence)
+
+**Priority**: Medium
+
+**Background**: The QUIC tunnel must terminate at the DuoTunnel process (LB can only do UDP passthrough), thus certificates and keys must be managed at the application layer. Current process restarts cause self-signed Key changes and STEK (Session Ticket Encryption Key) loss, causing 0-RTT failure.
+
+**Implementation key points**:
+1. **Identity Persistence**: Save the self-signed certificate or CA to disk (e.g., `pki/server.crt`) to avoid client distrust due to certificate fingerprint changes.
+2. **STEK Persistence (Critical)**: Save the key used to encrypt Session Tickets to disk. Ensure the Server can still decrypt Tickets carried by Clients after a restart to achieve 0-RTT instant connection.
+3. **Key Rotation**: Implement a scheduled STEK rotation mechanism (e.g., every 24 hours) to maintain 0-RTT while ensuring Forward Secrecy.
+4. **LB Architecture Confirmation**: Maintain LB as UDP Layer 4 Passthrough mode to ensure QUIC features (connection migration, etc.) are effective end-to-end.
+
+## QUIC Feature Audit & Comparison
+
+| Feature | Currently Used | Recommendation / Necessity |
+| :--- | :--- | :--- |
+| **Multi-streaming** | ✅ Deeply integrated | Core to the project (TCP/HTTP), prevents HOL blocking. |
+| **BBR Congestion Control** | ✅ Enabled | Enabled in `quic.rs:47`. Critical for cross-border/weak network environments. |
+| **Connection Migration** | ⚠️ Partially active | Enabled by default in `quinn`. Vital for maintaining tunnels during Wi-Fi/5G switching on mobile. |
+| **0-RTT (Fast)** | ❌ Disabled | Medium priority. Requires STEK persistence to be effective across restarts. |
+| **Datagram (Datagrams)** | ❌ Disabled | **High priority (for UDP proxy)**. Avoids stream retransmission delay, key to high-performance UDP. |
 
 ---
 
-## Bench 修复
+## Advanced Performance & Architecture
 
-### [TODO-15] egress_http_post 溢出 Phase 边界
+### [TODO-28] Kernel-level Zero-copy (Splice/Sendfile)
+**Priority**: Medium (Linux Only)
+Currently `bridge.rs` uses user-mode relaying. Should try using `tokio-splice` to move data directly within kernel buffers, targeting a 50% reduction in CPU soft-interrupt overhead.
 
-**文件**: `ci-helpers/k6/bench.js`, `bench/index.html`
-**优先级**: 低
+### [TODO-29] Dynamic Buffer Tuning (Dynamic Windows)
+**Priority**: Medium
+For high-latency links, upgrade `bridge.rs`'s 8KB buffer to a delay-aware Dynamic Buffer (64KB ~ 4MB) to maximize Long Fat Network (LFN) bandwidth utilization.
 
-`egress_http_post` startTime=6s + stages 5s+20s = 结束于 31s，但 Phase "Basic" end=29。
-仅图表注释框不能完全覆盖该场景，不影响数据。
+### [TODO-30] Upstream Pre-warming
+**Priority**: Low
+Maintain a "warm" connection pool on the client side. Concurrently establish upstream connections while protocol detection is in progress to eliminate TCP handshake-induced Time-to-First-Byte (TTFB) delay.
+
+### [TODO-31] Routing Algorithm Upgrade: Linear Scan -> Trie
+**Files**: `tunnel-lib/src/transport/listener.rs`
+**Priority**: Medium
+Currently `VhostRouter` wildcard matching is O(N). Should switch to a Radix Tree or Trie to make complex query time complexity constant.
+
+### [TODO-32] Certificate Generation: Root CA Signing Mode
+**Files**: `tunnel-lib/src/infra/pki.rs`
+**Priority**: High
+Currently, self-signed certificates generate a new key pair every time (CPU intensive). Should optimize to maintain a persistent Root CA and only perform signing for site-specific certificates, improving efficiency by 10-100x.
+
+### [TODO-33] Zero-copy HTTP Header Parsing (httparse Deep Integration)
+**Files**: `tunnel-lib/src/transport/listener.rs`
+**Priority**: Medium
+Refactor `extract_host_from_http`. Stop using string line scanning and directly reuse `httparse` offset indices to achieve completely allocation-free Host extraction.
+
+### [TODO-34] Eliminate Synchronization Overhead in Relaying (Eliminate Mutex)
+**Files**: `tunnel-lib/src/engine/relay.rs`
+**Priority**: Medium
+Switch the generic relaying function to use type-specific `into_split()`, avoiding `Arc<Mutex>` lock contention within `tokio::io::split` and improving vertical scalability under high concurrency.
+
+---
+
+## Inspiration from Pingora (Industrial Grade Architecture)
+
+### [TODO-35] Thread-Shared Global Connection Pooling
+Based on Pingora's core design. Break the per-task connection pool limit and implement global `Upstream` connection sharing. Reduces TCP/TLS handshake frequency under high concurrency, significantly improving TTFB.
+
+### [TODO-36] Static Dispatch Refactor: Eliminate Boxed Traits
+**Files**: `tunnel-lib/src/proxy/peers.rs`
+Extreme CPU optimization following Pingora practices. Refactor `PeerKind`'s `Dyn(Box<dyn UpstreamPeer>)` to `Enum`-based static dispatch where possible to reduce vtable lookup overhead and improve CPU branch prediction.
+
+### [TODO-37] Seamless Graceful Handover
+Implement a signal-based (e.g., SIGQUIT) graceful exit mechanism. Upon entering the shutdown sequence, reject new tunnel requests but allow existing long-lived connections to finish processing before exiting, ensuring zero business interruption during upgrades.
+
+### [TODO-38] Vectorized IO Relaying (Vectorized IO / writev)
+On the HTTP relaying path, combined with [TODO-33] zero-copy parsing, use `writev` to send Header offset slices and Body content together. Avoids the overhead of copying multiple memory blocks into a continuous buffer before sending.
+
+---
+
+## Bench Fixes
+
+### [TODO-15] egress_http_post Overflow Phase Boundary
+
+**Files**: `ci-helpers/k6/bench.js`, `bench/index.html`
+**Priority**: Low
+
+`egress_http_post` startTime=6s + stages 5s+20s = ends at 31s, but Phase "Basic" end=29. The chart annotation box does not completely cover this scenario, but it does not affect the data accuracy.
