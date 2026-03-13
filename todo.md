@@ -89,8 +89,20 @@ A quinn `Endpoint` binds to a single UDP socket, serializing `recvmsg/sendmsg`. 
 ### [TODO-25] io_uring instead of epoll
 
 **Priority**: Low (Experimental)
+**Status**: **Deferred** (Refactor only when native `tokio` support is mature to avoid breaking the current `Send` task model).
 
-Use `tokio-uring` or `monoio` as a replacement for tokio's epoll backend. Currently, no Rust QUIC library natively supports `io_uring`, pending progress on quinn issue #915.
+
+**Implementation Challenges**:
+1. **Programming Model Shift**: Transition from Readiness-based (epoll) to Completion-based (io_uring). Requires passing buffer ownership (`Vec<u8>`) to the kernel rather than references.
+2. **Runtime Constraints**: `tokio-uring` tasks are generally `!Send`. Requires a `Thread-per-core` architecture where each thread runs its own local executor, conflicting with the current global work-stealing scheduler.
+3. **Library Compatibility**: `quinn` currently lacks native `io_uring` support. A shim layer might be needed, potentially negating performance gains for QUIC traffic.
+4. **Buffer Management**: Necessity of a custom Buffer Pool to avoid frequent large allocations since `uring` requires owned buffers for every IO operation.
+
+**Implementation Plan**:
+1. Create a separate binary or crate (e.g., `client-uring`) to avoid polluting the main codebase with `!Send` constraints.
+2. Focus strictly on the **TCP Relay path** (local TCP <-> Tunnel) where `io_uring` provides the most gain, while keeping the QUIC control plane on standard Tokio.
+3. Replace `tokio::io::copy` with an `io_uring` optimized relay loop using owned buffers.
+
 
 ### [TODO-26] Native UDP Proxy Support (Based on QUIC Datagram)
 
