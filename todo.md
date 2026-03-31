@@ -1,5 +1,93 @@
 # Tunnel TODO
 
+## Auth & Config Source Plan
+
+### [TODO-48] Token-only Client Registration/Login
+**Priority**: High
+
+**Goal**:
+Client side no longer submits identity fields for authentication decisions. Client only sends `token`; server identifies `name`/tenant/group from token and then pushes routing rules.
+
+**Why it matters**:
+Avoids client-side identity spoofing risk and simplifies bootstrap flow.
+
+**Implementation notes**:
+1. Keep `Login.token` as the only auth input used by server.
+2. Server ignores/does not trust client-provided identity metadata for auth.
+3. After token verification, server binds connection to the resolved unique `name`.
+
+### [TODO-49] Server-issued Long Unique Tokens
+**Priority**: High
+
+**Goal**:
+Server provides token generation API/CLI: generate long, unique, high-entropy tokens per unique `name`.
+
+**Why it matters**:
+Eliminates weak/manual token creation and ensures uniqueness + entropy baseline.
+
+**Implementation notes**:
+1. Token generation: at least 32 random bytes (base64url/hex encoded).
+2. Enforce uniqueness with DB unique index.
+3. Support rotate/revoke lifecycle (`active`, `revoked_at`).
+4. Store only token hash in DB; never persist plaintext token.
+
+### [TODO-50] Auth Data Persistence via DB (Default: SQLite in Dev)
+**Priority**: High
+
+**Goal**:
+Move auth and client identity mapping from static config to DB-backed source. Dev default is local SQLite.
+
+**Why it matters**:
+Removes manual YAML token distribution; enables dynamic updates and auditability.
+
+**Implementation notes**:
+1. Add `AuthStore`/`ConfigStore` abstraction.
+2. Default provider for development: `sqlite://./data/duotunnel.db`.
+3. Suggested schema:
+   - `clients(id, name UNIQUE, token_hash, status, created_at, updated_at)`
+   - `client_tokens(id, client_id, token_hash, status, created_at, revoked_at)`
+4. Add migration files and startup auto-migrate (dev mode).
+
+### [TODO-51] Server Auth Path: Resolve Name by Token, Then Push Rules
+**Priority**: High
+
+**Goal**:
+On login, server validates token via DB and resolves owning `name`, then fetches effective routing rules and returns `LoginResp`.
+
+**Why it matters**:
+Makes auth and authorization deterministic and centrally managed.
+
+**Implementation notes**:
+1. Login flow: `token -> client(name) -> rule set -> LoginResp`.
+2. Reject missing/revoked token with explicit error code.
+3. Keep auth comparison timing-safe where applicable.
+4. Emit metrics split by result (`auth_success`, `auth_failure_invalid`, `auth_failure_revoked`).
+
+### [TODO-52] Rules from DB + Multi-source Provider
+**Priority**: High
+
+**Goal**:
+Rules can be loaded from DB, while preserving previously discussed multi-source model (file/db/hybrid).
+
+**Why it matters**:
+Supports dynamic control-plane updates without giving up local-file fallback.
+
+**Implementation notes**:
+1. Introduce `ConfigSource` trait:
+   - `FileSource` (existing YAML)
+   - `DbSource` (SQLite/Postgres in future)
+   - `MergedSource` (override/priority rules)
+2. Keep current file mode as compatibility path.
+3. Add source priority semantics and conflict resolution policy.
+
+### [TODO-53] Delivery Plan (Incremental)
+**Priority**: High
+
+1. Milestone A: schema + token generation + DB lookup (auth only).
+2. Milestone B: server login uses DB name resolution; client remains token-only.
+3. Milestone C: rules read from DB (with file fallback).
+4. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
+
 ## Config Tuning (No Code Changes)
 
 ### [TODO-16] QUIC connections: 1 → 4
