@@ -71,7 +71,7 @@ pub async fn run_supervisor(
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(wait) => {
                     info!(
-                        client_id = %config.client_id,
+                        server = %config.server_address(),
                         startup_jitter_ms = wait.as_millis(),
                         "startup jitter elapsed"
                     );
@@ -83,24 +83,24 @@ pub async fn run_supervisor(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                info!(client_id = %config.client_id, "shutdown signal received");
+                info!(server = %config.server_address(), "shutdown signal received");
                 return Ok(());
             }
             result = crate::run_client(&config, &endpoint) => {
                 match result {
                     Ok(_) => {
                         backoff.reset();
-                        info!(client_id = %config.client_id, "connection ended, restarting loop");
+                        info!(server = %config.server_address(), "connection ended, restarting loop");
                     }
                     Err(e) => {
                         if e.class() == FailureClass::Fatal {
-                            error!(client_id = %config.client_id, error = %e, "fatal connect error");
+                            error!(server = %config.server_address(), error = %e, "fatal connect error");
                             return Err(e.into_anyhow());
                         }
 
                         let retry_delay = backoff.next_delay();
                         warn!(
-                            client_id = %config.client_id,
+                            server = %config.server_address(),
                             error = %e,
                             retry_in_ms = retry_delay.as_millis(),
                             "transient connect error, scheduling retry"

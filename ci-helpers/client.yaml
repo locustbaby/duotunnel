@@ -2,7 +2,7 @@ log_level: "info"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
-client_group_id: "ci-group"
+auth_token: "ci-placeholder-token"
 http_entry_port: 8081
 quic:
   connections: 4

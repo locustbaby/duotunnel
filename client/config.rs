@@ -98,13 +98,8 @@ impl Default for ReconnectConfig {
 pub struct ClientConfigFile {
     pub server_addr: String,
     pub server_port: u16,
-    #[serde(default = "default_client_id")]
-    pub client_id: String,
-    #[serde(default)]
-    pub client_group_id: Option<String>,
 
-    #[serde(default)]
-    pub auth_token: Option<String>,
+    pub auth_token: String,
     #[serde(default)]
     pub log_level: Option<String>,
 
@@ -135,12 +130,6 @@ pub struct ClientConfigFile {
     pub reconnect: ReconnectConfig,
 }
 
-fn default_client_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    format!("client-{:x}", now.as_nanos())
-}
-
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {
         let resolved = tunnel_lib::resolve_config_path(path)?;
@@ -166,6 +155,9 @@ impl ClientConfigFile {
         }
         if self.server_port == 0 {
             errors.push("server_port must not be 0".into());
+        }
+        if self.auth_token.trim().is_empty() {
+            errors.push("auth_token is required".into());
         }
         if self.quic.connections == 0 {
             errors.push("quic.connections must be >= 1".into());

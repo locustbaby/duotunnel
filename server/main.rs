@@ -1,13 +1,10 @@
-// jemalloc: lower fragmentation and faster allocation under concurrent load.
-// Enabled on Linux/musl targets; falls back to system allocator elsewhere
-// (macOS already uses a fast allocator; Windows is excluded).
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_env = "msvc")))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
@@ -23,12 +20,42 @@ mod tunnel_handler;
 use config::{ServerConfigFile, ServerEgressUpstream, TunnelManagement};
 use registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, VhostRouter};
+use tunnel_store::AuthStore;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(short, long, default_value = "config/server.yaml")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[arg(short, long, default_value = "config/server.yaml", global = true)]
     config: String,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Run,
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenAction {
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    List,
+    Revoke {
+        #[arg(long)]
+        name: String,
+    },
+    Rotate {
+        #[arg(long)]
+        name: String,
+    },
 }
 
 pub struct RoutingSnapshot {
@@ -40,16 +67,18 @@ pub struct RoutingSnapshot {
 pub struct ServerState {
     pub config: Arc<ServerConfigFile>,
     pub registry: SharedRegistry,
-
     pub quic_semaphore: Arc<Semaphore>,
-
     pub tcp_semaphore: Arc<Semaphore>,
-
     pub tcp_params: tunnel_lib::TcpParams,
-
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
-
     pub routing: Arc<ArcSwap<RoutingSnapshot>>,
+    pub auth_store: Arc<dyn AuthStore>,
+}
+
+async fn build_auth_store(database_url: &str) -> Result<Arc<dyn AuthStore>> {
+    let store = tunnel_store::sqlite::SqliteAuthStore::new(database_url).await?;
+    store.migrate().await?;
+    Ok(Arc::new(store))
 }
 
 #[tokio::main]
@@ -58,9 +87,59 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    let config = ServerConfigFile::load(&args.config)?;
+    match cli.command {
+        Some(Commands::Token { action }) => handle_token_command(&cli.config, action).await,
+        Some(Commands::Run) | None => run_server(&cli.config).await,
+    }
+}
+
+async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
+    let config = ServerConfigFile::load(config_path)?;
+    let log_level = config.server.log_level.as_deref().unwrap_or("info");
+    tunnel_lib::infra::observability::init_tracing(log_level);
+
+    let store = build_auth_store(&config.server.database_url).await?;
+
+    match action {
+        TokenAction::Create { name } => {
+            let token = store.create_client(&name).await?;
+            println!("{}", token);
+        }
+        TokenAction::List => {
+            let entries = store.list_tokens().await?;
+            println!(
+                "{:<20} {:<10} {:<8} {:<10} {:<20} {}",
+                "NAME", "CLIENT", "TOKEN_ID", "STATUS", "CREATED", "REVOKED"
+            );
+            for e in entries {
+                println!(
+                    "{:<20} {:<10} {:<8} {:<10} {:<20} {}",
+                    e.client_name,
+                    e.client_status,
+                    e.token_id,
+                    e.token_status,
+                    e.created_at,
+                    e.revoked_at.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        TokenAction::Revoke { name } => {
+            store.revoke_token(&name).await?;
+            println!("token revoked for '{}'", name);
+        }
+        TokenAction::Rotate { name } => {
+            let token = store.rotate_token(&name).await?;
+            println!("{}", token);
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_server(config_path: &str) -> Result<()> {
+    let config = ServerConfigFile::load(config_path)?;
 
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
     tunnel_lib::infra::observability::init_tracing(log_level);
@@ -69,6 +148,9 @@ async fn main() -> Result<()> {
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
 
     tunnel_lib::init_cert_cache(&config.server.pki);
+
+    let auth_store = build_auth_store(&config.server.database_url).await?;
+    info!(url = %config.server.database_url, "auth store initialized");
 
     let http_params = HttpClientParams::from(&config.server.http_pool);
     let initial_snapshot = build_routing_snapshot(
@@ -85,6 +167,7 @@ async fn main() -> Result<()> {
         routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
         registry: new_shared_registry(),
         config: Arc::new(config.clone()),
+        auth_store,
     });
 
     info!(
@@ -93,7 +176,7 @@ async fn main() -> Result<()> {
         "Connection limits configured"
     );
 
-    hot_reload::spawn_config_watcher(args.config.clone(), state.clone());
+    hot_reload::spawn_config_watcher(config_path.to_string(), state.clone());
 
     let quic_state = state.clone();
     let quic_handle =

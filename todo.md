@@ -2,8 +2,8 @@
 
 ## Auth & Config Source Plan
 
-### [TODO-48] Token-only Client Registration/Login
-**Priority**: High
+### [TODO-48] Token-only Client Registration/Login ✅
+**Priority**: High | **Status**: Done
 
 **Goal**:
 Client side no longer submits identity fields for authentication decisions. Client only sends `token`; server identifies `name`/tenant/group from token and then pushes routing rules.
@@ -16,8 +16,8 @@ Avoids client-side identity spoofing risk and simplifies bootstrap flow.
 2. Server ignores/does not trust client-provided identity metadata for auth.
 3. After token verification, server binds connection to the resolved unique `name`.
 
-### [TODO-49] Server-issued Long Unique Tokens
-**Priority**: High
+### [TODO-49] Server-issued Long Unique Tokens ✅
+**Priority**: High | **Status**: Done
 
 **Goal**:
 Server provides token generation API/CLI: generate long, unique, high-entropy tokens per unique `name`.
@@ -31,8 +31,8 @@ Eliminates weak/manual token creation and ensures uniqueness + entropy baseline.
 3. Support rotate/revoke lifecycle (`active`, `revoked_at`).
 4. Store only token hash in DB; never persist plaintext token.
 
-### [TODO-50] Auth Data Persistence via DB (Default: SQLite in Dev)
-**Priority**: High
+### [TODO-50] Auth Data Persistence via DB (Default: SQLite in Dev) ✅
+**Priority**: High | **Status**: Done
 
 **Goal**:
 Move auth and client identity mapping from static config to DB-backed source. Dev default is local SQLite.
@@ -48,8 +48,8 @@ Removes manual YAML token distribution; enables dynamic updates and auditability
    - `client_tokens(id, client_id, token_hash, status, created_at, revoked_at)`
 4. Add migration files and startup auto-migrate (dev mode).
 
-### [TODO-51] Server Auth Path: Resolve Name by Token, Then Push Rules
-**Priority**: High
+### [TODO-51] Server Auth Path: Resolve Name by Token, Then Push Rules ✅
+**Priority**: High | **Status**: Done
 
 **Goal**:
 On login, server validates token via DB and resolves owning `name`, then fetches effective routing rules and returns `LoginResp`.
@@ -83,8 +83,8 @@ Supports dynamic control-plane updates without giving up local-file fallback.
 ### [TODO-53] Delivery Plan (Incremental)
 **Priority**: High
 
-1. Milestone A: schema + token generation + DB lookup (auth only).
-2. Milestone B: server login uses DB name resolution; client remains token-only.
+1. Milestone A: schema + token generation + DB lookup (auth only). ✅
+2. Milestone B: server login uses DB name resolution; client remains token-only. ✅
 3. Milestone C: rules read from DB (with file fallback).
 4. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
 

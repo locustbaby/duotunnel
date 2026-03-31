@@ -50,76 +50,67 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
 
     let msg_type = recv_message_type(&mut recv).await?;
     if msg_type != MessageType::Login {
-        warn!(msg_type = ?msg_type, "expected Login message");
+        warn!(addr = %remote_addr, msg_type = ?msg_type, "expected Login message");
         return Ok(());
     }
 
     let login: Login = recv_message(&mut recv).await?;
-    let group_id = login
-        .group_id
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
 
-    info!(
-        client_id = %login.client_id,
-        group_id = %group_id,
-        "client login attempt"
-    );
+    let auth_result = match state.auth_store.authenticate(&login.token).await {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(addr = %remote_addr, error = %e, "authentication failed");
+            metrics::auth_failure("unknown");
+            let resp = LoginResp {
+                success: false,
+                error: Some(e.to_string()),
+                config: ClientConfig::default(),
+                client_name: String::new(),
+            };
+            send_message(&mut send, MessageType::LoginResp, &resp).await?;
+            return Ok(());
+        }
+    };
 
-    if !state.config.validate_token(&group_id, &login.token) {
-        warn!(
-            client_id = %login.client_id,
-            group_id = %group_id,
-            "authentication failed: invalid token"
-        );
-        metrics::auth_failure(&group_id);
-        let resp = LoginResp {
-            success: false,
-            error: Some("Invalid authentication token".to_string()),
-            config: ClientConfig::default(),
-        };
-        send_message(&mut send, MessageType::LoginResp, &resp).await?;
-        return Ok(());
-    }
-
-    metrics::auth_success(&group_id);
+    let client_name = auth_result.client_name;
+    info!(addr = %remote_addr, client_name = %client_name, "authenticated");
+    metrics::auth_success(&client_name);
 
     let client_config = {
         let routing = state.routing.load();
-        build_client_config_for_group(&routing.tunnel_management, &group_id).unwrap_or_default()
+        build_client_config_for_group(&routing.tunnel_management, &client_name)
+            .unwrap_or_default()
     };
+
+    let conn_id = format!(
+        "{}-{}",
+        client_name,
+        conn.stable_id()
+    );
 
     let resp = LoginResp {
         success: true,
         error: None,
         config: client_config,
+        client_name: client_name.clone(),
     };
     send_message(&mut send, MessageType::LoginResp, &resp).await?;
 
-    info!(
-        client_id = %login.client_id,
-        group_id = %group_id,
-        "client authenticated and registered"
-    );
-
-    if let Some(old_conn) =
-        state
-            .registry
-            .replace_or_register(login.client_id.clone(), group_id.clone(), conn.clone())
-    {
-        warn!(
-            client_id = %login.client_id,
-            "duplicate client ID detected, closing old connection"
-        );
+    if let Some(old_conn) = state.registry.replace_or_register(
+        conn_id.clone(),
+        client_name.clone(),
+        conn.clone(),
+    ) {
+        warn!(conn_id = %conn_id, "duplicate conn_id, closing old connection");
         metrics::duplicate_client_closed();
         old_conn.close(0u32.into(), b"duplicate client");
     }
-    metrics::client_registered(&group_id);
+    metrics::client_registered(&client_name);
 
     loop {
         tokio::select! {
             _ = conn.closed() => {
-                info!(client_id = %login.client_id, "connection closed");
+                info!(conn_id = %conn_id, "connection closed");
                 break;
             }
             result = conn.accept_bi() => {
@@ -142,8 +133,8 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         }
     }
 
-    state.registry.unregister(&login.client_id);
-    metrics::client_unregistered(&group_id);
+    state.registry.unregister(&conn_id);
+    metrics::client_unregistered(&client_name);
 
     Ok(())
 }

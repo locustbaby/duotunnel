@@ -10,6 +10,7 @@ path = "main.rs"
 
 [dependencies]
 tunnel-lib = { path = "../tunnel-lib" }
+tunnel-store = { path = "../tunnel-store" }
 tokio = { version = "1.49", features = ["full", "io-util"] }
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
@@ -33,7 +34,6 @@ async-trait = "0.1"
 tokio-rustls = "0.26"
 prometheus = "0.13"
 lazy_static = "1.5"
-subtle = "2.5"
 arc-swap = "1.7"
 notify = { version = "6.1", features = ["macos_kqueue"] }
 figment = { version = "0.10", features = ["yaml", "env"] }

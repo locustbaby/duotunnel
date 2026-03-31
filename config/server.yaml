@@ -7,6 +7,7 @@ server:
   entry_port: 8001
   log_level: "debug"
   trace_enabled: false
+  database_url: "sqlite://./data/duotunnel.db?mode=rwc"
 
   # TCP socket options applied to all ingress connections
   tcp:

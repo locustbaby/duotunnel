@@ -51,12 +51,7 @@ async fn main() -> Result<()> {
     tunnel_lib::infra::observability::init_tracing(log_level);
 
     info!("Starting DuoTunnel Client");
-    info!(
-        server = %config.server_address(),
-        client_id = %config.client_id,
-        group_id = ?config.client_group_id,
-        "Configuration loaded"
-    );
+    info!(server = %config.server_address(), "Configuration loaded");
 
     let endpoint = build_quic_endpoint(&config)?;
 
@@ -118,9 +113,7 @@ pub(crate) async fn run_client(
         .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
 
     let login = Login {
-        client_id: config.client_id.clone(),
-        group_id: config.client_group_id.clone(),
-        token: config.auth_token.clone().unwrap_or_default(),
+        token: config.auth_token.clone(),
     };
     timeout(
         login_timeout,

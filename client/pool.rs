@@ -15,16 +15,8 @@ pub async fn run_pool(
 
     let mut slots = JoinSet::new();
 
-    for i in 0..n {
-        let slot_id = if n == 1 {
-            config.client_id.clone()
-        } else {
-            format!("{}-{}", config.client_id, i)
-        };
-
-        let mut slot_config = config.clone();
-        slot_config.client_id = slot_id.clone();
-
+    for _i in 0..n {
+        let slot_config = config.clone();
         let endpoint = endpoint.clone();
         let slot_cancel = cancel.clone();
 

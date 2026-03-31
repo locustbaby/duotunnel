@@ -4,6 +4,7 @@ server:
   tunnel_port: 10086
   entry_port: 8001
   log_level: "info"
+  database_url: "sqlite://./data/duotunnel-example.db?mode=rwc"
 
 # Egress: Server forwards client requests to external services
 server_egress_upstream:

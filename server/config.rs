@@ -28,8 +28,8 @@ pub struct ServerBasicConfig {
     #[serde(default)]
     pub trace_enabled: bool,
 
-    #[serde(default)]
-    pub auth_tokens: HashMap<String, String>,
+    pub database_url: String,
+
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     #[serde(default = "default_max_connections")]
@@ -165,7 +165,7 @@ impl ServerConfigFile {
             .merge(Yaml::file(&resolved))
             .merge(
                 Env::prefixed("TUNNEL_SERVER__")
-                    .only(&["server.log_level", "server.auth_tokens"])
+                    .only(&["server.log_level", "server.database_url"])
                     .split("__"),
             )
             .extract()?;
@@ -179,6 +179,9 @@ impl ServerConfigFile {
 
         if self.server.tunnel_port == 0 {
             errors.push("server.tunnel_port must not be 0".into());
+        }
+        if self.server.database_url.trim().is_empty() {
+            errors.push("server.database_url is required".into());
         }
         if self.server.max_connections == 0 {
             errors.push("server.max_connections must be >= 1".into());
@@ -224,18 +227,6 @@ impl ServerConfigFile {
                 errors.join("\n  - ")
             ))
         }
-    }
-
-    pub fn validate_token(&self, group_id: &str, token: &str) -> bool {
-        use subtle::ConstantTimeEq;
-        if self.server.auth_tokens.is_empty() {
-            return true;
-        }
-        self.server
-            .auth_tokens
-            .get(group_id)
-            .map(|expected| bool::from(expected.as_bytes().ct_eq(token.as_bytes())))
-            .unwrap_or(false)
     }
 }
 

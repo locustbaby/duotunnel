@@ -3,6 +3,7 @@ server:
   entry_port: 8080
   metrics_port: 9090
   log_level: "info"
+  database_url: "sqlite://./data/duotunnel-ci.db?mode=rwc"
   quic:
     keepalive_secs: 10
     idle_timeout_secs: 30

@@ -29,8 +29,6 @@ impl MessageType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Login {
-    pub client_id: String,
-    pub group_id: Option<String>,
     pub token: String,
 }
 
@@ -39,6 +37,7 @@ pub struct LoginResp {
     pub success: bool,
     pub error: Option<String>,
     pub config: ClientConfig,
+    pub client_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,9 +91,6 @@ where
     M: Serialize,
 {
     let payload = bincode::serialize(msg)?;
-    // Combine the 5-byte header (1-byte type + 4-byte length) with the
-    // payload into a single allocation so the underlying write path can
-    // flush everything in one syscall instead of three.
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(msg_type as u8);
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -148,16 +144,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_message_serialize() {
+    fn test_login_serialize() {
         let login = Login {
-            client_id: "test-client".to_string(),
-            group_id: Some("group-a".to_string()),
-            token: "secret".to_string(),
+            token: "dt_test123".to_string(),
         };
         let encoded = bincode::serialize(&login).unwrap();
         let decoded: Login = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(login.client_id, decoded.client_id);
-        assert_eq!(login.group_id, decoded.group_id);
+        assert_eq!(login.token, decoded.token);
     }
 
     #[test]
@@ -203,19 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn test_login_group_id_none() {
-        let login = Login {
-            client_id: "client-x".to_string(),
-            group_id: None,
-            token: "tok".to_string(),
-        };
-        let encoded = bincode::serialize(&login).unwrap();
-        let decoded: Login = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(decoded.group_id, None);
-        assert_eq!(decoded.client_id, "client-x");
-    }
-
-    #[test]
     fn test_routing_info_host_none() {
         let info = RoutingInfo {
             proxy_name: "tcp-proxy".to_string(),
@@ -233,9 +213,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_recv_login_full_frame() {
         let login = Login {
-            client_id: "client-1".to_string(),
-            group_id: Some("group-a".to_string()),
-            token: "s3cr3t".to_string(),
+            token: "dt_s3cr3t".to_string(),
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(1024);
@@ -248,8 +226,6 @@ mod tests {
         assert_eq!(msg_type, MessageType::Login);
 
         let decoded: Login = recv_message(&mut reader).await.unwrap();
-        assert_eq!(decoded.client_id, login.client_id);
-        assert_eq!(decoded.group_id, login.group_id);
         assert_eq!(decoded.token, login.token);
     }
 
@@ -264,6 +240,7 @@ mod tests {
                 upstreams: vec![],
                 rules: vec![],
             },
+            client_name: "test-client".to_string(),
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(4096);
@@ -279,6 +256,7 @@ mod tests {
         assert!(decoded.success);
         assert_eq!(decoded.error, None);
         assert_eq!(decoded.config.config_version, "v1.0.0");
+        assert_eq!(decoded.client_name, "test-client");
     }
 
     #[tokio::test]
@@ -287,6 +265,7 @@ mod tests {
             success: false,
             error: Some("auth failed".to_string()),
             config: ClientConfig::default(),
+            client_name: String::new(),
         };
 
         let (mut writer, mut reader) = tokio::io::duplex(4096);
@@ -345,8 +324,6 @@ mod tests {
     #[tokio::test]
     async fn test_recv_routing_info_wrong_type_returns_error() {
         let login = Login {
-            client_id: "c".to_string(),
-            group_id: None,
             token: "t".to_string(),
         };
 
@@ -388,8 +365,6 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_messages_sequential_on_same_pipe() {
         let login = Login {
-            client_id: "c1".to_string(),
-            group_id: None,
             token: "tok1".to_string(),
         };
         let info = RoutingInfo {
@@ -410,7 +385,7 @@ mod tests {
         let t1 = recv_message_type(&mut reader).await.unwrap();
         assert_eq!(t1, MessageType::Login);
         let decoded_login: Login = recv_message(&mut reader).await.unwrap();
-        assert_eq!(decoded_login.client_id, "c1");
+        assert_eq!(decoded_login.token, "tok1");
 
         let decoded_info = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded_info.proxy_name, "p");
