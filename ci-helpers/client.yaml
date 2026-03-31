@@ -12,3 +12,7 @@ quic:
 reconnect:
   initial_delay_ms: 500
   max_delay_ms: 5000
+  connect_timeout_ms: 3000
+  resolve_timeout_ms: 2000
+  login_timeout_ms: 3000
+  startup_jitter_ms: 50

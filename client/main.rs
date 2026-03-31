@@ -1,17 +1,25 @@
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_env = "msvc")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "windows"),
+    not(target_env = "msvc")
+))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 
 mod app;
 mod config;
+mod connect;
 mod pool;
 mod proxy;
 
@@ -19,6 +27,7 @@ mod entry;
 
 use app::LocalProxyMap;
 use config::ClientConfigFile;
+use connect::ConnectError;
 use proxy::handle_work_stream;
 
 #[derive(Parser, Debug)]
@@ -61,40 +70,13 @@ async fn main() -> Result<()> {
     });
 
     if config.quic.connections > 1 {
-        info!(connections = %config.quic.connections, "using multi-QUIC connection pool");
-        pool::run_pool(&config, &endpoint, cancel).await
+        info!(
+            connections = %config.quic.connections,
+            "using multi-QUIC connection pool"
+        );
+        pool::run_pool(config, endpoint, cancel).await
     } else {
-        let initial_delay = std::time::Duration::from_millis(config.reconnect.initial_delay_ms);
-        let max_delay = std::time::Duration::from_millis(config.reconnect.max_delay_ms);
-        let mut retry_delay = initial_delay;
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!("Shutdown signal received, exiting.");
-                    return Ok(());
-                }
-                result = run_client(&config, &endpoint) => {
-                    match result {
-                        Ok(_) => {
-                            info!("Connection closed gracefully, reconnecting immediately...");
-                            retry_delay = initial_delay;
-                        }
-                        Err(e) => {
-                            error!(error = %e, retry_in_ms = %retry_delay.as_millis(), "Connection error, reconnecting...");
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    info!("Shutdown signal received, exiting.");
-                                    return Ok(());
-                                }
-                                _ = tokio::time::sleep(retry_delay) => {}
-                            }
-                            retry_delay = std::cmp::min(retry_delay * 2, max_delay);
-                        }
-                    }
-                }
-            }
-        }
+        connect::run_supervisor(config, endpoint, cancel).await
     }
 }
 
@@ -124,33 +106,51 @@ fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
 pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
-) -> Result<()> {
-    let server_addr = config.server_address().parse()?;
-    info!(server_addr = %server_addr, "Connecting to server...");
-
-    let conn = endpoint.connect(server_addr, "localhost")?.await?;
+) -> std::result::Result<(), ConnectError> {
+    let conn = connect_to_server(config, endpoint).await?;
 
     info!("Connected to server");
 
-    let (mut send, mut recv) = conn.open_bi().await?;
+    let login_timeout = Duration::from_millis(config.reconnect.login_timeout_ms);
+    let (mut send, mut recv) = timeout(login_timeout, conn.open_bi())
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("open_bi timed out")))?
+        .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
 
     let login = Login {
         client_id: config.client_id.clone(),
         group_id: config.client_group_id.clone(),
         token: config.auth_token.clone().unwrap_or_default(),
     };
-    send_message(&mut send, MessageType::Login, &login).await?;
+    timeout(
+        login_timeout,
+        send_message(&mut send, MessageType::Login, &login),
+    )
+    .await
+    .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
+    .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
     debug!("Login message sent");
 
-    let msg_type = recv_message_type(&mut recv).await?;
+    let msg_type = timeout(login_timeout, recv_message_type(&mut recv))
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("waiting login response timed out")))?
+        .map_err(|e| {
+            ConnectError::transient(anyhow!("failed to read login response type: {}", e))
+        })?;
     if msg_type != MessageType::LoginResp {
-        return Err(anyhow::anyhow!("Expected LoginResp, got {:?}", msg_type));
+        return Err(ConnectError::fatal(anyhow!(
+            "protocol mismatch: expected LoginResp, got {:?}",
+            msg_type
+        )));
     }
 
-    let resp: LoginResp = recv_message(&mut recv).await?;
+    let resp: LoginResp = timeout(login_timeout, recv_message(&mut recv))
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
+        .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
 
     if !resp.success {
-        return Err(anyhow::anyhow!("Login failed: {:?}", resp.error));
+        return Err(connect::classify_login_failure(resp.error.as_deref()));
     }
 
     info!(
@@ -209,7 +209,10 @@ pub(crate) async fn run_client(
 
             reason = conn.closed() => {
                 warn!(reason = ?reason, "Connection closed by server");
-                break Err(anyhow::anyhow!("Connection closed: {:?}", reason));
+                break Err(ConnectError::transient(anyhow!(
+                    "connection closed by server: {:?}",
+                    reason
+                )));
             }
 
             stream_result = conn.accept_bi() => {
@@ -234,7 +237,10 @@ pub(crate) async fn run_client(
                     }
                     Err(e) => {
                         warn!(error = %e, "Connection error");
-                        break Err(e.into());
+                        break Err(ConnectError::transient(anyhow!(
+                            "accept_bi failed: {}",
+                            e
+                        )));
                     }
                 }
             }
@@ -243,9 +249,84 @@ pub(crate) async fn run_client(
 
     cancel_token.cancel();
 
-    tokio::time::sleep(std::time::Duration::from_millis(config.reconnect.grace_ms)).await;
+    tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)).await;
 
     result
+}
+
+async fn connect_to_server(
+    config: &ClientConfigFile,
+    endpoint: &quinn::Endpoint,
+) -> std::result::Result<quinn::Connection, ConnectError> {
+    let addrs = resolve_server_addresses(config).await?;
+    let connect_timeout = Duration::from_millis(config.reconnect.connect_timeout_ms);
+    let sni = config.tls_server_name().to_string();
+
+    let mut errors = Vec::new();
+    for addr in addrs {
+        info!(server_addr = %addr, sni = %sni, "Connecting to server");
+        let connecting = endpoint
+            .connect(addr, &sni)
+            .map_err(|e| ConnectError::transient(anyhow!("connect setup failed: {}", e)))?;
+
+        match timeout(connect_timeout, connecting).await {
+            Ok(Ok(conn)) => return Ok(conn),
+            Ok(Err(e)) => {
+                errors.push(format!("{}: {}", addr, e));
+            }
+            Err(_) => {
+                errors.push(format!("{}: connect timeout", addr));
+            }
+        }
+    }
+
+    Err(ConnectError::transient(anyhow!(
+        "all connection attempts failed ({})",
+        errors.join("; ")
+    )))
+}
+
+async fn resolve_server_addresses(
+    config: &ClientConfigFile,
+) -> std::result::Result<Vec<SocketAddr>, ConnectError> {
+    if let Ok(ip) = config.server_addr.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, config.server_port)]);
+    }
+
+    let resolve_timeout = Duration::from_millis(config.reconnect.resolve_timeout_ms);
+    let host = config.server_addr.clone();
+    let lookup = tokio::net::lookup_host((host.as_str(), config.server_port));
+    let resolved = timeout(resolve_timeout, lookup)
+        .await
+        .map_err(|_| {
+            ConnectError::transient(anyhow!(
+                "DNS resolve timed out for {}:{}",
+                host,
+                config.server_port
+            ))
+        })?
+        .map_err(|e| {
+            ConnectError::transient(anyhow!(
+                "DNS resolve failed for {}:{}: {}",
+                host,
+                config.server_port,
+                e
+            ))
+        })?;
+
+    let mut addrs: Vec<SocketAddr> = resolved.collect();
+    addrs.sort_unstable();
+    addrs.dedup();
+
+    if addrs.is_empty() {
+        return Err(ConnectError::transient(anyhow!(
+            "no resolved addresses for {}:{}",
+            host,
+            config.server_port
+        )));
+    }
+
+    Ok(addrs)
 }
 
 fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
@@ -286,11 +367,16 @@ fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
             let _ = root_store.add(cert);
         }
         if root_store.is_empty() {
-            warn!("No system root certificates found, falling back to insecure mode");
-            return Ok(rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
-                .with_no_client_auth());
+            if config.allow_insecure_fallback {
+                warn!("No system root certificates found, falling back to insecure mode");
+                return Ok(rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
+                    .with_no_client_auth());
+            }
+            return Err(anyhow!(
+                "No system root certificates found; set tls_ca_cert or explicitly enable allow_insecure_fallback"
+            ));
         }
         debug!("Loaded {} system root certificates", root_store.len());
     }

@@ -1,18 +1,19 @@
 use anyhow::Result;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::config::ClientConfigFile;
 
 pub async fn run_pool(
-    config: &ClientConfigFile,
-    endpoint: &quinn::Endpoint,
+    config: ClientConfigFile,
+    endpoint: quinn::Endpoint,
     cancel: CancellationToken,
 ) -> Result<()> {
     let n = config.quic.connections.max(1) as usize;
     info!(connections = n, "starting QUIC connection pool");
 
-    let mut handles = Vec::with_capacity(n);
+    let mut slots = JoinSet::new();
 
     for i in 0..n {
         let slot_id = if n == 1 {
@@ -25,53 +26,30 @@ pub async fn run_pool(
         slot_config.client_id = slot_id.clone();
 
         let endpoint = endpoint.clone();
-        let cancel = cancel.clone();
+        let slot_cancel = cancel.clone();
 
-        let handle = tokio::spawn(async move {
-            run_slot(slot_config, endpoint, cancel).await;
+        slots.spawn(async move {
+            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel).await
         });
-        handles.push(handle);
     }
 
-    for h in handles {
-        let _ = h.await;
-    }
-
-    Ok(())
-}
-
-async fn run_slot(config: ClientConfigFile, endpoint: quinn::Endpoint, cancel: CancellationToken) {
-    let initial_delay = std::time::Duration::from_millis(config.reconnect.initial_delay_ms);
-    let max_delay = std::time::Duration::from_millis(config.reconnect.max_delay_ms);
-    let mut retry_delay = initial_delay;
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!(client_id = %config.client_id, "pool slot cancelled");
-                return;
+    while let Some(join_result) = slots.join_next().await {
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, "pool slot failed; stopping all slots");
+                cancel.cancel();
+                while slots.join_next().await.is_some() {}
+                return Err(e);
             }
-            result = crate::run_client(&config, &endpoint) => {
-                match result {
-                    Ok(_) => {
-                        info!(client_id = %config.client_id, "connection closed gracefully, reconnecting...");
-                        retry_delay = initial_delay;
-                    }
-                    Err(e) => {
-                        error!(
-                            client_id = %config.client_id,
-                            error = %e,
-                            retry_in_ms = %retry_delay.as_millis(),
-                            "connection error, reconnecting..."
-                        );
-                        tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            _ = tokio::time::sleep(retry_delay) => {}
-                        }
-                        retry_delay = std::cmp::min(retry_delay * 2, max_delay);
-                    }
-                }
+            Err(e) => {
+                error!(error = %e, "pool slot task panicked; stopping all slots");
+                cancel.cancel();
+                while slots.join_next().await.is_some() {}
+                return Err(anyhow::anyhow!("pool slot task join error: {}", e));
             }
         }
     }
+
+    Ok(())
 }

@@ -192,9 +192,16 @@ log_level: "info"
 tls_skip_verify: true       # Set false in production
 server_addr: "127.0.0.1"
 server_port: 10086
+tls_server_name: "example.com" # Optional SNI override when server_addr is IP
 client_group_id: "group-a"
 auth_token: "your-token-here"
 http_entry_port: 8003       # Optional: egress entry
+reconnect:
+  initial_delay_ms: 1000
+  max_delay_ms: 60000
+  connect_timeout_ms: 10000
+  resolve_timeout_ms: 5000
+  login_timeout_ms: 5000
 ```
 
 ### Run

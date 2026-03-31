@@ -70,6 +70,14 @@ pub struct ReconnectConfig {
     pub max_delay_ms: u64,
 
     pub grace_ms: u64,
+
+    pub connect_timeout_ms: u64,
+
+    pub resolve_timeout_ms: u64,
+
+    pub login_timeout_ms: u64,
+
+    pub startup_jitter_ms: u64,
 }
 
 impl Default for ReconnectConfig {
@@ -78,6 +86,10 @@ impl Default for ReconnectConfig {
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             grace_ms: 100,
+            connect_timeout_ms: 10_000,
+            resolve_timeout_ms: 5_000,
+            login_timeout_ms: 5_000,
+            startup_jitter_ms: 300,
         }
     }
 }
@@ -106,6 +118,10 @@ pub struct ClientConfigFile {
     pub tls_skip_verify: bool,
     #[serde(default)]
     pub tls_ca_cert: Option<String>,
+    #[serde(default)]
+    pub tls_server_name: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_fallback: bool,
 
     #[serde(default)]
     pub quic: ClientQuicConfig,
@@ -145,7 +161,7 @@ impl ClientConfigFile {
     fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
-        if self.server_addr.is_empty() {
+        if self.server_addr.trim().is_empty() {
             errors.push("server_addr is required".into());
         }
         if self.server_port == 0 {
@@ -163,6 +179,20 @@ impl ClientConfigFile {
                 self.reconnect.initial_delay_ms, self.reconnect.max_delay_ms
             ));
         }
+        if self.reconnect.connect_timeout_ms == 0 {
+            errors.push("reconnect.connect_timeout_ms must be >= 1".into());
+        }
+        if self.reconnect.resolve_timeout_ms == 0 {
+            errors.push("reconnect.resolve_timeout_ms must be >= 1".into());
+        }
+        if self.reconnect.login_timeout_ms == 0 {
+            errors.push("reconnect.login_timeout_ms must be >= 1".into());
+        }
+        if let Some(name) = self.tls_server_name.as_ref() {
+            if name.trim().is_empty() {
+                errors.push("tls_server_name must not be empty when set".into());
+            }
+        }
 
         if errors.is_empty() {
             Ok(())
@@ -176,5 +206,12 @@ impl ClientConfigFile {
 
     pub fn server_address(&self) -> String {
         format!("{}:{}", self.server_addr, self.server_port)
+    }
+
+    pub fn tls_server_name(&self) -> &str {
+        self.tls_server_name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_else(|| self.server_addr.trim())
     }
 }
