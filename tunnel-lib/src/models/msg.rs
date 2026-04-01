@@ -40,6 +40,26 @@ pub struct LoginResp {
     pub client_name: String,
 }
 
+impl LoginResp {
+    pub fn success(config: ClientConfig, client_name: String) -> Self {
+        Self {
+            success: true,
+            error: None,
+            config,
+            client_name,
+        }
+    }
+
+    pub fn failure(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            error: Some(error.into()),
+            config: ClientConfig::default(),
+            client_name: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientConfig {
     pub config_version: String,

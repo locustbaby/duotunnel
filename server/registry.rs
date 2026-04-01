@@ -13,17 +13,15 @@ struct ClientInfo {
 
 /// A group of QUIC connections that share a `group_id`.
 ///
-/// Layout notes:
-/// - `conns` and `ids` are stored as separate `Vec`s (SoA) so that the hot
-///   path (`select_healthy`) only touches connection handles, leaving the
-///   cold `String` id data in a different cacheline.
-/// - `counter` is wrapped in `CachePadded` to prevent false-sharing with
-///   `conns`/`ids` when multiple cores increment it concurrently.
+/// `entries` holds `(conn_id, Connection)` pairs under a single lock,
+/// eliminating the TOCTOU race that existed when `ids` and `conns` were
+/// two separate `RwLock<Vec>` updated in separate critical sections.
+///
+/// `counter` is wrapped in `CachePadded` to prevent false-sharing with
+/// `entries` when multiple cores increment it concurrently.
 pub struct ClientGroup {
-    /// Active QUIC connections — touched on every routing decision.
-    conns: RwLock<Vec<Connection>>,
-    /// Corresponding client IDs — touched only on register/unregister.
-    ids: RwLock<Vec<String>>,
+    /// (conn_id, connection) pairs — single lock keeps them in sync.
+    entries: RwLock<Vec<(String, Connection)>>,
     /// Round-robin cursor, padded to its own cacheline.
     counter: CachePadded<AtomicUsize>,
 }
@@ -31,54 +29,45 @@ pub struct ClientGroup {
 impl ClientGroup {
     pub fn new() -> Self {
         Self {
-            conns: RwLock::new(Vec::new()),
-            ids: RwLock::new(Vec::new()),
+            entries: RwLock::new(Vec::new()),
             counter: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 
-    pub fn add(&self, client_id: String, conn: Connection) {
-        // Check if we're replacing an existing client_id
-        {
-            let mut ids = self.ids.write();
-            if let Some(pos) = ids.iter().position(|id| id == &client_id) {
-                ids[pos] = client_id.clone();
-                drop(ids);
-                self.conns.write()[pos] = conn;
-                return;
-            }
-            ids.push(client_id);
+    /// Insert or replace the connection for `client_id` (upsert semantics).
+    pub fn set(&self, client_id: String, conn: Connection) {
+        let mut entries = self.entries.write();
+        if let Some(pos) = entries.iter().position(|(id, _)| id == &client_id) {
+            entries[pos] = (client_id, conn);
+        } else {
+            entries.push((client_id, conn));
         }
-        self.conns.write().push(conn);
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
-        let mut ids = self.ids.write();
-        if let Some(pos) = ids.iter().position(|id| id == client_id) {
-            ids.swap_remove(pos);
-            drop(ids);
-            self.conns.write().swap_remove(pos);
+        let mut entries = self.entries.write();
+        if let Some(pos) = entries.iter().position(|(id, _)| id == client_id) {
+            entries.swap_remove(pos);
             return true;
         }
         false
     }
 
     pub fn is_empty(&self) -> bool {
-        self.conns.read().is_empty()
+        self.entries.read().is_empty()
     }
 
     /// Round-robin selection, skipping closed connections.
-    /// Only acquires the read lock on `conns` — never touches `ids`.
     pub fn select_healthy(&self) -> Option<Connection> {
-        let conns = self.conns.read();
-        let len = conns.len();
+        let entries = self.entries.read();
+        let len = entries.len();
         if len == 0 {
             return None;
         }
 
         let start = self.counter.fetch_add(1, Ordering::Relaxed);
         for i in 0..len {
-            let conn = &conns[(start + i) % len];
+            let (_, conn) = &entries[(start + i) % len];
             if conn.close_reason().is_none() {
                 return Some(conn.clone());
             }
@@ -101,19 +90,12 @@ impl ClientRegistry {
         }
     }
 
-    pub fn replace_or_register(
-        &self,
-        client_id: String,
-        group_id: String,
-        conn: Connection,
-    ) -> Option<Connection> {
+    fn replace_or_register(&self, client_id: String, group_id: String, conn: Connection) {
         use dashmap::mapref::entry::Entry;
 
-        let old_conn = match self.clients.entry(client_id.clone()) {
+        match self.clients.entry(client_id.clone()) {
             Entry::Occupied(mut occ) => {
-                let old_info = occ.get();
-                let old_group_id = old_info.group_id.clone();
-                let old_conn = old_info.conn.clone();
+                let old_group_id = occ.get().group_id.clone();
 
                 if let Some(grp) = self.groups.get(&old_group_id) {
                     grp.remove(&client_id);
@@ -128,24 +110,19 @@ impl ClientRegistry {
                     group_id: group_id.clone(),
                     conn: conn.clone(),
                 });
-
-                Some(old_conn)
             }
             Entry::Vacant(vac) => {
                 vac.insert(ClientInfo {
                     group_id: group_id.clone(),
                     conn: conn.clone(),
                 });
-                None
             }
-        };
+        }
 
         self.groups
             .entry(group_id)
             .or_insert_with(|| Arc::new(ClientGroup::new()))
-            .add(client_id, conn);
-
-        old_conn
+            .set(client_id, conn);
     }
 
     pub fn register(&self, client_id: String, group_id: String, conn: Connection) {

@@ -17,10 +17,10 @@ mod metrics;
 mod registry;
 mod tunnel_handler;
 
-use config::{ServerConfigFile, ServerEgressUpstream, TunnelManagement};
+use config::{ConfigSource, DbSource, FileSource, MergedSource, ServerConfigFile, ServerEgressUpstream, TunnelManagement};
 use registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, VhostRouter};
-use tunnel_store::AuthStore;
+use tunnel_store::{AuthStore, RuleStore};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -73,12 +73,37 @@ pub struct ServerState {
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
     pub routing: Arc<ArcSwap<RoutingSnapshot>>,
     pub auth_store: Arc<dyn AuthStore>,
+    pub rule_store: Arc<dyn RuleStore>,
+    pub config_source: Arc<dyn ConfigSource>,
+    /// Broadcast channel for immediate token revocation.
+    /// Senders emit the `client_name` whose token was revoked;
+    /// tunnel loops subscribe and close the connection if the name matches.
+    pub revocation_tx: tokio::sync::broadcast::Sender<String>,
 }
 
-async fn build_auth_store(database_url: &str) -> Result<Arc<dyn AuthStore>> {
-    let store = tunnel_store::sqlite::SqliteAuthStore::new(database_url).await?;
-    store.migrate().await?;
-    Ok(Arc::new(store))
+async fn build_stores(
+    database_url: &str,
+) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
+    let pool = tunnel_store::open_sqlite_pool(database_url).await?;
+
+    let auth_store = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool.clone());
+    auth_store.migrate().await?;
+
+    let rule_store = tunnel_store::sqlite_rules::SqliteRuleStore::new(pool);
+    rule_store.migrate().await?;
+
+    Ok((Arc::new(auth_store), Arc::new(rule_store)))
+}
+
+fn build_config_source(
+    config_path: &str,
+    rule_store: Arc<dyn RuleStore>,
+) -> Arc<dyn ConfigSource> {
+    // DB is primary (dynamic); file is fallback (MergedSource falls back when DB is empty)
+    Arc::new(MergedSource::new(
+        Box::new(DbSource::new(rule_store)),
+        Box::new(FileSource::new(config_path)),
+    ))
 }
 
 #[tokio::main]
@@ -100,7 +125,10 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
     tunnel_lib::infra::observability::init_tracing(log_level);
 
-    let store = build_auth_store(&config.server.database_url).await?;
+    let pool = tunnel_store::open_sqlite_pool(&config.server.database_url).await?;
+    let auth = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool);
+    auth.migrate().await?;
+    let store = Arc::new(auth) as Arc<dyn AuthStore>;
 
     match action {
         TokenAction::Create { name } => {
@@ -149,15 +177,38 @@ async fn run_server(config_path: &str) -> Result<()> {
 
     tunnel_lib::init_cert_cache(&config.server.pki);
 
-    let auth_store = build_auth_store(&config.server.database_url).await?;
-    info!(url = %config.server.database_url, "auth store initialized");
+    let (auth_store, rule_store) = build_stores(&config.server.database_url).await?;
+    info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
+
+    // On first boot, seed the DB from the YAML config so DB has an initial copy.
+    // Only seed the DB from YAML on first boot (when DB is empty) to avoid
+    // overwriting live rules that may have been updated via the API after boot.
+    match rule_store.is_routing_empty().await {
+        Ok(true) => {
+            if let Err(e) = config::sync_file_to_db(&config, rule_store.as_ref()).await {
+                tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
+            } else {
+                info!("routing rules seeded into DB from config file (first boot)");
+            }
+        }
+        Ok(false) => {
+            info!("routing DB already populated, skipping YAML seed");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
+        }
+    }
+
+    let config_source = build_config_source(config_path, rule_store.clone());
 
     let http_params = HttpClientParams::from(&config.server.http_pool);
-    let initial_snapshot = build_routing_snapshot(
-        &config.tunnel_management,
-        &config.server_egress_upstream,
-        &http_params,
-    );
+    let (tm, egress) = config_source.load().await?;
+    let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
+
+    // Capacity 64: enough for burst revocations. Receivers that lag get
+    // RecvError::Lagged, which the tunnel loop treats as a missed revocation
+    // (safe: it will re-validate against the DB).
+    let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
     let state = Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
@@ -168,6 +219,9 @@ async fn run_server(config_path: &str) -> Result<()> {
         registry: new_shared_registry(),
         config: Arc::new(config.clone()),
         auth_store,
+        rule_store,
+        config_source,
+        revocation_tx,
     });
 
     info!(

@@ -63,7 +63,7 @@ Makes auth and authorization deterministic and centrally managed.
 3. Keep auth comparison timing-safe where applicable.
 4. Emit metrics split by result (`auth_success`, `auth_failure_invalid`, `auth_failure_revoked`).
 
-### [TODO-52] Rules from DB + Multi-source Provider
+### [TODO-52] Rules from DB + Multi-source Provider ✅
 **Priority**: High
 
 **Goal**:
@@ -85,12 +85,12 @@ Supports dynamic control-plane updates without giving up local-file fallback.
 
 1. Milestone A: schema + token generation + DB lookup (auth only). ✅
 2. Milestone B: server login uses DB name resolution; client remains token-only. ✅
-3. Milestone C: rules read from DB (with file fallback).
+3. Milestone C: rules read from DB (with file fallback). ✅
 4. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
 
 ## Config Tuning (No Code Changes)
 
-### [TODO-16] QUIC connections: 1 → 4
+### [TODO-16] QUIC connections: 1 → 4 ✅
 
 **Files**: `ci-helpers/client.yaml`
 **Priority**: High
@@ -99,7 +99,7 @@ Supports dynamic control-plane updates without giving up local-file fallback.
 
 Change to `connections: 4` to distribute the load across 4 QUIC connections.
 
-### [TODO-17] max_concurrent_streams: 200 → 1000
+### [TODO-17] max_concurrent_streams: 200 → 1000 ✅
 
 **Files**: `ci-helpers/client.yaml`, `ci-helpers/server.yaml`
 **Priority**: High

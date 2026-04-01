@@ -95,17 +95,13 @@ async fn handle_tls_connection(
 
     debug!(host = %host, "TLS connection detected, terminating");
 
+    // Resolve the routing group at connection time (stable for the lifetime of this TLS conn).
     let group_id = state
         .routing
         .load()
         .vhost_router
         .get(&host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
-
-    let client_conn = state
-        .registry
-        .select_client_for_group(&group_id)
-        .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
     let (certs, key) = tunnel_lib::infra::pki::generate_self_signed_cert_for_host(&host)?;
     let mut server_config = rustls::ServerConfig::builder()
@@ -124,11 +120,30 @@ async fn handle_tls_connection(
     let src_port = peer_addr.port();
 
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let client_conn = client_conn.clone();
+        // Re-select the client connection on every request so that:
+        // - load is spread across all healthy connections (round-robin)
+        // - a dead connection mid-H2-session does not cause a sustained 502 storm
+        let client_conn = state.registry.select_client_for_group(&group_id);
         let proxy_name = proxy_name.clone();
         let target_host = target_host.clone();
         let src_addr = src_addr.clone();
         async move {
+            let client_conn = match client_conn {
+                Some(c) => c,
+                None => {
+                    return Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(503)
+                            .body(
+                                Full::new(bytes::Bytes::from("No client available"))
+                                    .map_err(|_| unreachable!())
+                                    .boxed_unsync(),
+                            )
+                            .unwrap(),
+                    );
+                }
+            };
+
             let (mut parts, body) = req.into_parts();
 
             let mut uri_parts = parts.uri.clone().into_parts();

@@ -4,6 +4,31 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use tracing::{info, warn};
 
+/// Open a single WAL-mode SQLite pool suitable for sharing between
+/// `SqliteAuthStore` and `SqliteRuleStore`.
+pub async fn open_sqlite_pool(database_url: &str) -> Result<SqlitePool> {
+    if let Some(path) = database_url
+        .strip_prefix("sqlite://")
+        .and_then(|s| s.split('?').next())
+    {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+    }
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
+
+    sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
+    sqlx::query("PRAGMA busy_timeout=5000").execute(&pool).await?;
+
+    Ok(pool)
+}
+
 use crate::token::{generate_token, hash_token};
 use crate::{AuthError, AuthResult, AuthStore, TokenListEntry};
 
@@ -13,29 +38,7 @@ pub struct SqliteAuthStore {
 
 impl SqliteAuthStore {
     pub async fn new(database_url: &str) -> Result<Self> {
-        if let Some(path) = database_url
-            .strip_prefix("sqlite://")
-            .and_then(|s| s.split('?').next())
-        {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
-            }
-        }
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect(database_url)
-            .await?;
-
-        sqlx::query("PRAGMA journal_mode=WAL")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA busy_timeout=5000")
-            .execute(&pool)
-            .await?;
-
+        let pool = open_sqlite_pool(database_url).await?;
         Ok(Self { pool })
     }
 
@@ -83,6 +86,13 @@ impl SqliteAuthStore {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Create a `SqliteAuthStore` from an already-open pool.
+    /// The pool must already have WAL mode and busy_timeout configured.
+    /// `migrate()` must still be called separately.
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 }
 

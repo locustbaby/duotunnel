@@ -1,9 +1,10 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use tunnel_lib::{
-    recv_message, recv_message_type, send_message, ClientConfig, Login, LoginResp, MessageType,
+    recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
 };
 
 use crate::config::build_client_config_for_group;
@@ -48,26 +49,40 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
 
     let (mut send, mut recv) = conn.accept_bi().await?;
 
-    let msg_type = recv_message_type(&mut recv).await?;
+    let login_timeout = Duration::from_secs(state.config.server.login_timeout_secs);
+
+    let msg_type = match tokio::time::timeout(login_timeout, recv_message_type(&mut recv)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_elapsed) => {
+            warn!(addr = %remote_addr, "login handshake timed out waiting for message type");
+            let _ = send_message(&mut send, MessageType::LoginResp, &LoginResp::failure("login timeout")).await;
+            return Ok(());
+        }
+    };
+
     if msg_type != MessageType::Login {
         warn!(addr = %remote_addr, msg_type = ?msg_type, "expected Login message");
+        let _ = send_message(&mut send, MessageType::LoginResp, &LoginResp::failure(format!("unexpected message type: {:?}", msg_type))).await;
         return Ok(());
     }
 
-    let login: Login = recv_message(&mut recv).await?;
+    let login: Login = match tokio::time::timeout(login_timeout, recv_message(&mut recv)).await {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_elapsed) => {
+            warn!(addr = %remote_addr, "login handshake timed out waiting for login body");
+            let _ = send_message(&mut send, MessageType::LoginResp, &LoginResp::failure("login timeout")).await;
+            return Ok(());
+        }
+    };
 
     let auth_result = match state.auth_store.authenticate(&login.token).await {
         Ok(result) => result,
         Err(e) => {
             warn!(addr = %remote_addr, error = %e, "authentication failed");
             metrics::auth_failure("unknown");
-            let resp = LoginResp {
-                success: false,
-                error: Some(e.to_string()),
-                config: ClientConfig::default(),
-                client_name: String::new(),
-            };
-            send_message(&mut send, MessageType::LoginResp, &resp).await?;
+            send_message(&mut send, MessageType::LoginResp, &LoginResp::failure(e.to_string())).await?;
             return Ok(());
         }
     };
@@ -82,30 +97,14 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
             .unwrap_or_default()
     };
 
-    let conn_id = format!(
-        "{}-{}",
-        client_name,
-        conn.stable_id()
-    );
+    let conn_id = uuid::Uuid::new_v4().to_string();
 
-    let resp = LoginResp {
-        success: true,
-        error: None,
-        config: client_config,
-        client_name: client_name.clone(),
-    };
-    send_message(&mut send, MessageType::LoginResp, &resp).await?;
+    send_message(&mut send, MessageType::LoginResp, &LoginResp::success(client_config, client_name.clone())).await?;
 
-    if let Some(old_conn) = state.registry.replace_or_register(
-        conn_id.clone(),
-        client_name.clone(),
-        conn.clone(),
-    ) {
-        warn!(conn_id = %conn_id, "duplicate conn_id, closing old connection");
-        metrics::duplicate_client_closed();
-        old_conn.close(0u32.into(), b"duplicate client");
-    }
+    state.registry.register(conn_id.clone(), client_name.clone(), conn.clone());
     metrics::client_registered(&client_name);
+
+    let mut revocation_rx = state.revocation_tx.subscribe();
 
     loop {
         tokio::select! {
@@ -127,6 +126,32 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                     Err(e) => {
                         debug!(error = %e, "accept_bi error");
                         break;
+                    }
+                }
+            }
+            recv_result = revocation_rx.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                match recv_result {
+                    Ok(revoked_name) if revoked_name == client_name => {
+                        warn!(conn_id = %conn_id, client_name = %client_name,
+                              "closing connection: token revoked");
+                        conn.close(0u32.into(), b"token revoked");
+                        break;
+                    }
+                    Ok(_) => {
+                        // Different client revoked — not our concern.
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        // Missed n revocation messages; re-validate token against DB.
+                        warn!(conn_id = %conn_id, skipped = n, "revocation channel lagged; re-validating token");
+                        if state.auth_store.authenticate(&login.token).await.is_err() {
+                            warn!(conn_id = %conn_id, "token no longer valid after lag; closing connection");
+                            conn.close(0u32.into(), b"token revoked");
+                            break;
+                        }
+                    }
+                    Err(RecvError::Closed) => {
+                        // Server is shutting down; let conn.closed() handle exit.
                     }
                 }
             }

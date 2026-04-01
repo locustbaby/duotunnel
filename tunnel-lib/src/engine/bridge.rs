@@ -1,22 +1,29 @@
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::{debug, trace};
+
+const RELAY_BUF: usize = 65536;
 
 pub async fn relay<A, B>(stream_a: A, stream_b: B) -> std::io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut a_read, mut a_write) = tokio::io::split(stream_a);
-    let (mut b_read, mut b_write) = tokio::io::split(stream_b);
+    // tokio::io::split uses Arc+Mutex; acceptable here since A/B are not
+    // IntoSplit (generic constraint).  64KB buffers reduce syscalls ~8x vs
+    // the default 8KB (TODO-21).
+    let (a_read, mut a_write) = tokio::io::split(stream_a);
+    let (b_read, mut b_write) = tokio::io::split(stream_b);
+    let mut a_read = BufReader::with_capacity(RELAY_BUF, a_read);
+    let mut b_read = BufReader::with_capacity(RELAY_BUF, b_read);
 
     let a_to_b = async {
-        let bytes = tokio::io::copy(&mut a_read, &mut b_write).await?;
+        let bytes = tokio::io::copy_buf(&mut a_read, &mut b_write).await?;
         let _ = b_write.shutdown().await;
         Ok::<_, std::io::Error>(bytes)
     };
 
     let b_to_a = async {
-        let bytes = tokio::io::copy(&mut b_read, &mut a_write).await?;
+        let bytes = tokio::io::copy_buf(&mut b_read, &mut a_write).await?;
         let _ = a_write.shutdown().await;
         Ok::<_, std::io::Error>(bytes)
     };
@@ -35,12 +42,13 @@ where
     }
 }
 
-pub async fn relay_unidirectional<R, W>(mut reader: R, mut writer: W) -> std::io::Result<u64>
+pub async fn relay_unidirectional<R, W>(reader: R, mut writer: W) -> std::io::Result<u64>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let bytes = tokio::io::copy(&mut reader, &mut writer).await?;
+    let mut reader = BufReader::with_capacity(RELAY_BUF, reader);
+    let bytes = tokio::io::copy_buf(&mut reader, &mut writer).await?;
     let _ = writer.shutdown().await;
     trace!("unidirectional relay completed: {} bytes", bytes);
     Ok(bytes)
@@ -62,20 +70,22 @@ impl QuicBiStream {
 }
 
 pub async fn relay_quic_to_tcp(
-    mut quic_recv: quinn::RecvStream,
+    quic_recv: quinn::RecvStream,
     mut quic_send: quinn::SendStream,
     tcp_stream: tokio::net::TcpStream,
 ) -> anyhow::Result<(u64, u64)> {
-    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, quic_recv);
+    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
 
     let quic_to_tcp = async {
-        let bytes = tokio::io::copy(&mut quic_recv, &mut tcp_write).await?;
+        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
         let _ = tcp_write.shutdown().await;
         Ok::<_, std::io::Error>(bytes)
     };
 
     let tcp_to_quic = async {
-        let bytes = tokio::io::copy(&mut tcp_read, &mut quic_send).await?;
+        let bytes = tokio::io::copy_buf(&mut tcp_read, &mut quic_send).await?;
         let _ = quic_send.finish();
         Ok::<_, std::io::Error>(bytes)
     };
@@ -98,7 +108,7 @@ pub async fn relay_quic_to_tcp(
 }
 
 pub async fn relay_with_first_data(
-    mut quic_recv: quinn::RecvStream,
+    quic_recv: quinn::RecvStream,
     mut quic_send: quinn::SendStream,
     mut tcp_stream: tokio::net::TcpStream,
     first_data: Option<&[u8]>,
@@ -107,16 +117,18 @@ pub async fn relay_with_first_data(
         tcp_stream.write_all(data).await?;
     }
 
-    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, quic_recv);
+    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
 
     let quic_to_tcp = async {
-        let bytes = tokio::io::copy(&mut quic_recv, &mut tcp_write).await?;
+        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
         let _ = tcp_write.shutdown().await;
         Ok::<_, std::io::Error>(bytes)
     };
 
     let tcp_to_quic = async {
-        let bytes = tokio::io::copy(&mut tcp_read, &mut quic_send).await?;
+        let bytes = tokio::io::copy_buf(&mut tcp_read, &mut quic_send).await?;
         let _ = quic_send.finish();
         Ok::<_, std::io::Error>(bytes)
     };

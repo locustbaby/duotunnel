@@ -53,11 +53,6 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
-    pub static ref DUPLICATE_CLIENTS: IntCounter = IntCounter::new(
-        "duotunnel_duplicate_clients_total",
-        "Duplicate client connections closed"
-    )
-    .unwrap();
 }
 
 pub fn init() {
@@ -80,7 +75,6 @@ pub fn init() {
     REGISTRY
         .register(Box::new(CONNECTIONS_REJECTED.clone()))
         .ok();
-    REGISTRY.register(Box::new(DUPLICATE_CLIENTS.clone())).ok();
 }
 
 pub fn encode() -> String {
@@ -133,6 +127,3 @@ pub fn connection_rejected(conn_type: &str) {
     CONNECTIONS_REJECTED.with_label_values(&[conn_type]).inc();
 }
 
-pub fn duplicate_client_closed() {
-    DUPLICATE_CLIENTS.inc();
-}

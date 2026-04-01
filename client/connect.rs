@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio_util::sync::CancellationToken;
@@ -150,6 +150,7 @@ impl JitterBackoff {
 }
 
 fn random_delay_up_to(cap: Duration) -> Duration {
+    use rand::Rng;
     let max_ms_u128 = cap.as_millis();
     if max_ms_u128 == 0 {
         return Duration::ZERO;
@@ -158,16 +159,17 @@ fn random_delay_up_to(cap: Duration) -> Duration {
     if max_ms <= 1 {
         return Duration::from_millis(max_ms);
     }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
-    let jitter_ms = (now % (max_ms as u128)) as u64 + 1;
+    let jitter_ms = rand::rng().random_range(1..=max_ms);
     Duration::from_millis(jitter_ms)
 }
 
 pub fn classify_login_failure(resp_error: Option<&str>) -> ConnectError {
-    let msg = resp_error.unwrap_or("unknown login error").to_string();
-    ConnectError::fatal(anyhow!("login rejected by server: {}", msg))
+    let msg = resp_error.unwrap_or("unknown login error");
+    // Transient: server-side timeout or unexpected protocol state — worth retrying.
+    // Fatal: explicit auth rejection (invalid/revoked token) — retrying won't help.
+    if msg.contains("timeout") || msg.contains("unexpected message type") {
+        ConnectError::transient(anyhow!("login rejected by server: {}", msg))
+    } else {
+        ConnectError::fatal(anyhow!("login rejected by server: {}", msg))
+    }
 }

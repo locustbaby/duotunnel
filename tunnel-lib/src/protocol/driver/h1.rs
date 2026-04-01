@@ -101,12 +101,57 @@ impl ProtocolDriver for Http1Driver {
             .context("RecvStream missing after reclaim")?;
 
         // ── 2. Read until we have a complete header block ────────────
-        loop {
+        struct ParsedHead {
+            header_end: usize,
+            method: Method,
+            uri: Uri,
+            version: u8,
+            header_map: HeaderMap,
+        }
+
+        let parsed = loop {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
 
             match req.parse(&self.read_buf) {
-                Ok(httparse::Status::Complete(_)) => break,
+                Ok(httparse::Status::Complete(n)) => {
+                    let method_str = req.method.context("no method")?;
+                    let path = req.path.context("no path")?;
+                    let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
+                    let uri: Uri = uri_str.parse()?;
+
+                    let method = match method_str {
+                        "GET" => Method::GET,
+                        "POST" => Method::POST,
+                        "PUT" => Method::PUT,
+                        "DELETE" => Method::DELETE,
+                        "HEAD" => Method::HEAD,
+                        "OPTIONS" => Method::OPTIONS,
+                        "PATCH" => Method::PATCH,
+                        _ => Method::from_bytes(method_str.as_bytes())
+                            .map_err(|_| anyhow::anyhow!("unsupported method: {}", method_str))?,
+                    };
+
+                    let mut header_map = HeaderMap::new();
+                    for h in req.headers.iter() {
+                        if !h.name.is_empty() {
+                            if let (Ok(name), Ok(value)) = (
+                                http::header::HeaderName::from_bytes(h.name.as_bytes()),
+                                http::header::HeaderValue::from_bytes(h.value),
+                            ) {
+                                header_map.insert(name, value);
+                            }
+                        }
+                    }
+
+                    break ParsedHead {
+                        header_end: n,
+                        method,
+                        uri,
+                        version: req.version.unwrap_or(1),
+                        header_map,
+                    };
+                }
                 Ok(httparse::Status::Partial) => {
                     if self.read_buf.len() >= 8192 {
                         return Err(anyhow::anyhow!("Headers exceeding buffer size"));
@@ -119,7 +164,6 @@ impl ProtocolDriver for Http1Driver {
                         None => {
                             self.read_buf.truncate(old_len);
                             if old_len == 0 {
-                                // Clean EOF — connection closed.
                                 self.recv = Some(recv);
                                 return Ok(None);
                             }
@@ -129,48 +173,14 @@ impl ProtocolDriver for Http1Driver {
                 }
                 Err(e) => return Err(e.into()),
             }
-        }
-
-        // ── 3. Parse the complete headers ────────────────────────────
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut req = httparse::Request::new(&mut headers);
-        let header_end = match req.parse(&self.read_buf)? {
-            httparse::Status::Complete(n) => n,
-            _ => unreachable!("Headers already validated as complete"),
         };
 
-        let method_str = req.method.context("no method")?;
-        let path = req.path.context("no path")?;
-
-        let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
-        let uri: Uri = uri_str.parse()?;
-
-        let method = match method_str {
-            "GET" => Method::GET,
-            "POST" => Method::POST,
-            "PUT" => Method::PUT,
-            "DELETE" => Method::DELETE,
-            "HEAD" => Method::HEAD,
-            "OPTIONS" => Method::OPTIONS,
-            "PATCH" => Method::PATCH,
-            _ => Method::from_bytes(method_str.as_bytes())
-                .map_err(|_| anyhow::anyhow!("unsupported method: {}", method_str))?,
-        };
-
-        let mut header_map = HeaderMap::new();
-        for h in req.headers.iter() {
-            if !h.name.is_empty() {
-                if let (Ok(name), Ok(value)) = (
-                    http::header::HeaderName::from_bytes(h.name.as_bytes()),
-                    http::header::HeaderValue::from_bytes(h.value),
-                ) {
-                    header_map.insert(name, value);
-                }
-            }
-        }
-
-        // ── 4. Determine keep-alive BEFORE sanitize removes Connection ──
-        let http_minor = req.version.unwrap_or(1);
+        // ── 3. Unpack parsed head ─────────────────────────────────────
+        let header_end = parsed.header_end;
+        let method = parsed.method;
+        let uri = parsed.uri;
+        let http_minor = parsed.version;
+        let mut header_map = parsed.header_map;
 
         let conn_header = header_map
             .get(http::header::CONNECTION)
@@ -198,9 +208,7 @@ impl ProtocolDriver for Http1Driver {
 
         let available = self.read_buf.len();
         let body_prefix_len = available.min(content_length);
-        let body_prefix = Bytes::copy_from_slice(&self.read_buf[..body_prefix_len]);
-        // Bytes beyond body belong to the next request — keep in read_buf.
-        let _ = self.read_buf.split_to(body_prefix_len);
+        let body_prefix = self.read_buf.split_to(body_prefix_len).freeze();
 
         let body_remaining = content_length.saturating_sub(body_prefix_len);
 
@@ -273,21 +281,23 @@ impl ProtocolDriver for Http1Driver {
 
                     // Read more body from recv
                     let to_read = state.remaining.min(8192);
-                    let mut buf = BytesMut::zeroed(to_read);
+                    let mut buf = BytesMut::with_capacity(to_read);
+                    // SAFETY: quinn RecvStream::read fills [0..n] before returning Ok(Some(n)).
+                    unsafe { buf.set_len(to_read) };
                     match recv.read(&mut buf[..]).await {
                         Ok(Some(n)) => {
                             let got = n.min(state.remaining);
                             state.read += got;
                             state.remaining -= got;
 
-                            let data = Bytes::copy_from_slice(&buf[..got]);
-
-                            // Over-read bytes belong to the next request.
+                            let mut buf = buf;
+                            buf.truncate(n);
                             let overflow = if n > got {
-                                Bytes::copy_from_slice(&buf[got..n])
+                                buf.split_off(got).freeze()
                             } else {
                                 Bytes::new()
                             };
+                            let data = buf.freeze();
 
                             // If body done, reclaim immediately.
                             if state.remaining == 0 {

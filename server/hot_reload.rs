@@ -55,7 +55,7 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
 
         info!(path = %config_path, "config change detected, reloading");
 
-        match reload_routing(&config_path, &state) {
+        match reload_routing(&config_path, &state).await {
             Ok(()) => info!(path = %config_path, "hot reload successful"),
             Err(e) => {
                 warn!(path = %config_path, error = %e, "hot reload failed, keeping previous config")
@@ -66,16 +66,27 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
     Ok(())
 }
 
-fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
-    let new_config = ServerConfigFile::load(config_path)?;
+async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
+    let http_params = HttpClientParams::from(&state.config.server.http_pool);
 
-    let http_params = HttpClientParams::from(&new_config.server.http_pool);
-    let snapshot = build_routing_snapshot(
-        &new_config.tunnel_management,
-        &new_config.server_egress_upstream,
-        &http_params,
-    );
+    // Load from file, sync to DB so DB stays authoritative, then build snapshot
+    // directly from the loaded data — avoids a second DB round-trip.
+    let (tm, egress) = match ServerConfigFile::load(config_path) {
+        Ok(new_config) => {
+            if let Err(e) =
+                crate::config::sync_file_to_db(&new_config, state.rule_store.as_ref()).await
+            {
+                warn!(error = %e, "failed to sync updated YAML to DB");
+            }
+            (new_config.tunnel_management, new_config.server_egress_upstream)
+        }
+        Err(e) => {
+            warn!(error = %e, "could not re-read config file; reloading from DB");
+            state.config_source.load().await?
+        }
+    };
 
+    let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     state.routing.store(Arc::new(snapshot));
     Ok(())
 }
