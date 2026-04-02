@@ -181,7 +181,14 @@ jobs:
           TOKEN=$(./target/release/server --config ci-helpers/server.yaml token create --name ci-group 2>/dev/null \
             || ./target/release/server --config ci-helpers/server.yaml token rotate --name ci-group 2>/dev/null)
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-          sed -i "s|^auth_token:.*|auth_token: \"${TOKEN}\"|" ci-helpers/client.yaml
+          python3 -c "
+import re, sys
+f='ci-helpers/client.yaml'
+t=sys.argv[1]
+c=open(f).read()
+c=re.sub(r'^auth_token:.*',f'auth_token: \"{t}\"',c,flags=re.MULTILINE)
+open(f,'w').write(c)
+" "$TOKEN"
           ./target/release/client --config ci-helpers/client.yaml \
             > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
@@ -589,7 +596,14 @@ jobs:
           TOKEN=$(./target/release/server --config ci-helpers/server.yaml token create --name ci-group 2>/dev/null \
             || ./target/release/server --config ci-helpers/server.yaml token rotate --name ci-group 2>/dev/null)
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-          sed -i "s|^auth_token:.*|auth_token: \"${TOKEN}\"|" ci-helpers/client.yaml
+          python3 -c "
+import re, sys
+f='ci-helpers/client.yaml'
+t=sys.argv[1]
+c=open(f).read()
+c=re.sub(r'^auth_token:.*',f'auth_token: \"{t}\"',c,flags=re.MULTILINE)
+open(f,'w').write(c)
+" "$TOKEN"
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
