@@ -8,30 +8,19 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use quinn::{RecvStream, SendStream};
 use tokio::sync::oneshot;
-
-/// Residual state returned by the body stream after it finishes consuming
-/// the request body.  Contains the `RecvStream` and any over-read bytes
-/// that belong to the next request.
 struct Reclaim {
     recv: RecvStream,
     overflow: Bytes,
 }
-
 pub struct Http1Driver {
     send: SendStream,
-    /// `None` while a body stream holds the recv.
     recv: Option<RecvStream>,
     scheme: String,
     authority: String,
-    /// Persistent read buffer — survives across requests.  May contain
-    /// leftover bytes from a previous read that belong to the next request.
     read_buf: BytesMut,
-    /// Channel to reclaim `recv` + overflow from an in-flight body stream.
     inflight_reclaim: Option<oneshot::Receiver<Reclaim>>,
-    /// Whether the connection should close after the current request.
     pub should_close: bool,
 }
-
 impl Http1Driver {
     pub fn new(
         send: SendStream,
@@ -54,84 +43,57 @@ impl Http1Driver {
             should_close: false,
         }
     }
-
     pub async fn finish(&mut self) -> Result<()> {
         self.send.finish()?;
         Ok(())
     }
-
-    /// Ensure `self.recv` is available.  If a body stream is still holding
-    /// it, wait for the stream to finish and reclaim the recv + overflow.
     async fn reclaim_recv(&mut self) -> Result<()> {
         if self.recv.is_some() {
             return Ok(());
         }
-        let rx = self
-            .inflight_reclaim
-            .take()
-            .context("recv lost: no reclaim channel")?;
-
+        let rx = self.inflight_reclaim.take().context("recv lost: no reclaim channel")?;
         let reclaim = rx
             .await
             .map_err(|_| anyhow::anyhow!("body stream dropped without returning recv"))?;
-
         self.recv = Some(reclaim.recv);
         if !reclaim.overflow.is_empty() {
-            // Prepend overflow so the next read_request sees it first.
-            let mut new_buf =
-                BytesMut::with_capacity(reclaim.overflow.len() + self.read_buf.len());
-            new_buf.extend_from_slice(&reclaim.overflow);
-            new_buf.extend_from_slice(&self.read_buf);
-            self.read_buf = new_buf;
+            if self.read_buf.is_empty() {
+                self.read_buf = BytesMut::from(reclaim.overflow.as_ref());
+            } else {
+                let mut prepend = BytesMut::from(reclaim.overflow.as_ref());
+                prepend.extend_from_slice(&self.read_buf);
+                self.read_buf = prepend;
+            }
         }
         Ok(())
     }
 }
-
+struct ParsedHead {
+    header_end: usize,
+    method: Method,
+    uri: Uri,
+    version: u8,
+    header_map: HeaderMap,
+}
 #[async_trait]
 impl ProtocolDriver for Http1Driver {
     async fn read_request(&mut self) -> Result<Option<ProxyRequest>> {
-        // ── 1. Reclaim recv from previous body stream if needed ──────
         self.reclaim_recv().await?;
         self.should_close = false;
-
-        let mut recv = self
-            .recv
-            .take()
-            .context("RecvStream missing after reclaim")?;
-
-        // ── 2. Read until we have a complete header block ────────────
-        struct ParsedHead {
-            header_end: usize,
-            method: Method,
-            uri: Uri,
-            version: u8,
-            header_map: HeaderMap,
-        }
-
+        let mut recv = self.recv.take().context("RecvStream missing after reclaim")?;
         let parsed = loop {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
-
             match req.parse(&self.read_buf) {
                 Ok(httparse::Status::Complete(n)) => {
                     let method_str = req.method.context("no method")?;
                     let path = req.path.context("no path")?;
-                    let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
+                    let uri_str = format!(
+                        "{}://{}{}", self.scheme, self.authority, path
+                    );
                     let uri: Uri = uri_str.parse()?;
-
-                    let method = match method_str {
-                        "GET" => Method::GET,
-                        "POST" => Method::POST,
-                        "PUT" => Method::PUT,
-                        "DELETE" => Method::DELETE,
-                        "HEAD" => Method::HEAD,
-                        "OPTIONS" => Method::OPTIONS,
-                        "PATCH" => Method::PATCH,
-                        _ => Method::from_bytes(method_str.as_bytes())
-                            .map_err(|_| anyhow::anyhow!("unsupported method: {}", method_str))?,
-                    };
-
+                    let method = Method::from_bytes(method_str.as_bytes())
+                        .map_err(|_| anyhow::anyhow!("unsupported method: {}", method_str))?;
                     let mut header_map = HeaderMap::new();
                     for h in req.headers.iter() {
                         if !h.name.is_empty() {
@@ -143,7 +105,6 @@ impl ProtocolDriver for Http1Driver {
                             }
                         }
                     }
-
                     break ParsedHead {
                         header_end: n,
                         method,
@@ -174,57 +135,35 @@ impl ProtocolDriver for Http1Driver {
                 Err(e) => return Err(e.into()),
             }
         };
-
-        // ── 3. Unpack parsed head ─────────────────────────────────────
         let header_end = parsed.header_end;
         let method = parsed.method;
         let uri = parsed.uri;
         let http_minor = parsed.version;
         let mut header_map = parsed.header_map;
-
         let conn_header = header_map
             .get(http::header::CONNECTION)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_ascii_lowercase());
-
         self.should_close = match http_minor {
-            // HTTP/1.1: keep-alive by default, close only if explicit
             1 => conn_header.as_deref() == Some("close"),
-            // HTTP/1.0: close by default, keep-alive only if explicit
             _ => conn_header.as_deref() != Some("keep-alive"),
         };
-
         let content_length: usize = header_map
             .get(http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-
         sanitize_request_headers(&mut header_map);
-
-        // ── 5. Split read_buf: body prefix vs next-request overflow ──
-        // Consume header bytes, keep the rest.
         let _ = self.read_buf.split_to(header_end);
-
         let available = self.read_buf.len();
         let body_prefix_len = available.min(content_length);
         let body_prefix = self.read_buf.split_to(body_prefix_len).freeze();
-
         let body_remaining = content_length.saturating_sub(body_prefix_len);
-
-        // ── 6. Build the body stream ─────────────────────────────────
         let body = if content_length == 0 {
-            // No body — recv stays with driver.
             self.recv = Some(recv);
-            http_body_util::Empty::new()
-                .map_err(|e| match e {})
-                .boxed_unsync()
+            http_body_util::Empty::new().map_err(|e| match e {}).boxed_unsync()
         } else if body_remaining == 0 {
-            // The prefix already contains the entire body.  Reclaim recv
-            // eagerly so it is returned even if hyper drops the body stream
-            // without polling to completion.
             self.recv = Some(recv);
-
             let prefix = body_prefix;
             let stream = futures_util::stream::try_unfold(
                 Some(prefix),
@@ -237,59 +176,46 @@ impl ProtocolDriver for Http1Driver {
                     Ok(None)
                 },
             );
-
             http_body_util::StreamBody::new(stream).boxed_unsync()
         } else {
-            // Body stream temporarily owns recv.
             let (reclaim_tx, reclaim_rx) = oneshot::channel::<Reclaim>();
             self.inflight_reclaim = Some(reclaim_rx);
-
             let stream = futures_util::stream::try_unfold(
                 BodyState {
                     recv: Some(recv),
                     body_prefix: Some(body_prefix),
-                    read: 0,
                     remaining: body_remaining,
                     reclaim_tx: Some(reclaim_tx),
                 },
                 |mut state| async move {
-                    // Yield the prefix chunk first
                     if let Some(prefix) = state.body_prefix.take() {
                         if !prefix.is_empty() {
-                            state.read += prefix.len();
                             return Ok(Some((hyper::body::Frame::data(prefix), state)));
                         }
                     }
-
-                    // All body bytes consumed — reclaim recv.
                     if state.remaining == 0 {
-                        if let (Some(tx), Some(recv)) =
-                            (state.reclaim_tx.take(), state.recv.take())
-                        {
-                            let _ = tx.send(Reclaim {
-                                recv,
-                                overflow: Bytes::new(),
-                            });
+                        if let (Some(tx), Some(recv)) = (
+                            state.reclaim_tx.take(),
+                            state.recv.take(),
+                        ) {
+                            let _ = tx
+                                .send(Reclaim {
+                                    recv,
+                                    overflow: Bytes::new(),
+                                });
                         }
                         return Ok(None);
                     }
-
                     let recv = match state.recv.as_mut() {
                         Some(r) => r,
                         None => return Ok(None),
                     };
-
-                    // Read more body from recv
                     let to_read = state.remaining.min(8192);
-                    let mut buf = BytesMut::with_capacity(to_read);
-                    // SAFETY: quinn RecvStream::read fills [0..n] before returning Ok(Some(n)).
-                    unsafe { buf.set_len(to_read) };
+                    let mut buf = BytesMut::zeroed(to_read);
                     match recv.read(&mut buf[..]).await {
                         Ok(Some(n)) => {
                             let got = n.min(state.remaining);
-                            state.read += got;
                             state.remaining -= got;
-
                             let mut buf = buf;
                             buf.truncate(n);
                             let overflow = if n > got {
@@ -298,43 +224,35 @@ impl ProtocolDriver for Http1Driver {
                                 Bytes::new()
                             };
                             let data = buf.freeze();
-
-                            // If body done, reclaim immediately.
                             if state.remaining == 0 {
-                                if let (Some(tx), Some(recv)) =
-                                    (state.reclaim_tx.take(), state.recv.take())
-                                {
+                                if let (Some(tx), Some(recv)) = (
+                                    state.reclaim_tx.take(),
+                                    state.recv.take(),
+                                ) {
                                     let _ = tx.send(Reclaim { recv, overflow });
                                 }
                             }
-
                             Ok(Some((hyper::body::Frame::data(data), state)))
                         }
-                        Ok(None) => {
-                            // Unexpected EOF in body — connection broken.
-                            Ok(None)
-                        }
+                        Ok(None) => Ok(None),
                         Err(e) => Err(std::io::Error::other(e)),
                     }
                 },
             );
-
             http_body_util::StreamBody::new(stream).boxed_unsync()
         };
-
-        Ok(Some(ProxyRequest {
-            method,
-            uri,
-            headers: header_map,
-            version: Version::HTTP_11,
-            body,
-        }))
+        Ok(
+            Some(ProxyRequest {
+                method,
+                uri,
+                headers: header_map,
+                version: Version::HTTP_11,
+                body,
+            }),
+        )
     }
-
     async fn write_response(&mut self, mut response: Response<Incoming>) -> Result<()> {
         let status = response.status();
-
-        // Check response Connection header for close signal.
         if let Some(conn) = response.headers().get(http::header::CONNECTION) {
             if let Ok(v) = conn.to_str() {
                 if v.eq_ignore_ascii_case("close") {
@@ -342,21 +260,15 @@ impl ProtocolDriver for Http1Driver {
                 }
             }
         }
-
         sanitize_response_headers(response.headers_mut());
-
         let headers = response.headers();
         let mut header_buf = BytesMut::with_capacity(32 + headers.len() * 48 + 32);
-
         use std::fmt::Write as FmtWrite;
         write!(
-            header_buf,
-            "HTTP/1.1 {} {}\r\n",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("OK")
+            header_buf, "HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason()
+            .unwrap_or("OK")
         )
-        .unwrap();
-
+            .unwrap();
         for (name, value) in headers {
             header_buf.put_slice(name.as_str().as_bytes());
             header_buf.put_slice(b": ");
@@ -364,13 +276,10 @@ impl ProtocolDriver for Http1Driver {
             header_buf.put_slice(b"\r\n");
         }
         header_buf.put_slice(b"transfer-encoding: chunked\r\n\r\n");
-
         self.send.write_all(&header_buf).await?;
-
         let mut body = response.into_body();
         let mut accumulated_trailers = HeaderMap::new();
         let mut chunk_buf = BytesMut::with_capacity(8192 + 24);
-
         loop {
             match body.frame().await {
                 Some(Ok(frame)) => {
@@ -388,12 +297,11 @@ impl ProtocolDriver for Http1Driver {
                     }
                 }
                 Some(Err(e)) => {
-                    return Err(anyhow::anyhow!("error reading response frame: {}", e))
+                    return Err(anyhow::anyhow!("error reading response frame: {}", e));
                 }
                 None => break,
             }
         }
-
         if accumulated_trailers.is_empty() {
             self.send.write_all(b"0\r\n\r\n").await?;
         } else {
@@ -408,16 +316,12 @@ impl ProtocolDriver for Http1Driver {
             tail.put_slice(b"\r\n");
             self.send.write_all(&tail).await?;
         }
-
         Ok(())
     }
 }
-
-/// Internal state for the body-reading stream.
 struct BodyState {
     recv: Option<RecvStream>,
     body_prefix: Option<Bytes>,
-    read: usize,
     remaining: usize,
     reclaim_tx: Option<oneshot::Sender<Reclaim>>,
 }

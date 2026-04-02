@@ -4,7 +4,6 @@ pub struct UpstreamAddr {
     pub port: u16,
     pub connect_addr: String,
 }
-
 pub fn parse_upstream(addr: &str) -> UpstreamAddr {
     let (scheme_https, clean_addr) = if addr.starts_with("https://") {
         (Some(true), addr.trim_start_matches("https://"))
@@ -17,14 +16,10 @@ pub fn parse_upstream(addr: &str) -> UpstreamAddr {
     } else {
         (None, addr)
     };
-
     let host = extract_host(clean_addr).to_string();
     let port = extract_port(clean_addr);
-
     let is_https = scheme_https.unwrap_or_else(|| port == Some(443));
-
     let effective_port = port.unwrap_or(if is_https { 443 } else { 80 });
-
     let connect_addr = if port.is_some() {
         clean_addr.to_string()
     } else if is_https {
@@ -32,7 +27,6 @@ pub fn parse_upstream(addr: &str) -> UpstreamAddr {
     } else {
         format!("{}:80", clean_addr)
     };
-
     UpstreamAddr {
         is_https,
         host,
@@ -40,7 +34,6 @@ pub fn parse_upstream(addr: &str) -> UpstreamAddr {
         connect_addr,
     }
 }
-
 fn extract_host(addr: &str) -> &str {
     if let Some(rest) = addr.strip_prefix('[') {
         rest.split(']').next().unwrap_or(addr)
@@ -48,7 +41,6 @@ fn extract_host(addr: &str) -> &str {
         addr.split(':').next().unwrap_or(addr)
     }
 }
-
 fn extract_port(addr: &str) -> Option<u16> {
     if addr.starts_with('[') {
         let after_bracket = addr.split(']').nth(1)?;
@@ -59,7 +51,6 @@ fn extract_port(addr: &str) -> Option<u16> {
         parts.next()?.parse().ok()
     }
 }
-
 pub fn normalize_host(host: &str) -> String {
     if let Some(rest) = host.strip_prefix('[') {
         rest.split(']').next().unwrap_or(host).to_lowercase()
@@ -67,34 +58,29 @@ pub fn normalize_host(host: &str) -> String {
         host.split(':').next().unwrap_or(host).to_lowercase()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_plain_http() {
         let a = parse_upstream("example.com:8080");
         assert_eq!(a.host, "example.com");
         assert_eq!(a.port, 8080);
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.connect_addr, "example.com:8080");
     }
-
     #[test]
     fn test_port_443_is_https() {
         let a = parse_upstream("example.com:443");
         assert!(a.is_https);
         assert_eq!(a.port, 443);
     }
-
     #[test]
     fn test_port_4430_is_not_https() {
         let a = parse_upstream("example.com:4430");
-        assert!(!a.is_https, "port 4430 must not be treated as HTTPS");
+        assert!(! a.is_https, "port 4430 must not be treated as HTTPS");
         assert_eq!(a.port, 4430);
     }
-
     #[test]
     fn test_explicit_https_scheme() {
         let a = parse_upstream("https://example.com");
@@ -103,7 +89,6 @@ mod tests {
         assert_eq!(a.host, "example.com");
         assert_eq!(a.connect_addr, "example.com:443");
     }
-
     #[test]
     fn test_explicit_https_with_port() {
         let a = parse_upstream("https://example.com:8443");
@@ -111,24 +96,21 @@ mod tests {
         assert_eq!(a.port, 8443);
         assert_eq!(a.connect_addr, "example.com:8443");
     }
-
     #[test]
     fn test_explicit_http_scheme() {
         let a = parse_upstream("http://example.com:8080");
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.port, 8080);
         assert_eq!(a.host, "example.com");
     }
-
     #[test]
     fn test_ipv6_with_port() {
         let a = parse_upstream("[::1]:8080");
         assert_eq!(a.host, "::1");
         assert_eq!(a.port, 8080);
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.connect_addr, "[::1]:8080");
     }
-
     #[test]
     fn test_ipv6_port_443() {
         let a = parse_upstream("[::1]:443");
@@ -136,47 +118,40 @@ mod tests {
         assert_eq!(a.port, 443);
         assert!(a.is_https);
     }
-
     #[test]
     fn test_no_port_defaults_to_80() {
         let a = parse_upstream("example.com");
         assert_eq!(a.port, 80);
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.connect_addr, "example.com:80");
     }
-
     #[test]
     fn test_normalize_host_ipv6() {
         assert_eq!(normalize_host("[::1]:8080"), "::1");
         assert_eq!(normalize_host("[::1]"), "::1");
     }
-
     #[test]
     fn test_normalize_host_plain() {
         assert_eq!(normalize_host("Example.COM:8080"), "example.com");
     }
-
     #[test]
     fn test_connect_addr_no_port_https() {
         let a = parse_upstream("https://example.com");
         assert_eq!(a.connect_addr, "example.com:443");
     }
-
     #[test]
     fn test_connect_addr_no_port_http() {
         let a = parse_upstream("http://example.com");
         assert_eq!(a.connect_addr, "example.com:80");
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.port, 80);
     }
-
     #[test]
     fn test_connect_addr_explicit_port_preserved() {
         let a = parse_upstream("https://example.com:8443");
         assert_eq!(a.connect_addr, "example.com:8443");
         assert_eq!(a.port, 8443);
     }
-
     #[test]
     fn test_wss_scheme_treated_as_https() {
         let a = parse_upstream("wss://echo.websocket.org");
@@ -184,68 +159,53 @@ mod tests {
         assert_eq!(a.host, "echo.websocket.org");
         assert_eq!(a.port, 443);
     }
-
     #[test]
     fn test_ws_scheme_treated_as_http() {
         let a = parse_upstream("ws://127.0.0.1:8765");
-        assert!(!a.is_https, "ws:// must not be treated as HTTPS");
+        assert!(! a.is_https, "ws:// must not be treated as HTTPS");
         assert_eq!(a.host, "127.0.0.1");
         assert_eq!(a.port, 8765);
     }
-
     #[test]
     fn test_http_scheme_overrides_port_443() {
         let a = parse_upstream("http://example.com:443");
-        assert!(
-            !a.is_https,
-            "explicit http:// must override port-443 heuristic"
-        );
+        assert!(! a.is_https, "explicit http:// must override port-443 heuristic");
         assert_eq!(a.port, 443);
     }
-
     #[test]
     fn test_bare_host_defaults_to_http_port_80() {
         let a = parse_upstream("backend.internal");
-        assert!(!a.is_https);
+        assert!(! a.is_https);
         assert_eq!(a.port, 80);
         assert_eq!(a.host, "backend.internal");
         assert_eq!(a.connect_addr, "backend.internal:80");
     }
-
     #[test]
     fn test_ipv6_no_port_defaults_to_80() {
         let a = parse_upstream("[::1]");
         assert_eq!(a.host, "::1");
         assert_eq!(a.port, 80);
-        assert!(!a.is_https);
+        assert!(! a.is_https);
     }
-
     #[test]
     fn test_invalid_port_string_falls_back_to_default() {
         let a = parse_upstream("example.com:abc");
-        assert_eq!(
-            a.port, 80,
-            "invalid port string should fall back to port 80"
-        );
-        assert!(!a.is_https);
+        assert_eq!(a.port, 80, "invalid port string should fall back to port 80");
+        assert!(! a.is_https);
     }
-
     #[test]
     fn test_port_overflow_falls_back_to_default() {
         let a = parse_upstream("example.com:99999");
         assert_eq!(a.port, 80, "port > 65535 should fall back to port 80");
     }
-
     #[test]
     fn test_normalize_host_no_port() {
         assert_eq!(normalize_host("Example.COM"), "example.com");
     }
-
     #[test]
     fn test_normalize_host_ipv6_no_port() {
         assert_eq!(normalize_host("[::1]"), "::1");
     }
-
     #[test]
     fn test_normalize_host_mixed_case_ipv6() {
         assert_eq!(normalize_host("[FE80::1]:443"), "fe80::1");

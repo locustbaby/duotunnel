@@ -6,24 +6,17 @@ use figment::{
 use serde::Deserialize;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use tunnel_lib::transport::quic::QuicTransportParams;
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ClientQuicConfig {
     pub connections: u32,
-
     pub max_concurrent_streams: u32,
-
     pub stream_window_mb: Option<u64>,
-
     pub connection_window_mb: Option<u64>,
-
     pub keepalive_secs: Option<u64>,
-
     pub idle_timeout_secs: Option<u64>,
     pub congestion: Option<String>,
 }
-
 impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
@@ -37,7 +30,6 @@ impl Default for ClientQuicConfig {
         }
     }
 }
-
 impl From<&ClientQuicConfig> for QuicTransportParams {
     fn from(c: &ClientQuicConfig) -> Self {
         let d = QuicTransportParams::default();
@@ -61,25 +53,17 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
         }
     }
 }
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ReconnectConfig {
     pub initial_delay_ms: u64,
-
     pub max_delay_ms: u64,
-
     pub grace_ms: u64,
-
     pub connect_timeout_ms: u64,
-
     pub resolve_timeout_ms: u64,
-
     pub login_timeout_ms: u64,
-
     pub startup_jitter_ms: u64,
 }
-
 impl Default for ReconnectConfig {
     fn default() -> Self {
         Self {
@@ -93,22 +77,18 @@ impl Default for ReconnectConfig {
         }
     }
 }
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClientConfigFile {
     pub server_addr: String,
     pub server_port: u16,
-
     pub auth_token: String,
     #[serde(default)]
     pub log_level: Option<String>,
-
     #[serde(default)]
     #[allow(dead_code)]
     pub trace_enabled: bool,
     #[serde(default)]
     pub http_entry_port: Option<u16>,
-
     #[serde(default)]
     pub tls_skip_verify: bool,
     #[serde(default)]
@@ -117,7 +97,6 @@ pub struct ClientConfigFile {
     pub tls_server_name: Option<String>,
     #[serde(default)]
     pub allow_insecure_fallback: bool,
-
     #[serde(default)]
     pub quic: ClientQuicConfig,
     #[serde(default)]
@@ -129,11 +108,9 @@ pub struct ClientConfigFile {
     #[serde(default)]
     pub reconnect: ReconnectConfig,
 }
-
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {
         let resolved = tunnel_lib::resolve_config_path(path)?;
-
         let config: ClientConfigFile = Figment::new()
             .merge(Yaml::file(&resolved))
             .merge(
@@ -142,14 +119,11 @@ impl ClientConfigFile {
                     .split("__"),
             )
             .extract()?;
-
         config.validate()?;
         Ok(config)
     }
-
     fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
-
         if self.server_addr.trim().is_empty() {
             errors.push("server_addr is required".into());
         }
@@ -166,10 +140,13 @@ impl ClientConfigFile {
             errors.push("quic.max_concurrent_streams must be >= 1".into());
         }
         if self.reconnect.initial_delay_ms > self.reconnect.max_delay_ms {
-            errors.push(format!(
-                "reconnect.initial_delay_ms ({}) must be <= max_delay_ms ({})",
-                self.reconnect.initial_delay_ms, self.reconnect.max_delay_ms
-            ));
+            errors
+                .push(
+                    format!(
+                        "reconnect.initial_delay_ms ({}) must be <= max_delay_ms ({})",
+                        self.reconnect.initial_delay_ms, self.reconnect.max_delay_ms
+                    ),
+                );
         }
         if self.reconnect.connect_timeout_ms == 0 {
             errors.push("reconnect.connect_timeout_ms must be >= 1".into());
@@ -185,21 +162,19 @@ impl ClientConfigFile {
                 errors.push("tls_server_name must not be empty when set".into());
             }
         }
-
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(anyhow::anyhow!(
-                "Config validation failed:\n  - {}",
-                errors.join("\n  - ")
-            ))
+            Err(
+                anyhow::anyhow!(
+                    "Config validation failed:\n  - {}", errors.join("\n  - ")
+                ),
+            )
         }
     }
-
     pub fn server_address(&self) -> String {
         format!("{}:{}", self.server_addr, self.server_port)
     }
-
     pub fn tls_server_name(&self) -> &str {
         self.tls_server_name
             .as_deref()

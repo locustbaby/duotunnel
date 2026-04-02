@@ -1,12 +1,8 @@
-# Minimal server config for testing bidirectional tunnel
 server:
-  config_version: "v1.0.0"
   tunnel_port: 10086
-  entry_port: 8001
   log_level: "info"
   database_url: "sqlite://./data/duotunnel-example.db?mode=rwc"
 
-# Egress: Server forwards client requests to external services
 server_egress_upstream:
   upstreams:
     echo_backend:
@@ -19,18 +15,18 @@ server_egress_upstream:
       - match_host: "echo.free.beeceptor.com"
         action_upstream: "echo_backend"
 
-# Tunnel management
 tunnel_management:
-  # Ingress: Server routes external requests to clients
   server_ingress_routing:
-    rules:
-      vhost:
-        - match_host: "localhost"
-          action_client_group: "test-group"
+    listeners:
+      - port: 8001
+        mode: http
+        vhost:
+          - match_host: "localhost"
+            action_client_group: "test-group"
+            action_proxy_name: "echo_service"
 
-  # Client egress routing (forwarded to clients)
   client_configs:
-    client_egress_routings:
+    groups:
       test-group:
         config_version: "v1.0.0"
         upstreams:
@@ -39,7 +35,3 @@ tunnel_management:
               - address: "echo.free.beeceptor.com:443"
                 resolve: true
             lb_policy: "round_robin"
-        rules:
-          vhost:
-            - match_host: "localhost"
-              action_upstream: "echo_service"

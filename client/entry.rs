@@ -7,9 +7,9 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, RoutingInfo, TcpParams,
+    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, RoutingInfo,
+    TcpParams,
 };
-
 pub async fn start_entry_listener(
     conn: Connection,
     port: u16,
@@ -22,9 +22,10 @@ pub async fn start_entry_listener(
     let listener = TcpListener::bind(&addr).await?;
     let semaphore = Arc::new(Semaphore::new(max_connections as usize));
     let tcp_params = Arc::new(tcp_params);
-
-    info!(addr = %addr, max_connections = %max_connections, "client entry listener started");
-
+    info!(
+        addr = % addr, max_connections = % max_connections,
+        "client entry listener started"
+    );
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -34,7 +35,6 @@ pub async fn start_entry_listener(
             result = listener.accept() => {
                 let (stream, peer_addr) = result?;
                 tcp_params.apply(&stream)?;
-
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
@@ -42,15 +42,12 @@ pub async fn start_entry_listener(
                         continue;
                     }
                 };
-
                 debug!(peer_addr = %peer_addr, "new entry connection");
                 let conn = conn.clone();
                 let tcp_params = tcp_params.clone();
-
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let _ = tcp_params;
-                    if let Err(e) = handle_entry_connection(conn, stream, peek_buf_size).await {
+                    if let Err(e) = handle_entry_connection(conn, stream, peek_buf_size, tcp_params).await {
                         debug!(error = %e, "entry connection error");
                     }
                 });
@@ -58,24 +55,20 @@ pub async fn start_entry_listener(
         }
     }
 }
-
 async fn handle_entry_connection(
     conn: Connection,
     local_stream: TcpStream,
     peek_buf_size: usize,
+    tcp_params: Arc<TcpParams>,
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
-
+    tcp_params.apply(&local_stream)?;
     let mut buf = vec![0u8; peek_buf_size];
     let n = local_stream.peek(&mut buf).await?;
     let initial_bytes = Bytes::copy_from_slice(&buf[..n]);
-
     let (protocol, host) = detect_protocol_and_host(&initial_bytes);
-
-    debug!(protocol = %protocol, host = ?host, "detected protocol from entry");
-
+    debug!(protocol = % protocol, host = ? host, "detected protocol from entry");
     let (mut send, recv) = conn.open_bi().await?;
-
     let routing_info = RoutingInfo {
         proxy_name: "entry".to_string(),
         src_addr: peer_addr.ip().to_string(),
@@ -83,12 +76,10 @@ async fn handle_entry_connection(
         protocol: protocol.to_string(),
         host,
     };
-
     send_routing_info(&mut send, &routing_info).await?;
-
     let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
-
-    debug!(sent = sent, received = received, protocol = %protocol, "entry relay completed");
-
+    debug!(
+        sent = sent, received = received, protocol = % protocol, "entry relay completed"
+    );
     Ok(())
 }

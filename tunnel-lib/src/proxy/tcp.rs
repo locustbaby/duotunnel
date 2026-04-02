@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpstreamScheme {
     Tcp,
@@ -18,7 +17,6 @@ pub enum UpstreamScheme {
     Ws,
     Wss,
 }
-
 impl UpstreamScheme {
     pub fn from_address(addr: &str) -> (Self, String, Option<String>) {
         let (scheme, rest) = if addr.starts_with("https://") {
@@ -34,7 +32,6 @@ impl UpstreamScheme {
         } else {
             (Self::Tcp, addr)
         };
-
         let host = extract_host_part(rest);
         let addr_with_port = if has_explicit_port(rest) {
             rest.to_string()
@@ -44,19 +41,15 @@ impl UpstreamScheme {
                 _ => format!("{}:80", rest),
             }
         };
-
         let tls_host = match scheme {
             Self::Https | Self::Wss | Self::Tls => Some(host),
             _ => None,
         };
-
         (scheme, addr_with_port, tls_host)
     }
-
     pub fn requires_tls(&self) -> bool {
         matches!(self, Self::Tls | Self::Https | Self::Wss)
     }
-
     pub fn alpn(&self) -> Option<Vec<Vec<u8>>> {
         match self {
             Self::Https => Some(vec![b"h2".to_vec(), b"http/1.1".to_vec()]),
@@ -65,7 +58,6 @@ impl UpstreamScheme {
         }
     }
 }
-
 fn extract_host_part(addr: &str) -> String {
     if let Some(rest) = addr.strip_prefix('[') {
         rest.split(']').next().unwrap_or(addr).to_string()
@@ -73,19 +65,12 @@ fn extract_host_part(addr: &str) -> String {
         addr.split(':').next().unwrap_or(addr).to_string()
     }
 }
-
 fn has_explicit_port(addr: &str) -> bool {
-    if addr.starts_with('[') {
-        addr.contains("]:")
-    } else {
-        addr.contains(':')
-    }
+    if addr.starts_with('[') { addr.contains("]:") } else { addr.contains(':') }
 }
-
 fn has_port_443(addr: &str) -> bool {
     extract_port_number(addr) == Some(443)
 }
-
 fn extract_port_number(addr: &str) -> Option<u16> {
     if addr.starts_with('[') {
         addr.rsplit(':').next()?.parse().ok()
@@ -93,22 +78,16 @@ fn extract_port_number(addr: &str) -> Option<u16> {
         addr.split(':').nth(1)?.parse().ok()
     }
 }
-
 pub struct TcpPeer {
     pub target_addr: SocketAddr,
-
     pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
-
 pub struct TlsTcpPeer {
     pub target_addr: SocketAddr,
     pub tls_host: String,
-
     pub connector: Arc<TlsConnector>,
-
     pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
-
 impl TlsTcpPeer {
     pub fn new(
         target_addr: SocketAddr,
@@ -122,7 +101,6 @@ impl TlsTcpPeer {
             crate::transport::tcp_params::TcpParams::default(),
         )
     }
-
     pub fn new_with_params(
         target_addr: SocketAddr,
         tls_host: String,
@@ -131,15 +109,12 @@ impl TlsTcpPeer {
     ) -> Result<Self> {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
         let mut tls_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
-
         if let Some(alpn) = alpn {
             tls_config.alpn_protocols = alpn;
         }
-
         Ok(Self {
             target_addr,
             tls_host,
@@ -148,7 +123,6 @@ impl TlsTcpPeer {
         })
     }
 }
-
 impl TcpPeer {
     pub async fn connect_inner(
         self,
@@ -163,17 +137,15 @@ impl TcpPeer {
         self.tcp_params
             .apply(&tcp_stream)
             .context("failed to apply TCP params to upstream")?;
-
         let initial_slice = initial_data.as_deref();
-
-        info!(target = %self.target_addr, "starting bidirectional relay (raw tcp, into_split)");
-
+        info!(
+            target = % self.target_addr,
+            "starting bidirectional relay (raw tcp, into_split)"
+        );
         bridge::relay_with_first_data(recv, send, tcp_stream, initial_slice).await?;
-
         Ok(())
     }
 }
-
 impl TlsTcpPeer {
     pub async fn connect_inner(
         self,
@@ -182,31 +154,28 @@ impl TlsTcpPeer {
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         debug!(
-            "connecting to TLS tcp upstream: {} (SNI: {})",
-            self.target_addr, self.tls_host
+            "connecting to TLS tcp upstream: {} (SNI: {})", self.target_addr, self
+            .tls_host
         );
-
         let tcp_stream = TcpStream::connect(self.target_addr)
             .await
             .context("failed to connect to tcp upstream")?;
         self.tcp_params
             .apply(&tcp_stream)
             .context("failed to apply TCP params to TLS upstream")?;
-
         let server_name = ServerName::try_from(self.tls_host.clone())
             .map_err(|_| anyhow::anyhow!("invalid TLS server name: {}", self.tls_host))?;
-
         let tls_stream = self
             .connector
             .connect(server_name, tcp_stream)
             .await
             .context("TLS handshake failed")?;
-
         let initial_slice = initial_data.as_deref();
-
-        info!(target = %self.target_addr, tls_host = %self.tls_host, "starting TLS bidirectional relay");
+        info!(
+            target = % self.target_addr, tls_host = % self.tls_host,
+            "starting TLS bidirectional relay"
+        );
         relay_with_initial(recv, send, tls_stream, initial_slice.unwrap_or(&[])).await?;
-
         Ok(())
     }
 }

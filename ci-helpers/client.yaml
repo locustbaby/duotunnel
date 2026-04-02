@@ -2,7 +2,7 @@ log_level: "info"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
-auth_token: "ci-placeholder-token"
+auth_token: "set-via-TUNNEL_CLIENT__AUTH_TOKEN-env"
 http_entry_port: 8081
 quic:
   connections: 4

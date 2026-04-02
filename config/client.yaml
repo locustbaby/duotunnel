@@ -14,7 +14,7 @@ allow_insecure_fallback: false
 server_addr: "127.0.0.1"
 server_port: 10086
 
-auth_token: "your-token-here"
+auth_token: "dt_NCFxXxGafTN-N1crgLnb_miaKjzJkwQIPjCkBA9Lb1Y"
 
 # Optional: Set to enable HTTP listener
 http_entry_port: 8003
