@@ -373,7 +373,7 @@ function renderDetail(entry) {
   metaEl.innerHTML = `${ghLink} ${esc(commitMsg(entry))} · ${new Date(entry.timestamp).toLocaleString()}`;
 
   const prevScMap = {};
-  if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[s.name] = s; });
+  if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[(s.tunnel||'duotunnel')+':'+s.name] = s; });
   const maxP95 = Math.max(...sc.map(s => s.p95 || 0), 1);
 
   let html = `
@@ -407,7 +407,7 @@ function renderDetail(entry) {
     for (const s of group) {
       const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
       const isFrp = s.tunnel === 'frp';
-      const ps = isFrp ? null : prevScMap[s.name];
+      const ps = prevScMap[(s.tunnel||'duotunnel')+':'+s.name];
       const tunnelTag = isFrp ? ` <span style="font-size:9px;font-weight:600;color:var(--orange);background:rgba(245,166,35,.15);padding:1px 5px;border-radius:3px">frp</span>` : '';
       html += `<tr>
         <td style="color:var(--text)">${s.name}${tunnelTag}</td>
