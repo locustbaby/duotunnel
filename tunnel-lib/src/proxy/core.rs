@@ -2,9 +2,7 @@ use super::peers::PeerKind;
 use anyhow::Result;
 use bytes::BytesMut;
 use std::net::SocketAddr;
-
 use crate::models::msg::RoutingInfo;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Protocol {
     H1,
@@ -13,30 +11,25 @@ pub enum Protocol {
     Tcp,
     Unknown,
 }
-
 pub struct Context {
     pub client_addr: SocketAddr,
     pub protocol: Protocol,
     pub initial_bytes: Option<bytes::Bytes>,
     pub routing_info: Option<RoutingInfo>,
 }
-
 pub trait ProxyApp: Send + Sync {
     fn upstream_peer(
         &self,
         context: &mut Context,
     ) -> impl std::future::Future<Output = Result<PeerKind>> + Send;
 }
-
 pub struct ProxyEngine<A: ProxyApp> {
     app: A,
 }
-
 impl<A: ProxyApp> ProxyEngine<A> {
     pub fn new(app: A) -> Self {
         Self { app }
     }
-
     pub async fn run_stream(
         &self,
         send: quinn::SendStream,
@@ -44,18 +37,10 @@ impl<A: ProxyApp> ProxyEngine<A> {
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
-        // Single allocation via BytesMut; freeze() hands ownership to Bytes
-        // without a second copy.
-        let mut buf = BytesMut::with_capacity(4096);
-        // SAFETY: quinn's RecvStream::read fills the slice before returning
-        // the byte count; we truncate to n immediately after.
-        unsafe {
-            buf.set_len(4096);
-        }
+        let mut buf = BytesMut::zeroed(4096);
         let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
         buf.truncate(n);
         let initial_bytes: bytes::Bytes = buf.freeze();
-
         let protocol = if let Some(ref ri) = routing_info {
             match ri.protocol.as_str() {
                 "h2" => Protocol::H2,
@@ -79,21 +64,17 @@ impl<A: ProxyApp> ProxyEngine<A> {
         } else {
             Protocol::Unknown
         };
-
         let mut ctx = Context {
             client_addr,
             protocol,
             initial_bytes: Some(initial_bytes),
             routing_info,
         };
-
         let peer = self.app.upstream_peer(&mut ctx).await?;
         peer.connect(send, recv, ctx.initial_bytes).await?;
-
         Ok(())
     }
 }
-
 fn is_websocket_upgrade(data: &[u8]) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);

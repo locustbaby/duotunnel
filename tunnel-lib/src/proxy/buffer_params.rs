@@ -1,12 +1,9 @@
 #[derive(Debug, Clone)]
 pub struct ProxyBufferParams {
     pub peek_buf_size: usize,
-
     pub http_header_buf_size: usize,
-
     pub http_body_chunk_size: usize,
 }
-
 impl Default for ProxyBufferParams {
     fn default() -> Self {
         Self {

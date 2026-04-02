@@ -86,11 +86,11 @@ jobs:
   #   https://grpc-echo.semior.dev:443  — gRPC echo (HTTPS)
   #
   # /etc/hosts maps test domains to 127.0.0.1 for Host-header-based routing:
-  #   echo.local / ws.local / grpc.local → tunnel-server entry_port :8080
+  #   echo.local / ws.local / grpc.local → tunnel-server http listener :8080
   #
   # Tunnel topology:
   #   ci-test-client
-  #     │ ingress → echo.local:8080 (server entry_port) ──QUIC:10086──→ client
+  #     │ ingress → echo.local:8080 (server http listener) ──QUIC:10086──→ client
   #     │                                                                   │ egress
   #     │ egress  → 127.0.0.1:8081 (client http_entry_port)                │
   #     └─────────────────────────────────────────────────────────────────────→ backends
@@ -169,7 +169,6 @@ jobs:
           ./target/release/server --config ci-helpers/server.yaml \
             > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          # Poll for QUIC listener ready instead of blind sleep
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
             sleep 0.3
@@ -179,8 +178,11 @@ jobs:
       - name: Start tunnel client and wait for login
         timeout-minutes: 1
         run: |
-          ./target/release/client --config ci-helpers/client.yaml \
-            > /tmp/ci-client.log 2>&1 &
+          TOKEN=$(./target/release/server --config ci-helpers/server.yaml token create --name ci-group 2>/dev/null \
+            || ./target/release/server --config ci-helpers/server.yaml token rotate --name ci-group 2>/dev/null)
+          if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
+          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
@@ -583,6 +585,10 @@ jobs:
             sleep 0.3
           done
 
+          TOKEN=$(./target/release/server --config ci-helpers/server.yaml token create --name ci-group 2>/dev/null \
+            || ./target/release/server --config ci-helpers/server.yaml token rotate --name ci-group 2>/dev/null)
+          if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
+          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do

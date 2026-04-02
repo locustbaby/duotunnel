@@ -1,14 +1,11 @@
 use crate::egress::http::HttpClientParams;
 use serde::{Deserialize, Serialize};
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HttpPoolConfig {
     pub idle_timeout_secs: u64,
-
     pub max_idle_per_host: usize,
 }
-
 impl Default for HttpPoolConfig {
     fn default() -> Self {
         Self {
@@ -17,7 +14,6 @@ impl Default for HttpPoolConfig {
         }
     }
 }
-
 impl From<&HttpPoolConfig> for HttpClientParams {
     fn from(c: &HttpPoolConfig) -> Self {
         HttpClientParams {

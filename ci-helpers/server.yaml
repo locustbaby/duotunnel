@@ -1,8 +1,8 @@
 server:
   tunnel_port: 10086
-  entry_port: 8080
   metrics_port: 9090
   log_level: "info"
+  database_url: "sqlite://./data/duotunnel-ci.db?mode=rwc"
   quic:
     keepalive_secs: 10
     idle_timeout_secs: 30
@@ -29,23 +29,31 @@ server_egress_upstream:
 
 tunnel_management:
   server_ingress_routing:
-    rules:
-      vhost:
-        - match_host: "echo.local"
-          action_client_group: "ci-group"
-        - match_host: "ws.local"
-          action_client_group: "ci-group"
-        - match_host: "grpc.local"
-          action_client_group: "ci-group"
-        - match_host: "echo.beeceptor.test"
-          action_client_group: "ci-group"
-        - match_host: "ws.ext.test"
-          action_client_group: "ci-group"
-        - match_host: "grpc.ext.test"
-          action_client_group: "ci-group"
+    listeners:
+      - port: 8080
+        mode: http
+        vhost:
+          - match_host: "echo.local"
+            action_client_group: "ci-group"
+            action_proxy_name: "http_echo_local"
+          - match_host: "ws.local"
+            action_client_group: "ci-group"
+            action_proxy_name: "ws_echo_local"
+          - match_host: "grpc.local"
+            action_client_group: "ci-group"
+            action_proxy_name: "grpc_echo_local"
+          - match_host: "echo.beeceptor.test"
+            action_client_group: "ci-group"
+            action_proxy_name: "echo_beeceptor"
+          - match_host: "ws.ext.test"
+            action_client_group: "ci-group"
+            action_proxy_name: "wss_ext"
+          - match_host: "grpc.ext.test"
+            action_client_group: "ci-group"
+            action_proxy_name: "grpc_ext"
 
   client_configs:
-    client_egress_routings:
+    groups:
       ci-group:
         config_version: "v1.0.0"
         upstreams:
@@ -79,17 +87,3 @@ tunnel_management:
               - address: "https://grpc-echo.semior.dev:443"
                 resolve: true
             lb_policy: "round_robin"
-        rules:
-          vhost:
-            - match_host: "echo.local"
-              action_upstream: "http_echo_local"
-            - match_host: "ws.local"
-              action_upstream: "ws_echo_local"
-            - match_host: "grpc.local"
-              action_upstream: "grpc_echo_local"
-            - match_host: "echo.beeceptor.test"
-              action_upstream: "echo_beeceptor"
-            - match_host: "ws.ext.test"
-              action_upstream: "wss_ext"
-            - match_host: "grpc.ext.test"
-              action_upstream: "grpc_ext"

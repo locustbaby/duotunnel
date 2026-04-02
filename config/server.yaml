@@ -1,47 +1,28 @@
-# ====================================================================
-# SECTION 1: SERVER BASIC CONFIGURATION
-# ====================================================================
 server:
-  config_version: "v1.0.0"
   tunnel_port: 10086
-  entry_port: 8001
+  h2_single_authority: true
   log_level: "debug"
   trace_enabled: false
+  database_url: "sqlite://./data/duotunnel.db?mode=rwc"
 
-  # TCP socket options applied to all ingress connections
   tcp:
     nodelay: true
-    # recv_buf_size: 262144  # default: null — SO_RCVBUF in bytes (null = OS default)
-    # send_buf_size: 262144  # default: null — SO_SNDBUF in bytes (null = OS default)
 
-  # QUIC transport parameters
   quic:
     max_concurrent_streams: 1000
     keepalive_secs: 20
     idle_timeout_secs: 60
-    # congestion: "bbr"       # default: NewReno
-    # stream_window_mb: 1     # default: 1 MB
-    # connection_window_mb: 8 # default: 8 MB
 
-  # Outbound HTTP connection pool (used for H1/H2 egress)
   http_pool:
     idle_timeout_secs: 90
     max_idle_per_host: 10
 
-  # Protocol detection peek buffer & HTTP processing buffers
   proxy_buffers:
     peek_buf_size: 16384
-    # http_header_buf_size: 8192   # default: 8192
-    # http_body_chunk_size: 8192   # default: 8192
 
-  # PKI: self-signed cert cache for TLS-MITM flows
   pki:
     cert_cache_ttl_secs: 3600
 
-# ====================================================================
-# SECTION 2: SERVER EGRESS UPSTREAM
-# Upstreams are external services reachable by the server.
-# ====================================================================
 server_egress_upstream:
   upstreams:
     backend:
@@ -55,36 +36,38 @@ server_egress_upstream:
       - match_host: "wss.localtest.com"
         action_upstream: "backend"
 
-# ====================================================================
-# SECTION 3: TUNNEL MANAGEMENT
-# ====================================================================
 tunnel_management:
-  # Vhost-based routing (unified, protocol-agnostic)
   server_ingress_routing:
-    rules:
-      vhost:
-        - match_host: "wss.localtest.com"
-          action_client_group: "group-a"
-        - match_host: "harbor.example.com"
-          action_client_group: "group-a"
-        - match_host: "test.local"
-          action_client_group: "group-a"
-        - match_host: "www2.localtest.com"
-          action_client_group: "group-b"
+    listeners:
+      - port: 8001
+        mode: http
+        vhost:
+          - match_host: "wss.localtest.com"
+            action_client_group: "group-a"
+            action_proxy_name: "grpc_service"
+          - match_host: "harbor.example.com"
+            action_client_group: "group-a"
+            action_proxy_name: "google_service"
+          - match_host: "test.local"
+            action_client_group: "group-a"
+            action_proxy_name: "http_service"
+          - match_host: "www2.localtest.com"
+            action_client_group: "group-b"
+            action_proxy_name: "local_service"
 
-      tcp:
-        - match_port: 50051
-          action_client_group: "group-a"
-          action_proxy_name: "grpc_service"
+      - port: 50051
+        mode: tcp
+        action_client_group: "group-a"
+        action_proxy_name: "grpc_service"
 
   client_configs:
-    client_egress_routings:
+    groups:
       group-a:
         config_version: "v1.0.0"
         upstreams:
-          echo_beeceptor:
+          grpc_service:
             servers:
-              - address: "echo.free.beeceptor.com:443"
+              - address: "https://grpc-echo.semior.dev:443"
                 resolve: true
             lb_policy: "round_robin"
 
@@ -100,30 +83,17 @@ tunnel_management:
                 resolve: false
             lb_policy: "round_robin"
 
+          echo_beeceptor:
+            servers:
+              - address: "echo.free.beeceptor.com:443"
+                resolve: true
+            lb_policy: "round_robin"
+
           wss_service:
             servers:
               - address: "wss://echo.websocket.org"
                 resolve: false
             lb_policy: "round_robin"
-
-          grpc_service:
-            servers:
-              - address: "https://grpc-echo.semior.dev:443"
-                resolve: true
-            lb_policy: "round_robin"
-
-        rules:
-          vhost:
-            - match_host: "wss.localtest.com"
-              action_upstream: "grpc_service"
-              # action_upstream: "wss_service"
-              # action_upstream: "echo_beeceptor"
-            - match_host: "harbor.example.com"
-              action_upstream: "google_service"
-            - match_host: "localhost"
-              action_upstream: "http_service"
-            - match_host: "test.local"
-              action_upstream: "http_service"
 
       group-b:
         config_version: "v1.0.0"

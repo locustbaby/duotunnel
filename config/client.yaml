@@ -5,16 +5,16 @@ trace_enabled: false
 
 # Skip TLS verification for self-signed certs (development only)
 tls_skip_verify: true
+# Optional: override SNI/server-name used in TLS handshake (defaults to server_addr)
+# tls_server_name: "example.com"
+# If system roots are missing, only fallback to insecure mode when explicitly enabled.
+allow_insecure_fallback: false
 
 # Connection to server address and port
 server_addr: "127.0.0.1"
 server_port: 10086
 
-# Client group id
-client_group_id: "group-a"
-
-# Optional: Authentication token
-auth_token: "your-token-here"
+auth_token: "dt_NCFxXxGafTN-N1crgLnb_miaKjzJkwQIPjCkBA9Lb1Y"
 
 # Optional: Set to enable HTTP listener
 http_entry_port: 8003
@@ -49,3 +49,7 @@ reconnect:
   initial_delay_ms: 1000  # default: 1000
   max_delay_ms: 60000     # default: 60000
   grace_ms: 100           # wait after cancel before reconnect (default: 100)
+  connect_timeout_ms: 10000
+  resolve_timeout_ms: 5000
+  login_timeout_ms: 5000
+  startup_jitter_ms: 300

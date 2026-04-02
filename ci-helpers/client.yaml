@@ -2,7 +2,7 @@ log_level: "info"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
-client_group_id: "ci-group"
+auth_token: "set-via-TUNNEL_CLIENT__AUTH_TOKEN-env"
 http_entry_port: 8081
 quic:
   connections: 4
@@ -12,3 +12,7 @@ quic:
 reconnect:
   initial_delay_ms: 500
   max_delay_ms: 5000
+  connect_timeout_ms: 3000
+  resolve_timeout_ms: 2000
+  login_timeout_ms: 3000
+  startup_jitter_ms: 50
