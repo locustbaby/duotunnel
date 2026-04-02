@@ -52,7 +52,7 @@ async fn handle_quic_connection(
         .await
     {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => return Err(e.into()),
+        Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
             warn!(
                 addr = % remote_addr,
@@ -87,7 +87,7 @@ async fn handle_quic_connection(
         .await
     {
         Ok(Ok(l)) => l,
-        Ok(Err(e)) => return Err(e.into()),
+        Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
             warn!(
                 addr = % remote_addr, "login handshake timed out waiting for login body"

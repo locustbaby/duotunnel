@@ -55,8 +55,9 @@ enum ListenerKind {
     Http,
     Tcp { group_id: String, proxy_name: String },
 }
+pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<(String, String)>>>>;
 pub struct RoutingSnapshot {
-    pub http_routers: Arc<HashMap<u16, Arc<VhostRouter<(String, String)>>>>,
+    pub http_routers: HttpRouterMap,
     pub tunnel_management: Arc<TunnelManagement>,
     pub egress_map: Arc<egress::ServerEgressMap>,
 }
@@ -123,8 +124,8 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
         TokenAction::List => {
             let entries = store.list_tokens().await?;
             println!(
-                "{:<20} {:<10} {:<8} {:<10} {:<20} {}",
-                "NAME", "CLIENT", "TOKEN_ID", "STATUS", "CREATED", "REVOKED"
+                "{:<20} {:<10} {:<8} {:<10} {:<20} REVOKED",
+                "NAME", "CLIENT", "TOKEN_ID", "STATUS", "CREATED"
             );
             for e in entries {
                 println!(
@@ -205,12 +206,7 @@ async fn run_server(config_path: &str) -> Result<()> {
     let quic_handle =
         tokio::spawn(async move { handlers::quic::run_quic_server(quic_state).await });
     {
-        let listeners: Vec<_> = tm
-            .server_ingress_routing
-            .listeners
-            .iter()
-            .cloned()
-            .collect();
+        let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
         sync_listeners(&state, &listeners);
     }
     if let Some(metrics_port) = config.server.metrics_port {
