@@ -1038,8 +1038,10 @@ jobs:
       - name: Resource report — per-process (pidstat)
         if: always()
         run: |
-          echo "── server + client CPU% and RSS during k6 (pidstat 2s interval) ──"
-          cat /tmp/pidstat.log || echo "(no data)"
+          echo "── I/O stats per process (pidstat -d) ──"
+          cat /tmp/pidstat-io.log || echo "(no data)"
+          echo "── Context switches per process (pidstat -w) ──"
+          cat /tmp/pidstat-ctxsw.log || echo "(no data)"
 
       - name: Resource report — system (vmstat)
         if: always()

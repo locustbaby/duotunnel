@@ -48,7 +48,7 @@ pub async fn run_cli(cmd: CliCommand, svc: &crate::service::ControlService) -> R
             if tokens.is_empty() {
                 println!("No clients registered.");
             } else {
-                println!("{:<20} {:<10} {:<8} {:<10} {}", "Client", "Client Status", "Token ID", "Token Status", "Created At");
+                println!("{:<20} {:<10} {:<8} {:<10} Created At", "Client", "Client Status", "Token ID", "Token Status");
                 println!("{}", "-".repeat(75));
                 for t in &tokens {
                     println!(
