@@ -13,9 +13,11 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 mod config;
+mod control_client;
 mod egress;
 mod handlers;
 mod hot_reload;
+mod local_auth;
 mod metrics;
 mod registry;
 mod tunnel_handler;
@@ -33,6 +35,11 @@ struct Cli {
     command: Option<Commands>,
     #[arg(short, long, default_value = "config/server.yaml", global = true)]
     config: String,
+    /// Address of tunnel-ctld watch endpoint (e.g. 127.0.0.1:7788).
+    /// When set, server fetches all routing and token config from ctld via
+    /// long-lived watch stream instead of reading SQLite directly.
+    #[arg(long, global = true)]
+    ctld_addr: Option<String>,
 }
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -73,6 +80,8 @@ pub struct ServerState {
     pub rule_store: Arc<dyn RuleStore>,
     pub config_source: Arc<dyn ConfigSource>,
     pub revocation_tx: tokio::sync::broadcast::Sender<String>,
+    /// Present when running in ctld-managed mode; None in standalone mode.
+    pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     listener_next_id: AtomicU64,
     listeners: Mutex<HashMap<u16, ListenerEntry>>,
 }
@@ -105,7 +114,7 @@ async fn main() -> Result<()> {
         Some(Commands::Token { action }) => {
             handle_token_command(&cli.config, action).await
         }
-        Some(Commands::Run) | None => run_server(&cli.config).await,
+        Some(Commands::Run) | None => run_server(&cli.config, cli.ctld_addr.as_deref()).await,
     }
 }
 async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
@@ -150,32 +159,46 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
     }
     Ok(())
 }
-async fn run_server(config_path: &str) -> Result<()> {
+async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
     tunnel_lib::infra::observability::init_tracing(log_level);
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
-    let (auth_store, rule_store) = build_stores(&config.server.database_url).await?;
-    info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
-    match rule_store.is_routing_empty().await {
-        Ok(true) => {
-            if let Err(e) =
-                config::sync_file_to_db(&config, rule_store.as_ref()).await
-            {
-                tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
-            } else {
-                info!("routing rules seeded into DB from config file (first boot)");
+    let (auth_store, rule_store, local_token_cache): (
+        Arc<dyn AuthStore>,
+        Arc<dyn RuleStore>,
+        Option<Arc<local_auth::LocalTokenCache>>,
+    ) = if ctld_addr.is_some() {
+        // ctld-managed mode: no local SQLite auth; token cache fed by watch stream
+        info!("running in ctld-managed mode; skipping local SQLite stores");
+        let token_cache = Arc::new(local_auth::LocalTokenCache::new());
+        let auth: Arc<dyn AuthStore> = token_cache.clone();
+        // Still need a rule_store stub for ServerState (used only in standalone hot_reload)
+        let (_, rule_store) = build_stores(&config.server.database_url).await?;
+        (auth, rule_store, Some(token_cache))
+    } else {
+        let (auth_store, rule_store) = build_stores(&config.server.database_url).await?;
+        info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
+        match rule_store.is_routing_empty().await {
+            Ok(true) => {
+                if let Err(e) = config::sync_file_to_db(&config, rule_store.as_ref()).await {
+                    tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
+                } else {
+                    info!("routing rules seeded into DB from config file (first boot)");
+                }
+            }
+            Ok(false) => {
+                info!("routing DB already populated, skipping YAML seed");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
             }
         }
-        Ok(false) => {
-            info!("routing DB already populated, skipping YAML seed");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
-        }
-    }
+        (auth_store, rule_store, None)
+    };
+
     let config_source = build_config_source(config_path, rule_store.clone());
     let http_params = HttpClientParams::from(&config.server.http_pool);
     let (tm, egress) = config_source.load().await?;
@@ -193,6 +216,7 @@ async fn run_server(config_path: &str) -> Result<()> {
         rule_store,
         config_source,
         revocation_tx,
+        local_token_cache,
         listener_next_id: AtomicU64::new(1),
         listeners: Mutex::new(HashMap::new()),
     });
@@ -201,7 +225,15 @@ async fn run_server(config_path: &str) -> Result<()> {
         max_tcp_connections = %config.server.max_tcp_connections,
         "Connection limits configured"
     );
-    hot_reload::spawn_config_watcher(config_path.to_string(), state.clone());
+
+    if let Some(addr_str) = ctld_addr {
+        let addr: std::net::SocketAddr = addr_str.parse()?;
+        info!(addr = %addr, "starting ctld watch client");
+        control_client::spawn_control_client(addr, state.clone());
+    } else {
+        hot_reload::spawn_config_watcher(config_path.to_string(), state.clone());
+    }
+
     let quic_state = state.clone();
     let quic_handle =
         tokio::spawn(async move { handlers::quic::run_quic_server(quic_state).await });
