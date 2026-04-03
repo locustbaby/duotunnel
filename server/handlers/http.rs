@@ -5,7 +5,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
-use crate::handlers::try_acquire_permit;
 use crate::{metrics, ServerState};
 pub async fn run_http_listener(
     state: Arc<ServerState>,
@@ -25,10 +24,13 @@ pub async fn run_http_listener(
         };
         state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new http connection");
-        let Some(permit) = try_acquire_permit(state.tcp_semaphore.clone()).await else {
-            warn!(peer_addr = %peer_addr, "HTTP connection rejected: max connections reached");
-            metrics::connection_rejected("http");
-            continue;
+        let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(peer_addr = %peer_addr, "HTTP connection rejected: max connections reached");
+                metrics::connection_rejected("http");
+                continue;
+            }
         };
         let state = state.clone();
         tokio::spawn(async move {
