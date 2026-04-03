@@ -6,7 +6,6 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
-use parking_lot::Mutex as ParkingMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -61,38 +60,53 @@ pub struct RoutingSnapshot {
     pub tunnel_management: Arc<TunnelManagement>,
     pub egress_map: Arc<egress::ServerEgressMap>,
 }
-/// Free-list for peek buffers.
-/// Avoids one heap allocation per incoming connection by recycling fixed-size buffers.
-/// Pool size is capped to avoid unbounded memory growth under idle-after-burst scenarios.
+/// Thread-local free-list for peek buffers.
+/// Each tokio worker thread keeps its own pool — no lock, no cross-thread contention.
+/// Buffers are returned with their original capacity; `set_len` avoids zeroing.
 pub struct PeekBufPool {
-    pool: ParkingMutex<Vec<Vec<u8>>>,
     buf_size: usize,
 }
 impl PeekBufPool {
-    /// Cap on how many buffers we keep idle. Excess are dropped.
-    const MAX_IDLE: usize = 256;
+    /// Max buffers kept per thread. With 8–16 worker threads this caps total idle RAM at
+    /// 16 threads × 32 bufs × 16 KiB = ~8 MiB, same order as the old global cap (256 × 16 KiB).
+    const MAX_IDLE_PER_THREAD: usize = 32;
 
     pub fn new(buf_size: usize) -> Self {
-        Self { pool: ParkingMutex::new(Vec::new()), buf_size }
+        Self { buf_size }
     }
 
     pub fn take(&self) -> Vec<u8> {
-        self.pool.lock().pop().unwrap_or_else(|| vec![0u8; self.buf_size])
+        PEEK_BUF_POOL.with(|cell| {
+            let buf = cell.borrow_mut().pop();
+            match buf {
+                Some(mut b) => {
+                    // SAFETY: capacity == buf_size (enforced in put); bytes are
+                    // overwritten by peek() before any read occurs.
+                    unsafe { b.set_len(self.buf_size); }
+                    b
+                }
+                None => vec![0u8; self.buf_size],
+            }
+        })
     }
 
     pub fn put(&self, mut buf: Vec<u8>) {
-        if buf.capacity() != self.buf_size {
-            return; // wrong size — drop
+        if buf.capacity() < self.buf_size {
+            return; // undersized — drop
         }
-        // Restore full length so the next peek() has a full-sized slice to write into.
-        // Safe: capacity == buf_size, so setting len to buf_size is within allocation.
-        buf.resize(self.buf_size, 0);
-        let mut pool = self.pool.lock();
-        if pool.len() < Self::MAX_IDLE {
-            pool.push(buf);
-        }
-        // else: pool is full, drop buf to free memory
+        // Truncate to buf_size so the slice passed to peek() is exactly buf_size bytes.
+        unsafe { buf.set_len(self.buf_size); }
+        PEEK_BUF_POOL.with(|cell| {
+            let mut pool = cell.borrow_mut();
+            if pool.len() < Self::MAX_IDLE_PER_THREAD {
+                pool.push(buf);
+            }
+        });
     }
+}
+
+thread_local! {
+    static PEEK_BUF_POOL: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub struct ServerState {
@@ -102,7 +116,7 @@ pub struct ServerState {
     pub tcp_semaphore: Arc<Semaphore>,
     pub tcp_params: tunnel_lib::TcpParams,
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
-    pub peek_buf_pool: Arc<PeekBufPool>,
+    pub peek_buf_pool: PeekBufPool,
     pub routing: Arc<ArcSwap<RoutingSnapshot>>,
     pub auth_store: Arc<dyn AuthStore>,
     pub rule_store: Arc<dyn RuleStore>,
@@ -238,7 +252,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let proxy_buffer_params = tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers);
     let state = Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
-        peek_buf_pool: Arc::new(PeekBufPool::new(proxy_buffer_params.peek_buf_size)),
+        peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
         quic_semaphore: Arc::new(Semaphore::new(config.server.max_connections)),
         tcp_semaphore: Arc::new(Semaphore::new(config.server.max_tcp_connections)),

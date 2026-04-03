@@ -55,7 +55,7 @@ async fn handle_http_connection(
     use tunnel_lib::detect_protocol_and_host;
     use tunnel_lib::protocol::detect::extract_tls_sni;
     let peer_addr = stream.peer_addr()?;
-    let pool = Arc::clone(&state.peek_buf_pool);
+    let pool = &state.peek_buf_pool;
     let mut buf = pool.take();
     let n = match stream.peek(&mut buf).await {
         Ok(n) => n,
