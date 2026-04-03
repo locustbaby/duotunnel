@@ -1,0 +1,28 @@
+[package]
+name = "tunnel-service"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "tunnel-ctld"
+path = "src/main.rs"
+
+[dependencies]
+tunnel-store = { path = "../tunnel-store", features = ["sqlite"] }
+tunnel-lib = { path = "../tunnel-lib" }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1.49", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+bincode = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+figment = { version = "0.10", features = ["yaml", "env"] }
+arc-swap = "1.7"
+subtle = "2"
+hex = "0.4"
+sha2 = "0.10"
