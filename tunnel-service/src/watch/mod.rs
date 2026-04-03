@@ -64,8 +64,14 @@ async fn handle_watch_connection(
     let req: WatchRequest = recv_message(&mut reader).await?;
     debug!(peer = %peer, resource_version = req.resource_version, "received WatchRequest");
 
-    // Step 2: send full snapshot (regardless of resource_version, v1 always sends full state)
-    let current = svc.current();
+    // Step 2: subscribe BEFORE reading current state to avoid a race where a
+    // Patch is published between reading the snapshot and starting to watch.
+    // tokio::sync::watch guarantees that borrow_and_update() after changed()
+    // will deliver every value published after subscribe() was called.
+    let mut rx = svc.subscribe();
+
+    // Send the full snapshot that was current at subscribe time.
+    let current = rx.borrow_and_update().clone();
     send_message(&mut writer, MessageType::ConfigPush, &*current).await?;
     writer.flush().await?;
     info!(
@@ -73,9 +79,6 @@ async fn handle_watch_connection(
         resource_version = svc.current_version(),
         "sent initial Snapshot"
     );
-
-    // Step 3: subscribe and stream patches
-    let mut rx = svc.subscribe();
     loop {
         // Wait for the next mutation
         match rx.changed().await {

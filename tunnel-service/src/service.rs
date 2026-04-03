@@ -49,11 +49,6 @@ impl ControlService {
         self.watch_tx.subscribe()
     }
 
-    /// Returns the latest event (used by WatchServer to send the initial list).
-    pub fn current(&self) -> Arc<WatchEvent> {
-        self.watch_tx.borrow().clone()
-    }
-
     pub fn current_version(&self) -> u64 {
         self.resource_version.load(Ordering::SeqCst)
     }
@@ -121,6 +116,7 @@ impl ControlService {
 
     // ── Routing CRUD ─────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub async fn save_routing(&self, data: &RoutingData) -> Result<()> {
         self.rule_store.save_routing(data).await?;
         info!("routing saved");
@@ -130,6 +126,7 @@ impl ControlService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn load_routing(&self) -> Result<RoutingData> {
         self.rule_store.load_routing().await
     }

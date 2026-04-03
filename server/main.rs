@@ -28,6 +28,37 @@ use config::{
 use registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
+
+// ── Null stubs for ctld-managed mode ─────────────────────────────────────────
+// In ctld-managed mode the server never queries SQLite directly.  These stubs
+// satisfy the ServerState fields without opening a DB connection.
+
+struct NullRuleStore;
+#[async_trait::async_trait]
+impl RuleStore for NullRuleStore {
+    async fn load_routing(&self) -> Result<tunnel_store::rules::RoutingData> {
+        Ok(tunnel_store::rules::RoutingData {
+            ingress_listeners: vec![],
+            client_groups: vec![],
+            egress_upstreams: vec![],
+            egress_vhost_rules: vec![],
+        })
+    }
+    async fn save_routing(&self, _: &tunnel_store::rules::RoutingData) -> Result<()> {
+        anyhow::bail!("NullRuleStore: server is in ctld-managed mode")
+    }
+    async fn is_routing_empty(&self) -> Result<bool> {
+        Ok(true)
+    }
+}
+
+struct NullConfigSource;
+#[async_trait::async_trait]
+impl ConfigSource for NullConfigSource {
+    async fn load(&self) -> Result<(TunnelManagement, ServerEgressUpstream)> {
+        Ok((TunnelManagement::default(), ServerEgressUpstream::default()))
+    }
+}
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -166,18 +197,17 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
-    let (auth_store, rule_store, local_token_cache): (
+    let (auth_store, rule_store, config_source, local_token_cache): (
         Arc<dyn AuthStore>,
         Arc<dyn RuleStore>,
+        Arc<dyn ConfigSource>,
         Option<Arc<local_auth::LocalTokenCache>>,
     ) = if ctld_addr.is_some() {
-        // ctld-managed mode: no local SQLite auth; token cache fed by watch stream
-        info!("running in ctld-managed mode; skipping local SQLite stores");
+        // ctld-managed mode: no local SQLite; all config comes from ctld watch stream.
+        info!("running in ctld-managed mode; no local SQLite stores");
         let token_cache = Arc::new(local_auth::LocalTokenCache::new());
         let auth: Arc<dyn AuthStore> = token_cache.clone();
-        // Still need a rule_store stub for ServerState (used only in standalone hot_reload)
-        let (_, rule_store) = build_stores(&config.server.database_url).await?;
-        (auth, rule_store, Some(token_cache))
+        (auth, Arc::new(NullRuleStore), Arc::new(NullConfigSource), Some(token_cache))
     } else {
         let (auth_store, rule_store) = build_stores(&config.server.database_url).await?;
         info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
@@ -196,10 +226,9 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
                 tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
             }
         }
-        (auth_store, rule_store, None)
+        let cs = build_config_source(config_path, rule_store.clone());
+        (auth_store, rule_store, cs, None)
     };
-
-    let config_source = build_config_source(config_path, rule_store.clone());
     let http_params = HttpClientParams::from(&config.server.http_pool);
     let (tm, egress) = config_source.load().await?;
     let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
