@@ -1,9 +1,20 @@
+# ── Server tuning ─────────────────────────────────────────────────────────────
+# These settings are always read by the server binary regardless of mode.
+#
+# In ctld-managed mode (--ctld-addr):
+#   - database_url is ignored; routing and tokens come from tunnel-ctld
+#   - tunnel_management / server_egress_upstream below are also ignored at runtime
+#   - Use: tunnel-ctld client import-routing --from this-file  to seed ctld DB
+#
+# In standalone mode (no --ctld-addr):
+#   - database_url is used for local auth/routing SQLite
+#   - tunnel_management / server_egress_upstream are seeded into SQLite on first boot
 server:
   tunnel_port: 10086
   h2_single_authority: true
   log_level: "debug"
   trace_enabled: false
-  database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+  database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone mode only
 
   tcp:
     nodelay: true
@@ -22,6 +33,10 @@ server:
 
   pki:
     cert_cache_ttl_secs: 3600
+
+# ── Routing config ─────────────────────────────────────────────────────────────
+# In ctld-managed mode: used only by  tunnel-ctld client import-routing
+# In standalone mode:   seeded into SQLite on first boot (or re-read on hot reload)
 
 server_egress_upstream:
   upstreams:

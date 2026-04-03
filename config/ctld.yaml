@@ -1,0 +1,3 @@
+database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+watch_addr: "0.0.0.0:7788"
+log_level: "info"

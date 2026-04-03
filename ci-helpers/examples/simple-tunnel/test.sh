@@ -1,85 +1,137 @@
 #!/bin/bash
-# Test script for bidirectional tunnel
+# Test script for bidirectional tunnel (ctld-managed mode)
 
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/../../.."
 
 echo "=== DuoTunnel Bidirectional Test ==="
 echo ""
 
 # Build binaries if needed
-if [ ! -f "../../../target/release/server" ] || [ ! -f "../../../target/release/client" ]; then
+if [ ! -f "$ROOT/target/release/tunnel-ctld" ] || \
+   [ ! -f "$ROOT/target/release/server" ] || \
+   [ ! -f "$ROOT/target/release/client" ]; then
     echo "Building binaries..."
-    cd ../../.. && cargo build --release && cd -
+    cd "$ROOT" && cargo build --release
     echo "✓ Build completed"
 else
     echo "✓ Binaries found"
 fi
 
-echo ""
+cd "$SCRIPT_DIR"
 
-# Start tunnel server
+CTLD="$ROOT/target/release/tunnel-ctld"
+SERVER="$ROOT/target/release/server"
+CLIENT="$ROOT/target/release/client"
+
+mkdir -p "$SCRIPT_DIR/data"
+
+cleanup() {
+    kill "${CTLD_PID:-}" "${SERVER_PID:-}" "${CLIENT_PID:-}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# ── Start ctld ────────────────────────────────────────────────────────────────
+echo "Starting tunnel-ctld..."
+# Use a temp ctld config pointing at a local DB
+cat > /tmp/example-ctld.yaml <<'EOF'
+database_url: "sqlite:///tmp/duotunnel-example.db?mode=rwc"
+watch_addr: "127.0.0.1:7799"
+log_level: "info"
+EOF
+
+"$CTLD" --config /tmp/example-ctld.yaml > /tmp/tunnel-ctld.log 2>&1 &
+CTLD_PID=$!
+echo "ctld started (PID: $CTLD_PID)"
+
+for i in $(seq 1 20); do
+    grep -q "starting tunnel-ctld" /tmp/tunnel-ctld.log 2>/dev/null && break
+    sleep 0.2
+done
+
+# Seed routing
+"$CTLD" --config /tmp/example-ctld.yaml \
+    client import-routing --from "$SCRIPT_DIR/server.yaml"
+echo "✓ Routing seeded"
+
+# Create token
+TOKEN=$("$CTLD" --config /tmp/example-ctld.yaml \
+    client create-client test-group | grep '^Token:' | awk '{print $2}')
+if [ -z "$TOKEN" ]; then
+    echo "ERROR: failed to obtain token"
+    exit 1
+fi
+echo "✓ Token created"
+
+# ── Start server ──────────────────────────────────────────────────────────────
 echo "Starting tunnel server..."
-../../../target/release/server --config server.yaml > /tmp/tunnel-server.log 2>&1 &
+"$SERVER" --config "$SCRIPT_DIR/server.yaml" --ctld-addr 127.0.0.1:7799 \
+    > /tmp/tunnel-server.log 2>&1 &
 SERVER_PID=$!
-echo "Tunnel server started (PID: $SERVER_PID)"
+echo "Server started (PID: $SERVER_PID)"
 
-sleep 2
+for i in $(seq 1 20); do
+    grep -q "QUIC server listening" /tmp/tunnel-server.log 2>/dev/null && break
+    sleep 0.3
+done
 
-# Start tunnel client
+# ── Start client ──────────────────────────────────────────────────────────────
 echo "Starting tunnel client..."
-../../../target/release/client --config client.yaml > /tmp/tunnel-client.log 2>&1 &
+# Patch auth_token in a temp copy of client.yaml
+TEMP_CLIENT=$(mktemp /tmp/example-client-XXXX.yaml)
+python3 -c "
+import re, sys
+src = open('$SCRIPT_DIR/client.yaml').read()
+src = re.sub(r'^auth_token:.*', 'auth_token: \"$TOKEN\"', src, flags=re.MULTILINE)
+open(sys.argv[1], 'w').write(src)
+" "$TEMP_CLIENT"
+
+"$CLIENT" --config "$TEMP_CLIENT" > /tmp/tunnel-client.log 2>&1 &
 CLIENT_PID=$!
-echo "Tunnel client started (PID: $CLIENT_PID)"
+echo "Client started (PID: $CLIENT_PID)"
 
-sleep 2
+for i in $(seq 1 30); do
+    grep -q "Login successful" /tmp/tunnel-client.log 2>/dev/null && break
+    sleep 0.5
+done
 
-# Test 1: Ingress (external → server:8001 → client → echo.free.beeceptor.com)
+if ! grep -q "Login successful" /tmp/tunnel-client.log; then
+    echo "ERROR: client did not log in"
+    echo "=== ctld ===" && cat /tmp/tunnel-ctld.log
+    echo "=== server ===" && cat /tmp/tunnel-server.log
+    echo "=== client ===" && cat /tmp/tunnel-client.log
+    exit 1
+fi
+echo "✓ Client connected"
 echo ""
-echo "=== Test 1: Ingress Direction ==="
-echo "Request → Server:8001 → QUIC Tunnel → Client → echo.free.beeceptor.com"
-echo "Command: curl -H \"Host: localhost\" http://localhost:8001/"
-echo ""
 
-RESPONSE=$(curl -s -H "Host: localhost" http://localhost:8001/ 2>&1)
+# ── Test 1: Ingress ───────────────────────────────────────────────────────────
+echo "=== Test 1: Ingress (Server:8001 → QUIC → Client → beeceptor) ==="
+RESPONSE=$(curl -sf --max-time 10 -H "Host: localhost" http://localhost:8001/ 2>&1 || true)
 
 if echo "$RESPONSE" | grep -qi "beeceptor\|echo"; then
-    echo "✅ Ingress test PASSED"
-    echo "Response: $(echo "$RESPONSE" | jq -c '.method, .host' 2>/dev/null || echo "$RESPONSE" | head -1)"
+    echo "✅ Ingress PASSED"
 else
-    echo "❌ Ingress test FAILED"
+    echo "❌ Ingress FAILED"
     echo "Response: $RESPONSE"
 fi
 
-sleep 1
+sleep 0.5
 
-# Test 2: Egress (local app → client:8002 → server → echo.free.beeceptor.com)
+# ── Test 2: Egress ────────────────────────────────────────────────────────────
 echo ""
-echo "=== Test 2: Egress Direction ==="
-echo "Request → Client:8002 → QUIC Tunnel → Server → echo.free.beeceptor.com"
-echo "Command: curl -H \"Host: echo.free.beeceptor.com\" http://localhost:8002/"
-echo ""
-
-RESPONSE=$(curl -s -H "Host: echo.free.beeceptor.com" http://localhost:8002/ 2>&1)
+echo "=== Test 2: Egress (Client:8002 → QUIC → Server → beeceptor) ==="
+RESPONSE=$(curl -sf --max-time 10 \
+    -H "Host: echo.free.beeceptor.com" http://localhost:8002/ 2>&1 || true)
 
 if echo "$RESPONSE" | grep -qi "beeceptor\|echo"; then
-    echo "✅ Egress test PASSED"
-    echo "Response: $(echo "$RESPONSE" | jq -c '.method, .host' 2>/dev/null || echo "$RESPONSE" | head -1)"
+    echo "✅ Egress PASSED"
 else
-    echo "❌ Egress test FAILED"
+    echo "❌ Egress FAILED"
     echo "Response: $RESPONSE"
 fi
 
-# Summary
 echo ""
-echo "=== Summary ==="
-echo "✅ Bidirectional tunnel is working!"
-echo ""
-echo "Logs available at:"
-echo "  - Server: /tmp/tunnel-server.log"
-echo "  - Client: /tmp/tunnel-client.log"
-
-# Cleanup
-echo ""
-echo "Cleaning up..."
-kill $SERVER_PID $CLIENT_PID 2>/dev/null
-echo "Done."
+echo "Logs: /tmp/tunnel-{ctld,server,client}.log"
