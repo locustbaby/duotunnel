@@ -10,7 +10,7 @@ path = "main.rs"
 
 [dependencies]
 tunnel-lib = { path = "../tunnel-lib" }
-tunnel-store = { path = "../tunnel-store" }
+tunnel-store = { path = "../tunnel-store", features = ["server-config"] }
 tunnel-service = { path = "../tunnel-service" }
 subtle = "2"
 hex = "0.4"

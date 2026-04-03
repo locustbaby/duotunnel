@@ -188,6 +188,11 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
 }
 async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
+    // In standalone mode the routing sections are used at runtime, so validate them.
+    // In ctld-managed mode the routing sections are ignored by the server, so skip.
+    if ctld_addr.is_none() {
+        config::validate_server_config(&config)?;
+    }
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
     tunnel_lib::infra::observability::init_tracing(log_level);
     info!("Starting DuoTunnel Server");

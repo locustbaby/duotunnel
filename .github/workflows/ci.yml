@@ -167,20 +167,20 @@ jobs:
           echo "All backend servers ready"
 
       # ─── Start tunnel (ctld → server → client) ───────────────────────────────
-      - name: Start tunnel-ctld and seed routing
+      - name: Start tunnel-ctld
         timeout-minutes: 1
         run: |
           mkdir -p data
           ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             > /tmp/ci-ctld.log 2>&1 &
           echo $! > /tmp/ctld.pid
-          for i in $(seq 1 20); do
-            grep -q "starting tunnel-ctld" /tmp/ci-ctld.log 2>/dev/null && break
+          # Wait until ctld has finished its first-boot routing seed and is ready
+          for i in $(seq 1 30); do
+            grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
+              /tmp/ci-ctld.log 2>/dev/null && break
             sleep 0.2
           done
-          ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
-            client import-routing --from ci-helpers/server.yaml
-          echo "ctld ready and routing seeded"
+          echo "ctld ready"
 
       - name: Start tunnel server (ctld-managed mode)
         timeout-minutes: 1
@@ -606,12 +606,11 @@ jobs:
           mkdir -p data
           ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
           echo $! > /tmp/ctld.pid
-          for i in $(seq 1 20); do
-            grep -q "starting tunnel-ctld" /tmp/ci-ctld.log 2>/dev/null && break
+          for i in $(seq 1 30); do
+            grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
+              /tmp/ci-ctld.log 2>/dev/null && break
             sleep 0.2
           done
-          ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
-            client import-routing --from ci-helpers/server.yaml
 
           ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &

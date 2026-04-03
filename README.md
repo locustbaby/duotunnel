@@ -73,33 +73,36 @@ Local app → Client HTTP entry → QUIC stream → Server → External service
 
 ### Recommended: ctld-managed mode
 
-This is the normal production setup. The control daemon owns all configuration; the server is stateless apart from its own tuning parameters.
+The control daemon owns all routing config and token lifecycle. The server is a stateless data-plane process — it only needs its own tuning parameters.
+
+Point ctld at your `server.yaml` via the `server_config` field. On first boot ctld reads the routing sections from that file and seeds its database. On subsequent boots it uses the database and ignores the file.
+
+**`ctld.yaml`:**
+```yaml
+database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+watch_addr: "0.0.0.0:7788"
+server_config: "config/server.yaml"   # seeded once on first boot
+```
 
 **Step 1 — Start the control daemon:**
 ```bash
 ./target/release/tunnel-ctld --config ctld.yaml
+# On first boot: routing seeded from config/server.yaml automatically
 ```
 
-**Step 2 — Seed routing config from your server.yaml (first boot):**
+**Step 2 — Create a token for your client group:**
 ```bash
-./target/release/tunnel-ctld --config ctld.yaml \
-  client import-routing --from config/server.yaml
-```
-
-**Step 3 — Create a token for your client group:**
-```bash
-./target/release/tunnel-ctld --config ctld.yaml \
-  client create-client my-group
+./target/release/tunnel-ctld --config ctld.yaml client create-client my-group
 # → Created client 'my-group'
 # → Token: dt_xxxxxxxxxxxxxxxx
 ```
 
-**Step 4 — Start the server pointing at ctld:**
+**Step 3 — Start the server pointing at ctld:**
 ```bash
 ./target/release/server --config config/server.yaml --ctld-addr 127.0.0.1:7788
 ```
 
-**Step 5 — Start the client:**
+**Step 4 — Start the client:**
 ```bash
 ./target/release/client --config config/client.yaml
 ```
@@ -129,13 +132,17 @@ The server reads routing config from its own SQLite database (seeded from `serve
 
 ```yaml
 database_url: "sqlite://./data/duotunnel.db?mode=rwc"
-watch_addr: "0.0.0.0:7788"   # server connects here
+watch_addr: "0.0.0.0:7788"
 log_level: "info"
+# Routing sections from this file are seeded into the DB on first boot only.
+server_config: "config/server.yaml"
 ```
 
-### `config/server.yaml` — server tuning
+### `config/server.yaml` — server + routing config
 
-In ctld-managed mode the server only reads the `server.*` block. The `tunnel_management` and `server_egress_upstream` blocks are used for standalone mode and for `import-routing`.
+The `server.*` block is always read by the server. The `tunnel_management` and `server_egress_upstream` blocks are:
+- **ctld-managed mode**: read by ctld on first boot (via `server_config`) to seed its database. Ignored by the server at runtime — routing comes from ctld's watch stream.
+- **Standalone mode**: seeded into the server's own SQLite on first boot; hot-reloaded on file change.
 
 ```yaml
 server:
@@ -159,7 +166,7 @@ server:
   pki:
     cert_cache_ttl_secs: 3600
 
-# ── Routing sections (used in standalone mode + import-routing) ───────────────
+# ── Routing sections (ctld: seeded on first boot; standalone: seeded + hot-reloaded) ─
 
 server_egress_upstream:
   upstreams:
@@ -247,10 +254,9 @@ tunnel-ctld client revoke-client <name>
 
 # List all clients and token status
 tunnel-ctld client list-tokens
-
-# Seed routing from a server.yaml
-tunnel-ctld client import-routing --from config/server.yaml
 ```
+
+Routing is managed via the `server_config` field in `ctld.yaml` — ctld reads the routing sections from `server.yaml` automatically on first boot.
 
 ---
 

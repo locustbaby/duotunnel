@@ -29,6 +29,11 @@ struct Config {
     watch_addr: String,
     #[serde(default)]
     log_level: Option<String>,
+    /// Path to a server.yaml whose routing sections (`tunnel_management` +
+    /// `server_egress_upstream`) are seeded into the DB on first boot (when
+    /// the routing table is empty).  No-op on subsequent boots.
+    #[serde(default)]
+    server_config: Option<String>,
 }
 
 fn default_database_url() -> String {
@@ -95,6 +100,34 @@ async fn main() -> Result<()> {
 
     let auth_store: Arc<dyn tunnel_store::AuthStore> = Arc::new(auth_store_inner);
     let rule_store: Arc<dyn tunnel_store::RuleStore> = Arc::new(rule_store_inner);
+
+    // Seed routing from server.yaml on first boot (when the routing table is empty).
+    if let Some(ref server_cfg_path) = cfg.server_config {
+        match rule_store.is_routing_empty().await {
+            Ok(true) => {
+                info!(path = %server_cfg_path, "routing DB empty — seeding from server config");
+                match tunnel_store::server_config::ServerConfigFile::load(server_cfg_path) {
+                    Ok(server_cfg) => {
+                        let data = tunnel_store::server_config::routing_data_from_server_config(&server_cfg);
+                        if let Err(e) = rule_store.save_routing(&data).await {
+                            tracing::warn!(error = %e, "failed to seed routing from server config (non-fatal)");
+                        } else {
+                            info!(
+                                listeners = data.ingress_listeners.len(),
+                                groups = data.client_groups.len(),
+                                egress_upstreams = data.egress_upstreams.len(),
+                                "routing seeded from server config"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, path = %server_cfg_path,
+                        "failed to parse server config for routing seed (non-fatal)"),
+                }
+            }
+            Ok(false) => info!("routing DB already populated, skipping server config seed"),
+            Err(e) => tracing::warn!(error = %e, "could not check routing DB state, skipping seed"),
+        }
+    }
 
     let svc = ControlService::new(auth_store, rule_store, pool).await?;
 
