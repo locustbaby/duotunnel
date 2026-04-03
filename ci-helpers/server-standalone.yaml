@@ -4,8 +4,8 @@ server:
   log_level: "info"
   database_url: "sqlite://./data/duotunnel-ci-standalone.db?mode=rwc"
   quic:
-    keepalive_secs: 10
-    idle_timeout_secs: 30
+    keepalive_secs: 2
+    idle_timeout_secs: 5
     max_concurrent_streams: 1000
 
 server_egress_upstream:

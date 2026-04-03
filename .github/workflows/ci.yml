@@ -650,8 +650,16 @@ jobs:
             echo "ERROR: token rotate returned empty output"; exit 1
           fi
           echo "New token after rotate: $NEW_TOKEN"
+          # Count server registrations before kill so we can detect unregistration.
+          REG_BEFORE=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || echo 0)
           kill "$(cat /tmp/sa-client.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 0.5
+          # Wait for the server to detect the dead QUIC connection and unregister it
+          # (idle_timeout_secs=5 in standalone config, so this should fire within ~6s).
+          for i in $(seq 1 15); do
+            REG_NOW=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || echo 0)
+            [ "${REG_NOW:-0}" -gt "${REG_BEFORE:-0}" ] && break
+            sleep 0.5
+          done
           python3 -c "
           import re, sys
           f = 'ci-helpers/client.yaml'
@@ -671,7 +679,7 @@ jobs:
             echo "=== client ===" && cat /tmp/sa-client2.log
             exit 1
           fi
-          # Warmup: wait for the new client's QUIC streams to be ready for traffic.
+          # Warmup: wait for QUIC streams to be ready for traffic.
           for i in $(seq 1 10); do
             curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1 && break
             sleep 0.5
