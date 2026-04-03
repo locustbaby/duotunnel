@@ -4,7 +4,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy;
-use crate::handlers::try_acquire_permit;
 use crate::{metrics, ServerState};
 pub async fn run_tcp_listener(
     state: Arc<ServerState>,
@@ -28,10 +27,13 @@ pub async fn run_tcp_listener(
         };
         state.tcp_params.apply(&stream)?;
         debug!(peer_addr = % peer_addr, "new TCP connection");
-        let Some(permit) = try_acquire_permit(state.tcp_semaphore.clone()).await else {
-            warn!(peer_addr = %peer_addr, "TCP connection rejected: max connections reached");
-            metrics::connection_rejected("tcp");
-            continue;
+        let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(peer_addr = %peer_addr, "TCP connection rejected: max connections reached");
+                metrics::connection_rejected("tcp");
+                continue;
+            }
         };
         let state = state.clone();
         let proxy_name = proxy_name.clone();
@@ -59,7 +61,7 @@ async fn handle_tcp_connection(
 ) -> Result<()> {
     use tunnel_lib::detect_protocol_and_host;
     let peer_addr = stream.peer_addr()?;
-    let pool = std::sync::Arc::clone(&state.peek_buf_pool);
+    let pool = &state.peek_buf_pool;
     let mut buf = pool.take();
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
