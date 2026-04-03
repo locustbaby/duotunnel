@@ -2,10 +2,12 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+use crate::handlers::SEMAPHORE_WAIT_MS;
 use tunnel_lib::{
     recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
 };
 use crate::config::build_client_config_for_group;
+use crate::egress::EgressProxy;
 use crate::{metrics, tunnel_handler, ServerState};
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
@@ -17,10 +19,19 @@ pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     info!(addr = % addr, "QUIC server listening");
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
-        let permit = match state.quic_semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                warn!("QUIC connection rejected: max connections reached");
+        let permit = match tokio::time::timeout(
+            Duration::from_millis(SEMAPHORE_WAIT_MS),
+            state.quic_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_semaphore_closed)) => {
+                // Semaphore was closed — server is shutting down, stop accepting.
+                break;
+            }
+            Err(_elapsed) => {
+                warn!("QUIC connection rejected: max connections reached after wait");
                 metrics::connection_rejected("quic");
                 continue;
             }
@@ -149,7 +160,7 @@ async fn handle_quic_connection(
                         let state = state.clone();
                         tokio::spawn(async move {
                             let egress_map = state.routing.load().egress_map.clone();
-                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, egress_map).await {
+                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
                                 debug!(error = %e, "egress stream error");
                             }
                         });

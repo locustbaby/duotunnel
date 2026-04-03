@@ -109,14 +109,14 @@ pub struct HttpListenerConfig {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct TcpListenerConfig {
-    pub action_client_group: String,
-    pub action_proxy_name: String,
+    pub client_group: String,
+    pub proxy_name: String,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct VhostRule {
     pub match_host: String,
-    pub action_client_group: String,
-    pub action_proxy_name: String,
+    pub client_group: String,
+    pub proxy_name: String,
 }
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ClientConfigs {
@@ -209,33 +209,33 @@ impl ServerConfigFile {
                                 listener.port, rule.match_host
                             ));
                         }
-                        if let Some(group) = groups.get(&rule.action_client_group) {
-                            if !group.upstreams.contains_key(&rule.action_proxy_name) {
+                        if let Some(group) = groups.get(&rule.client_group) {
+                            if !group.upstreams.contains_key(&rule.proxy_name) {
                                 errors.push(format!(
                                     "port {}: match_host \"{}\": proxy_name \"{}\" not found in group \"{}\" upstreams",
-                                    listener.port, rule.match_host, rule.action_proxy_name, rule.action_client_group
+                                    listener.port, rule.match_host, rule.proxy_name, rule.client_group
                                 ));
                             }
                         } else {
                             errors.push(format!(
                                 "port {}: match_host \"{}\": group \"{}\" not found in client_configs",
-                                listener.port, rule.match_host, rule.action_client_group
+                                listener.port, rule.match_host, rule.client_group
                             ));
                         }
                     }
                 }
                 IngressMode::Tcp(cfg) => {
-                    if let Some(group) = groups.get(&cfg.action_client_group) {
-                        if !group.upstreams.contains_key(&cfg.action_proxy_name) {
+                    if let Some(group) = groups.get(&cfg.client_group) {
+                        if !group.upstreams.contains_key(&cfg.proxy_name) {
                             errors.push(format!(
                                 "port {}: tcp proxy_name \"{}\" not found in group \"{}\" upstreams",
-                                listener.port, cfg.action_proxy_name, cfg.action_client_group
+                                listener.port, cfg.proxy_name, cfg.client_group
                             ));
                         }
                     } else {
                         errors.push(format!(
                             "port {}: tcp group \"{}\" not found in client_configs",
-                            listener.port, cfg.action_client_group
+                            listener.port, cfg.client_group
                         ));
                     }
                 }
@@ -330,16 +330,16 @@ impl ConfigSource for DbSource {
                                 .into_iter()
                                 .map(|r| VhostRule {
                                     match_host: r.match_host,
-                                    action_client_group: r.group_id,
-                                    action_proxy_name: r.proxy_name,
+                                    client_group: r.group_id,
+                                    proxy_name: r.proxy_name,
                                 })
                                 .collect(),
                         })
                     }
                     tunnel_store::IngressListenerMode::Tcp { group_id, proxy_name } => {
                         IngressMode::Tcp(TcpListenerConfig {
-                            action_client_group: group_id,
-                            action_proxy_name: proxy_name,
+                            client_group: group_id,
+                            proxy_name,
                         })
                     }
                 },
@@ -468,14 +468,14 @@ pub async fn sync_file_to_db(
                         .iter()
                         .map(|r| StoreVhost {
                             match_host: r.match_host.clone(),
-                            group_id: r.action_client_group.clone(),
-                            proxy_name: r.action_proxy_name.clone(),
+                            group_id: r.client_group.clone(),
+                            proxy_name: r.proxy_name.clone(),
                         })
                         .collect(),
                 },
                 IngressMode::Tcp(cfg) => StoreMode::Tcp {
-                    group_id: cfg.action_client_group.clone(),
-                    proxy_name: cfg.action_proxy_name.clone(),
+                    group_id: cfg.client_group.clone(),
+                    proxy_name: cfg.proxy_name.clone(),
                 },
             },
         })

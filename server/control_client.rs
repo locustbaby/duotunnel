@@ -132,11 +132,13 @@ fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
     let egress = proto_to_server_egress(&snap.egress_upstreams, &snap.egress_vhost_rules);
     let http_params = tunnel_lib::HttpClientParams::from(&state.config.server.http_pool);
     let routing_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
-    state.routing.store(Arc::new(routing_snapshot));
 
-    // Sync listeners (start/stop as needed)
+    // Sync listeners BEFORE swapping the routing table: a listener that hasn't
+    // started yet returns 503 (recoverable), while a route pointing to a port
+    // with no listener silently drops the connection (unrecoverable from client POV).
     let listeners = tm.server_ingress_routing.listeners.clone();
     crate::sync_listeners(state, &listeners);
+    state.routing.store(Arc::new(routing_snapshot));
 }
 
 // ── Type conversions: tunnel_store routing types → server config types ────────
@@ -155,15 +157,15 @@ fn proto_to_tunnel_management(
                         .iter()
                         .map(|r| VhostRule {
                             match_host: r.match_host.clone(),
-                            action_client_group: r.group_id.clone(),
-                            action_proxy_name: r.proxy_name.clone(),
+                            client_group: r.group_id.clone(),
+                            proxy_name: r.proxy_name.clone(),
                         })
                         .collect(),
                 }),
                 IngressListenerMode::Tcp { group_id, proxy_name } => {
                     IngressMode::Tcp(TcpListenerConfig {
-                        action_client_group: group_id.clone(),
-                        action_proxy_name: proxy_name.clone(),
+                        client_group: group_id.clone(),
+                        proxy_name: proxy_name.clone(),
                     })
                 }
             },

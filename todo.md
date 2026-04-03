@@ -157,6 +157,36 @@ Wrap the reader with `BufReader::with_capacity(65536)` before passing it to `tok
 
 The generic `relay()` use `tokio::io::split()` (internal Arc+Mutex), whereas `relay_quic_to_tcp()` correctly uses `into_split()` (zero-cost owned halves).
 
+### [TODO-51] LocalTokenCache 增量更新（替代全量重建 HashMap）
+
+**Files**: `server/local_auth.rs`, `tunnel-service/src/proto.rs`, `server/control_client.rs`
+**Priority**: Low（影响低）
+
+**Background**:
+当前每次 ctld 推送 Patch（哪怕只改 1 个 token），server 都重建整个 `HashMap<[u8;32], CacheEntry>`。10 万 token 时重建约几十毫秒 CPU。
+
+**Impact**: 仅在 token 数量 10 万以上且频繁批量变更时可感知，普通场景可忽略。
+
+**Implementation notes**:
+1. 在 `WatchEvent` 协议中增加 `TokenDelta { added: Vec<TokenCacheEntry>, removed: Vec<String> }` 变体（需协议版本兼容）。
+2. `LocalTokenCache` 增加 `patch(added, removed)` 方法，对现有 map 做增量 insert/remove（写时复制或 RCU 风格）。
+3. 仅 token 变更时发 `TokenDelta`，路由变更时仍发全量 Patch。
+
+### [TODO-52] ArcSwap 路由快照连接级缓存（H2 热路径优化）
+
+**Files**: `server/handlers/http.rs` (`handle_plaintext_h2_connection`, `handle_tls_connection`)
+**Priority**: Low（影响低）
+
+**Background**:
+`state.routing.load()` 在每个 HTTP 请求（包括 H2 多路复用的每个流）都执行一次 ArcSwap epoch-based 读。路由配置变更极低频，同一 H2 连接生命周期内路由快照不变。在 64 核 + 百万 rps 场景下，多核并发 load() 会争抢 cache line。
+
+**Impact**: 路由不更新时 `load()` 约 3ns，几乎无开销。仅在 64 核以上高并发场景下可测量，普通场景可忽略。
+
+**Implementation notes**:
+1. 在 `handle_plaintext_h2_connection` 连接入口处 load 一次，将 `Arc<RoutingSnapshot>` 移入 `service_fn` 闭包捕获（不在每个请求 load）。
+2. TLS H2 路径同理：`handle_tls_connection` 已在连接级别 `lookup_route` 一次，无需改动。
+3. 注意热重载时连接级缓存会使用旧路由直到连接断开（可接受，符合长连接语义）。
+
 ---
 
 ## Architecture Level Optimization

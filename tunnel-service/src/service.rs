@@ -1,12 +1,17 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use anyhow::Result;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use tunnel_store::rules::RoutingData;
 use tunnel_store::{AuthStore, RuleStore, TokenListEntry};
 use crate::proto::{ConfigSnapshot, WatchEvent};
 use crate::token::cache::load_token_cache;
+
+/// Debounce window: multiple mutations within this window are collapsed into
+/// a single DB rebuild + broadcast.
+const PUBLISH_DEBOUNCE_MS: u64 = 50;
 
 /// Central coordinator: owns the stores, maintains the watch channel.
 pub struct ControlService {
@@ -19,6 +24,8 @@ pub struct ControlService {
     watch_tx: watch::Sender<Arc<WatchEvent>>,
     /// Kept alive so the channel never closes while ControlService lives.
     _watch_rx: watch::Receiver<Arc<WatchEvent>>,
+    /// Signal channel: any mutation sends a () here; the debounce task does the actual rebuild.
+    publish_tx: mpsc::Sender<()>,
 }
 
 impl ControlService {
@@ -31,6 +38,8 @@ impl ControlService {
         let initial = Self::build_snapshot(&*rule_store, &pool, 1).await?;
         let event = Arc::new(WatchEvent::Snapshot(initial));
         let (watch_tx, _watch_rx) = watch::channel(event);
+        // Channel capacity 1: multiple senders collapse into a single pending signal.
+        let (publish_tx, publish_rx) = mpsc::channel::<()>(1);
         let svc = Arc::new(Self {
             auth_store,
             rule_store,
@@ -38,8 +47,13 @@ impl ControlService {
             resource_version: std::sync::atomic::AtomicU64::new(1),
             watch_tx,
             _watch_rx,
+            publish_tx,
         });
         info!("ControlService initialised, resource_version=1");
+        // Spawn the debounce task. Uses a Weak reference so the task exits cleanly
+        // when the last strong Arc<ControlService> is dropped.
+        let weak = Arc::downgrade(&svc);
+        tokio::spawn(debounce_publish_task(weak, publish_rx));
         Ok(svc)
     }
 
@@ -50,7 +64,7 @@ impl ControlService {
     }
 
     pub fn current_version(&self) -> u64 {
-        self.resource_version.load(Ordering::SeqCst)
+        self.resource_version.load(Ordering::Acquire)
     }
 
     // ── Snapshot builder ────────────────────────────────────────────────────
@@ -73,12 +87,26 @@ impl ControlService {
     }
 
     /// Rebuilds snapshot from DB and broadcasts Patch event to all watchers.
-    async fn publish(&self) -> Result<()> {
-        let version = self.resource_version.fetch_add(1, Ordering::SeqCst) + 1;
-        let snapshot = Self::build_snapshot(&*self.rule_store, &self.pool, version).await?;
-        info!(resource_version = version, "broadcasting config patch to watchers");
+    /// Called only from the debounce task — not directly from mutation methods.
+    async fn do_publish(&self) -> Result<()> {
+        // Read the candidate version WITHOUT incrementing yet.
+        // Only commit the increment after a successful snapshot build so that
+        // a failed DB query does not leave a gap in the version sequence.
+        let next = self.resource_version.load(Ordering::Acquire) + 1;
+        let snapshot = Self::build_snapshot(&*self.rule_store, &self.pool, next).await?;
+        // Build succeeded — now commit the version increment.
+        self.resource_version.fetch_add(1, Ordering::AcqRel);
+        info!(resource_version = next, "broadcasting config patch to watchers");
         let _ = self.watch_tx.send(Arc::new(WatchEvent::Patch(snapshot)));
         Ok(())
+    }
+
+    /// Signal that a mutation has occurred. The debounce task will coalesce
+    /// rapid signals and perform one rebuild per debounce window.
+    fn publish(&self) {
+        // try_send: if the channel already has a pending signal, this is a no-op —
+        // which is exactly what we want (debounce collapses multiple signals).
+        let _ = self.publish_tx.try_send(());
     }
 
     // ── Token lifecycle ──────────────────────────────────────────────────────
@@ -86,27 +114,21 @@ impl ControlService {
     pub async fn create_client(&self, name: &str) -> Result<String> {
         let token = self.auth_store.create_client(name).await?;
         info!(name = %name, "client created");
-        if let Err(e) = self.publish().await {
-            warn!(error = %e, "publish after create_client failed");
-        }
+        self.publish();
         Ok(token)
     }
 
     pub async fn revoke_token(&self, name: &str) -> Result<()> {
         self.auth_store.revoke_token(name).await?;
         info!(name = %name, "token revoked");
-        if let Err(e) = self.publish().await {
-            warn!(error = %e, "publish after revoke_token failed");
-        }
+        self.publish();
         Ok(())
     }
 
     pub async fn rotate_token(&self, name: &str) -> Result<String> {
         let token = self.auth_store.rotate_token(name).await?;
         info!(name = %name, "token rotated");
-        if let Err(e) = self.publish().await {
-            warn!(error = %e, "publish after rotate_token failed");
-        }
+        self.publish();
         Ok(token)
     }
 
@@ -120,14 +142,52 @@ impl ControlService {
     pub async fn save_routing(&self, data: &RoutingData) -> Result<()> {
         self.rule_store.save_routing(data).await?;
         info!("routing saved");
-        if let Err(e) = self.publish().await {
-            warn!(error = %e, "publish after save_routing failed");
-        }
+        self.publish();
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn load_routing(&self) -> Result<RoutingData> {
         self.rule_store.load_routing().await
+    }
+}
+
+/// Background task: waits for publish signals, debounces within PUBLISH_DEBOUNCE_MS,
+/// then performs one full snapshot rebuild and broadcast.
+/// On persistent failures, applies exponential backoff (1s → 32s) before retrying.
+async fn debounce_publish_task(
+    svc: std::sync::Weak<ControlService>,
+    mut rx: mpsc::Receiver<()>,
+) {
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        // Block until at least one signal arrives.
+        if rx.recv().await.is_none() {
+            // Channel closed — ControlService dropped.
+            break;
+        }
+        // Debounce: wait for the burst to settle, then drain any queued signals.
+        tokio::time::sleep(Duration::from_millis(PUBLISH_DEBOUNCE_MS)).await;
+        while rx.try_recv().is_ok() {}
+
+        match svc.upgrade() {
+            None => break, // ControlService dropped while we were sleeping.
+            Some(svc) => {
+                if let Err(e) = svc.do_publish().await {
+                    consecutive_failures += 1;
+                    // Backoff: 1s, 2s, 4s, 8s, 16s, 32s (capped).
+                    let backoff = Duration::from_secs(1 << consecutive_failures.min(5));
+                    warn!(
+                        error = %e,
+                        consecutive_failures,
+                        backoff_secs = backoff.as_secs(),
+                        "debounced publish failed, backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                } else {
+                    consecutive_failures = 0;
+                }
+            }
+        }
     }
 }

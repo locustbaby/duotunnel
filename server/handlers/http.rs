@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
+use crate::handlers::try_acquire_permit;
 use crate::{metrics, ServerState};
 pub async fn run_http_listener(
     state: Arc<ServerState>,
@@ -24,13 +25,10 @@ pub async fn run_http_listener(
         };
         state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new http connection");
-        let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                warn!(peer_addr = %peer_addr, "HTTP connection rejected: max connections reached");
-                metrics::connection_rejected("http");
-                continue;
-            }
+        let Some(permit) = try_acquire_permit(state.tcp_semaphore.clone()).await else {
+            warn!(peer_addr = %peer_addr, "HTTP connection rejected: max connections reached");
+            metrics::connection_rejected("http");
+            continue;
         };
         let state = state.clone();
         tokio::spawn(async move {
@@ -54,30 +52,36 @@ async fn handle_http_connection(
 ) -> Result<()> {
     use tunnel_lib::detect_protocol_and_host;
     use tunnel_lib::protocol::detect::extract_tls_sni;
-    let peek_size = state.proxy_buffer_params.peek_buf_size;
     let peer_addr = stream.peer_addr()?;
-    let mut buf = vec![0u8; peek_size];
-    let n = stream.peek(&mut buf).await?;
+    let pool = Arc::clone(&state.peek_buf_pool);
+    let mut buf = pool.take();
+    let n = match stream.peek(&mut buf).await {
+        Ok(n) => n,
+        Err(e) => { pool.put(buf); return Err(e.into()); }
+    };
     let is_tls = n > 0 && buf[0] == 0x16;
     if is_tls {
         let sni = extract_tls_sni(&buf[..n]);
+        pool.put(buf);
         let host = sni.ok_or_else(|| anyhow::anyhow!("no SNI in TLS ClientHello"))?;
         handle_tls_connection(state, stream, host, peer_addr, port).await
     } else {
         let (protocol, detected_host) = detect_protocol_and_host(&buf[..n]);
         if protocol == "h2" {
+            pool.put(buf);
             handle_plaintext_h2_connection(state, stream, peer_addr, port).await
         } else {
-            let host = detected_host
-                .or_else(|| extract_host_from_http(&buf[..n]))
-                .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
+            let host = detected_host.or_else(|| extract_host_from_http(&buf[..n]));
+            let initial_data: Vec<u8> = buf[..n].to_vec();
+            pool.put(buf);
+            let host = host.ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
             handle_plaintext_h1_connection(
                 state,
                 stream,
                 host,
                 protocol.to_string(),
                 peer_addr,
-                &buf[..n],
+                &initial_data,
                 port,
             )
             .await
@@ -88,7 +92,7 @@ fn lookup_route(
     state: &ServerState,
     port: u16,
     host: &str,
-) -> Option<(String, String)> {
+) -> Option<(Arc<str>, Arc<str>)> {
     state
         .routing
         .load()
@@ -159,7 +163,7 @@ async fn handle_tls_connection(
                 target_host, parts.method, parts.uri
             );
             let routing_info = tunnel_lib::RoutingInfo {
-                proxy_name,
+                proxy_name: proxy_name.to_string(),
                 src_addr,
                 src_port,
                 protocol: "h2".to_string(),
@@ -207,7 +211,7 @@ async fn handle_plaintext_h2_connection(
     let src_port = peer_addr.port();
     let h2_single_authority = state.config.server.h2_single_authority;
     let first_authority: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
-    let route_cache: Arc<OnceLock<Option<(String, String)>>> = Arc::new(OnceLock::new());
+    let route_cache: Arc<OnceLock<Option<(Arc<str>, Arc<str>)>>> = Arc::new(OnceLock::new());
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();
         let first_authority = first_authority.clone();
@@ -289,7 +293,7 @@ async fn handle_plaintext_h2_connection(
                 parts.method, parts.uri, host
             );
             let routing_info = tunnel_lib::RoutingInfo {
-                proxy_name,
+                proxy_name: proxy_name.to_string(),
                 src_addr,
                 src_port,
                 protocol: "h2".to_string(),
@@ -342,7 +346,7 @@ async fn handle_plaintext_h1_connection(
     proxy::forward_with_initial_data(
         &client_conn,
         tunnel_lib::RoutingInfo {
-            proxy_name,
+            proxy_name: proxy_name.to_string(),
             src_addr: peer_addr.ip().to_string(),
             src_port: peer_addr.port(),
             protocol,

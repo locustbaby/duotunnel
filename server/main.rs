@@ -6,59 +6,30 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex as ParkingMutex;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 mod config;
 mod control_client;
 mod egress;
 mod handlers;
 mod hot_reload;
+mod listener_mgr;
 mod local_auth;
 mod metrics;
+mod null_stores;
 mod registry;
 mod tunnel_handler;
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
     ServerEgressUpstream, TunnelManagement,
 };
+use null_stores::{NullConfigSource, NullRuleStore};
 use registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
-
-// ── Null stubs for ctld-managed mode ─────────────────────────────────────────
-// In ctld-managed mode the server never queries SQLite directly.  These stubs
-// satisfy the ServerState fields without opening a DB connection.
-
-struct NullRuleStore;
-#[async_trait::async_trait]
-impl RuleStore for NullRuleStore {
-    async fn load_routing(&self) -> Result<tunnel_store::rules::RoutingData> {
-        Ok(tunnel_store::rules::RoutingData {
-            ingress_listeners: vec![],
-            client_groups: vec![],
-            egress_upstreams: vec![],
-            egress_vhost_rules: vec![],
-        })
-    }
-    async fn save_routing(&self, _: &tunnel_store::rules::RoutingData) -> Result<()> {
-        anyhow::bail!("NullRuleStore: server is in ctld-managed mode")
-    }
-    async fn is_routing_empty(&self) -> Result<bool> {
-        Ok(true)
-    }
-}
-
-struct NullConfigSource;
-#[async_trait::async_trait]
-impl ConfigSource for NullConfigSource {
-    async fn load(&self) -> Result<(TunnelManagement, ServerEgressUpstream)> {
-        Ok((TunnelManagement::default(), ServerEgressUpstream::default()))
-    }
-}
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -84,21 +55,46 @@ enum TokenAction {
     Revoke { #[arg(long)] name: String },
     Rotate { #[arg(long)] name: String },
 }
-struct ListenerEntry {
-    id: u64,
-    kind: ListenerKind,
-    cancel: CancellationToken,
-}
-enum ListenerKind {
-    Http,
-    Tcp { group_id: String, proxy_name: String },
-}
-pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<(String, String)>>>>;
+pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>>>;
 pub struct RoutingSnapshot {
     pub http_routers: HttpRouterMap,
     pub tunnel_management: Arc<TunnelManagement>,
     pub egress_map: Arc<egress::ServerEgressMap>,
 }
+/// Free-list for peek buffers.
+/// Avoids one heap allocation per incoming connection by recycling fixed-size buffers.
+/// Pool size is capped to avoid unbounded memory growth under idle-after-burst scenarios.
+pub struct PeekBufPool {
+    pool: ParkingMutex<Vec<Vec<u8>>>,
+    buf_size: usize,
+}
+impl PeekBufPool {
+    /// Cap on how many buffers we keep idle. Excess are dropped.
+    const MAX_IDLE: usize = 256;
+
+    pub fn new(buf_size: usize) -> Self {
+        Self { pool: ParkingMutex::new(Vec::new()), buf_size }
+    }
+
+    pub fn take(&self) -> Vec<u8> {
+        self.pool.lock().pop().unwrap_or_else(|| vec![0u8; self.buf_size])
+    }
+
+    pub fn put(&self, mut buf: Vec<u8>) {
+        if buf.capacity() != self.buf_size {
+            return; // wrong size — drop
+        }
+        // Restore full length so the next peek() has a full-sized slice to write into.
+        // Safe: capacity == buf_size, so setting len to buf_size is within allocation.
+        buf.resize(self.buf_size, 0);
+        let mut pool = self.pool.lock();
+        if pool.len() < Self::MAX_IDLE {
+            pool.push(buf);
+        }
+        // else: pool is full, drop buf to free memory
+    }
+}
+
 pub struct ServerState {
     pub config: Arc<ServerConfigFile>,
     pub registry: SharedRegistry,
@@ -106,6 +102,7 @@ pub struct ServerState {
     pub tcp_semaphore: Arc<Semaphore>,
     pub tcp_params: tunnel_lib::TcpParams,
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
+    pub peek_buf_pool: Arc<PeekBufPool>,
     pub routing: Arc<ArcSwap<RoutingSnapshot>>,
     pub auth_store: Arc<dyn AuthStore>,
     pub rule_store: Arc<dyn RuleStore>,
@@ -113,8 +110,7 @@ pub struct ServerState {
     pub revocation_tx: tokio::sync::broadcast::Sender<String>,
     /// Present when running in ctld-managed mode; None in standalone mode.
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
-    listener_next_id: AtomicU64,
-    listeners: Mutex<HashMap<u16, ListenerEntry>>,
+    pub listeners: listener_mgr::ListenerManager,
 }
 async fn build_stores(
     database_url: &str,
@@ -233,9 +229,11 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let (tm, egress) = config_source.load().await?;
     let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+    let proxy_buffer_params = tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers);
     let state = Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
-        proxy_buffer_params: tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers),
+        peek_buf_pool: Arc::new(PeekBufPool::new(proxy_buffer_params.peek_buf_size)),
+        proxy_buffer_params,
         quic_semaphore: Arc::new(Semaphore::new(config.server.max_connections)),
         tcp_semaphore: Arc::new(Semaphore::new(config.server.max_tcp_connections)),
         routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
@@ -246,8 +244,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         config_source,
         revocation_tx,
         local_token_cache,
-        listener_next_id: AtomicU64::new(1),
-        listeners: Mutex::new(HashMap::new()),
+        listeners: listener_mgr::ListenerManager::new(),
     });
     info!(
         max_quic_connections = %config.server.max_connections,
@@ -285,14 +282,14 @@ pub fn build_routing_snapshot(
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
 ) -> RoutingSnapshot {
-    let mut http_routers: HashMap<u16, Arc<VhostRouter<(String, String)>>> = HashMap::new();
+    let mut http_routers: HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
         if let IngressMode::Http(cfg) = &listener.mode {
-            let router: VhostRouter<(String, String)> = VhostRouter::new();
+            let router: VhostRouter<(Arc<str>, Arc<str>)> = VhostRouter::new();
             for rule in &cfg.vhost {
                 router.add_route(
                     &rule.match_host,
-                    (rule.action_client_group.clone(), rule.action_proxy_name.clone()),
+                    (Arc::from(rule.client_group.as_str()), Arc::from(rule.proxy_name.as_str())),
                 );
             }
             info!(
@@ -310,105 +307,4 @@ pub fn build_routing_snapshot(
         egress_map: Arc::new(egress_map),
     }
 }
-pub fn sync_listeners(
-    state: &Arc<ServerState>,
-    desired: &[config::IngressListener],
-) {
-    let desired_ports: HashSet<u16> = desired.iter().map(|l| l.port).collect();
-    let desired_by_port: HashMap<u16, &config::IngressListener> =
-        desired.iter().map(|l| (l.port, l)).collect();
-
-    let mut to_cancel = Vec::new();
-    let mut map = state.listeners.lock().unwrap();
-
-    map.retain(|port, entry| {
-        if !desired_ports.contains(port) {
-            info!(port = %port, "listener removed (hot-reload)");
-            to_cancel.push(entry.cancel.clone());
-            return false;
-        }
-        let listener = desired_by_port[port];
-        let changed = match (&entry.kind, &listener.mode) {
-            (ListenerKind::Http, IngressMode::Http(_)) => false,
-            (
-                ListenerKind::Tcp { group_id, proxy_name },
-                IngressMode::Tcp(cfg),
-            ) => {
-                group_id != &cfg.action_client_group || proxy_name != &cfg.action_proxy_name
-            }
-            _ => true,
-        };
-        if changed {
-            info!(port = %port, "listener config changed (hot-reload), restarting");
-            to_cancel.push(entry.cancel.clone());
-            false
-        } else {
-            true
-        }
-    });
-    drop(map);
-
-    for cancel in to_cancel {
-        cancel.cancel();
-    }
-
-    let mut map = state.listeners.lock().unwrap();
-    for (port, listener) in &desired_by_port {
-        if map.contains_key(port) {
-            continue;
-        }
-        let listener_id = state.listener_next_id.fetch_add(1, Ordering::Relaxed);
-        let cancel = CancellationToken::new();
-        let kind = match &listener.mode {
-            IngressMode::Http(_) => ListenerKind::Http,
-            IngressMode::Tcp(cfg) => ListenerKind::Tcp {
-                group_id: cfg.action_client_group.clone(),
-                proxy_name: cfg.action_proxy_name.clone(),
-            },
-        };
-        map.insert(*port, ListenerEntry { id: listener_id, kind, cancel: cancel.clone() });
-        match &listener.mode {
-            IngressMode::Http(_) => {
-                let tcp_state = state.clone();
-                let p = *port;
-                let cancel_for_task = cancel.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        handlers::http::run_http_listener(tcp_state.clone(), p, cancel_for_task)
-                            .await
-                    {
-                        error!(port = %p, error = %e, "HTTP listener failed");
-                    }
-                    let mut map = tcp_state.listeners.lock().unwrap();
-                    if map.get(&p).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&p);
-                    }
-                });
-            }
-            IngressMode::Tcp(cfg) => {
-                let tcp_state = state.clone();
-                let p = *port;
-                let group_id = cfg.action_client_group.clone();
-                let proxy_name = cfg.action_proxy_name.clone();
-                let cancel_for_task = cancel.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handlers::tcp::run_tcp_listener(
-                        tcp_state.clone(),
-                        p,
-                        proxy_name,
-                        group_id,
-                        cancel_for_task,
-                    )
-                    .await
-                    {
-                        error!(port = %p, error = %e, "TCP listener failed");
-                    }
-                    let mut map = tcp_state.listeners.lock().unwrap();
-                    if map.get(&p).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&p);
-                    }
-                });
-            }
-        }
-    }
-}
+pub use listener_mgr::sync_listeners;
