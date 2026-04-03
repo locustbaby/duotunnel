@@ -1,17 +1,16 @@
-use crate::egress::{ServerEgressApp, ServerEgressMap};
 use anyhow::Result;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{Protocol, ProxyEngine};
+use tunnel_lib::proxy::core::{Protocol, ProxyApp, ProxyEngine};
 use tunnel_lib::recv_routing_info;
-pub async fn handle_tunnel_stream(
+
+pub async fn handle_tunnel_stream<A: ProxyApp>(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    egress_map: Arc<ServerEgressMap>,
+    app: A,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
     info!(
-        target_host = ? routing_info.host, protocol = % routing_info.protocol,
+        target_host = ?routing_info.host, protocol = %routing_info.protocol,
         "handling egress request from client"
     );
     let _protocol = match routing_info.protocol.as_str() {
@@ -27,9 +26,7 @@ pub async fn handle_tunnel_stream(
             return Err(anyhow::anyhow!("invalid client addr: {}", e));
         }
     };
-    let app = ServerEgressApp::new(egress_map);
-    let engine = ProxyEngine::new(app);
-    engine.run_stream(send, recv, client_addr, Some(routing_info)).await?;
+    ProxyEngine::new(app).run_stream(send, recv, client_addr, Some(routing_info)).await?;
     debug!("egress stream completed");
     Ok(())
 }

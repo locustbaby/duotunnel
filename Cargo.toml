@@ -3,6 +3,7 @@
 members = [
     "tunnel-lib",
     "tunnel-store",
+    "tunnel-service",
     "server",
     "client",
     "ci-helpers",

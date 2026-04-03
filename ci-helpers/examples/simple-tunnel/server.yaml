@@ -22,8 +22,8 @@ tunnel_management:
         mode: http
         vhost:
           - match_host: "localhost"
-            action_client_group: "test-group"
-            action_proxy_name: "echo_service"
+            client_group: "test-group"
+            proxy_name: "echo_service"
 
   client_configs:
     groups:

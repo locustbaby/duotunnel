@@ -1,0 +1,6 @@
+database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+watch_addr: "0.0.0.0:7788"
+log_level: "info"
+# Path to server.yaml — routing sections are seeded into the DB on first boot.
+# On subsequent boots this is ignored (routing lives in the DB).
+server_config: "config/server.yaml"

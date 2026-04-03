@@ -1,0 +1,51 @@
+server:
+  tunnel_port: 10087
+  metrics_port: 9091
+  log_level: "info"
+  database_url: "sqlite://./data/duotunnel-ci-standalone.db?mode=rwc"
+  quic:
+    keepalive_secs: 2
+    idle_timeout_secs: 5
+    max_concurrent_streams: 1000
+
+server_egress_upstream:
+  upstreams: {}
+  rules:
+    vhost: []
+
+tunnel_management:
+  server_ingress_routing:
+    listeners:
+      - port: 8180
+        mode: http
+        vhost:
+          - match_host: "echo.local"
+            client_group: "ci-standalone"
+            proxy_name: "http_echo_local"
+          - match_host: "ws.local"
+            client_group: "ci-standalone"
+            proxy_name: "ws_echo_local"
+          - match_host: "grpc.local"
+            client_group: "ci-standalone"
+            proxy_name: "grpc_echo_local"
+
+  client_configs:
+    groups:
+      ci-standalone:
+        config_version: "v1.0.0"
+        upstreams:
+          http_echo_local:
+            servers:
+              - address: "127.0.0.1:9999"
+                resolve: false
+            lb_policy: "round_robin"
+          ws_echo_local:
+            servers:
+              - address: "ws://127.0.0.1:8765"
+                resolve: false
+            lb_policy: "round_robin"
+          grpc_echo_local:
+            servers:
+              - address: "http://127.0.0.1:50051"
+                resolve: false
+            lb_policy: "round_robin"
