@@ -43,22 +43,22 @@ tunnel_management:
         mode: http
         vhost:
           - match_host: "wss.localtest.com"
-            action_client_group: "group-a"
-            action_proxy_name: "grpc_service"
+            client_group: "group-a"
+            proxy_name: "grpc_service"
           - match_host: "harbor.example.com"
-            action_client_group: "group-a"
-            action_proxy_name: "google_service"
+            client_group: "group-a"
+            proxy_name: "google_service"
           - match_host: "test.local"
-            action_client_group: "group-a"
-            action_proxy_name: "http_service"
+            client_group: "group-a"
+            proxy_name: "http_service"
           - match_host: "www2.localtest.com"
-            action_client_group: "group-b"
-            action_proxy_name: "local_service"
+            client_group: "group-b"
+            proxy_name: "local_service"
 
       - port: 50051
         mode: tcp
-        action_client_group: "group-a"
-        action_proxy_name: "grpc_service"
+        client_group: "group-a"
+        proxy_name: "grpc_service"
 
   client_configs:
     groups:
