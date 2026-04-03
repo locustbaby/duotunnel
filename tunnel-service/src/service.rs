@@ -13,6 +13,10 @@ use crate::token::cache::load_token_cache;
 /// a single DB rebuild + broadcast.
 const PUBLISH_DEBOUNCE_MS: u64 = 50;
 
+/// How often the daemon polls SQLite for out-of-band changes (e.g. made by the
+/// CLI tool running as a separate process against the same DB).
+const POLL_INTERVAL_MS: u64 = 1500;
+
 /// Central coordinator: owns the stores, maintains the watch channel.
 pub struct ControlService {
     auth_store: Arc<dyn AuthStore>,
@@ -53,7 +57,10 @@ impl ControlService {
         // Spawn the debounce task. Uses a Weak reference so the task exits cleanly
         // when the last strong Arc<ControlService> is dropped.
         let weak = Arc::downgrade(&svc);
-        tokio::spawn(debounce_publish_task(weak, publish_rx));
+        tokio::spawn(debounce_publish_task(weak.clone(), publish_rx));
+        // Spawn the DB polling task to detect out-of-band writes (CLI tool running
+        // as a separate process against the same SQLite DB).
+        tokio::spawn(db_poll_task(weak));
         Ok(svc)
     }
 
@@ -186,6 +193,45 @@ async fn debounce_publish_task(
                     tokio::time::sleep(backoff).await;
                 } else {
                     consecutive_failures = 0;
+                }
+            }
+        }
+    }
+}
+
+/// Background task: polls SQLite every POLL_INTERVAL_MS to detect token or
+/// routing changes written by an out-of-process CLI tool.  When a change is
+/// detected the normal publish path is triggered so all watchers (servers) get
+/// an updated Patch.
+async fn db_poll_task(svc: std::sync::Weak<ControlService>) {
+    // Fingerprint = sorted list of (hash_hex, token_status, client_status) tuples.
+    // We compare this cheaply without needing a DB version column.
+    let mut last_fingerprint: Option<String> = None;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+
+        let Some(svc) = svc.upgrade() else { break };
+
+        match crate::token::cache::load_token_cache(&svc.pool).await {
+            Err(e) => {
+                warn!(error = %e, "db_poll: failed to load token cache");
+            }
+            Ok(entries) => {
+                // Build a cheap fingerprint: sorted concatenation of all token rows.
+                let mut parts: Vec<String> = entries
+                    .iter()
+                    .map(|e| format!("{}:{}:{}", e.hash_hex, e.token_status, e.client_status))
+                    .collect();
+                parts.sort_unstable();
+                let fingerprint = parts.join("|");
+
+                let changed = last_fingerprint.as_deref() != Some(&fingerprint);
+                last_fingerprint = Some(fingerprint);
+
+                if changed {
+                    tracing::debug!("db_poll: token change detected, triggering publish");
+                    svc.publish();
                 }
             }
         }

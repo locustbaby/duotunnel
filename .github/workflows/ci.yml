@@ -196,7 +196,7 @@ jobs:
           done
           echo "Tunnel server ready"
 
-      - name: Start tunnel client and wait for login
+      - name: Create client token
         timeout-minutes: 1
         run: |
           TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
@@ -204,7 +204,21 @@ jobs:
             || ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
+          echo "$TOKEN" > /tmp/ci-token.txt
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+          # Wait for ctld's db_poll to detect the new token and push a Patch to server.
+          # Poll interval is 1500ms; record current patch count and wait for it to increase.
+          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+          for i in $(seq 1 25); do
+            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+            [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
+            sleep 0.2
+          done
+          echo "Token ready, server notified"
+
+      - name: Start tunnel client and wait for login
+        timeout-minutes: 1
+        run: |
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
@@ -787,6 +801,13 @@ jobs:
             client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+          # Wait for ctld's db_poll to push the new token to server before connecting client.
+          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+          for i in $(seq 1 25); do
+            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+            [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
+            sleep 0.2
+          done
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
