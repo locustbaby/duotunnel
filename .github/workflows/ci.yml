@@ -597,6 +597,11 @@ jobs:
             echo "=== client ===" && cat /tmp/sa-client.log
             exit 1
           fi
+          # Warmup: wait for QUIC streams to be ready before 7-D fires.
+          for i in $(seq 1 10); do
+            curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1 && break
+            sleep 0.5
+          done
           echo "Client connected to standalone server"
 
       - name: "[Standalone] 7-D: HTTP GET ingress — echo.local:8180"
@@ -666,6 +671,11 @@ jobs:
             echo "=== client ===" && cat /tmp/sa-client2.log
             exit 1
           fi
+          # Warmup: wait for the new client's QUIC streams to be ready for traffic.
+          for i in $(seq 1 10); do
+            curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1 && break
+            sleep 0.5
+          done
           ./target/release/ci-test-client http "http://echo.local:8180/"
           echo "Token rotate + reconnect OK"
 
