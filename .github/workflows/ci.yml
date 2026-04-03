@@ -106,6 +106,7 @@ jobs:
   #   SECTION 4 — WebSocket local: echo + multi-message
   #   SECTION 5 — gRPC local: Health + EchoService/Echo
   #   SECTION 6 — Bidirectional concurrent + mixed-protocol
+  #   SECTION 7 — Standalone mode: SQLite auto-seed, token CLI, HTTP/WS/gRPC, hot-reload, token rotate
   # ─────────────────────────────────────────────────────────────────────────────
   integration-test:
     name: Integration Test (all protocols)
@@ -499,6 +500,161 @@ jobs:
           if [ "$FAIL" -gt 0 ]; then echo "FAIL: $FAIL/3 gRPC concurrent"; exit 1; fi
           echo "PASS: 3/3 gRPC concurrent"
 
+      # ═══════════════════════════════════════════════════════════════════════════
+      #  SECTION 7 — Standalone mode smoke test
+      #
+      #  Verifies the server can run without ctld:
+      #    7-A: first-boot SQLite auto-seed from YAML
+      #    7-B: `server token create` CLI
+      #    7-C: client connects with standalone-issued token
+      #    7-D: HTTP GET ingress
+      #    7-E: HTTP POST + body verify ingress
+      #    7-F: WebSocket ingress
+      #    7-G: gRPC Health ingress
+      #    7-H: gRPC Echo ingress
+      #    7-I: hot-reload (touch config → watcher fires → routing refreshed)
+      #    7-J: token rotate — new token works
+      #
+      #  Uses different ports (QUIC :10087, listener :8180, metrics :9091) and a
+      #  separate SQLite DB to keep standalone state isolated from the ctld run.
+      #  The backend servers (echo :9999, ws :8765, grpc :50051) are reused —
+      #  they are still running from the earlier startup step.
+      # ═══════════════════════════════════════════════════════════════════════════
+
+      - name: "[Standalone] Stop ctld-mode tunnel (keep backends)"
+        run: |
+          kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ctld.pid   2>/dev/null)" 2>/dev/null || true
+          sleep 0.5
+
+      - name: "[Standalone] 7-A: start server — verify SQLite auto-seed on first boot"
+        timeout-minutes: 1
+        run: |
+          mkdir -p data
+          ./target/release/server --config ci-helpers/server-standalone.yaml \
+            > /tmp/sa-server.log 2>&1 &
+          echo $! > /tmp/sa-server.pid
+          for i in $(seq 1 30); do
+            grep -q "QUIC server listening" /tmp/sa-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+          if ! grep -q "QUIC server listening" /tmp/sa-server.log; then
+            echo "ERROR: standalone server did not start"; cat /tmp/sa-server.log; exit 1
+          fi
+          if ! grep -q "routing rules seeded into DB from config file\|routing DB already populated" \
+              /tmp/sa-server.log; then
+            echo "ERROR: expected SQLite seed log line not found"
+            cat /tmp/sa-server.log; exit 1
+          fi
+          echo "Standalone server ready (SQLite auto-seed confirmed)"
+
+      - name: "[Standalone] 7-B: server token create CLI"
+        run: |
+          SA_TOKEN=$(./target/release/server --config ci-helpers/server-standalone.yaml \
+            token create --name ci-standalone 2>/dev/null | tail -1)
+          if [ -z "$SA_TOKEN" ]; then
+            echo "ERROR: token create returned empty output"; exit 1
+          fi
+          echo "$SA_TOKEN" > /tmp/sa-token.txt
+          echo "Token created: $SA_TOKEN"
+
+      - name: "[Standalone] 7-C: client connects with standalone-issued token"
+        timeout-minutes: 1
+        run: |
+          SA_TOKEN=$(cat /tmp/sa-token.txt)
+          python3 -c "
+          import re, sys
+          f = 'ci-helpers/client.yaml'
+          c = open(f).read()
+          c = re.sub(r'^auth_token:.*', 'auth_token: \"' + sys.argv[1] + '\"', c, flags=re.MULTILINE)
+          c = re.sub(r'^server_port:.*', 'server_port: 10087', c, flags=re.MULTILINE)
+          open(f, 'w').write(c)
+          " "$SA_TOKEN"
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/sa-client.log 2>&1 &
+          echo $! > /tmp/sa-client.pid
+          for i in $(seq 1 40); do
+            grep -q "Login successful" /tmp/sa-client.log 2>/dev/null && break
+            sleep 0.5
+          done
+          if ! grep -q "Login successful" /tmp/sa-client.log; then
+            echo "ERROR: client did not login to standalone server"
+            echo "=== server ===" && cat /tmp/sa-server.log
+            echo "=== client ===" && cat /tmp/sa-client.log
+            exit 1
+          fi
+          echo "Client connected to standalone server"
+
+      - name: "[Standalone] 7-D: HTTP GET ingress — echo.local:8180"
+        run: |
+          ./target/release/ci-test-client http "http://echo.local:8180/"
+
+      - name: "[Standalone] 7-E: HTTP POST + body verify ingress"
+        run: |
+          ./target/release/ci-test-client http "http://echo.local:8180/" \
+            --method POST \
+            --body '{"standalone":"ci","test":"sa-post-body"}' \
+            --expect-body "sa-post-body"
+
+      - name: "[Standalone] 7-F: WebSocket ingress — ws.local:8180"
+        run: |
+          ./target/release/ci-test-client ws "ws://ws.local:8180" --message "standalone-ws-hello"
+
+      - name: "[Standalone] 7-G: gRPC Health ingress — grpc.local:8180"
+        run: |
+          ./target/release/ci-test-client grpc "grpc.local:8180" --service ""
+
+      - name: "[Standalone] 7-H: gRPC Echo ingress — grpc.local:8180"
+        run: |
+          ./target/release/ci-test-client grpc-echo "grpc.local:8180" \
+            --ping "standalone-grpc-echo"
+
+      - name: "[Standalone] 7-I: hot-reload — touch config, verify watcher fires"
+        run: |
+          echo "# ci-hot-reload-trigger" >> ci-helpers/server-standalone.yaml
+          for i in $(seq 1 20); do
+            grep -q "hot reload successful" /tmp/sa-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+          if ! grep -q "hot reload successful" /tmp/sa-server.log; then
+            echo "ERROR: hot-reload did not fire within 6s"
+            cat /tmp/sa-server.log; exit 1
+          fi
+          echo "Hot-reload confirmed"
+          ./target/release/ci-test-client http "http://echo.local:8180/"
+
+      - name: "[Standalone] 7-J: token rotate — new token works"
+        run: |
+          NEW_TOKEN=$(./target/release/server --config ci-helpers/server-standalone.yaml \
+            token rotate --name ci-standalone 2>/dev/null | tail -1)
+          if [ -z "$NEW_TOKEN" ]; then
+            echo "ERROR: token rotate returned empty output"; exit 1
+          fi
+          echo "New token after rotate: $NEW_TOKEN"
+          kill "$(cat /tmp/sa-client.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 0.5
+          python3 -c "
+          import re, sys
+          f = 'ci-helpers/client.yaml'
+          c = open(f).read()
+          c = re.sub(r'^auth_token:.*', 'auth_token: \"' + sys.argv[1] + '\"', c, flags=re.MULTILINE)
+          open(f, 'w').write(c)
+          " "$NEW_TOKEN"
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/sa-client2.log 2>&1 &
+          echo $! > /tmp/sa-client.pid
+          for i in $(seq 1 40); do
+            grep -q "Login successful" /tmp/sa-client2.log 2>/dev/null && break
+            sleep 0.5
+          done
+          if ! grep -q "Login successful" /tmp/sa-client2.log; then
+            echo "ERROR: client did not reconnect after token rotate"
+            echo "=== server ===" && tail -30 /tmp/sa-server.log
+            echo "=== client ===" && cat /tmp/sa-client2.log
+            exit 1
+          fi
+          ./target/release/ci-test-client http "http://echo.local:8180/"
+          echo "Token rotate + reconnect OK"
+
       # ─── Diagnostics ─────────────────────────────────────────────────────────
       - name: Upload logs on failure
         if: failure()
@@ -510,6 +666,9 @@ jobs:
             /tmp/ci-ctld.log
             /tmp/ci-server.log
             /tmp/ci-client.log
+            /tmp/sa-server.log
+            /tmp/sa-client.log
+            /tmp/sa-client2.log
             /tmp/http-echo.log
             /tmp/ws-echo.log
             /tmp/grpc-echo.log
@@ -517,12 +676,14 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          kill "$(cat /tmp/ctld.pid      2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ctld.pid       2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/server.pid     2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/client.pid     2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/sa-server.pid  2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/sa-client.pid  2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/http-echo.pid  2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ws-echo.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/grpc-echo.pid  2>/dev/null)" 2>/dev/null || true
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 3: Stress test — k6 multi-protocol benchmark (local backends only)
