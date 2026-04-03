@@ -61,7 +61,7 @@ async fn handle_tcp_connection(
 ) -> Result<()> {
     use tunnel_lib::detect_protocol_and_host;
     let peer_addr = stream.peer_addr()?;
-    let pool = std::sync::Arc::clone(&state.peek_buf_pool);
+    let pool = &state.peek_buf_pool;
     let mut buf = pool.take();
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
