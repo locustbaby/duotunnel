@@ -211,6 +211,7 @@ async fn handle_plaintext_h2_connection(
     let src_port = peer_addr.port();
     let h2_single_authority = state.config.server.h2_single_authority;
     let first_authority: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    #[allow(clippy::type_complexity)]
     let route_cache: Arc<OnceLock<Option<(Arc<str>, Arc<str>)>>> = Arc::new(OnceLock::new());
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();

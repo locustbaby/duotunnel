@@ -198,6 +198,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
+    #[allow(clippy::type_complexity)]
     let (auth_store, rule_store, config_source, local_token_cache): (
         Arc<dyn AuthStore>,
         Arc<dyn RuleStore>,
@@ -287,6 +288,7 @@ pub fn build_routing_snapshot(
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
 ) -> RoutingSnapshot {
+    #[allow(clippy::type_complexity)]
     let mut http_routers: HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
         if let IngressMode::Http(cfg) = &listener.mode {
