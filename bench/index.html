@@ -136,7 +136,15 @@ const FALLBACK_PHASES = [
 function phaseAnnotations(entry) {
   const a = {};
   const offset = entry?.resources?.k6OffsetSeconds || 0;
-  const phaseDefs = entry?.phases || FALLBACK_PHASES;
+  const phaseDefs = (entry?.phases || FALLBACK_PHASES).slice().sort((x, y) => {
+    const xs = Number.isFinite(x?.start) ? x.start : 0;
+    const ys = Number.isFinite(y?.start) ? y.start : 0;
+    if (xs !== ys) return xs - ys;
+    const xe = Number.isFinite(x?.end) ? x.end : 0;
+    const ye = Number.isFinite(y?.end) ? y.end : 0;
+    if (xe !== ye) return xe - ye;
+    return (x?.name || '').localeCompare(y?.name || '');
+  });
   phaseDefs.forEach((p, i) => {
     const isFrp = p.tunnel === 'frp';
     const s = p.start + (isFrp ? 0 : offset);
@@ -411,6 +419,13 @@ function renderDetail(entry) {
   for (const cat of categories) {
     const group = sc.filter(s => s.category === cat);
     if (!group.length) continue;
+    // duotunnel rows first, frp rows after — preserves logical ordering
+    group.sort((a, b) => {
+      const ta = a.tunnel || 'duotunnel';
+      const tb = b.tunnel || 'duotunnel';
+      if (ta !== tb) return ta === 'frp' ? 1 : -1;
+      return 0;
+    });
     html += `<tr><td colspan="${colSpan}" style="padding:12px 10px 2px;border-bottom:none">
       <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${catLabels[cat]||cat}</div>
       <div class="cat-desc">${catDescs[cat] || ''}</div>

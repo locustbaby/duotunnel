@@ -786,6 +786,22 @@ jobs:
         if: env.COLLECT_FLAMEGRAPH == '1'
         run: sudo apt-get install -y -qq linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
 
+      - name: Enable perf for flamegraph
+        if: env.COLLECT_FLAMEGRAPH == '1'
+        run: |
+          # sysctl may be blocked by cgroup; write directly to /proc as fallback
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
+            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
+            sudo sysctl -w kernel.kptr_restrict=0 || true
+          # Verify perf works; disable flamegraph collection if not
+          if ! sudo perf stat -e cycles -- true 2>/dev/null; then
+            echo "WARNING: perf not functional, disabling flamegraph collection"
+            echo "COLLECT_FLAMEGRAPH=0" >> "$GITHUB_ENV"
+          else
+            echo "perf OK, paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
+          fi
+
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
         run: sudo bash scripts/tune-os.sh
@@ -820,7 +836,7 @@ jobs:
           done
 
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
+            setsid sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           else
@@ -899,7 +915,7 @@ jobs:
 
           echo "Restarting server..."
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
+            setsid sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           else
@@ -1052,13 +1068,22 @@ jobs:
         if: always()
         run: |
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo kill -INT "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            for i in $(seq 1 30); do
+            SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
+            if [ -n "$SERVER_PID" ]; then
+              sudo kill -INT -- "-$SERVER_PID" 2>/dev/null || sudo kill -INT "$SERVER_PID" 2>/dev/null || true
+            fi
+            for i in $(seq 1 120); do
               [ -s /tmp/flamegraph.svg ] && break
+              if [ -n "$SERVER_PID" ] && ! ps -p "$SERVER_PID" >/dev/null 2>&1; then
+                [ -s /tmp/flamegraph.svg ] && break
+              fi
               sleep 1
             done
           fi
-          kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
+          if [ -n "$SERVER_PID" ]; then
+            sudo kill -TERM -- "-$SERVER_PID" 2>/dev/null || kill -9 "$SERVER_PID" 2>/dev/null || true
+          fi
           kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
           sleep 0.5
 
