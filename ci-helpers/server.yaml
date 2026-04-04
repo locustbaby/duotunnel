@@ -1,7 +1,7 @@
 server:
   tunnel_port: 10086
   metrics_port: 9090
-  log_level: "info"
+  log_level: "warn"
   quic:
     keepalive_secs: 10
     idle_timeout_secs: 30

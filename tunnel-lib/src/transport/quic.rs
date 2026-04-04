@@ -19,7 +19,7 @@ impl Default for QuicTransportParams {
             max_concurrent_streams: 1000,
             stream_receive_window_bytes: 4 * 1024 * 1024,
             connection_receive_window_bytes: 32 * 1024 * 1024,
-            send_window_bytes: 32 * 1024 * 1024,
+            send_window_bytes: 8 * 1024 * 1024,
             keepalive_secs: 20,
             idle_timeout_secs: 60,
             congestion: Some("bbr".to_string()),
