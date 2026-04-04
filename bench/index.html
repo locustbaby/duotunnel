@@ -513,13 +513,23 @@ function renderDetail(entry) {
 
   if (res) {
     const annotations = phaseAnnotations(entry);
+    // Clip x-axis to last phase end + small padding, so trailing idle
+    // sampling time after k6 finishes doesn't create a blank region.
+    const offset = entry?.resources?.k6OffsetSeconds || 0;
+    const phases = entry?.phases || FALLBACK_PHASES;
+    const lastPhaseEnd = Math.max(...phases.map(p => {
+      const isFrp = p.tunnel === 'frp';
+      return (p.end || 0) + (isFrp ? 0 : offset);
+    }));
+    const xMax = isFinite(lastPhaseEnd) && lastPhaseEnd > 0 ? lastPhaseEnd + 5 : undefined;
     const TSO = {  // base time-scale options
       ...CO,
       showLine: true,
       plugins: {...CO.plugins, annotation: {annotations},
         tooltip: {mode:'index', intersect:false}},
       scales: {
-        x: {...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}},
+        x: {...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'},
+            ...(xMax !== undefined ? {max: xMax} : {})},
         y: {...CO.scales.y},
       },
     };
