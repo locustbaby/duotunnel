@@ -743,7 +743,7 @@ jobs:
     permissions:
       contents: write
     env:
-      COLLECT_FLAMEGRAPH: ${{ github.event_name == 'workflow_dispatch' && inputs.collect_flamegraph && '1' || '0' }}
+      COLLECT_FLAMEGRAPH: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.collect_flamegraph)) && '1' || '0' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
