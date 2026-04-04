@@ -3,10 +3,9 @@ import grpc from 'k6/net/grpc';
 import ws from 'k6/ws';
 import exec from 'k6/execution';
 import { check } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { Counter } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 
-const trends = {};
 const reqCounters = {};
 const errCounters = {};
 
@@ -22,9 +21,16 @@ const allScenarios = [
   'ingress_8000qps', 'egress_8000qps',
 ];
 for (const s of allScenarios) {
-  trends[s] = new Trend(`t_${s}`, true);
   reqCounters[s] = new Counter(`c_reqs_${s}`);
   errCounters[s] = new Counter(`c_err_${s}`);
+}
+
+const durationThresholds = {};
+for (const s of allScenarios) {
+  let metric = 'http_req_duration';
+  if (s.startsWith('grpc_')) metric = 'grpc_req_duration';
+  if (s.startsWith('ws_')) metric = 'ws_session_duration';
+  durationThresholds[`${metric}{name:${s}}`] = ['p(95)<60000'];
 }
 
 const PAYLOAD_1K = 'x'.repeat(1024);
@@ -32,6 +38,7 @@ const PAYLOAD_10K = 'x'.repeat(10240);
 const PAYLOAD_100K = 'x'.repeat(102400);
 
 export const options = {
+  discardResponseBodies: true,
   scenarios: {
     ingress_http_get: {
       executor: 'ramping-arrival-rate',
@@ -267,6 +274,7 @@ export const options = {
   noConnectionReuse: false,
 
   thresholds: {
+    ...durationThresholds,
     'http_req_failed{scenario:ingress_http_get}': ['rate<0.05'],
     'http_req_failed{scenario:ingress_http_post}': ['rate<0.05'],
     'http_req_failed{scenario:egress_http_get}': ['rate<0.05'],
@@ -281,152 +289,185 @@ export const options = {
   },
 };
 
-function track(res, ok) {
+function track(ok) {
   const sn = exec.scenario.name;
-  trends[sn].add(res.timings.duration);
   reqCounters[sn].add(1);
   if (!ok) errCounters[sn].add(1);
 }
 
 export function ingressHttpGet() {
+  const sn = exec.scenario.name;
+  const withBody = !(sn.includes('_3000qps') || sn.includes('_8000qps'));
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://echo.local:8080/?id=${id}`, {
     timeout: '10s',
-    tags: { name: 'ingress_get' },
+    tags: { name: sn },
+    responseType: withBody ? 'text' : 'none',
   });
-  const ok = check(res, {
-    'ingress GET 200': (r) => r.status === 200,
-    'ingress GET echo': (r) => r.body && r.body.includes(id),
-  });
-  track(res, ok);
+  const checks = { 'ingress GET 200': (r) => r.status === 200 };
+  if (withBody) checks['ingress GET echo'] = (r) => r.body && r.body.includes(id);
+  const ok = check(res, checks);
+  track(ok);
 }
 
 export function ingressHttpGetNoKeepalive() {
+  const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://echo.local:8080/?id=${id}`, {
     timeout: '10s',
     headers: { Connection: 'close' },
-    tags: { name: 'ingress_get_nokl' },
+    tags: { name: sn },
   });
   const ok = check(res, {
     'ingress GET nokl 200': (r) => r.status === 200,
-    'ingress GET nokl echo': (r) => r.body && r.body.includes(id),
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function egressHttpGetNoKeepalive() {
+  const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://127.0.0.1:8081/?id=${id}`, {
     headers: { Host: 'echo.local', Connection: 'close' },
     timeout: '10s',
-    tags: { name: 'egress_get_nokl' },
+    tags: { name: sn },
   });
   const ok = check(res, {
     'egress GET nokl 200': (r) => r.status === 200,
-    'egress GET nokl echo': (r) => r.body && r.body.includes(id),
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function ingressHttpPost() {
+  const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.post(
     'http://echo.local:8080/',
     JSON.stringify({ bench: 'ingress-post', id: id }),
-    { headers: { 'Content-Type': 'application/json' }, timeout: '10s' },
+    { headers: { 'Content-Type': 'application/json' }, timeout: '10s', tags: { name: sn }, responseType: 'text' },
   );
   const ok = check(res, {
     'ingress POST 200': (r) => r.status === 200,
     'ingress POST body': (r) => r.body && r.body.includes(id),
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function egressHttpGet() {
+  const sn = exec.scenario.name;
+  const withBody = !(sn.includes('_3000qps') || sn.includes('_8000qps'));
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://127.0.0.1:8081/?id=${id}`, {
     headers: { Host: 'echo.local' },
     timeout: '10s',
-    tags: { name: 'egress_get' },
+    tags: { name: sn },
+    responseType: withBody ? 'text' : 'none',
   });
-  const ok = check(res, {
-    'egress GET 200': (r) => r.status === 200,
-    'egress GET echo': (r) => r.body && r.body.includes(id),
-  });
-  track(res, ok);
+  const checks = { 'egress GET 200': (r) => r.status === 200 };
+  if (withBody) checks['egress GET echo'] = (r) => r.body && r.body.includes(id);
+  const ok = check(res, checks);
+  track(ok);
 }
 
 export function egressHttpPost() {
+  const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.post(
     'http://127.0.0.1:8081/',
     JSON.stringify({ bench: 'egress-post', id: id }),
-    { headers: { Host: 'echo.local', 'Content-Type': 'application/json' }, timeout: '10s' },
+    {
+      headers: { Host: 'echo.local', 'Content-Type': 'application/json' },
+      timeout: '10s',
+      tags: { name: sn },
+      responseType: 'text',
+    },
   );
   const ok = check(res, {
     'egress POST 200': (r) => r.status === 200,
     'egress POST body': (r) => r.body && r.body.includes(id),
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function ingressPost1K() {
+  const sn = exec.scenario.name;
   const res = http.post(
     'http://echo.local:8080/',
     PAYLOAD_1K,
-    { headers: { 'Content-Type': 'application/octet-stream' }, timeout: '10s' },
+    {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: '10s',
+      tags: { name: sn },
+      responseType: 'text',
+    },
   );
   const ok = check(res, {
     'ingress 1K 200': (r) => r.status === 200,
     'ingress 1K size': (r) => r.body && r.body.length >= 1024,
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function ingressPost10K() {
+  const sn = exec.scenario.name;
   const res = http.post(
     'http://echo.local:8080/',
     PAYLOAD_10K,
-    { headers: { 'Content-Type': 'application/octet-stream' }, timeout: '10s' },
+    {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: '10s',
+      tags: { name: sn },
+      responseType: 'text',
+    },
   );
   const ok = check(res, {
     'ingress 10K 200': (r) => r.status === 200,
     'ingress 10K size': (r) => r.body && r.body.length >= 10240,
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function ingressPost100K() {
+  const sn = exec.scenario.name;
   const res = http.post(
     'http://echo.local:8080/',
     PAYLOAD_100K,
-    { headers: { 'Content-Type': 'application/octet-stream' }, timeout: '10s' },
+    {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: '10s',
+      tags: { name: sn },
+      responseType: 'text',
+    },
   );
   const ok = check(res, {
     'ingress 100K 200': (r) => r.status === 200,
     'ingress 100K size': (r) => r.body && r.body.length >= 102400,
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function egressPost10K() {
+  const sn = exec.scenario.name;
   const res = http.post(
     'http://127.0.0.1:8081/',
     PAYLOAD_10K,
-    { headers: { Host: 'echo.local', 'Content-Type': 'application/octet-stream' }, timeout: '10s' },
+    {
+      headers: { Host: 'echo.local', 'Content-Type': 'application/octet-stream' },
+      timeout: '10s',
+      tags: { name: sn },
+      responseType: 'text',
+    },
   );
   const ok = check(res, {
     'egress 10K 200': (r) => r.status === 200,
     'egress 10K size': (r) => r.body && r.body.length >= 10240,
   });
-  track(res, ok);
+  track(ok);
 }
 
 export function wsIngress() {
   const sn = exec.scenario.name;
-  ws.connect('ws://ws.local:8080', {}, function (socket) {
-    const start = Date.now();
+  ws.connect('ws://ws.local:8080', { tags: { name: sn } }, function (socket) {
     let counted = false;
 
     socket.setTimeout(function () {
@@ -439,7 +480,6 @@ export function wsIngress() {
     });
 
     socket.on('message', function (msg) {
-      trends[sn].add(Date.now() - start);
       const ok = check(msg, {
         'ws echo matches': (d) => d === 'k6-bench-ping',
       });
@@ -457,10 +497,9 @@ export function wsMultiMsg() {
   const sn = exec.scenario.name;
   const msgCount = 20;
   let received = 0;
-  const start = Date.now();
   let counted = false;
 
-  ws.connect('ws://ws.local:8080', {}, function (socket) {
+  ws.connect('ws://ws.local:8080', { tags: { name: sn } }, function (socket) {
     socket.setTimeout(function () {
       if (!counted) { reqCounters[sn].add(1); errCounters[sn].add(1); counted = true; }
       socket.close();
@@ -478,7 +517,6 @@ export function wsMultiMsg() {
         'ws burst echo': (d) => d.startsWith(`burst-${__VU}-${__ITER}-`),
       });
       if (received >= msgCount) {
-        trends[sn].add(Date.now() - start);
         if (!counted) { reqCounters[sn].add(1); counted = true; }
         socket.close();
       }
@@ -506,9 +544,7 @@ grpcHighQpsClient.load(['../proto'], 'grpc_echo.proto');
 export function grpcHealthIngress() {
   const sn = exec.scenario.name;
   if (__ITER === 0) grpcHealthClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
-  const start = Date.now();
-  const resp = grpcHealthClient.invoke('grpc.health.v1.Health/Check', { service: '' });
-  trends[sn].add(Date.now() - start);
+  const resp = grpcHealthClient.invoke('grpc.health.v1.Health/Check', { service: '' }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
@@ -523,9 +559,7 @@ export function grpcEchoIngress() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   if (__ITER === 0) grpcEchoClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
-  const start = Date.now();
-  const resp = grpcEchoClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id });
-  trends[sn].add(Date.now() - start);
+  const resp = grpcEchoClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
@@ -542,9 +576,7 @@ export function grpcEchoIngress() {
 export function grpcLargePayload() {
   const sn = exec.scenario.name;
   if (__ITER === 0) grpcLargeClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
-  const start = Date.now();
-  const resp = grpcLargeClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: PAYLOAD_10K });
-  trends[sn].add(Date.now() - start);
+  const resp = grpcLargeClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: PAYLOAD_10K }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
@@ -562,9 +594,7 @@ export function grpcHighQps() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   if (__ITER === 0) grpcHighQpsClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
-  const start = Date.now();
-  const resp = grpcHighQpsClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id });
-  trends[sn].add(Date.now() - start);
+  const resp = grpcHighQpsClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
@@ -578,17 +608,17 @@ export function grpcHighQps() {
 export function bidirectional() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const start = Date.now();
   const inRes = http.get(`http://echo.local:8080/?id=${id}`, {
     timeout: '10s',
-    tags: { name: 'bidir_ingress' },
+    tags: { name: sn },
+    responseType: 'text',
   });
   const egRes = http.get(`http://127.0.0.1:8081/?id=${id}`, {
     headers: { Host: 'echo.local' },
     timeout: '10s',
-    tags: { name: 'bidir_egress' },
+    tags: { name: sn },
+    responseType: 'text',
   });
-  trends[sn].add(Date.now() - start);
   const ok1 = check(inRes, {
     'bidir ingress 200': (r) => r.status === 200,
     'bidir ingress echo': (r) => r.body && r.body.includes(id),
@@ -608,28 +638,38 @@ export function handleSummary(data) {
     return Math.round(v * 100) / 100;
   }
 
+  function metricByName(base, name) {
+    const direct = m[`${base}{name:${name}}`];
+    if (direct) return direct;
+    const needle = `name:${name}`;
+    for (const [k, v] of Object.entries(m)) {
+      if (k.startsWith(`${base}{`) && k.includes(needle)) return v;
+    }
+    return null;
+  }
+
   const scenarioMeta = {
-    ingress_http_get:    { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 25 },
-    ingress_http_post:   { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 25 },
-    egress_http_get:     { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 25 },
-    egress_http_post:    { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 25 },
-    bidir_mixed:         { protocol: 'HTTP', direction: 'bidir',   category: 'basic',     duration: 20 },
-    ingress_post_1k:     { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20 },
-    ingress_post_10k:    { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20 },
-    ingress_post_100k:   { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20 },
-    egress_post_10k:     { protocol: 'HTTP', direction: 'egress',  category: 'body_size', duration: 20 },
-    grpc_health_ingress: { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 20 },
-    grpc_echo_ingress:   { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 20 },
-    grpc_large_payload:  { protocol: 'gRPC', direction: 'ingress', category: 'body_size', duration: 20 },
-    grpc_high_qps:       { protocol: 'gRPC', direction: 'ingress', category: 'stress',    duration: 20 },
-    ws_ingress:          { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 20 },
-    ws_multi_msg:        { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 20 },
-    ingress_3000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20 },
-    egress_3000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
-    ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20 },
-    egress_3000qps_nokl:  { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
-    ingress_8000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20 },
-    egress_8000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20 },
+    ingress_http_get:    { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 25, metric: 'http_req_duration' },
+    ingress_http_post:   { protocol: 'HTTP', direction: 'ingress', category: 'basic',     duration: 25, metric: 'http_req_duration' },
+    egress_http_get:     { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 25, metric: 'http_req_duration' },
+    egress_http_post:    { protocol: 'HTTP', direction: 'egress',  category: 'basic',     duration: 25, metric: 'http_req_duration' },
+    bidir_mixed:         { protocol: 'HTTP', direction: 'bidir',   category: 'basic',     duration: 20, metric: 'http_req_duration' },
+    ingress_post_1k:     { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20, metric: 'http_req_duration' },
+    ingress_post_10k:    { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20, metric: 'http_req_duration' },
+    ingress_post_100k:   { protocol: 'HTTP', direction: 'ingress', category: 'body_size', duration: 20, metric: 'http_req_duration' },
+    egress_post_10k:     { protocol: 'HTTP', direction: 'egress',  category: 'body_size', duration: 20, metric: 'http_req_duration' },
+    grpc_health_ingress: { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 20, metric: 'grpc_req_duration' },
+    grpc_echo_ingress:   { protocol: 'gRPC', direction: 'ingress', category: 'basic',     duration: 20, metric: 'grpc_req_duration' },
+    grpc_large_payload:  { protocol: 'gRPC', direction: 'ingress', category: 'body_size', duration: 20, metric: 'grpc_req_duration' },
+    grpc_high_qps:       { protocol: 'gRPC', direction: 'ingress', category: 'stress',    duration: 20, metric: 'grpc_req_duration' },
+    ws_ingress:          { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 20, metric: 'ws_session_duration' },
+    ws_multi_msg:        { protocol: 'WS',   direction: 'ingress', category: 'basic',     duration: 20, metric: 'ws_session_duration' },
+    ingress_3000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20, metric: 'http_req_duration' },
+    egress_3000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20, metric: 'http_req_duration' },
+    ingress_3000qps_nokl: { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20, metric: 'http_req_duration' },
+    egress_3000qps_nokl:  { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20, metric: 'http_req_duration' },
+    ingress_8000qps:      { protocol: 'HTTP', direction: 'ingress', category: 'stress',   duration: 20, metric: 'http_req_duration' },
+    egress_8000qps:       { protocol: 'HTTP', direction: 'egress',  category: 'stress',   duration: 20, metric: 'http_req_duration' },
   };
 
   const phases = [
@@ -649,7 +689,7 @@ export function handleSummary(data) {
   let totalErrors = 0;
 
   for (const [name, meta] of Object.entries(scenarioMeta)) {
-    const trend = m[`t_${name}`];
+    const trend = metricByName(meta.metric, name);
     if (!trend) continue;
 
     const v = trend.values;

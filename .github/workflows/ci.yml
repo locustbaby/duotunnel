@@ -31,6 +31,10 @@ on:
         description: 'Apply kernel tuning (tune-os.sh) before stress test'
         type: boolean
         default: true
+      collect_flamegraph:
+        description: 'Collect server CPU flamegraph during stress test'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -738,6 +742,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      COLLECT_FLAMEGRAPH: ${{ github.event_name == 'workflow_dispatch' && inputs.collect_flamegraph && '1' || '0' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -767,10 +773,18 @@ jobs:
       - name: Build all binaries
         run: cargo build --release
 
+      - name: Install cargo-flamegraph
+        if: env.COLLECT_FLAMEGRAPH == '1'
+        run: cargo install flamegraph
+
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
       - name: Install sysstat
         run: sudo apt-get install -y -qq sysstat
+
+      - name: Install perf tools
+        if: env.COLLECT_FLAMEGRAPH == '1'
+        run: sudo apt-get install -y -qq linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
 
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
@@ -805,8 +819,14 @@ jobs:
             sleep 0.2
           done
 
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
+              ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          else
+            ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          fi
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
@@ -878,8 +898,14 @@ jobs:
           sleep 0.5
 
           echo "Restarting server..."
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
+              ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          else
+            ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          fi
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
@@ -1025,6 +1051,13 @@ jobs:
       - name: Stop duotunnel server and client
         if: always()
         run: |
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo kill -INT "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+            for i in $(seq 1 30); do
+              [ -s /tmp/flamegraph.svg ] && break
+              sleep 1
+            done
+          fi
           kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
           sleep 0.5
@@ -1121,12 +1154,20 @@ jobs:
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           FRP_ARG=""
           FRP_OFFSET_ARG=""
+          FLAMEGRAPH_ARG=""
           if [ -s /tmp/bench-results-frp.json ]; then
             FRP_ARG="--frp-result /tmp/bench-results-frp.json"
             if [ -f /tmp/frp_k6_start_epoch ] && [ -f /tmp/sampling_start_epoch ]; then
               FRP_K6_OFFSET=$(( $(cat /tmp/frp_k6_start_epoch) - $(cat /tmp/sampling_start_epoch) ))
               FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
             fi
+          fi
+          if [ -s /tmp/flamegraph.svg ]; then
+            mkdir -p bench/flamegraphs
+            SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+            FLAMEGRAPH_REL="flamegraphs/${SHORT_SHA}-${{ github.run_id }}.svg"
+            cp /tmp/flamegraph.svg "bench/${FLAMEGRAPH_REL}"
+            FLAMEGRAPH_ARG="--flamegraph ${FLAMEGRAPH_REL}"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results.json \
@@ -1135,7 +1176,7 @@ jobs:
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --resources /tmp/resource-data.json \
-            $FRP_ARG $FRP_OFFSET_ARG
+            $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
@@ -1161,6 +1202,15 @@ jobs:
             /tmp/http-echo.log
             /tmp/frps.log
             /tmp/frpc.log
+
+      - name: Upload flamegraph
+        if: always() && env.COLLECT_FLAMEGRAPH == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-cpu-flamegraph-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: /tmp/flamegraph.svg
 
       - name: Cleanup
         if: always()

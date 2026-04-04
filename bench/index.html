@@ -366,6 +366,7 @@ function renderDetail(entry) {
   const sum = entry.summary || {};
   const prevSum = prev ? (prev.summary || {}) : {};
   const res = entry.resources || null;
+  const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
 
@@ -384,6 +385,16 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Total Requests</div><div class="val">${fmt(sum.totalRequests)}</div>${delta(sum.totalRequests||0, prevSum.totalRequests, false)}</div>
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
+
+  ${flamegraph ? `
+  <div class="row full">
+    <div class="panel auto">
+      <h3>Profiles</h3>
+      <div style="font-size:13px">
+        <a href="${esc(flamegraph)}" target="_blank">CPU Flamegraph (SVG)</a>
+      </div>
+    </div>
+  </div>` : ''}
 
   <div class="sec">Scenario Results</div>
   <div class="row full">
