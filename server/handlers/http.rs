@@ -1,3 +1,4 @@
+use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -5,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
-use crate::{metrics, ServerState};
 pub async fn run_http_listener(
     state: Arc<ServerState>,
     port: u16,
@@ -59,7 +59,10 @@ async fn handle_http_connection(
     let mut buf = pool.take();
     let n = match stream.peek(&mut buf).await {
         Ok(n) => n,
-        Err(e) => { pool.put(buf); return Err(e.into()); }
+        Err(e) => {
+            pool.put(buf);
+            return Err(e.into());
+        }
     };
     let is_tls = n > 0 && buf[0] == 0x16;
     if is_tls {
@@ -76,7 +79,8 @@ async fn handle_http_connection(
             let host = detected_host.or_else(|| extract_host_from_http(&buf[..n]));
             let initial_data: Vec<u8> = buf[..n].to_vec();
             pool.put(buf);
-            let host = host.ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
+            let host =
+                host.ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
             handle_plaintext_h1_connection(
                 state,
                 stream,
@@ -90,11 +94,7 @@ async fn handle_http_connection(
         }
     }
 }
-fn lookup_route(
-    state: &ServerState,
-    port: u16,
-    host: &str,
-) -> Option<(Arc<str>, Arc<str>)> {
+fn lookup_route(state: &ServerState, port: u16, host: &str) -> Option<(Arc<str>, Arc<str>)> {
     state
         .routing
         .load()
@@ -117,14 +117,8 @@ async fn handle_tls_connection(
     debug!(host = %host, "TLS connection detected, terminating");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
-    let (certs, key) =
-        tunnel_lib::infra::pki::generate_self_signed_cert_for_host(&host)?;
-    let mut server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    let acceptor =
-        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+    let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let tls_stream = acceptor.accept(stream).await?;
     info!("TLS terminated, serving H2 with authority rewriting");
     let target_host = host.clone();
@@ -221,16 +215,12 @@ async fn handle_plaintext_h2_connection(
         let route_cache = route_cache.clone();
         let src_addr = src_addr.clone();
         async move {
-            let authority = req
-                .uri()
-                .authority()
-                .map(|a| a.to_string())
-                .or_else(|| {
-                    req.headers()
-                        .get(hyper::header::HOST)
-                        .and_then(|h| h.to_str().ok())
-                        .map(|s| s.to_string())
-                });
+            let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
+                req.headers()
+                    .get(hyper::header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string())
+            });
             let host = match authority {
                 Some(h) => h,
                 None => {
@@ -244,8 +234,7 @@ async fn handle_plaintext_h2_connection(
                         .unwrap());
                 }
             };
-            let route_host =
-                host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
+            let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
             if h2_single_authority {
                 let pinned = first_authority.get_or_init(|| route_host.clone());
                 if pinned != &route_host {

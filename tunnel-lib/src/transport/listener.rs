@@ -3,14 +3,18 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
@@ -23,11 +27,7 @@ fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
     let std_listener: std::net::TcpListener = socket.into();
     Ok(TcpListener::from_std(std_listener)?)
 }
-pub async fn start_tcp_listener<F, Fut>(
-    port: u16,
-    handler: F,
-    protocol_name: &str,
-) -> Result<()>
+pub async fn start_tcp_listener<F, Fut>(port: u16, handler: F, protocol_name: &str) -> Result<()>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
@@ -145,7 +145,9 @@ pub struct PortRouter<T: Clone + Send + Sync> {
 }
 impl<T: Clone + Send + Sync> PortRouter<T> {
     pub fn new() -> Self {
-        Self { routes: HashMap::new() }
+        Self {
+            routes: HashMap::new(),
+        }
     }
     pub fn add_route(&mut self, port: u16, value: T) {
         self.routes.insert(port, value);
@@ -162,25 +164,9 @@ impl<T: Clone + Send + Sync> Default for PortRouter<T> {
         Self::new()
     }
 }
-pub fn extract_host_from_http(data: &[u8]) -> Option<String> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let mut lines = data_str.lines();
-    lines.next();
-    for line in lines {
-        if line.len() > 5 && line[..5].eq_ignore_ascii_case("host:") {
-            return Some(line[5..].trim().to_string());
-        }
-    }
-    None
-}
-pub fn extract_method_path_from_http(data: &[u8]) -> Option<(String, String)> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let first_line = data_str.lines().next()?;
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
-    Some((method, path))
-}
+// HTTP parsing helpers live in protocol::http_utils; re-exported here for
+// backwards compatibility with existing callers.
+pub use crate::protocol::http_utils::{extract_host_from_http, extract_method_path_from_http};
 pub type SharedVhostRouter<T> = Arc<VhostRouter<T>>;
 pub fn new_shared_vhost_router<T: Clone + Send + Sync>() -> SharedVhostRouter<T> {
     Arc::new(VhostRouter::new())
@@ -219,8 +205,8 @@ mod tests {
     fn test_extract_method_path() {
         let req = b"GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n";
         assert_eq!(
-            extract_method_path_from_http(req), Some(("GET".to_string(), "/api/users"
-            .to_string()))
+            extract_method_path_from_http(req),
+            Some(("GET".to_string(), "/api/users".to_string()))
         );
     }
     #[test]
@@ -229,7 +215,7 @@ mod tests {
         assert!(router.is_empty());
         assert_eq!(router.len(), 0);
         router.add_route("a.com", "x".to_string());
-        assert!(! router.is_empty());
+        assert!(!router.is_empty());
         assert_eq!(router.len(), 1);
         router.add_route("*.b.com", "y".to_string());
         assert_eq!(router.len(), 2);
@@ -277,8 +263,14 @@ mod tests {
         let router: VhostRouter<String> = VhostRouter::new();
         router.add_route("*.example.com", "wildcard-group".to_string());
         router.add_route("api.example.com", "exact-group".to_string());
-        assert_eq!(router.get("api.example.com"), Some("exact-group".to_string()));
-        assert_eq!(router.get("www.example.com"), Some("wildcard-group".to_string()));
+        assert_eq!(
+            router.get("api.example.com"),
+            Some("exact-group".to_string())
+        );
+        assert_eq!(
+            router.get("www.example.com"),
+            Some("wildcard-group".to_string())
+        );
     }
     #[test]
     fn test_wildcard_case_insensitive() {
@@ -294,7 +286,10 @@ mod tests {
     #[test]
     fn test_extract_host_with_port() {
         let req = b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
-        assert_eq!(extract_host_from_http(req), Some("example.com:8080".to_string()));
+        assert_eq!(
+            extract_host_from_http(req),
+            Some("example.com:8080".to_string())
+        );
     }
     #[test]
     fn test_extract_host_missing_returns_none() {
@@ -310,8 +305,8 @@ mod tests {
     fn test_extract_method_path_post() {
         let req = b"POST /submit HTTP/1.1\r\nHost: example.com\r\n\r\n";
         assert_eq!(
-            extract_method_path_from_http(req), Some(("POST".to_string(), "/submit"
-            .to_string()))
+            extract_method_path_from_http(req),
+            Some(("POST".to_string(), "/submit".to_string()))
         );
     }
     #[test]
@@ -323,8 +318,8 @@ mod tests {
     fn test_extract_method_path_root() {
         let req = b"DELETE / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         assert_eq!(
-            extract_method_path_from_http(req), Some(("DELETE".to_string(), "/"
-            .to_string()))
+            extract_method_path_from_http(req),
+            Some(("DELETE".to_string(), "/".to_string()))
         );
     }
 }

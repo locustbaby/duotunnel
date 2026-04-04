@@ -1,8 +1,8 @@
-use std::time::Duration;
+use crate::config::ClientConfigFile;
 use anyhow::{anyhow, Result};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use crate::config::ClientConfigFile;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum FailureClass {
     Fatal,
@@ -86,7 +86,11 @@ struct JitterBackoff {
 }
 impl JitterBackoff {
     fn new(initial: Duration, max: Duration) -> Self {
-        let initial = if initial.is_zero() { Duration::from_millis(1) } else { initial };
+        let initial = if initial.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            initial
+        };
         let max = if max < initial { initial } else { max };
         Self {
             initial,

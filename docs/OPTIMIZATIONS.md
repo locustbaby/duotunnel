@@ -8,6 +8,7 @@ This document outlines the performance optimizations implemented in DuoTunnel to
 * **Structure of Arrays (SoA) Data Layout**: Inside `ClientGroup`, hot data (`Connection` handles) and cold data (`String` IDs) are stored in separate arrays. This improves CPU L1/L2 cache hit rates when the routing algorithm scans for healthy connections.
 * **False Sharing Mitigation**: The round-robin counter (`AtomicUsize`) used for load balancing is wrapped in `crossbeam_utils::CachePadded`. This prevents cache-line invalidation storms across CPU cores when multiple threads increment the counter concurrently.
 * **Kernel-level Load Balancing (`SO_REUSEPORT`)**: Enabled `SO_REUSEPORT` for TCP listeners. This delegates the `accept()` load distribution to the OS kernel, efficiently balancing incoming connections across multiple Tokio worker threads.
+* **Read-Copy-Update (RCU) Connection Registry**: For client connection selection, we eliminated concurrent `DashMap` iterations which previously allocated transient `Vec`s and held shard locks. By migrating to an RCU architecture using `ArcSwap<Vec<Connection>>`, we achieved an O(1), zero-allocation, lock-free routing read path. Write locks are completely isolated to macro lifecycle events (connect/disconnect).
 
 ## 2. Memory Management & Data Structures
 
@@ -30,6 +31,7 @@ This document outlines the performance optimizations implemented in DuoTunnel to
 * **Native Protocol Backpressure**: Replaced manual capacity polling with Hyper's native `H2Builder`. This delegates flow control and window management to a mature ecosystem, preventing deadlocks and OOM crashes caused by custom buffering logic.
 * **Static Dispatch over vtables (`tunnel-lib/proxy/peers.rs`)**: Replaced `Box<dyn UpstreamPeer>` with a concrete `enum PeerKind`. This allows the Rust compiler to use static dispatch and aggressively inline connection logic, avoiding the overhead of vtable lookups and heap allocations.
 * **Singleton Resource Caching**: Heavy resources like TLS `RootCertStore` and `QuicServerConfig` are initialized once at startup and wrapped in an `Arc`. This prevents the application from reloading hundreds of CA certificates for every new connection.
+* **Double-Checked Locking for L7 TLS Termination**: During HTTP/2 and HTTPS routing, generating RSA/ECDSA self-signed certificates per connection caused extreme CPU latency. We implemented a TTL-bounded cache yielding a shared `Arc<rustls::ServerConfig>`. To prevent "thundering herd" races during cache misses under high concurrency, we utilize double-checked locking mechanisms, ensuring that a certificate for any single host is algorithmically signed exactly once.
 
 ## 5. Compiler & OS Optimizations
 

@@ -1,8 +1,8 @@
+use crate::config::ClientConfigFile;
 use anyhow::Result;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use crate::config::ClientConfigFile;
 pub async fn run_pool(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
@@ -15,10 +15,9 @@ pub async fn run_pool(
         let slot_config = config.clone();
         let endpoint = endpoint.clone();
         let slot_cancel = cancel.clone();
-        slots
-            .spawn(async move {
-                crate::connect::run_supervisor(slot_config, endpoint, slot_cancel).await
-            });
+        slots.spawn(async move {
+            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel).await
+        });
     }
     while let Some(join_result) = slots.join_next().await {
         match join_result {

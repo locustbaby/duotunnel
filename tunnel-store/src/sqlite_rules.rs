@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use sqlx::Row;
-use tracing::info;
 use crate::rules::{
     ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
     IngressListenerMode, IngressVhostRule, RoutingData, RuleStore, UpstreamServer,
 };
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use sqlx::Row;
+use tracing::info;
 pub struct SqliteRuleStore {
     pool: sqlx::sqlite::SqlitePool,
 }
@@ -156,7 +156,11 @@ impl RuleStore for SqliteRuleStore {
                 }
                 IngressListenerMode::Http { vhost }
             };
-            listeners.push(IngressListener { id, port: port as u16, mode: listener_mode });
+            listeners.push(IngressListener {
+                id,
+                port: port as u16,
+                mode: listener_mode,
+            });
         }
         let group_rows = sqlx::query(
             "SELECT g.group_id, g.config_version,
@@ -180,12 +184,10 @@ impl RuleStore for SqliteRuleStore {
                         let address: Option<String> = row.try_get("address").ok();
                         if let Some(addr) = address {
                             let resolve: i64 = row.get("resolve");
-                            if let Some(upstream) =
-                                last_group.upstreams.iter_mut().find(|u| {
-                                    let upstream_name: String = row.get("upstream_name");
-                                    u.name == upstream_name
-                                })
-                            {
+                            if let Some(upstream) = last_group.upstreams.iter_mut().find(|u| {
+                                let upstream_name: String = row.get("upstream_name");
+                                u.name == upstream_name
+                            }) {
                                 upstream.servers.push(UpstreamServer {
                                     address: addr,
                                     resolve: resolve != 0,
@@ -220,11 +222,18 @@ impl RuleStore for SqliteRuleStore {
                     upstreams.push(ClientUpstream {
                         name: upstream_name,
                         lb_policy,
-                        servers: vec![UpstreamServer { address: addr, resolve: resolve != 0 }],
+                        servers: vec![UpstreamServer {
+                            address: addr,
+                            resolve: resolve != 0,
+                        }],
                     });
                 }
             }
-            groups.push(ClientGroup { group_id, config_version, upstreams });
+            groups.push(ClientGroup {
+                group_id,
+                config_version,
+                upstreams,
+            });
         }
         let egress_rows = sqlx::query(
             "SELECT u.id AS upstream_id, u.name, u.lb_policy, s.address, s.resolve
@@ -243,7 +252,10 @@ impl RuleStore for SqliteRuleStore {
                 if last.name == name {
                     if let Some(addr) = address {
                         let resolve: i64 = row.get("resolve");
-                        last.servers.push(UpstreamServer { address: addr, resolve: resolve != 0 });
+                        last.servers.push(UpstreamServer {
+                            address: addr,
+                            resolve: resolve != 0,
+                        });
                     }
                     continue;
                 }
@@ -252,16 +264,22 @@ impl RuleStore for SqliteRuleStore {
             let mut servers = Vec::new();
             if let Some(addr) = address {
                 let resolve: i64 = row.get("resolve");
-                servers.push(UpstreamServer { address: addr, resolve: resolve != 0 });
+                servers.push(UpstreamServer {
+                    address: addr,
+                    resolve: resolve != 0,
+                });
             }
-            egress_upstreams.push(EgressUpstreamDef { name, lb_policy, servers });
+            egress_upstreams.push(EgressUpstreamDef {
+                name,
+                lb_policy,
+                servers,
+            });
         }
-        let vhost_rows = sqlx::query(
-            "SELECT match_host, action_upstream FROM egress_vhost_rules ORDER BY id",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("load egress vhost rules")?;
+        let vhost_rows =
+            sqlx::query("SELECT match_host, action_upstream FROM egress_vhost_rules ORDER BY id")
+                .fetch_all(&self.pool)
+                .await
+                .context("load egress vhost rules")?;
         let egress_vhost_rules = vhost_rows
             .iter()
             .map(|r| EgressVhostRule {
@@ -269,11 +287,18 @@ impl RuleStore for SqliteRuleStore {
                 action_upstream: r.get("action_upstream"),
             })
             .collect();
-        Ok(RoutingData { ingress_listeners: listeners, client_groups: groups, egress_upstreams, egress_vhost_rules })
+        Ok(RoutingData {
+            ingress_listeners: listeners,
+            client_groups: groups,
+            egress_upstreams,
+            egress_vhost_rules,
+        })
     }
     async fn save_routing(&self, data: &RoutingData) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM ingress_listeners").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM ingress_listeners")
+            .execute(&mut *tx)
+            .await?;
         for l in &data.ingress_listeners {
             match &l.mode {
                 IngressListenerMode::Http { vhost } => {
@@ -297,7 +322,10 @@ impl RuleStore for SqliteRuleStore {
                         .context("insert vhost rule")?;
                     }
                 }
-                IngressListenerMode::Tcp { group_id, proxy_name } => {
+                IngressListenerMode::Tcp {
+                    group_id,
+                    proxy_name,
+                } => {
                     sqlx::query(
                         "INSERT INTO ingress_listeners (port, mode, tcp_group, tcp_proxy) VALUES (?, 'tcp', ?, ?)",
                     )
@@ -310,16 +338,16 @@ impl RuleStore for SqliteRuleStore {
                 }
             }
         }
-        sqlx::query("DELETE FROM client_groups").execute(&mut *tx).await?;
-        for g in &data.client_groups {
-            sqlx::query(
-                "INSERT INTO client_groups (group_id, config_version) VALUES (?, ?)",
-            )
-            .bind(&g.group_id)
-            .bind(&g.config_version)
+        sqlx::query("DELETE FROM client_groups")
             .execute(&mut *tx)
-            .await
-            .context("insert client group")?;
+            .await?;
+        for g in &data.client_groups {
+            sqlx::query("INSERT INTO client_groups (group_id, config_version) VALUES (?, ?)")
+                .bind(&g.group_id)
+                .bind(&g.config_version)
+                .execute(&mut *tx)
+                .await
+                .context("insert client group")?;
             for u in &g.upstreams {
                 let uid: i64 = sqlx::query_scalar(
                     "INSERT INTO client_upstreams (group_id, name, lb_policy) VALUES (?, ?, ?) RETURNING id",
@@ -343,7 +371,9 @@ impl RuleStore for SqliteRuleStore {
                 }
             }
         }
-        sqlx::query("DELETE FROM egress_upstreams").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM egress_upstreams")
+            .execute(&mut *tx)
+            .await?;
         for u in &data.egress_upstreams {
             let uid: i64 = sqlx::query_scalar(
                 "INSERT INTO egress_upstreams (name, lb_policy) VALUES (?, ?) RETURNING id",
@@ -365,7 +395,9 @@ impl RuleStore for SqliteRuleStore {
                 .context("insert egress server")?;
             }
         }
-        sqlx::query("DELETE FROM egress_vhost_rules").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM egress_vhost_rules")
+            .execute(&mut *tx)
+            .await?;
         for r in &data.egress_vhost_rules {
             sqlx::query(
                 "INSERT INTO egress_vhost_rules (match_host, action_upstream) VALUES (?, ?)",
@@ -381,11 +413,10 @@ impl RuleStore for SqliteRuleStore {
         Ok(())
     }
     async fn is_routing_empty(&self) -> Result<bool> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM ingress_listeners")
-                .fetch_one(&self.pool)
-                .await
-                .context("check ingress_listeners count")?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingress_listeners")
+            .fetch_one(&self.pool)
+            .await
+            .context("check ingress_listeners count")?;
         Ok(count == 0)
     }
 }

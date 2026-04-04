@@ -18,8 +18,13 @@ pub struct IngressListener {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IngressListenerMode {
-    Http { vhost: Vec<IngressVhostRule> },
-    Tcp { group_id: String, proxy_name: String },
+    Http {
+        vhost: Vec<IngressVhostRule>,
+    },
+    Tcp {
+        group_id: String,
+        proxy_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

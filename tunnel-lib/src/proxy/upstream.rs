@@ -16,7 +16,11 @@ impl UpstreamGroup {
         }
         let raw = self.counter.fetch_add(1, Ordering::Relaxed);
         let len = self.servers.len();
-        let idx = if len.is_power_of_two() { raw & (len - 1) } else { raw % len };
+        let idx = if len.is_power_of_two() {
+            raw & (len - 1)
+        } else {
+            raw % len
+        };
         self.servers.get(idx)
     }
     pub fn first(&self) -> Option<&String> {

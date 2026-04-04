@@ -1,3 +1,5 @@
+use crate::egress::http::{H2cClient, HttpsClient};
+use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -8,8 +10,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
-use crate::egress::http::{H2cClient, HttpsClient};
-use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub async fn serve_h2_forward<IO>(
     io: IO,
     https_client: HttpsClient,
@@ -29,11 +29,17 @@ where
         async move {
             let (mut parts, body) = req.into_parts();
             let target_uri: hyper::Uri = format!(
-                "{}://{}{}", scheme, target_host, parts.uri.path_and_query().map(| pq |
-                pq.as_str()).unwrap_or("/")
+                "{}://{}{}",
+                scheme,
+                target_host,
+                parts
+                    .uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/")
             )
-                .parse()
-                .unwrap();
+            .parse()
+            .unwrap();
             parts.uri = target_uri;
             if let Ok(hv) = target_host.parse() {
                 parts.headers.insert(hyper::header::HOST, hv);
@@ -54,16 +60,14 @@ where
                 }
                 Err(e) => {
                     debug!(error = % e, "H2 forward: upstream request failed");
-                    Ok(
-                        Response::builder()
-                            .status(502)
-                            .body(
-                                http_body_util::Full::new(Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap(),
-                    )
+                    Ok(Response::builder()
+                        .status(502)
+                        .body(
+                            http_body_util::Full::new(Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
+                        .unwrap())
                 }
             }
         }
@@ -92,22 +96,22 @@ impl H2Peer {
         if let Some(init) = initial_data.filter(|b| !b.is_empty()) {
             let io = PrefixedReadWrite::new(stream, init);
             serve_h2_forward(
-                    io,
-                    self.https_client,
-                    self.h2c_client,
-                    self.scheme,
-                    self.target_host,
-                )
-                .await
+                io,
+                self.https_client,
+                self.h2c_client,
+                self.scheme,
+                self.target_host,
+            )
+            .await
         } else {
             serve_h2_forward(
-                    stream,
-                    self.https_client,
-                    self.h2c_client,
-                    self.scheme,
-                    self.target_host,
-                )
-                .await
+                stream,
+                self.https_client,
+                self.h2c_client,
+                self.scheme,
+                self.target_host,
+            )
+            .await
         }
     }
 }

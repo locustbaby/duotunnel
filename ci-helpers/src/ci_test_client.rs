@@ -241,18 +241,31 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--method" => { i += 1; method = args[i].clone(); }
-            "--body" => { i += 1; body_str = Some(args[i].clone()); }
+            "--method" => {
+                i += 1;
+                method = args[i].clone();
+            }
+            "--body" => {
+                i += 1;
+                body_str = Some(args[i].clone());
+            }
             "--header" => {
                 i += 1;
                 let kv = &args[i];
                 let colon = kv.find(':').ok_or_else(|| format!("bad header: {kv}"))?;
                 extra_headers.push((kv[..colon].to_string(), kv[colon + 1..].trim().to_string()));
             }
-            "--expect-body" => { i += 1; expect_body = Some(args[i].clone()); }
+            "--expect-body" => {
+                i += 1;
+                expect_body = Some(args[i].clone());
+            }
             "--allow-status" => {
                 i += 1;
-                allow_statuses.push(args[i].parse::<u16>().map_err(|_| format!("bad status: {}", args[i]))?);
+                allow_statuses.push(
+                    args[i]
+                        .parse::<u16>()
+                        .map_err(|_| format!("bad status: {}", args[i]))?,
+                );
             }
             _ => {}
         }
@@ -317,7 +330,13 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
 
     let status = resp.status().as_u16();
     let body = read_body(resp.into_body()).await?;
-    validate_response(status, &body, "H2C-prior", expect_body.as_deref(), &allow_statuses)
+    validate_response(
+        status,
+        &body,
+        "H2C-prior",
+        expect_body.as_deref(),
+        &allow_statuses,
+    )
 }
 
 async fn read_body<B>(body: B) -> Result<String, String>
@@ -597,8 +616,16 @@ async fn run_grpc_server_stream(addr: &str, args: &[String]) -> Result<String, S
     while i < args.len() {
         match args[i].as_str() {
             "--tls" | "--insecure" => use_tls = true,
-            "--ping" => { i += 1; ping_text = args[i].clone(); }
-            "--count" => { i += 1; count = args[i].parse().map_err(|_| format!("bad count: {}", args[i]))?; }
+            "--ping" => {
+                i += 1;
+                ping_text = args[i].clone();
+            }
+            "--count" => {
+                i += 1;
+                count = args[i]
+                    .parse()
+                    .map_err(|_| format!("bad count: {}", args[i]))?;
+            }
             _ => {}
         }
         i += 1;
@@ -626,7 +653,13 @@ async fn run_grpc_server_stream(addr: &str, args: &[String]) -> Result<String, S
     )
     .await
     .map_err(|_| "gRPC ServerStreamEcho timeout".to_string())?
-    .map_err(|e| format!("gRPC ServerStreamEcho error: status={} message={}", e.code(), e.message()))?;
+    .map_err(|e| {
+        format!(
+            "gRPC ServerStreamEcho error: status={} message={}",
+            e.code(),
+            e.message()
+        )
+    })?;
 
     let mut stream = resp.into_inner();
     let mut received = 0;
@@ -671,8 +704,16 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
     while i < args.len() {
         match args[i].as_str() {
             "--tls" | "--insecure" => use_tls = true,
-            "--ping" => { i += 1; ping_text = args[i].clone(); }
-            "--count" => { i += 1; count = args[i].parse().map_err(|_| format!("bad count: {}", args[i]))?; }
+            "--ping" => {
+                i += 1;
+                ping_text = args[i].clone();
+            }
+            "--count" => {
+                i += 1;
+                count = args[i]
+                    .parse()
+                    .map_err(|_| format!("bad count: {}", args[i]))?;
+            }
             _ => {}
         }
         i += 1;
@@ -687,7 +728,9 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
 
     // Build the outbound stream
     let pings: Vec<EchoRequest> = (0..count)
-        .map(|i| EchoRequest { ping: format!("{}:{}", ping_text, i) })
+        .map(|i| EchoRequest {
+            ping: format!("{}:{}", ping_text, i),
+        })
         .collect();
     let outbound = futures_util::stream::iter(pings);
 
@@ -703,7 +746,13 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
     )
     .await
     .map_err(|_| "gRPC BidiStreamEcho timeout".to_string())?
-    .map_err(|e| format!("gRPC BidiStreamEcho error: status={} message={}", e.code(), e.message()))?;
+    .map_err(|e| {
+        format!(
+            "gRPC BidiStreamEcho error: status={} message={}",
+            e.code(),
+            e.message()
+        )
+    })?;
 
     let mut stream = resp.into_inner();
     let mut received = 0;

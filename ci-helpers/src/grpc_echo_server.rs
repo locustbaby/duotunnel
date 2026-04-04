@@ -186,9 +186,8 @@ mod echo_service_trait {
     {
         type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
         type Error = std::convert::Infallible;
-        type Future = Pin<
-            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
-        >;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
         fn poll_ready(
             &mut self,
@@ -211,9 +210,7 @@ mod echo_service_trait {
                         let mut grpc = tonic::server::Grpc::new(codec);
                         struct Handler<T>(std::sync::Arc<T>);
                         #[tonic::async_trait]
-                        impl<T: EchoServiceServer> tonic::server::UnaryService<EchoRequest>
-                            for Handler<T>
-                        {
+                        impl<T: EchoServiceServer> tonic::server::UnaryService<EchoRequest> for Handler<T> {
                             type Response = EchoResponse;
                             type Future = Pin<
                                 Box<
@@ -245,21 +242,13 @@ mod echo_service_trait {
                             type Future = Pin<
                                 Box<
                                     dyn std::future::Future<
-                                            Output = Result<
-                                                Response<Self::ResponseStream>,
-                                                Status,
-                                            >,
+                                            Output = Result<Response<Self::ResponseStream>, Status>,
                                         > + Send,
                                 >,
                             >;
-                            fn call(
-                                &mut self,
-                                req: Request<StreamEchoRequest>,
-                            ) -> Self::Future {
+                            fn call(&mut self, req: Request<StreamEchoRequest>) -> Self::Future {
                                 let inner = self.0.clone();
-                                Box::pin(
-                                    async move { inner.server_stream_echo(req).await },
-                                )
+                                Box::pin(async move { inner.server_stream_echo(req).await })
                             }
                         }
                         let resp = grpc.server_streaming(Handler(inner), req).await;
@@ -271,18 +260,13 @@ mod echo_service_trait {
                         let mut grpc = tonic::server::Grpc::new(codec);
                         struct Handler<T>(std::sync::Arc<T>);
                         #[tonic::async_trait]
-                        impl<T: EchoServiceServer>
-                            tonic::server::StreamingService<EchoRequest> for Handler<T>
-                        {
+                        impl<T: EchoServiceServer> tonic::server::StreamingService<EchoRequest> for Handler<T> {
                             type Response = EchoResponse;
                             type ResponseStream = T::BidiStreamEchoStream;
                             type Future = Pin<
                                 Box<
                                     dyn std::future::Future<
-                                            Output = Result<
-                                                Response<Self::ResponseStream>,
-                                                Status,
-                                            >,
+                                            Output = Result<Response<Self::ResponseStream>, Status>,
                                         > + Send,
                                 >,
                             >;
@@ -291,9 +275,7 @@ mod echo_service_trait {
                                 req: Request<Streaming<EchoRequest>>,
                             ) -> Self::Future {
                                 let inner = self.0.clone();
-                                Box::pin(
-                                    async move { inner.bidi_stream_echo(req).await },
-                                )
+                                Box::pin(async move { inner.bidi_stream_echo(req).await })
                             }
                         }
                         let resp = grpc.streaming(Handler(inner), req).await;

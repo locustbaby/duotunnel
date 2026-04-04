@@ -1,41 +1,78 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 lazy_static! {
-    pub static ref REGISTRY : Registry = Registry::new(); pub static ref
-    ACTIVE_QUIC_CONNECTIONS : IntGauge =
-    IntGauge::new("duotunnel_active_quic_connections",
-    "Number of active QUIC client connections").unwrap(); pub static ref
-    ACTIVE_TCP_CONNECTIONS : IntGauge = IntGauge::new("duotunnel_active_tcp_connections",
-    "Number of active TCP connections").unwrap(); pub static ref TOTAL_QUIC_CONNECTIONS :
-    IntCounter = IntCounter::new("duotunnel_total_quic_connections",
-    "Total QUIC connections established").unwrap(); pub static ref TOTAL_TCP_CONNECTIONS
-    : IntCounter = IntCounter::new("duotunnel_total_tcp_connections",
-    "Total TCP connections established").unwrap(); pub static ref AUTH_SUCCESS :
-    IntCounterVec = IntCounterVec::new(Opts::new("duotunnel_auth_success_total",
-    "Successful authentications"), & ["group_id"]).unwrap(); pub static ref AUTH_FAILURE
-    : IntCounterVec = IntCounterVec::new(Opts::new("duotunnel_auth_failure_total",
-    "Failed authentications"), & ["group_id"]).unwrap(); pub static ref CLIENTS_PER_GROUP
-    : IntGaugeVec = IntGaugeVec::new(Opts::new("duotunnel_clients_per_group",
-    "Connected clients per group"), & ["group_id"]).unwrap(); pub static ref
-    REQUESTS_TOTAL : IntCounterVec =
-    IntCounterVec::new(Opts::new("duotunnel_requests_total", "Total requests processed"),
-    & ["protocol", "status"]).unwrap(); pub static ref CONNECTIONS_REJECTED :
-    IntCounterVec = IntCounterVec::new(Opts::new("duotunnel_connections_rejected_total",
-    "Connections rejected due to backpressure"), & ["type"]).unwrap();
+    pub static ref REGISTRY: Registry = Registry::new();
+    pub static ref ACTIVE_QUIC_CONNECTIONS: IntGauge = IntGauge::new(
+        "duotunnel_active_quic_connections",
+        "Number of active QUIC client connections"
+    )
+    .unwrap();
+    pub static ref ACTIVE_TCP_CONNECTIONS: IntGauge = IntGauge::new(
+        "duotunnel_active_tcp_connections",
+        "Number of active TCP connections"
+    )
+    .unwrap();
+    pub static ref TOTAL_QUIC_CONNECTIONS: IntCounter = IntCounter::new(
+        "duotunnel_total_quic_connections",
+        "Total QUIC connections established"
+    )
+    .unwrap();
+    pub static ref TOTAL_TCP_CONNECTIONS: IntCounter = IntCounter::new(
+        "duotunnel_total_tcp_connections",
+        "Total TCP connections established"
+    )
+    .unwrap();
+    pub static ref AUTH_SUCCESS: IntCounterVec = IntCounterVec::new(
+        Opts::new("duotunnel_auth_success_total", "Successful authentications"),
+        &["group_id"]
+    )
+    .unwrap();
+    pub static ref AUTH_FAILURE: IntCounterVec = IntCounterVec::new(
+        Opts::new("duotunnel_auth_failure_total", "Failed authentications"),
+        &["group_id"]
+    )
+    .unwrap();
+    pub static ref CLIENTS_PER_GROUP: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("duotunnel_clients_per_group", "Connected clients per group"),
+        &["group_id"]
+    )
+    .unwrap();
+    pub static ref REQUESTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("duotunnel_requests_total", "Total requests processed"),
+        &["protocol", "status"]
+    )
+    .unwrap();
+    pub static ref CONNECTIONS_REJECTED: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "duotunnel_connections_rejected_total",
+            "Connections rejected due to backpressure"
+        ),
+        &["type"]
+    )
+    .unwrap();
 }
 pub fn init() {
-    REGISTRY.register(Box::new(ACTIVE_QUIC_CONNECTIONS.clone())).ok();
-    REGISTRY.register(Box::new(ACTIVE_TCP_CONNECTIONS.clone())).ok();
-    REGISTRY.register(Box::new(TOTAL_QUIC_CONNECTIONS.clone())).ok();
-    REGISTRY.register(Box::new(TOTAL_TCP_CONNECTIONS.clone())).ok();
+    REGISTRY
+        .register(Box::new(ACTIVE_QUIC_CONNECTIONS.clone()))
+        .ok();
+    REGISTRY
+        .register(Box::new(ACTIVE_TCP_CONNECTIONS.clone()))
+        .ok();
+    REGISTRY
+        .register(Box::new(TOTAL_QUIC_CONNECTIONS.clone()))
+        .ok();
+    REGISTRY
+        .register(Box::new(TOTAL_TCP_CONNECTIONS.clone()))
+        .ok();
     REGISTRY.register(Box::new(AUTH_SUCCESS.clone())).ok();
     REGISTRY.register(Box::new(AUTH_FAILURE.clone())).ok();
     REGISTRY.register(Box::new(CLIENTS_PER_GROUP.clone())).ok();
     REGISTRY.register(Box::new(REQUESTS_TOTAL.clone())).ok();
-    REGISTRY.register(Box::new(CONNECTIONS_REJECTED.clone())).ok();
+    REGISTRY
+        .register(Box::new(CONNECTIONS_REJECTED.clone()))
+        .ok();
 }
 pub fn encode() -> String {
     let encoder = TextEncoder::new();

@@ -66,7 +66,11 @@ fn extract_host_part(addr: &str) -> String {
     }
 }
 fn has_explicit_port(addr: &str) -> bool {
-    if addr.starts_with('[') { addr.contains("]:") } else { addr.contains(':') }
+    if addr.starts_with('[') {
+        addr.contains("]:")
+    } else {
+        addr.contains(':')
+    }
 }
 fn has_port_443(addr: &str) -> bool {
     extract_port_number(addr) == Some(443)
@@ -88,6 +92,23 @@ pub struct TlsTcpPeer {
     pub connector: Arc<TlsConnector>,
     pub tcp_params: crate::transport::tcp_params::TcpParams,
 }
+/// Shared base TLS config with system roots loaded once.
+/// ALPN is set per-connection by cloning and mutating before wrapping in TlsConnector.
+fn base_tls_config() -> Arc<rustls::ClientConfig> {
+    use std::sync::OnceLock;
+    static BASE: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    BASE.get_or_init(|| {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        )
+    })
+    .clone()
+}
+
 impl TlsTcpPeer {
     pub fn new(
         target_addr: SocketAddr,
@@ -107,18 +128,18 @@ impl TlsTcpPeer {
         alpn: Option<Vec<Vec<u8>>>,
         tcp_params: crate::transport::tcp_params::TcpParams,
     ) -> Result<Self> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let mut tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        if let Some(alpn) = alpn {
-            tls_config.alpn_protocols = alpn;
-        }
+        let connector = if let Some(alpn) = alpn {
+            // Clone only when ALPN overrides are needed — avoids copying the CA store.
+            let mut cfg = (*base_tls_config()).clone();
+            cfg.alpn_protocols = alpn;
+            Arc::new(TlsConnector::from(Arc::new(cfg)))
+        } else {
+            Arc::new(TlsConnector::from(base_tls_config()))
+        };
         Ok(Self {
             target_addr,
             tls_host,
-            connector: Arc::new(TlsConnector::from(Arc::new(tls_config))),
+            connector,
             tcp_params,
         })
     }
@@ -154,8 +175,8 @@ impl TlsTcpPeer {
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         debug!(
-            "connecting to TLS tcp upstream: {} (SNI: {})", self.target_addr, self
-            .tls_host
+            "connecting to TLS tcp upstream: {} (SNI: {})",
+            self.target_addr, self.tls_host
         );
         let tcp_stream = TcpStream::connect(self.target_addr)
             .await

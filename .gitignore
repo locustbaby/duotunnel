@@ -11,3 +11,5 @@ CLAUDE.md
 .idea/
 .github/copilot-instructions.md
 remove_rust_comments_smart.sh
+data/
+docs/tmp-tune/

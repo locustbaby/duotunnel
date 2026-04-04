@@ -1,19 +1,21 @@
+use crate::rules::{
+    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
+    IngressListenerMode, IngressVhostRule, RoutingData, UpstreamServer,
+};
+use anyhow::Result;
+use figment::{
+    providers::{Env, Format, Yaml},
+    Figment,
+};
+use serde::Deserialize;
 /// Parses the routing sections of a server.yaml and converts them to
 /// [`RoutingData`] that can be saved to any [`RuleStore`].
 ///
 /// This module is gated behind the `server-config` feature so that consumers
 /// that never need YAML parsing (e.g. pure-store binaries) pay no extra deps.
 use std::collections::HashMap;
-use anyhow::Result;
-use figment::{providers::{Env, Format, Yaml}, Figment};
-use serde::Deserialize;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 use tunnel_lib::PkiParams;
-use crate::rules::{
-    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule,
-    IngressListener, IngressListenerMode, IngressVhostRule,
-    RoutingData, UpstreamServer,
-};
 
 // ── Full server config file schema ───────────────────────────────────────────
 
@@ -61,9 +63,15 @@ pub struct ServerBasicConfig {
     pub h2_single_authority: bool,
 }
 
-fn default_max_connections() -> usize { 10_000 }
-fn default_login_timeout_secs() -> u64 { 10 }
-fn default_h2_single_authority() -> bool { true }
+fn default_max_connections() -> usize {
+    10_000
+}
+fn default_login_timeout_secs() -> u64 {
+    10
+}
+fn default_h2_single_authority() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ServerEgressUpstream {
@@ -95,8 +103,7 @@ pub struct TunnelManagement {
 
 impl TunnelManagement {
     pub fn is_empty(&self) -> bool {
-        self.server_ingress_routing.listeners.is_empty()
-            && self.client_configs.groups.is_empty()
+        self.server_ingress_routing.listeners.is_empty() && self.client_configs.groups.is_empty()
     }
 }
 
@@ -160,7 +167,9 @@ pub struct UpstreamDef {
     pub lb_policy: String,
 }
 
-fn default_lb_policy() -> String { "round_robin".to_string() }
+fn default_lb_policy() -> String {
+    "round_robin".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerDef {
@@ -203,11 +212,15 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
             port: l.port,
             mode: match &l.mode {
                 IngressModeDef::Http(h) => IngressListenerMode::Http {
-                    vhost: h.vhost.iter().map(|r| IngressVhostRule {
-                        match_host: r.match_host.clone(),
-                        group_id: r.client_group.clone(),
-                        proxy_name: r.proxy_name.clone(),
-                    }).collect(),
+                    vhost: h
+                        .vhost
+                        .iter()
+                        .map(|r| IngressVhostRule {
+                            match_host: r.match_host.clone(),
+                            group_id: r.client_group.clone(),
+                            proxy_name: r.proxy_name.clone(),
+                        })
+                        .collect(),
                 },
                 IngressModeDef::Tcp(t) => IngressListenerMode::Tcp {
                     group_id: t.client_group.clone(),
@@ -224,14 +237,22 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         .map(|(gid, g)| ClientGroup {
             group_id: gid.clone(),
             config_version: g.config_version.clone(),
-            upstreams: g.upstreams.iter().map(|(name, def)| ClientUpstream {
-                name: name.clone(),
-                lb_policy: def.lb_policy.clone(),
-                servers: def.servers.iter().map(|s| UpstreamServer {
-                    address: s.address.clone(),
-                    resolve: s.resolve,
-                }).collect(),
-            }).collect(),
+            upstreams: g
+                .upstreams
+                .iter()
+                .map(|(name, def)| ClientUpstream {
+                    name: name.clone(),
+                    lb_policy: def.lb_policy.clone(),
+                    servers: def
+                        .servers
+                        .iter()
+                        .map(|s| UpstreamServer {
+                            address: s.address.clone(),
+                            resolve: s.resolve,
+                        })
+                        .collect(),
+                })
+                .collect(),
         })
         .collect();
 
@@ -241,10 +262,14 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         .map(|(name, def)| EgressUpstreamDef {
             name: name.clone(),
             lb_policy: def.lb_policy.clone(),
-            servers: def.servers.iter().map(|s| UpstreamServer {
-                address: s.address.clone(),
-                resolve: s.resolve,
-            }).collect(),
+            servers: def
+                .servers
+                .iter()
+                .map(|s| UpstreamServer {
+                    address: s.address.clone(),
+                    resolve: s.resolve,
+                })
+                .collect(),
         })
         .collect();
 
@@ -258,5 +283,10 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         })
         .collect();
 
-    RoutingData { ingress_listeners, client_groups, egress_upstreams, egress_vhost_rules }
+    RoutingData {
+        ingress_listeners,
+        client_groups,
+        egress_upstreams,
+        egress_vhost_rules,
+    }
 }

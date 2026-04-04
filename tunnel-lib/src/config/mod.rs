@@ -15,5 +15,8 @@ pub fn resolve_config_path(path: &str) -> Result<String> {
     if std::path::Path::new(&alt).exists() {
         return Ok(alt);
     }
-    Err(anyhow::anyhow!("Config file not found: {} (checked ./ and ../)", path))
+    Err(anyhow::anyhow!(
+        "Config file not found: {} (checked ./ and ../)",
+        path
+    ))
 }

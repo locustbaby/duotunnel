@@ -1,10 +1,13 @@
-#[cfg(
-    all(not(target_os = "macos"), not(target_os = "windows"), not(target_env = "msvc"))
-)]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "windows"),
+    not(target_env = "msvc")
+))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,15 +15,13 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tunnel_lib::{
-    recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
-};
+use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 mod app;
 mod config;
 mod connect;
+mod entry;
 mod pool;
 mod proxy;
-mod entry;
 use app::LocalProxyMap;
 use config::ClientConfigFile;
 use connect::ConnectError;
@@ -63,9 +64,9 @@ async fn main() -> Result<()> {
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;
     crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-    let mut client_config = quinn::ClientConfig::new(
-        Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?),
-    );
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
+    ));
     let quic_params = tunnel_lib::QuicTransportParams::from(&config.quic);
     let transport_config = tunnel_lib::build_transport_config(&quic_params);
     client_config.transport_config(transport_config);
@@ -89,40 +90,34 @@ pub(crate) async fn run_client(
     let (mut send, mut recv) = timeout(login_timeout, conn.open_bi())
         .await
         .map_err(|_| ConnectError::transient(anyhow!("open_bi timed out")))?
-        .map_err(|e| ConnectError::transient(
-            anyhow!("failed to open login stream: {}", e),
-        ))?;
+        .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
     let login = Login {
         token: config.auth_token.clone(),
     };
-    timeout(login_timeout, send_message(&mut send, MessageType::Login, &login))
-        .await
-        .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
-        .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
+    timeout(
+        login_timeout,
+        send_message(&mut send, MessageType::Login, &login),
+    )
+    .await
+    .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
+    .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
     debug!("Login message sent");
     let msg_type = timeout(login_timeout, recv_message_type(&mut recv))
         .await
-        .map_err(|_| ConnectError::transient(
-            anyhow!("waiting login response timed out"),
-        ))?
+        .map_err(|_| ConnectError::transient(anyhow!("waiting login response timed out")))?
         .map_err(|e| {
             ConnectError::transient(anyhow!("failed to read login response type: {}", e))
         })?;
     if msg_type != MessageType::LoginResp {
-        return Err(
-            ConnectError::fatal(
-                anyhow!("protocol mismatch: expected LoginResp, got {:?}", msg_type),
-            ),
-        );
+        return Err(ConnectError::fatal(anyhow!(
+            "protocol mismatch: expected LoginResp, got {:?}",
+            msg_type
+        )));
     }
     let resp: LoginResp = timeout(login_timeout, recv_message(&mut recv))
         .await
-        .map_err(|_| ConnectError::transient(
-            anyhow!("reading LoginResp payload timed out"),
-        ))?
-        .map_err(|e| ConnectError::transient(
-            anyhow!("failed to decode LoginResp: {}", e),
-        ))?;
+        .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
+        .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
     if !resp.success {
         return Err(connect::classify_login_failure(resp.error.as_deref()));
     }
@@ -131,33 +126,33 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
-    let proxy_map = Arc::new(
-        LocalProxyMap::from_config(
-            &resp.config,
-            &tunnel_lib::HttpClientParams::from(&config.http_pool),
-        ),
-    );
-    let cancel_token = CancellationToken::new();
+    let proxy_map = Arc::new(LocalProxyMap::from_config(
+        &resp.config,
+        &tunnel_lib::HttpClientParams::from(&config.http_pool),
+    ));
+    let session_cancel = CancellationToken::new();
     let max_streams = config.quic.max_concurrent_streams;
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = % max_streams, "Stream backpressure configured");
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
     if let Some(entry_port) = config.http_entry_port {
         let conn = conn.clone();
-        let token = cancel_token.clone();
+        let token = session_cancel.clone();
         let max_entry_conns = config.quic.max_concurrent_streams;
         let entry_tcp_params = tcp_params.clone();
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
+        let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
         tokio::spawn(async move {
             if let Err(e) = entry::start_entry_listener(
-                    conn,
-                    entry_port,
-                    token,
-                    max_entry_conns,
-                    entry_tcp_params,
-                    peek_buf_size,
-                )
-                .await
+                conn,
+                entry_port,
+                token,
+                max_entry_conns,
+                entry_tcp_params,
+                peek_buf_size,
+                open_stream_timeout,
+            )
+            .await
             {
                 error!(port = entry_port, error = % e, "entry listener failed");
             }
@@ -165,22 +160,41 @@ pub(crate) async fn run_client(
     }
     let result = loop {
         tokio::select! {
-            reason = conn.closed() => { warn!(reason = ? reason,
-            "Connection closed by server"); break
-            Err(ConnectError::transient(anyhow!("connection closed by server: {:?}",
-            reason))); } stream_result = conn.accept_bi() => { match stream_result {
-            Ok((send, recv)) => { let permit = match stream_semaphore.clone()
-            .try_acquire_owned() { Ok(permit) => permit, Err(_) => {
-            warn!("Stream rejected: max concurrent streams reached"); continue; } };
-            debug!("Accepted work stream from server"); let proxy_map = proxy_map
-            .clone(); let tcp_params = tcp_params.clone(); tokio::spawn(async move { let
-            _permit = permit; if let Err(e) = handle_work_stream(send, recv, proxy_map,
-            tcp_params). await { debug!(error = % e, "work stream error"); } }); } Err(e)
-            => { warn!(error = % e, "Connection error"); break
-            Err(ConnectError::transient(anyhow!("accept_bi failed: {}", e))); } } }
+            reason = conn.closed() => {
+                warn!(reason = ?reason, "Connection closed by server");
+                break Err(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
+            }
+            stream_result = conn.accept_bi() => {
+                match stream_result {
+                    Ok((mut send, recv)) => {
+                        let permit = match stream_semaphore.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                warn!("Stream rejected: max concurrent streams reached");
+                                // Signal the server that we cannot accept this stream.
+                                let _ = send.reset(0u8.into());
+                                continue;
+                            }
+                        };
+                        debug!("Accepted work stream from server");
+                        let proxy_map = proxy_map.clone();
+                        let tcp_params = tcp_params.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
+                                debug!(error = %e, "work stream error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Connection error");
+                        break Err(ConnectError::transient(anyhow!("accept_bi failed: {}", e)));
+                    }
+                }
+            }
         }
     };
-    cancel_token.cancel();
+    session_cancel.cancel();
     tokio::select! {
         _ = shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}
@@ -199,9 +213,7 @@ async fn connect_to_server(
         info!(server_addr = % addr, sni = % sni, "Connecting to server");
         let connecting = endpoint
             .connect(addr, &sni)
-            .map_err(|e| ConnectError::transient(
-                anyhow!("connect setup failed: {}", e),
-            ))?;
+            .map_err(|e| ConnectError::transient(anyhow!("connect setup failed: {}", e)))?;
         match timeout(connect_timeout, connecting).await {
             Ok(Ok(conn)) => return Ok(conn),
             Ok(Err(e)) => {
@@ -212,11 +224,10 @@ async fn connect_to_server(
             }
         }
     }
-    Err(
-        ConnectError::transient(
-            anyhow!("all connection attempts failed ({})", errors.join("; ")),
-        ),
-    )
+    Err(ConnectError::transient(anyhow!(
+        "all connection attempts failed ({})",
+        errors.join("; ")
+    )))
 }
 async fn resolve_server_addresses(
     config: &ClientConfigFile,
@@ -230,49 +241,57 @@ async fn resolve_server_addresses(
     let resolved = timeout(resolve_timeout, lookup)
         .await
         .map_err(|_| {
-            ConnectError::transient(
-                anyhow!("DNS resolve timed out for {}:{}", host, config.server_port),
-            )
+            ConnectError::transient(anyhow!(
+                "DNS resolve timed out for {}:{}",
+                host,
+                config.server_port
+            ))
         })?
         .map_err(|e| {
-            ConnectError::transient(
-                anyhow!("DNS resolve failed for {}:{}: {}", host, config.server_port, e),
-            )
+            ConnectError::transient(anyhow!(
+                "DNS resolve failed for {}:{}: {}",
+                host,
+                config.server_port,
+                e
+            ))
         })?;
-    let mut addrs: Vec<SocketAddr> = resolved.collect();
-    addrs.sort_unstable();
-    addrs.dedup();
+    let mut seen = HashSet::new();
+    let mut addrs = Vec::new();
+    for addr in resolved {
+        if seen.insert(addr) {
+            addrs.push(addr);
+        }
+    }
     if addrs.is_empty() {
-        return Err(
-            ConnectError::transient(
-                anyhow!("no resolved addresses for {}:{}", host, config.server_port),
-            ),
-        );
+        return Err(ConnectError::transient(anyhow!(
+            "no resolved addresses for {}:{}",
+            host,
+            config.server_port
+        )));
     }
     Ok(addrs)
 }
 fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
     if config.tls_skip_verify {
         warn!("TLS certificate verification is DISABLED - this is insecure!");
-        return Ok(
-            rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
-                .with_no_client_auth(),
-        );
+        return Ok(rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
+            .with_no_client_auth());
     }
     let mut root_store = rustls::RootCertStore::empty();
     if let Some(ca_path) = &config.tls_ca_cert {
         let ca_file = std::fs::File::open(ca_path)
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to open CA cert file {}: {}", ca_path, e)
-            })?;
+            .map_err(|e| anyhow::anyhow!("Failed to open CA cert file {}: {}", ca_path, e))?;
         let mut reader = std::io::BufReader::new(ca_file);
         let certs = rustls_pemfile::certs(&mut reader)
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
         if certs.is_empty() {
-            return Err(anyhow::anyhow!("No valid certificates found in {}", ca_path));
+            return Err(anyhow::anyhow!(
+                "No valid certificates found in {}",
+                ca_path
+            ));
         }
         for cert in certs {
             root_store
@@ -287,17 +306,11 @@ fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
         }
         if root_store.is_empty() {
             if config.allow_insecure_fallback {
-                warn!(
-                    "No system root certificates found, falling back to insecure mode"
-                );
-                return Ok(
-                    rustls::ClientConfig::builder()
-                        .dangerous()
-                        .with_custom_certificate_verifier(
-                            Arc::new(InsecureServerCertVerifier),
-                        )
-                        .with_no_client_auth(),
-                );
+                warn!("No system root certificates found, falling back to insecure mode");
+                return Ok(rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
+                    .with_no_client_auth());
             }
             return Err(
                 anyhow!(
@@ -307,11 +320,9 @@ fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
         }
         debug!("Loaded {} system root certificates", root_store.len());
     }
-    Ok(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    )
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
 }
 #[derive(Debug)]
 struct InsecureServerCertVerifier;
@@ -352,7 +363,8 @@ impl rustls::client::danger::ServerCertVerifier for InsecureServerCertVerifier {
             rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
             rustls::SignatureScheme::RSA_PSS_SHA256,
             rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512, rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
         ]
     }
 }

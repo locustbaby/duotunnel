@@ -1,8 +1,8 @@
+use crate::metrics;
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tracing::info;
-use crate::metrics;
 pub async fn run_metrics_server(port: u16) -> Result<()> {
     metrics::init();
     let addr = format!("0.0.0.0:{}", port);

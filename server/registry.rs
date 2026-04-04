@@ -1,5 +1,7 @@
+use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use quinn::Connection;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,45 +12,55 @@ struct ClientInfo {
     conn: Connection,
 }
 
-/// Per-group connection pool.
-/// Uses DashMap for O(1) insert/remove and sharded locking (no global write lock).
-/// select_healthy() collects a snapshot of connections then scans — avoids holding
-/// any lock during the health check loop.
+/// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
+///
+/// `snapshot` is an `ArcSwap<Vec<Connection>>` — readers call `.load()` which is
+/// a single atomic pointer load with no allocation.  Writers hold a `Mutex` to
+/// serialize mutations, rebuild the Vec, and swap atomically.
+///
+/// This replaces the previous `DashMap<String, Connection>` pattern that caused
+/// a heap allocation + many Arc reference-count bumps on *every* routing lookup.
 pub struct ClientGroup {
-    entries: DashMap<String, Connection>,
+    /// Mutable index: client_id → Connection.  Only touched by writers.
+    index: Mutex<std::collections::HashMap<String, Connection>>,
+    /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
+    snapshot: ArcSwap<Vec<Connection>>,
     counter: CachePadded<AtomicUsize>,
 }
 
 impl ClientGroup {
     pub fn new() -> Self {
         Self {
-            entries: DashMap::new(),
+            index: Mutex::new(std::collections::HashMap::new()),
+            snapshot: ArcSwap::from_pointee(Vec::new()),
             counter: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn set(&self, client_id: String, conn: Connection) {
-        self.entries.insert(client_id, conn);
+        let mut idx = self.index.lock();
+        idx.insert(client_id, conn);
+        let snap: Vec<Connection> = idx.values().cloned().collect();
+        self.snapshot.store(Arc::new(snap));
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
-        self.entries.remove(client_id).is_some()
+        let mut idx = self.index.lock();
+        let removed = idx.remove(client_id).is_some();
+        if removed {
+            let snap: Vec<Connection> = idx.values().cloned().collect();
+            self.snapshot.store(Arc::new(snap));
+        }
+        removed
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.snapshot.load().is_empty()
     }
 
+    /// O(1) allocation-free routing read via RCU snapshot.
     pub fn select_healthy(&self) -> Option<Connection> {
-        // Fast path: single connection (common case) — skip Vec allocation.
-        if self.entries.len() == 1 {
-            let conn = self.entries.iter().next()?.value().clone();
-            self.counter.fetch_add(1, Ordering::Relaxed);
-            return if conn.close_reason().is_none() { Some(conn) } else { None };
-        }
-        // General case: snapshot then round-robin scan.
-        // Snapshot avoids holding DashMap shard locks during the health check loop.
-        let conns: Vec<Connection> = self.entries.iter().map(|r| r.value().clone()).collect();
+        let conns = self.snapshot.load();
         let len = conns.len();
         if len == 0 {
             return None;
@@ -77,12 +89,7 @@ impl ClientRegistry {
         }
     }
 
-    fn replace_or_register(
-        &self,
-        client_id: String,
-        group_id: String,
-        conn: Connection,
-    ) {
+    fn replace_or_register(&self, client_id: String, group_id: String, conn: Connection) {
         use dashmap::mapref::entry::Entry;
         match self.clients.entry(client_id.clone()) {
             Entry::Occupied(mut occ) => {

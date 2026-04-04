@@ -1,12 +1,17 @@
 use hpack::Decoder;
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub fn extract_h2_authority(data: &[u8]) -> Option<String> {
-    let start = if data.starts_with(HTTP2_PREFACE) { HTTP2_PREFACE.len() } else { 0 };
+    let start = if data.starts_with(HTTP2_PREFACE) {
+        HTTP2_PREFACE.len()
+    } else {
+        0
+    };
     let remaining = &data[start..];
     let mut pos = 0;
     while pos + 9 <= remaining.len() {
         let length = ((remaining[pos] as usize) << 16)
-            | ((remaining[pos + 1] as usize) << 8) | (remaining[pos + 2] as usize);
+            | ((remaining[pos + 1] as usize) << 8)
+            | (remaining[pos + 2] as usize);
         let frame_type = remaining[pos + 3];
         if frame_type == 0x01 {
             let flags = remaining[pos + 4];

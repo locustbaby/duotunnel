@@ -1,20 +1,16 @@
+use crate::config::build_client_config_for_group;
+use crate::egress::EgressProxy;
+use crate::handlers::SEMAPHORE_WAIT_MS;
+use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
-use crate::handlers::SEMAPHORE_WAIT_MS;
-use tunnel_lib::{
-    recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
-};
-use crate::config::build_client_config_for_group;
-use crate::egress::EgressProxy;
-use crate::{metrics, tunnel_handler, ServerState};
+use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
     let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
-    let server_config = tunnel_lib::transport::quic::create_server_config_with(
-        &quic_params,
-    )?;
+    let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
     info!(addr = % addr, "QUIC server listening");
     while let Some(incoming) = endpoint.accept().await {
@@ -47,21 +43,13 @@ pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     }
     Ok(())
 }
-async fn handle_quic_connection(
-    state: Arc<ServerState>,
-    incoming: quinn::Incoming,
-) -> Result<()> {
+async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
     let (mut send, mut recv) = conn.accept_bi().await?;
     let login_timeout = Duration::from_secs(state.config.server.login_timeout_secs);
-    let msg_type = match tokio::time::timeout(
-            login_timeout,
-            recv_message_type(&mut recv),
-        )
-        .await
-    {
+    let msg_type = match tokio::time::timeout(login_timeout, recv_message_type(&mut recv)).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
@@ -70,11 +58,11 @@ async fn handle_quic_connection(
                 "login handshake timed out waiting for message type"
             );
             if let Err(e) = send_message(
-                    &mut send,
-                    MessageType::LoginResp,
-                    &LoginResp::failure("login timeout"),
-                )
-                .await
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure("login timeout"),
+            )
+            .await
             {
                 debug!(addr = %remote_addr, error = %e, "send login timeout response failed");
             }
@@ -84,19 +72,17 @@ async fn handle_quic_connection(
     if msg_type != MessageType::Login {
         warn!(addr = % remote_addr, msg_type = ? msg_type, "expected Login message");
         if let Err(e) = send_message(
-                &mut send,
-                MessageType::LoginResp,
-                &LoginResp::failure(format!("unexpected message type: {:?}", msg_type)),
-            )
-            .await
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure(format!("unexpected message type: {:?}", msg_type)),
+        )
+        .await
         {
             debug!(addr = %remote_addr, error = %e, "send unexpected-msg-type response failed");
         }
         return Ok(());
     }
-    let login: Login = match tokio::time::timeout(login_timeout, recv_message(&mut recv))
-        .await
-    {
+    let login: Login = match tokio::time::timeout(login_timeout, recv_message(&mut recv)).await {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
@@ -104,11 +90,11 @@ async fn handle_quic_connection(
                 addr = % remote_addr, "login handshake timed out waiting for login body"
             );
             if let Err(e) = send_message(
-                    &mut send,
-                    MessageType::LoginResp,
-                    &LoginResp::failure("login timeout"),
-                )
-                .await
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure("login timeout"),
+            )
+            .await
             {
                 debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
             }
@@ -121,11 +107,11 @@ async fn handle_quic_connection(
             warn!(addr = % remote_addr, error = % e, "authentication failed");
             metrics::auth_failure("unknown");
             send_message(
-                    &mut send,
-                    MessageType::LoginResp,
-                    &LoginResp::failure(e.to_string()),
-                )
-                .await?;
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure(e.to_string()),
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -134,17 +120,18 @@ async fn handle_quic_connection(
     metrics::auth_success(&client_group);
     let client_config = {
         let routing = state.routing.load();
-        build_client_config_for_group(&routing.tunnel_management, &client_group)
-            .unwrap_or_default()
+        build_client_config_for_group(&routing.tunnel_management, &client_group).unwrap_or_default()
     };
     let conn_id = uuid::Uuid::new_v4().to_string();
     send_message(
-            &mut send,
-            MessageType::LoginResp,
-            &LoginResp::success(client_config, client_group.clone()),
-        )
-        .await?;
-    state.registry.register(conn_id.clone(), client_group.clone(), conn.clone());
+        &mut send,
+        MessageType::LoginResp,
+        &LoginResp::success(client_config, client_group.clone()),
+    )
+    .await?;
+    state
+        .registry
+        .register(conn_id.clone(), client_group.clone(), conn.clone());
     metrics::client_registered(&client_group);
     let mut revocation_rx = state.revocation_tx.subscribe();
     loop {

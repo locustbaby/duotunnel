@@ -77,18 +77,17 @@ pub struct RoutingInfo {
     pub protocol: String,
     pub host: Option<String>,
 }
-pub async fn send_message<W, M>(
-    writer: &mut W,
-    msg_type: MessageType,
-    msg: &M,
-) -> Result<()>
+pub async fn send_message<W, M>(writer: &mut W, msg_type: MessageType, msg: &M) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
     M: Serialize,
 {
     let payload = bincode::serialize(msg)?;
     if payload.len() > 10 * 1024 * 1024 {
-        return Err(anyhow!("Message too large to send: {} bytes", payload.len()));
+        return Err(anyhow!(
+            "Message too large to send: {} bytes",
+            payload.len()
+        ));
     }
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(msg_type as u8);
@@ -162,11 +161,20 @@ mod tests {
     #[test]
     fn test_message_type_from_u8_all_valid() {
         assert!(matches!(MessageType::from_u8(0x01), Ok(MessageType::Login)));
-        assert!(matches!(MessageType::from_u8(0x02), Ok(MessageType::LoginResp)));
-        assert!(matches!(MessageType::from_u8(0x10), Ok(MessageType::RoutingInfo)));
+        assert!(matches!(
+            MessageType::from_u8(0x02),
+            Ok(MessageType::LoginResp)
+        ));
+        assert!(matches!(
+            MessageType::from_u8(0x10),
+            Ok(MessageType::RoutingInfo)
+        ));
         assert!(matches!(MessageType::from_u8(0x04), Ok(MessageType::Ping)));
         assert!(matches!(MessageType::from_u8(0x05), Ok(MessageType::Pong)));
-        assert!(matches!(MessageType::from_u8(0x06), Ok(MessageType::ConfigPush)));
+        assert!(matches!(
+            MessageType::from_u8(0x06),
+            Ok(MessageType::ConfigPush)
+        ));
     }
     #[test]
     fn test_message_type_from_u8_invalid_returns_error() {
@@ -195,7 +203,9 @@ mod tests {
             token: "dt_s3cr3t".to_string(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
         drop(writer);
         let msg_type = recv_message_type(&mut reader).await.unwrap();
         assert_eq!(msg_type, MessageType::Login);
@@ -214,7 +224,9 @@ mod tests {
             client_group: "test-client".to_string(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::LoginResp, &resp).await.unwrap();
+        send_message(&mut writer, MessageType::LoginResp, &resp)
+            .await
+            .unwrap();
         drop(writer);
         let msg_type = recv_message_type(&mut reader).await.unwrap();
         assert_eq!(msg_type, MessageType::LoginResp);
@@ -233,11 +245,13 @@ mod tests {
             client_group: String::new(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::LoginResp, &resp).await.unwrap();
+        send_message(&mut writer, MessageType::LoginResp, &resp)
+            .await
+            .unwrap();
         drop(writer);
         recv_message_type(&mut reader).await.unwrap();
         let decoded: LoginResp = recv_message(&mut reader).await.unwrap();
-        assert!(! decoded.success);
+        assert!(!decoded.success);
         assert_eq!(decoded.error.as_deref(), Some("auth failed"));
     }
     #[tokio::test]
@@ -277,12 +291,19 @@ mod tests {
     }
     #[tokio::test]
     async fn test_recv_routing_info_wrong_type_returns_error() {
-        let login = Login { token: "t".to_string() };
+        let login = Login {
+            token: "t".to_string(),
+        };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
         drop(writer);
         let result = recv_routing_info(&mut reader).await;
-        assert!(result.is_err(), "recv_routing_info on a Login message must fail");
+        assert!(
+            result.is_err(),
+            "recv_routing_info on a Login message must fail"
+        );
     }
     #[tokio::test]
     async fn test_recv_message_size_limit() {
@@ -292,16 +313,22 @@ mod tests {
         writer.write_u32(too_large).await.unwrap();
         drop(writer);
         let result: Result<Login> = recv_message(&mut reader).await;
-        assert!(result.is_err(), "message exceeding 10MB limit must be rejected");
+        assert!(
+            result.is_err(),
+            "message exceeding 10MB limit must be rejected"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("too large") || msg.contains("10"),
-            "error should mention size: {}", msg
+            "error should mention size: {}",
+            msg
         );
     }
     #[tokio::test]
     async fn test_multiple_messages_sequential_on_same_pipe() {
-        let login = Login { token: "tok1".to_string() };
+        let login = Login {
+            token: "tok1".to_string(),
+        };
         let info = RoutingInfo {
             proxy_name: "p".to_string(),
             src_addr: "1.2.3.4".to_string(),
@@ -310,7 +337,9 @@ mod tests {
             host: Some("foo.com".to_string()),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
-        send_message(&mut writer, MessageType::Login, &login).await.unwrap();
+        send_message(&mut writer, MessageType::Login, &login)
+            .await
+            .unwrap();
         send_routing_info(&mut writer, &info).await.unwrap();
         drop(writer);
         let t1 = recv_message_type(&mut reader).await.unwrap();

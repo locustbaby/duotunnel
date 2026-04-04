@@ -1,3 +1,6 @@
+use crate::proto::{WatchEvent, WatchRequest};
+use crate::service::ControlService;
+use anyhow::Result;
 /// WatchServer: TCP listener that implements the ctld-side of the list-watch protocol.
 ///
 /// Protocol flow per connection:
@@ -7,13 +10,10 @@
 ///   4. On peer disconnect or error, drop the connection silently
 use std::net::SocketAddr;
 use std::sync::Arc;
-use anyhow::Result;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
-use tunnel_lib::models::msg::{MessageType, recv_message_type, recv_message, send_message};
-use crate::proto::{WatchRequest, WatchEvent};
-use crate::service::ControlService;
+use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
 
 pub struct WatchServer {
     svc: Arc<ControlService>,

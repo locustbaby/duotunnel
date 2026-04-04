@@ -26,7 +26,9 @@ pub async fn handle_tunnel_stream<A: ProxyApp>(
             return Err(anyhow::anyhow!("invalid client addr: {}", e));
         }
     };
-    ProxyEngine::new(app).run_stream(send, recv, client_addr, Some(routing_info)).await?;
+    ProxyEngine::new(app)
+        .run_stream(send, recv, client_addr, Some(routing_info))
+        .await?;
     debug!("egress stream completed");
     Ok(())
 }

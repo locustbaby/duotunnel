@@ -1,3 +1,4 @@
+use crate::config::ServerEgressUpstream;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -8,7 +9,6 @@ use tunnel_lib::proxy::core::{Context, Protocol, ProxyApp};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::proxy::tcp::{TcpPeer, TlsTcpPeer, UpstreamScheme};
-use crate::config::ServerEgressUpstream;
 use tunnel_lib::{HttpClientParams, UpstreamGroup};
 type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
@@ -20,10 +20,7 @@ pub struct ServerEgressMap {
     https_client: HttpsClient,
 }
 impl ServerEgressMap {
-    pub fn from_config(
-        egress: &ServerEgressUpstream,
-        http_params: &HttpClientParams,
-    ) -> Self {
+    pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
         let mut upstreams = HashMap::new();
         let mut http_rules = HashMap::new();
         for (name, upstream_def) in &egress.upstreams {
@@ -36,7 +33,12 @@ impl ServerEgressMap {
         }
         for rule in &egress.rules.vhost {
             // Strip port at insert time so lookup needs no split per request.
-            let host_key = rule.match_host.split(':').next().unwrap_or(&rule.match_host).to_string();
+            let host_key = rule
+                .match_host
+                .split(':')
+                .next()
+                .unwrap_or(&rule.match_host)
+                .to_string();
             http_rules.insert(host_key, rule.action_upstream.clone());
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
@@ -82,7 +84,8 @@ impl ProxyApp for ServerEgressMap {
         match context.protocol {
             Protocol::WebSocket => {
                 info!("WebSocket egress, using TCP forwarding");
-                let target_addr = if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>() {
+                let target_addr = if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>()
+                {
                     addr
                 } else {
                     tokio::net::lookup_host(&connect_addr_str)

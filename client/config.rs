@@ -13,6 +13,9 @@ pub struct ClientQuicConfig {
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
     pub connection_window_mb: Option<u64>,
+    /// Independent send-window override. Falls back to connection_window_mb, then default.
+    /// Useful for asymmetric links where upload/download windows differ.
+    pub send_window_mb: Option<u64>,
     pub keepalive_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
     pub congestion: Option<String>,
@@ -24,6 +27,7 @@ impl Default for ClientQuicConfig {
             max_concurrent_streams: 100,
             stream_window_mb: None,
             connection_window_mb: None,
+            send_window_mb: None,
             keepalive_secs: None,
             idle_timeout_secs: None,
             congestion: None,
@@ -43,8 +47,10 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
                 .connection_window_mb
                 .map(|mb| mb * 1024 * 1024)
                 .unwrap_or(d.connection_receive_window_bytes),
+            // send_window_mb takes priority; falls back to connection_window_mb then default.
             send_window_bytes: c
-                .connection_window_mb
+                .send_window_mb
+                .or(c.connection_window_mb)
                 .map(|mb| mb * 1024 * 1024)
                 .unwrap_or(d.send_window_bytes),
             keepalive_secs: c.keepalive_secs.unwrap_or(d.keepalive_secs),
@@ -63,6 +69,10 @@ pub struct ReconnectConfig {
     pub resolve_timeout_ms: u64,
     pub login_timeout_ms: u64,
     pub startup_jitter_ms: u64,
+    /// Timeout for `open_bi()` in the entry listener (waiting for a QUIC stream slot).
+    /// Separate from login_timeout_ms — stream acquisition can legitimately take longer
+    /// under backpressure. Defaults to 3000ms.
+    pub open_stream_timeout_ms: u64,
 }
 impl Default for ReconnectConfig {
     fn default() -> Self {
@@ -74,6 +84,7 @@ impl Default for ReconnectConfig {
             resolve_timeout_ms: 5_000,
             login_timeout_ms: 5_000,
             startup_jitter_ms: 300,
+            open_stream_timeout_ms: 3_000,
         }
     }
 }
@@ -140,13 +151,10 @@ impl ClientConfigFile {
             errors.push("quic.max_concurrent_streams must be >= 1".into());
         }
         if self.reconnect.initial_delay_ms > self.reconnect.max_delay_ms {
-            errors
-                .push(
-                    format!(
-                        "reconnect.initial_delay_ms ({}) must be <= max_delay_ms ({})",
-                        self.reconnect.initial_delay_ms, self.reconnect.max_delay_ms
-                    ),
-                );
+            errors.push(format!(
+                "reconnect.initial_delay_ms ({}) must be <= max_delay_ms ({})",
+                self.reconnect.initial_delay_ms, self.reconnect.max_delay_ms
+            ));
         }
         if self.reconnect.connect_timeout_ms == 0 {
             errors.push("reconnect.connect_timeout_ms must be >= 1".into());
@@ -157,6 +165,9 @@ impl ClientConfigFile {
         if self.reconnect.login_timeout_ms == 0 {
             errors.push("reconnect.login_timeout_ms must be >= 1".into());
         }
+        if self.reconnect.open_stream_timeout_ms == 0 {
+            errors.push("reconnect.open_stream_timeout_ms must be >= 1".into());
+        }
         if let Some(name) = self.tls_server_name.as_ref() {
             if name.trim().is_empty() {
                 errors.push("tls_server_name must not be empty when set".into());
@@ -165,11 +176,10 @@ impl ClientConfigFile {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(
-                anyhow::anyhow!(
-                    "Config validation failed:\n  - {}", errors.join("\n  - ")
-                ),
-            )
+            Err(anyhow::anyhow!(
+                "Config validation failed:\n  - {}",
+                errors.join("\n  - ")
+            ))
         }
     }
     pub fn server_address(&self) -> String {

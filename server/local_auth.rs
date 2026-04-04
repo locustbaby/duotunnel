@@ -58,7 +58,9 @@ impl AuthStore for LocalTokenCache {
                 if entry.token_status != "active" {
                     return Err(AuthError::TokenRevoked);
                 }
-                Ok(AuthResult { client_group: entry.client_group.clone() })
+                Ok(AuthResult {
+                    client_group: entry.client_group.clone(),
+                })
             }
         }
     }
