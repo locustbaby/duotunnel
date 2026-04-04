@@ -1,4 +1,4 @@
-log_level: "warn"
+log_level: "info"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
