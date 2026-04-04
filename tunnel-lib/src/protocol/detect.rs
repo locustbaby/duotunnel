@@ -18,13 +18,12 @@ pub fn detect_protocol_and_host(data: &[u8]) -> (&'static str, Option<String>) {
                     host = std::str::from_utf8(h.value)
                         .ok()
                         .map(|s| s.trim().to_string());
-                } else if h.name.eq_ignore_ascii_case("Upgrade") {
-                    if std::str::from_utf8(h.value)
+                } else if h.name.eq_ignore_ascii_case("Upgrade")
+                    && std::str::from_utf8(h.value)
                         .unwrap_or("")
                         .eq_ignore_ascii_case("websocket")
-                    {
-                        is_websocket = true;
-                    }
+                {
+                    is_websocket = true;
                 }
             }
             if is_websocket {
