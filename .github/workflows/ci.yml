@@ -782,9 +782,9 @@ jobs:
             cargo build --release
           fi
 
-      - name: Install cargo-flamegraph
+      - name: Install flamegraph tools
         if: env.COLLECT_FLAMEGRAPH == '1'
-        run: cargo install flamegraph
+        run: cargo install inferno
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -844,20 +844,19 @@ jobs:
             sleep 0.2
           done
 
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            setsid sudo PERF_RECORD_OPTS="--call-graph fp" \
-              ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
-              ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          else
-            ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          fi
+          ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
             sleep 0.3
           done
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo perf record -F 99 --call-graph fp \
+              -o /tmp/perf-server.data -p "$(cat /tmp/server.pid)" \
+              > /tmp/perf-server.log 2>&1 &
+            echo $! > /tmp/perf-server.pid
+          fi
 
           TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
@@ -872,13 +871,7 @@ jobs:
             [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
             sleep 0.2
           done
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            setsid sudo PERF_RECORD_OPTS="--call-graph fp" \
-              ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph-client.svg -- \
-              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          else
-            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          fi
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
@@ -888,6 +881,12 @@ jobs:
             echo "ERROR: client did not login"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
+          fi
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo perf record -F 99 --call-graph fp \
+              -o /tmp/perf-client.data -p "$(cat /tmp/client.pid)" \
+              > /tmp/perf-client.log 2>&1 &
+            echo $! > /tmp/perf-client.pid
           fi
           echo "All backends + tunnel ready"
 
@@ -930,29 +929,25 @@ jobs:
           sleep 0.5
 
           echo "Restarting server..."
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            setsid sudo PERF_RECORD_OPTS="--call-graph fp" \
-              ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph.svg -- \
-              ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          else
-            ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          fi
+          # Kill old perf recorders before restarting processes
+          sudo kill "$(cat /tmp/perf-server.pid 2>/dev/null)" 2>/dev/null || true
+          sudo kill "$(cat /tmp/perf-client.pid 2>/dev/null)" 2>/dev/null || true
+          ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
             sleep 0.3
           done
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo perf record -F 99 --call-graph fp \
+              -o /tmp/perf-server.data -p "$(cat /tmp/server.pid)" \
+              > /tmp/perf-server.log 2>&1 &
+            echo $! > /tmp/perf-server.pid
+          fi
 
           echo "Restarting client..."
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            setsid sudo PERF_RECORD_OPTS="--call-graph fp" \
-              ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph-client.svg -- \
-              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          else
-            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          fi
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
@@ -962,6 +957,12 @@ jobs:
             echo "ERROR: client did not login after restart"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
+          fi
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            sudo perf record -F 99 --call-graph fp \
+              -o /tmp/perf-client.data -p "$(cat /tmp/client.pid)" \
+              > /tmp/perf-client.log 2>&1 &
+            echo $! > /tmp/perf-client.pid
           fi
 
           echo "Retrying warmup after restart..."
@@ -1090,17 +1091,16 @@ jobs:
       - name: Stop duotunnel server and client
         if: always()
         run: |
+          # Stop perf recorders first (SIGINT flushes perf.data), then kill app processes
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
-            CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
-            # Send SIGINT to process groups so flamegraph can finalize perf data
-            [ -n "$SERVER_PID" ] && { sudo kill -INT -- "-$SERVER_PID" 2>/dev/null || sudo kill -INT "$SERVER_PID" 2>/dev/null || true; }
-            [ -n "$CLIENT_PID" ] && { sudo kill -INT -- "-$CLIENT_PID" 2>/dev/null || sudo kill -INT "$CLIENT_PID" 2>/dev/null || true; }
-            for i in $(seq 1 120); do
-              SERVER_DONE=0; CLIENT_DONE=0
-              { [ -s /tmp/flamegraph.svg ] || { [ -n "$SERVER_PID" ] && ! ps -p "$SERVER_PID" >/dev/null 2>&1; }; } && SERVER_DONE=1
-              { [ -s /tmp/flamegraph-client.svg ] || { [ -n "$CLIENT_PID" ] && ! ps -p "$CLIENT_PID" >/dev/null 2>&1; }; } && CLIENT_DONE=1
-              [ "$SERVER_DONE" = "1" ] && [ "$CLIENT_DONE" = "1" ] && break
+            sudo kill -INT "$(cat /tmp/perf-server.pid 2>/dev/null)" 2>/dev/null || true
+            sudo kill -INT "$(cat /tmp/perf-client.pid 2>/dev/null)" 2>/dev/null || true
+            # Wait for perf to finish writing perf.data files
+            for i in $(seq 1 30); do
+              SDONE=1; CDONE=1
+              ps -p "$(cat /tmp/perf-server.pid 2>/dev/null)" >/dev/null 2>&1 && SDONE=0
+              ps -p "$(cat /tmp/perf-client.pid 2>/dev/null)" >/dev/null 2>&1 && CDONE=0
+              [ "$SDONE" = "1" ] && [ "$CDONE" = "1" ] && break
               sleep 1
             done
           fi
@@ -1110,6 +1110,19 @@ jobs:
           fi
           kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
           sleep 0.5
+          # Convert perf.data → flamegraph SVGs
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            if [ -s /tmp/perf-server.data ]; then
+              sudo perf script -i /tmp/perf-server.data 2>/dev/null \
+                | ~/.cargo/bin/inferno-collapse-perf 2>/dev/null \
+                | ~/.cargo/bin/inferno-flamegraph > /tmp/flamegraph.svg 2>/dev/null || true
+            fi
+            if [ -s /tmp/perf-client.data ]; then
+              sudo perf script -i /tmp/perf-client.data 2>/dev/null \
+                | ~/.cargo/bin/inferno-collapse-perf 2>/dev/null \
+                | ~/.cargo/bin/inferno-flamegraph > /tmp/flamegraph-client.svg 2>/dev/null || true
+            fi
+          fi
 
       - name: Stop resource sampling
         if: always()
