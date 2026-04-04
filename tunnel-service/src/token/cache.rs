@@ -1,8 +1,8 @@
+use crate::proto::TokenCacheEntry;
 /// Build a token cache by querying the SQLite pool directly.
 /// This is separate from AuthStore::list_tokens() which doesn't expose hash values.
 use anyhow::Result;
 use sqlx::Row;
-use crate::proto::TokenCacheEntry;
 
 pub async fn load_token_cache(pool: &sqlx::sqlite::SqlitePool) -> Result<Vec<TokenCacheEntry>> {
     let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(

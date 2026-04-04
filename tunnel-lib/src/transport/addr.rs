@@ -66,7 +66,7 @@ mod tests {
         let a = parse_upstream("example.com:8080");
         assert_eq!(a.host, "example.com");
         assert_eq!(a.port, 8080);
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.connect_addr, "example.com:8080");
     }
     #[test]
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn test_port_4430_is_not_https() {
         let a = parse_upstream("example.com:4430");
-        assert!(! a.is_https, "port 4430 must not be treated as HTTPS");
+        assert!(!a.is_https, "port 4430 must not be treated as HTTPS");
         assert_eq!(a.port, 4430);
     }
     #[test]
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn test_explicit_http_scheme() {
         let a = parse_upstream("http://example.com:8080");
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.port, 8080);
         assert_eq!(a.host, "example.com");
     }
@@ -108,7 +108,7 @@ mod tests {
         let a = parse_upstream("[::1]:8080");
         assert_eq!(a.host, "::1");
         assert_eq!(a.port, 8080);
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.connect_addr, "[::1]:8080");
     }
     #[test]
@@ -122,7 +122,7 @@ mod tests {
     fn test_no_port_defaults_to_80() {
         let a = parse_upstream("example.com");
         assert_eq!(a.port, 80);
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.connect_addr, "example.com:80");
     }
     #[test]
@@ -143,7 +143,7 @@ mod tests {
     fn test_connect_addr_no_port_http() {
         let a = parse_upstream("http://example.com");
         assert_eq!(a.connect_addr, "example.com:80");
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.port, 80);
     }
     #[test]
@@ -162,20 +162,23 @@ mod tests {
     #[test]
     fn test_ws_scheme_treated_as_http() {
         let a = parse_upstream("ws://127.0.0.1:8765");
-        assert!(! a.is_https, "ws:// must not be treated as HTTPS");
+        assert!(!a.is_https, "ws:// must not be treated as HTTPS");
         assert_eq!(a.host, "127.0.0.1");
         assert_eq!(a.port, 8765);
     }
     #[test]
     fn test_http_scheme_overrides_port_443() {
         let a = parse_upstream("http://example.com:443");
-        assert!(! a.is_https, "explicit http:// must override port-443 heuristic");
+        assert!(
+            !a.is_https,
+            "explicit http:// must override port-443 heuristic"
+        );
         assert_eq!(a.port, 443);
     }
     #[test]
     fn test_bare_host_defaults_to_http_port_80() {
         let a = parse_upstream("backend.internal");
-        assert!(! a.is_https);
+        assert!(!a.is_https);
         assert_eq!(a.port, 80);
         assert_eq!(a.host, "backend.internal");
         assert_eq!(a.connect_addr, "backend.internal:80");
@@ -185,13 +188,16 @@ mod tests {
         let a = parse_upstream("[::1]");
         assert_eq!(a.host, "::1");
         assert_eq!(a.port, 80);
-        assert!(! a.is_https);
+        assert!(!a.is_https);
     }
     #[test]
     fn test_invalid_port_string_falls_back_to_default() {
         let a = parse_upstream("example.com:abc");
-        assert_eq!(a.port, 80, "invalid port string should fall back to port 80");
-        assert!(! a.is_https);
+        assert_eq!(
+            a.port, 80,
+            "invalid port string should fall back to port 80"
+        );
+        assert!(!a.is_https);
     }
     #[test]
     fn test_port_overflow_falls_back_to_default() {

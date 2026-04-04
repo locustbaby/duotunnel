@@ -1,6 +1,8 @@
-#[cfg(
-    all(not(target_os = "macos"), not(target_os = "windows"), not(target_env = "msvc"))
-)]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "windows"),
+    not(target_env = "msvc")
+))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::Result;
@@ -45,14 +47,26 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Run,
-    Token { #[command(subcommand)] action: TokenAction },
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
 }
 #[derive(Subcommand, Debug)]
 enum TokenAction {
-    Create { #[arg(long)] name: String },
+    Create {
+        #[arg(long)]
+        name: String,
+    },
     List,
-    Revoke { #[arg(long)] name: String },
-    Rotate { #[arg(long)] name: String },
+    Revoke {
+        #[arg(long)]
+        name: String,
+    },
+    Rotate {
+        #[arg(long)]
+        name: String,
+    },
 }
 pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>>>;
 pub struct RoutingSnapshot {
@@ -82,7 +96,9 @@ impl PeekBufPool {
                 Some(mut b) => {
                     // SAFETY: capacity == buf_size (enforced in put); bytes are
                     // overwritten by peek() before any read occurs.
-                    unsafe { b.set_len(self.buf_size); }
+                    unsafe {
+                        b.set_len(self.buf_size);
+                    }
                     b
                 }
                 None => vec![0u8; self.buf_size],
@@ -95,7 +111,9 @@ impl PeekBufPool {
             return; // undersized — drop
         }
         // Truncate to buf_size so the slice passed to peek() is exactly buf_size bytes.
-        unsafe { buf.set_len(self.buf_size); }
+        unsafe {
+            buf.set_len(self.buf_size);
+        }
         PEEK_BUF_POOL.with(|cell| {
             let mut pool = cell.borrow_mut();
             if pool.len() < Self::MAX_IDLE_PER_THREAD {
@@ -126,9 +144,7 @@ pub struct ServerState {
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
 }
-async fn build_stores(
-    database_url: &str,
-) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
+async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
     let auth_store = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool.clone());
     auth_store.migrate().await?;
@@ -136,10 +152,7 @@ async fn build_stores(
     rule_store.migrate().await?;
     Ok((Arc::new(auth_store), Arc::new(rule_store)))
 }
-fn build_config_source(
-    config_path: &str,
-    rule_store: Arc<dyn RuleStore>,
-) -> Arc<dyn ConfigSource> {
+fn build_config_source(config_path: &str, rule_store: Arc<dyn RuleStore>) -> Arc<dyn ConfigSource> {
     Arc::new(MergedSource::new(
         Box::new(DbSource::new(rule_store)),
         Box::new(FileSource::new(config_path)),
@@ -152,9 +165,7 @@ async fn main() -> Result<()> {
         .expect("Failed to install rustls crypto provider");
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Token { action }) => {
-            handle_token_command(&cli.config, action).await
-        }
+        Some(Commands::Token { action }) => handle_token_command(&cli.config, action).await,
         Some(Commands::Run) | None => run_server(&cli.config, cli.ctld_addr.as_deref()).await,
     }
 }
@@ -223,7 +234,12 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         info!("running in ctld-managed mode; no local SQLite stores");
         let token_cache = Arc::new(local_auth::LocalTokenCache::new());
         let auth: Arc<dyn AuthStore> = token_cache.clone();
-        (auth, Arc::new(NullRuleStore), Arc::new(NullConfigSource), Some(token_cache))
+        (
+            auth,
+            Arc::new(NullRuleStore),
+            Arc::new(NullConfigSource),
+            Some(token_cache),
+        )
     } else {
         let (auth_store, rule_store) = build_stores(&config.server.database_url).await?;
         info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
@@ -310,7 +326,10 @@ pub fn build_routing_snapshot(
             for rule in &cfg.vhost {
                 router.add_route(
                     &rule.match_host,
-                    (Arc::from(rule.client_group.as_str()), Arc::from(rule.proxy_name.as_str())),
+                    (
+                        Arc::from(rule.client_group.as_str()),
+                        Arc::from(rule.proxy_name.as_str()),
+                    ),
                 );
             }
             info!(

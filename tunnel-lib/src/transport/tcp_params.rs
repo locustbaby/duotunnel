@@ -63,12 +63,13 @@ fn set_sock_opt_u32(
         )
     };
     if ret != 0 {
-        return Err(
-            anyhow::anyhow!(
-                "setsockopt(level={}, opt={}, val={}) failed: {}", level, opt, val,
-                std::io::Error::last_os_error()
-            ),
-        );
+        return Err(anyhow::anyhow!(
+            "setsockopt(level={}, opt={}, val={}) failed: {}",
+            level,
+            opt,
+            val,
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }

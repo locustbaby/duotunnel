@@ -30,9 +30,15 @@ where
         }
     });
     let (parts, body) = request.into_parts();
-    let boxed_body = body.map_err(|e| std::io::Error::other(e.into())).boxed_unsync();
+    let boxed_body = body
+        .map_err(|e| std::io::Error::other(e.into()))
+        .boxed_unsync();
     let req = Request::from_parts(parts, boxed_body);
-    debug!("sending H2 request to client: {} {}", req.method(), req.uri());
+    debug!(
+        "sending H2 request to client: {} {}",
+        req.method(),
+        req.uri()
+    );
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
     let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();

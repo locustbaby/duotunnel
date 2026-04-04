@@ -89,12 +89,7 @@ impl ClientRegistry {
         }
     }
 
-    fn replace_or_register(
-        &self,
-        client_id: String,
-        group_id: String,
-        conn: Connection,
-    ) {
+    fn replace_or_register(&self, client_id: String, group_id: String, conn: Connection) {
         use dashmap::mapref::entry::Entry;
         match self.clients.entry(client_id.clone()) {
             Entry::Occupied(mut occ) => {

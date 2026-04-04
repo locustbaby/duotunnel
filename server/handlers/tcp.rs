@@ -1,10 +1,10 @@
+use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy;
-use crate::{metrics, ServerState};
 pub async fn run_tcp_listener(
     state: Arc<ServerState>,
     port: u16,
@@ -41,8 +41,7 @@ pub async fn run_tcp_listener(
         tokio::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
-            let result = handle_tcp_connection(state, stream, proxy_name, group_id)
-                .await;
+            let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
             if let Err(e) = &result {
                 debug!(error = % e, "TCP connection error");
                 metrics::request_completed("tcp", "error");
@@ -71,17 +70,17 @@ async fn handle_tcp_connection(
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
     let res = proxy::forward_to_client(
-            &client_conn,
-            tunnel_lib::RoutingInfo {
-                proxy_name,
-                src_addr: peer_addr.ip().to_string(),
-                src_port: peer_addr.port(),
-                protocol: protocol.to_string(),
-                host,
-            },
-            stream,
-        )
-        .await;
+        &client_conn,
+        tunnel_lib::RoutingInfo {
+            proxy_name,
+            src_addr: peer_addr.ip().to_string(),
+            src_port: peer_addr.port(),
+            protocol: protocol.to_string(),
+            host,
+        },
+        stream,
+    )
+    .await;
     pool.put(buf);
     res
 }

@@ -26,26 +26,21 @@ impl Default for QuicTransportParams {
         }
     }
 }
-fn apply_transport_params(
-    tc: &mut quinn::TransportConfig,
-    params: &QuicTransportParams,
-) {
+fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTransportParams) {
     tc.max_concurrent_bidi_streams(params.max_concurrent_streams.into());
     tc.max_concurrent_uni_streams(params.max_concurrent_streams.into());
     tc.stream_receive_window(params.stream_receive_window_bytes.try_into().unwrap());
     tc.receive_window(params.connection_receive_window_bytes.try_into().unwrap());
     tc.send_window(params.send_window_bytes);
     tc.keep_alive_interval(Some(std::time::Duration::from_secs(params.keepalive_secs)));
-    tc.max_idle_timeout(
-        Some(
-            std::time::Duration::from_secs(params.idle_timeout_secs).try_into().unwrap(),
-        ),
-    );
+    tc.max_idle_timeout(Some(
+        std::time::Duration::from_secs(params.idle_timeout_secs)
+            .try_into()
+            .unwrap(),
+    ));
     if let Some(ref mode) = params.congestion {
         if mode.eq_ignore_ascii_case("bbr") {
-            tc.congestion_controller_factory(
-                Arc::new(quinn::congestion::BbrConfig::default()),
-            );
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
         }
     }
 }
@@ -55,17 +50,14 @@ pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerC
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
-    let mut server_config = ServerConfig::with_crypto(
-        Arc::new(QuicServerConfig::try_from(server_crypto)?),
-    );
+    let mut server_config =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
     apply_transport_params(&mut transport_config, params);
     server_config.transport_config(Arc::new(transport_config));
     Ok(server_config)
 }
-pub fn build_transport_config(
-    params: &QuicTransportParams,
-) -> Arc<quinn::TransportConfig> {
+pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::TransportConfig> {
     let mut tc = quinn::TransportConfig::default();
     apply_transport_params(&mut tc, params);
     Arc::new(tc)

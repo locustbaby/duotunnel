@@ -1,7 +1,7 @@
 use super::peers::PeerKind;
+use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
-use crate::models::msg::RoutingInfo;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Protocol {
     H1,

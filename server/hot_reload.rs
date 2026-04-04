@@ -1,10 +1,10 @@
+use crate::config::ServerConfigFile;
+use crate::{build_routing_snapshot, ServerState};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use crate::config::ServerConfigFile;
-use crate::{build_routing_snapshot, ServerState};
 use tunnel_lib::HttpClientParams;
 pub fn spawn_config_watcher(config_path: String, state: Arc<ServerState>) {
     tokio::spawn(async move {
@@ -60,10 +60,7 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
     }
     Ok(())
 }
-async fn reload_routing(
-    config_path: &str,
-    state: &Arc<ServerState>,
-) -> anyhow::Result<()> {
+async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
     let http_params = HttpClientParams::from(&state.config.server.http_pool);
     let (tm, egress) = match ServerConfigFile::load(config_path) {
         Ok(new_config) => {
@@ -72,7 +69,10 @@ async fn reload_routing(
             {
                 warn!(error = %e, "failed to sync updated YAML to DB");
             }
-            (new_config.tunnel_management, new_config.server_egress_upstream)
+            (
+                new_config.tunnel_management,
+                new_config.server_egress_upstream,
+            )
         }
         Err(e) => {
             warn!(error = %e, "could not re-read config file; reloading from DB");

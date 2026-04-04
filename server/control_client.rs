@@ -11,11 +11,11 @@ use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
-use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
 use tunnel_lib::ctld_proto::{
     ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
     ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
 };
+use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
 
 use crate::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -57,7 +57,9 @@ async fn connect_and_watch(
     let mut reader = BufReader::new(reader);
 
     // Step 1: send WatchRequest
-    let req = WatchRequest { resource_version: last_version };
+    let req = WatchRequest {
+        resource_version: last_version,
+    };
     send_message(&mut writer, MessageType::ConfigPush, &req).await?;
     info!(addr = %addr, resource_version = last_version, "sent WatchRequest");
 
@@ -161,12 +163,13 @@ fn proto_to_tunnel_management(
                         })
                         .collect(),
                 }),
-                ProtoIngressListenerMode::Tcp { group_id, proxy_name } => {
-                    IngressMode::Tcp(TcpListenerConfig {
-                        client_group: group_id.clone(),
-                        proxy_name: proxy_name.clone(),
-                    })
-                }
+                ProtoIngressListenerMode::Tcp {
+                    group_id,
+                    proxy_name,
+                } => IngressMode::Tcp(TcpListenerConfig {
+                    client_group: group_id.clone(),
+                    proxy_name: proxy_name.clone(),
+                }),
             },
         })
         .collect();
@@ -184,7 +187,10 @@ fn proto_to_tunnel_management(
                             servers: u
                                 .servers
                                 .iter()
-                                .map(|s| ServerDef { address: s.address.clone(), resolve: s.resolve })
+                                .map(|s| ServerDef {
+                                    address: s.address.clone(),
+                                    resolve: s.resolve,
+                                })
                                 .collect(),
                             lb_policy: u.lb_policy.clone(),
                         },
@@ -193,7 +199,10 @@ fn proto_to_tunnel_management(
                 .collect();
             (
                 g.group_id.clone(),
-                GroupConfig { config_version: g.config_version.clone(), upstreams },
+                GroupConfig {
+                    config_version: g.config_version.clone(),
+                    upstreams,
+                },
             )
         })
         .collect();
@@ -217,7 +226,10 @@ fn proto_to_server_egress(
                     servers: u
                         .servers
                         .iter()
-                        .map(|s| ServerDef { address: s.address.clone(), resolve: s.resolve })
+                        .map(|s| ServerDef {
+                            address: s.address.clone(),
+                            resolve: s.resolve,
+                        })
                         .collect(),
                     lb_policy: u.lb_policy.clone(),
                 },
@@ -233,5 +245,8 @@ fn proto_to_server_egress(
         })
         .collect();
 
-    ServerEgressUpstream { upstreams: upstream_map, rules: EgressRules { vhost } }
+    ServerEgressUpstream {
+        upstreams: upstream_map,
+        rules: EgressRules { vhost },
+    }
 }

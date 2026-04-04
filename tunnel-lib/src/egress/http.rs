@@ -1,3 +1,5 @@
+use crate::protocol::rewrite::Rewriter;
+use crate::transport::addr::parse_upstream;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -9,16 +11,12 @@ use hyper_util::rt::TokioExecutor;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
 use tracing::debug;
-use crate::protocol::rewrite::Rewriter;
-use crate::transport::addr::parse_upstream;
 pub type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
     http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
 >;
-pub type H2cClient = Client<
-    HttpConnector,
-    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
->;
+pub type H2cClient =
+    Client<HttpConnector, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
 #[derive(Debug, Clone)]
 pub struct HttpClientParams {
     pub pool_idle_timeout_secs: u64,
@@ -111,7 +109,10 @@ pub async fn forward_http(
     req.parse(&head_buf)?;
 
     let method = req.method.ok_or_else(|| anyhow::anyhow!("no method"))?;
-    let mut path = req.path.ok_or_else(|| anyhow::anyhow!("no path"))?.to_string();
+    let mut path = req
+        .path
+        .ok_or_else(|| anyhow::anyhow!("no path"))?
+        .to_string();
     let mut hyper_headers = HeaderMap::new();
     for h in req.headers.iter() {
         if !h.name.is_empty() {
@@ -142,9 +143,8 @@ pub async fn forward_http(
         .unwrap_or(0);
     let req_body_stream: std::pin::Pin<
         Box<
-            dyn futures_util::Stream<
-                Item = Result<hyper::body::Frame<Bytes>, std::io::Error>,
-            > + Send,
+            dyn futures_util::Stream<Item = Result<hyper::body::Frame<Bytes>, std::io::Error>>
+                + Send,
         >,
     > = if content_length > 0 {
         let stream = futures_util::stream::try_unfold(
@@ -160,12 +160,10 @@ pub async fn forward_http(
                     let len = chunk.len();
                     if len > 0 {
                         read += len;
-                        return Ok(
-                            Some((
-                                hyper::body::Frame::data(chunk),
-                                (recv, None, read, total, buf),
-                            )),
-                        );
+                        return Ok(Some((
+                            hyper::body::Frame::data(chunk),
+                            (recv, None, read, total, buf),
+                        )));
                     }
                 }
                 if read >= total {
@@ -180,12 +178,10 @@ pub async fn forward_http(
                         read += n;
                         buf.truncate(n);
                         let chunk = buf.split().freeze();
-                        Ok(
-                            Some((
-                                hyper::body::Frame::data(chunk),
-                                (recv, None, read, total, buf),
-                            )),
-                        )
+                        Ok(Some((
+                            hyper::body::Frame::data(chunk),
+                            (recv, None, read, total, buf),
+                        )))
                     }
                     Ok(_) => Ok(None),
                     Err(e) => Err(std::io::Error::other(e)),
@@ -205,15 +201,15 @@ pub async fn forward_http(
     let request = request_builder.body(req_body)?;
     let response = client.request(request).await?;
     debug!(
-        status = response.status().as_u16(), elapsed_ms = start_time.elapsed()
-        .as_millis(), "HTTP response received"
+        status = response.status().as_u16(),
+        elapsed_ms = start_time.elapsed().as_millis(),
+        "HTTP response received"
     );
     {
         use std::fmt::Write as FmtWrite;
         let status = response.status();
         let headers = response.headers();
-        let mut header_buf =
-            bytes::BytesMut::with_capacity(32 + headers.len() * 48 + 4);
+        let mut header_buf = bytes::BytesMut::with_capacity(32 + headers.len() * 48 + 4);
         write!(
             header_buf,
             "HTTP/1.1 {} {}\r\n",

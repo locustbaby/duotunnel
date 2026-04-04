@@ -1,11 +1,11 @@
+use crate::config::{IngressListener, IngressMode};
+use crate::ServerState;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use crate::config::{IngressMode, IngressListener};
-use crate::ServerState;
 
 pub struct ListenerEntry {
     pub id: u64,
@@ -15,7 +15,10 @@ pub struct ListenerEntry {
 
 pub enum ListenerKind {
     Http,
-    Tcp { group_id: String, proxy_name: String },
+    Tcp {
+        group_id: String,
+        proxy_name: String,
+    },
 }
 
 /// Tracks all running ingress listener tasks.
@@ -68,9 +71,13 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             let listener = desired_by_port[port];
             let changed = match (&entry.kind, &listener.mode) {
                 (ListenerKind::Http, IngressMode::Http(_)) => false,
-                (ListenerKind::Tcp { group_id, proxy_name }, IngressMode::Tcp(cfg)) => {
-                    group_id != &cfg.client_group || proxy_name != &cfg.proxy_name
-                }
+                (
+                    ListenerKind::Tcp {
+                        group_id,
+                        proxy_name,
+                    },
+                    IngressMode::Tcp(cfg),
+                ) => group_id != &cfg.client_group || proxy_name != &cfg.proxy_name,
                 _ => true,
             };
             if changed {
@@ -104,7 +111,14 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
                     Some(cfg.proxy_name.clone()),
                 ),
             };
-            map.insert(*port, ListenerEntry { id: listener_id, kind, cancel: cancel.clone() });
+            map.insert(
+                *port,
+                ListenerEntry {
+                    id: listener_id,
+                    kind,
+                    cancel: cancel.clone(),
+                },
+            );
             spawns.push(SpawnDesc {
                 port: *port,
                 listener_id,
@@ -119,7 +133,14 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
 
     // 3. Spawn tasks outside the lock.
     for desc in to_spawn {
-        let SpawnDesc { port, listener_id, cancel, mode, tcp_group, tcp_proxy } = desc;
+        let SpawnDesc {
+            port,
+            listener_id,
+            cancel,
+            mode,
+            tcp_group,
+            tcp_proxy,
+        } = desc;
         match mode {
             IngressMode::Http(_) => {
                 let s = state.clone();

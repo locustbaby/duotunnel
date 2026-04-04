@@ -28,8 +28,13 @@ pub struct ProtoIngressVhostRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProtoIngressListenerMode {
-    Http { vhost: Vec<ProtoIngressVhostRule> },
-    Tcp { group_id: String, proxy_name: String },
+    Http {
+        vhost: Vec<ProtoIngressVhostRule>,
+    },
+    Tcp {
+        group_id: String,
+        proxy_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

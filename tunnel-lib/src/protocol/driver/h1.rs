@@ -51,7 +51,10 @@ impl Http1Driver {
         if self.recv.is_some() {
             return Ok(());
         }
-        let rx = self.inflight_reclaim.take().context("recv lost: no reclaim channel")?;
+        let rx = self
+            .inflight_reclaim
+            .take()
+            .context("recv lost: no reclaim channel")?;
         let reclaim = rx
             .await
             .map_err(|_| anyhow::anyhow!("body stream dropped without returning recv"))?;
@@ -80,7 +83,10 @@ impl ProtocolDriver for Http1Driver {
     async fn read_request(&mut self) -> Result<Option<ProxyRequest>> {
         self.reclaim_recv().await?;
         self.should_close = false;
-        let mut recv = self.recv.take().context("RecvStream missing after reclaim")?;
+        let mut recv = self
+            .recv
+            .take()
+            .context("RecvStream missing after reclaim")?;
         let parsed = loop {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
@@ -88,9 +94,7 @@ impl ProtocolDriver for Http1Driver {
                 Ok(httparse::Status::Complete(n)) => {
                     let method_str = req.method.context("no method")?;
                     let path = req.path.context("no path")?;
-                    let uri_str = format!(
-                        "{}://{}{}", self.scheme, self.authority, path
-                    );
+                    let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
                     let uri: Uri = uri_str.parse()?;
                     let method = Method::from_bytes(method_str.as_bytes())
                         .map_err(|_| anyhow::anyhow!("unsupported method: {}", method_str))?;
@@ -161,21 +165,20 @@ impl ProtocolDriver for Http1Driver {
         let body_remaining = content_length.saturating_sub(body_prefix_len);
         let body = if content_length == 0 {
             self.recv = Some(recv);
-            http_body_util::Empty::new().map_err(|e| match e {}).boxed_unsync()
+            http_body_util::Empty::new()
+                .map_err(|e| match e {})
+                .boxed_unsync()
         } else if body_remaining == 0 {
             self.recv = Some(recv);
             let prefix = body_prefix;
-            let stream = futures_util::stream::try_unfold(
-                Some(prefix),
-                |mut state| async move {
-                    if let Some(data) = state.take() {
-                        if !data.is_empty() {
-                            return Ok(Some((hyper::body::Frame::data(data), None)));
-                        }
+            let stream = futures_util::stream::try_unfold(Some(prefix), |mut state| async move {
+                if let Some(data) = state.take() {
+                    if !data.is_empty() {
+                        return Ok(Some((hyper::body::Frame::data(data), None)));
                     }
-                    Ok(None)
-                },
-            );
+                }
+                Ok(None)
+            });
             http_body_util::StreamBody::new(stream).boxed_unsync()
         } else {
             let (reclaim_tx, reclaim_rx) = oneshot::channel::<Reclaim>();
@@ -194,15 +197,12 @@ impl ProtocolDriver for Http1Driver {
                         }
                     }
                     if state.remaining == 0 {
-                        if let (Some(tx), Some(recv)) = (
-                            state.reclaim_tx.take(),
-                            state.recv.take(),
-                        ) {
-                            let _ = tx
-                                .send(Reclaim {
-                                    recv,
-                                    overflow: Bytes::new(),
-                                });
+                        if let (Some(tx), Some(recv)) = (state.reclaim_tx.take(), state.recv.take())
+                        {
+                            let _ = tx.send(Reclaim {
+                                recv,
+                                overflow: Bytes::new(),
+                            });
                         }
                         return Ok(None);
                     }
@@ -225,10 +225,9 @@ impl ProtocolDriver for Http1Driver {
                             };
                             let data = buf.freeze();
                             if state.remaining == 0 {
-                                if let (Some(tx), Some(recv)) = (
-                                    state.reclaim_tx.take(),
-                                    state.recv.take(),
-                                ) {
+                                if let (Some(tx), Some(recv)) =
+                                    (state.reclaim_tx.take(), state.recv.take())
+                                {
                                     let _ = tx.send(Reclaim { recv, overflow });
                                 }
                             }
@@ -241,15 +240,13 @@ impl ProtocolDriver for Http1Driver {
             );
             http_body_util::StreamBody::new(stream).boxed_unsync()
         };
-        Ok(
-            Some(ProxyRequest {
-                method,
-                uri,
-                headers: header_map,
-                version: Version::HTTP_11,
-                body,
-            }),
-        )
+        Ok(Some(ProxyRequest {
+            method,
+            uri,
+            headers: header_map,
+            version: Version::HTTP_11,
+            body,
+        }))
     }
     async fn write_response(&mut self, mut response: Response<Incoming>) -> Result<()> {
         let status = response.status();
@@ -265,10 +262,12 @@ impl ProtocolDriver for Http1Driver {
         let mut header_buf = BytesMut::with_capacity(32 + headers.len() * 48 + 32);
         use std::fmt::Write as FmtWrite;
         write!(
-            header_buf, "HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason()
-            .unwrap_or("OK")
+            header_buf,
+            "HTTP/1.1 {} {}\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("OK")
         )
-            .unwrap();
+        .unwrap();
         for (name, value) in headers {
             header_buf.put_slice(name.as_str().as_bytes());
             header_buf.put_slice(b": ");

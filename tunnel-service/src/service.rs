@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use crate::proto::{ConfigSnapshot, WatchEvent};
+use crate::token::cache::load_token_cache;
 use anyhow::Result;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use tunnel_store::rules::RoutingData;
 use tunnel_store::{AuthStore, RuleStore, TokenListEntry};
-use crate::proto::{ConfigSnapshot, WatchEvent};
-use crate::token::cache::load_token_cache;
 
 /// Debounce window: multiple mutations within this window are collapsed into
 /// a single DB rebuild + broadcast.
@@ -105,7 +105,10 @@ impl ControlService {
         let snapshot = Self::build_snapshot(&*self.rule_store, &self.pool, next).await?;
         // Build succeeded — now commit the version increment.
         self.resource_version.fetch_add(1, Ordering::AcqRel);
-        info!(resource_version = next, "broadcasting config patch to watchers");
+        info!(
+            resource_version = next,
+            "broadcasting config patch to watchers"
+        );
         let _ = self.watch_tx.send(Arc::new(WatchEvent::Patch(snapshot)));
         Ok(())
     }
@@ -164,10 +167,7 @@ impl ControlService {
 /// Background task: waits for publish signals, debounces within PUBLISH_DEBOUNCE_MS,
 /// then performs one full snapshot rebuild and broadcast.
 /// On persistent failures, applies exponential backoff (1s → 32s) before retrying.
-async fn debounce_publish_task(
-    svc: std::sync::Weak<ControlService>,
-    mut rx: mpsc::Receiver<()>,
-) {
+async fn debounce_publish_task(svc: std::sync::Weak<ControlService>, mut rx: mpsc::Receiver<()>) {
     let mut consecutive_failures: u32 = 0;
     loop {
         // Block until at least one signal arrives.

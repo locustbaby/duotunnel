@@ -1,9 +1,12 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use figment::{providers::{Env, Format, Yaml}, Figment};
+use figment::{
+    providers::{Env, Format, Yaml},
+    Figment,
+};
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tunnel_store::sqlite::{open_sqlite_pool, SqliteAuthStore};
@@ -15,7 +18,7 @@ mod service;
 mod token;
 mod watch;
 
-use cli::{CliCommand, run_cli};
+use cli::{run_cli, CliCommand};
 use service::ControlService;
 use watch::WatchServer;
 
@@ -108,7 +111,9 @@ async fn main() -> Result<()> {
                 info!(path = %server_cfg_path, "routing DB empty — seeding from server config");
                 match tunnel_store::server_config::ServerConfigFile::load(server_cfg_path) {
                     Ok(server_cfg) => {
-                        let data = tunnel_store::server_config::routing_data_from_server_config(&server_cfg);
+                        let data = tunnel_store::server_config::routing_data_from_server_config(
+                            &server_cfg,
+                        );
                         if let Err(e) = rule_store.save_routing(&data).await {
                             tracing::warn!(error = %e, "failed to seed routing from server config (non-fatal)");
                         } else {

@@ -10,10 +10,7 @@ use hyper_util::client::legacy::Client;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
 use tracing::debug;
-type HttpsClient = Client<
-    HttpsConnector<HttpConnector>,
-    UnsyncBoxBody<Bytes, std::io::Error>,
->;
+type HttpsClient = Client<HttpsConnector<HttpConnector>, UnsyncBoxBody<Bytes, std::io::Error>>;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct HttpPeer {
     pub client: HttpsClient,
@@ -35,26 +32,22 @@ impl HttpPeer {
             initial_data,
         );
         loop {
-            let req = match tokio::time::timeout(
-                    KEEPALIVE_IDLE_TIMEOUT,
-                    driver.read_request(),
-                )
-                .await
-            {
-                Ok(Ok(Some(r))) => r,
-                Ok(Ok(None)) => {
-                    debug!("H1 keep-alive: clean EOF, closing");
-                    break;
-                }
-                Ok(Err(e)) => {
-                    debug!(error = % e, "H1 keep-alive: read_request error, closing");
-                    break;
-                }
-                Err(_) => {
-                    debug!("H1 keep-alive: idle timeout, closing");
-                    break;
-                }
-            };
+            let req =
+                match tokio::time::timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
+                    Ok(Ok(Some(r))) => r,
+                    Ok(Ok(None)) => {
+                        debug!("H1 keep-alive: clean EOF, closing");
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        debug!(error = % e, "H1 keep-alive: read_request error, closing");
+                        break;
+                    }
+                    Err(_) => {
+                        debug!("H1 keep-alive: idle timeout, closing");
+                        break;
+                    }
+                };
             let should_close_after = driver.should_close;
             let mut builder = Request::builder()
                 .method(req.method)

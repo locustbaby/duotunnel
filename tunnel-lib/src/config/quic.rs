@@ -14,9 +14,7 @@ impl From<&QuicConfig> for QuicTransportParams {
     fn from(c: &QuicConfig) -> Self {
         let d = QuicTransportParams::default();
         QuicTransportParams {
-            max_concurrent_streams: c
-                .max_concurrent_streams
-                .unwrap_or(d.max_concurrent_streams),
+            max_concurrent_streams: c.max_concurrent_streams.unwrap_or(d.max_concurrent_streams),
             stream_receive_window_bytes: c
                 .stream_window_mb
                 .map(|mb| mb * 1024 * 1024)

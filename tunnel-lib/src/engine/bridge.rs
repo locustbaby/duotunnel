@@ -77,7 +77,10 @@ pub async fn relay_quic_to_tcp(
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e1), Err(e2)) => {
-            debug!("relay_quic_to_tcp: both directions failed; suppressed: {}", e2);
+            debug!(
+                "relay_quic_to_tcp: both directions failed; suppressed: {}",
+                e2
+            );
             Err(e1.into())
         }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
@@ -109,7 +112,10 @@ pub async fn relay_with_first_data(
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e1), Err(e2)) => {
-            debug!("relay_with_first_data: both directions failed; suppressed: {}", e2);
+            debug!(
+                "relay_with_first_data: both directions failed; suppressed: {}",
+                e2
+            );
             Err(e1.into())
         }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
@@ -129,7 +135,7 @@ mod tests {
         });
         let mut buf = Vec::new();
         server.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(& buf, data);
+        assert_eq!(&buf, data);
     }
     #[tokio::test]
     async fn test_relay_unidirectional_returns_byte_count() {
@@ -144,7 +150,7 @@ mod tests {
         assert_eq!(count, data.len() as u64);
         let mut received = Vec::new();
         sink_read.read_to_end(&mut received).await.unwrap();
-        assert_eq!(& received, data);
+        assert_eq!(&received, data);
     }
     #[tokio::test]
     async fn test_relay_unidirectional_empty_stream() {
@@ -175,10 +181,10 @@ mod tests {
         assert_eq!(recv, b_data.len() as u64, "recv byte count mismatch");
         let mut a_received = Vec::new();
         side_a_read.read_to_end(&mut a_received).await.unwrap();
-        assert_eq!(& a_received, b_data);
+        assert_eq!(&a_received, b_data);
         let mut b_received = Vec::new();
         side_b_read.read_to_end(&mut b_received).await.unwrap();
-        assert_eq!(& b_received, a_data);
+        assert_eq!(&b_received, a_data);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_relay_bidirectional_large_payload() {

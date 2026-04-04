@@ -23,10 +23,7 @@ impl std::fmt::Display for AuthError {
 impl std::error::Error for AuthError {}
 #[async_trait]
 pub trait AuthStore: Send + Sync {
-    async fn authenticate(
-        &self,
-        raw_token: &str,
-    ) -> std::result::Result<AuthResult, AuthError>;
+    async fn authenticate(&self, raw_token: &str) -> std::result::Result<AuthResult, AuthError>;
     async fn create_client(&self, name: &str) -> Result<String>;
     async fn list_tokens(&self) -> Result<Vec<TokenListEntry>>;
     async fn revoke_token(&self, name: &str) -> Result<()>;

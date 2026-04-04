@@ -31,16 +31,12 @@ impl Rewriter {
             }
         }
         for name in &self.header_remove {
-            if let Ok(header_name) = hyper::header::HeaderName::from_bytes(
-                name.as_bytes(),
-            ) {
+            if let Ok(header_name) = hyper::header::HeaderName::from_bytes(name.as_bytes()) {
                 headers.remove(&header_name);
             }
         }
         for (name, value) in &self.header_add {
-            if let Ok(header_name) = hyper::header::HeaderName::from_bytes(
-                name.as_bytes(),
-            ) {
+            if let Ok(header_name) = hyper::header::HeaderName::from_bytes(name.as_bytes()) {
                 if let Ok(header_value) = hyper::header::HeaderValue::from_str(value) {
                     headers.insert(header_name, header_value);
                 }

@@ -1,9 +1,9 @@
-use anyhow::Result;
-use bytes::Bytes;
-use quinn::{RecvStream, SendStream};
 use super::h2::H2Peer;
 use super::http::HttpPeer;
 use super::tcp::{TcpPeer, TlsTcpPeer};
+use anyhow::Result;
+use bytes::Bytes;
+use quinn::{RecvStream, SendStream};
 pub enum PeerKind {
     Tcp(TcpPeer),
     Tls(TlsTcpPeer),

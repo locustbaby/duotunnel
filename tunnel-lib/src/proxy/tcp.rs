@@ -66,7 +66,11 @@ fn extract_host_part(addr: &str) -> String {
     }
 }
 fn has_explicit_port(addr: &str) -> bool {
-    if addr.starts_with('[') { addr.contains("]:") } else { addr.contains(':') }
+    if addr.starts_with('[') {
+        addr.contains("]:")
+    } else {
+        addr.contains(':')
+    }
 }
 fn has_port_443(addr: &str) -> bool {
     extract_port_number(addr) == Some(443)
@@ -132,7 +136,12 @@ impl TlsTcpPeer {
         } else {
             Arc::new(TlsConnector::from(base_tls_config()))
         };
-        Ok(Self { target_addr, tls_host, connector, tcp_params })
+        Ok(Self {
+            target_addr,
+            tls_host,
+            connector,
+            tcp_params,
+        })
     }
 }
 impl TcpPeer {
@@ -166,8 +175,8 @@ impl TlsTcpPeer {
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         debug!(
-            "connecting to TLS tcp upstream: {} (SNI: {})", self.target_addr, self
-            .tls_host
+            "connecting to TLS tcp upstream: {} (SNI: {})",
+            self.target_addr, self.tls_host
         );
         let tcp_stream = TcpStream::connect(self.target_addr)
             .await

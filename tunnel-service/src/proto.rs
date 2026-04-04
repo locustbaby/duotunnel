@@ -3,8 +3,8 @@
 /// without depending on tunnel-service.
 pub use tunnel_lib::ctld_proto::{
     ConfigSnapshot, ProtoClientGroup, ProtoClientUpstream, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode,
-    ProtoIngressVhostRule, ProtoUpstreamServer, TokenCacheEntry, WatchEvent, WatchRequest,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ProtoIngressVhostRule,
+    ProtoUpstreamServer, TokenCacheEntry, WatchEvent, WatchRequest,
 };
 
 use tunnel_store::rules::{
@@ -23,8 +23,16 @@ pub fn routing_data_to_proto(
 ) {
     let ingress = data.ingress_listeners.iter().map(proto_listener).collect();
     let groups = data.client_groups.iter().map(proto_group).collect();
-    let egress_upstreams = data.egress_upstreams.iter().map(proto_egress_upstream).collect();
-    let egress_vhost = data.egress_vhost_rules.iter().map(proto_egress_vhost).collect();
+    let egress_upstreams = data
+        .egress_upstreams
+        .iter()
+        .map(proto_egress_upstream)
+        .collect();
+    let egress_vhost = data
+        .egress_vhost_rules
+        .iter()
+        .map(proto_egress_vhost)
+        .collect();
     (ingress, groups, egress_upstreams, egress_vhost)
 }
 
@@ -42,12 +50,13 @@ fn proto_listener(l: &IngressListener) -> ProtoIngressListener {
                     })
                     .collect(),
             },
-            IngressListenerMode::Tcp { group_id, proxy_name } => {
-                ProtoIngressListenerMode::Tcp {
-                    group_id: group_id.clone(),
-                    proxy_name: proxy_name.clone(),
-                }
-            }
+            IngressListenerMode::Tcp {
+                group_id,
+                proxy_name,
+            } => ProtoIngressListenerMode::Tcp {
+                group_id: group_id.clone(),
+                proxy_name: proxy_name.clone(),
+            },
         },
     }
 }
@@ -65,7 +74,10 @@ fn proto_group(g: &ClientGroup) -> ProtoClientGroup {
                 servers: u
                     .servers
                     .iter()
-                    .map(|s| ProtoUpstreamServer { address: s.address.clone(), resolve: s.resolve })
+                    .map(|s| ProtoUpstreamServer {
+                        address: s.address.clone(),
+                        resolve: s.resolve,
+                    })
                     .collect(),
             })
             .collect(),
@@ -79,7 +91,10 @@ fn proto_egress_upstream(u: &EgressUpstreamDef) -> ProtoEgressUpstreamDef {
         servers: u
             .servers
             .iter()
-            .map(|s| ProtoUpstreamServer { address: s.address.clone(), resolve: s.resolve })
+            .map(|s| ProtoUpstreamServer {
+                address: s.address.clone(),
+                resolve: s.resolve,
+            })
             .collect(),
     }
 }
