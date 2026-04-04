@@ -117,14 +117,8 @@ async fn handle_tls_connection(
     debug!(host = %host, "TLS connection detected, terminating");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
-    let (certs, key) =
-        tunnel_lib::infra::pki::generate_self_signed_cert_for_host(&host)?;
-    let mut server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    let acceptor =
-        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+    let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let tls_stream = acceptor.accept(stream).await?;
     info!("TLS terminated, serving H2 with authority rewriting");
     let target_host = host.clone();
