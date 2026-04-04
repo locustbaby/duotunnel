@@ -1141,7 +1141,7 @@ jobs:
           git add bench/
           git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
           git commit -m "bench: update data for $(echo '${{ github.sha }}' | cut -c1-7)"
-          git push origin gh-pages
+          git push --force origin gh-pages
 
       - name: Dump tunnel error logs
         if: always()

@@ -65,6 +65,11 @@ impl ClientGroup {
         if len == 0 {
             return None;
         }
+        // Fast path: single connection (common case) — skip counter bump and modulo.
+        if len == 1 {
+            let conn = &conns[0];
+            return if conn.close_reason().is_none() { Some(conn.clone()) } else { None };
+        }
         let start = self.counter.fetch_add(1, Ordering::Relaxed);
         for i in 0..len {
             let conn = &conns[(start + i) % len];
