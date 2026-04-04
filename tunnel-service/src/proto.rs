@@ -1,64 +1,92 @@
-/// List-Watch protocol between tunnel-ctld and server.
-///
-/// Modelled after the Kubernetes list-watch pattern:
-///   1. Server connects to ctld and sends a WatchRequest with resource_version=0
-///      (meaning "give me the full snapshot first").
-///   2. ctld responds with a WatchEvent::Snapshot (full state, sets the baseline version).
-///   3. ctld keeps the TCP connection open and streams WatchEvent::Patch for every
-///      subsequent mutation (token create/revoke/rotate, routing save).
-///   4. If the server reconnects, it sends resource_version=N (last known version).
-///      ctld responds with a full Snapshot again (simplest correct behaviour; diffs are
-///      a future optimisation).
-///
-/// Wire framing: reuses the existing tunnel-lib send_message/recv_message bincode framing.
-///   [msg_type: u8 = 0x06 ConfigPush][len: u32 BE][bincode(CtldMessage)]
-use serde::{Deserialize, Serialize};
-use tunnel_store::rules::{
-    ClientGroup, EgressUpstreamDef, EgressVhostRule, IngressListener,
+/// Re-export the list-watch protocol types from tunnel-lib.
+/// Types live in tunnel-lib so that server can depend on tunnel-lib only,
+/// without depending on tunnel-service.
+pub use tunnel_lib::ctld_proto::{
+    ConfigSnapshot, ProtoClientGroup, ProtoClientUpstream, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode,
+    ProtoIngressVhostRule, ProtoUpstreamServer, TokenCacheEntry, WatchEvent, WatchRequest,
 };
-/// Sent by the server to initiate (or resume) a watch session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchRequest {
-    /// The last resource_version the server has seen.
-    /// 0 means "I have nothing; send me the full snapshot".
-    pub resource_version: u64,
+
+use tunnel_store::rules::{
+    ClientGroup, EgressUpstreamDef, EgressVhostRule, IngressListener, IngressListenerMode,
+    RoutingData,
+};
+
+/// Convert tunnel_store RoutingData into the proto types used in ConfigSnapshot.
+pub fn routing_data_to_proto(
+    data: &RoutingData,
+) -> (
+    Vec<ProtoIngressListener>,
+    Vec<ProtoClientGroup>,
+    Vec<ProtoEgressUpstreamDef>,
+    Vec<ProtoEgressVhostRule>,
+) {
+    let ingress = data.ingress_listeners.iter().map(proto_listener).collect();
+    let groups = data.client_groups.iter().map(proto_group).collect();
+    let egress_upstreams = data.egress_upstreams.iter().map(proto_egress_upstream).collect();
+    let egress_vhost = data.egress_vhost_rules.iter().map(proto_egress_vhost).collect();
+    (ingress, groups, egress_upstreams, egress_vhost)
 }
 
-/// The full config snapshot pushed by ctld as the list response,
-/// and also after each mutation (no delta in v1 for simplicity).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigSnapshot {
-    /// Monotonically increasing. Incremented on every write to ctld.
-    pub resource_version: u64,
-    /// Full ingress listener + routing configuration.
-    pub ingress_listeners: Vec<IngressListener>,
-    pub client_groups: Vec<ClientGroup>,
-    pub egress_upstreams: Vec<EgressUpstreamDef>,
-    pub egress_vhost_rules: Vec<EgressVhostRule>,
-    /// Flattened token table for server-side in-memory auth cache.
-    /// Server uses constant-time prefix scan on this instead of hitting SQLite.
-    pub token_cache: Vec<TokenCacheEntry>,
+fn proto_listener(l: &IngressListener) -> ProtoIngressListener {
+    ProtoIngressListener {
+        port: l.port,
+        mode: match &l.mode {
+            IngressListenerMode::Http { vhost } => ProtoIngressListenerMode::Http {
+                vhost: vhost
+                    .iter()
+                    .map(|r| ProtoIngressVhostRule {
+                        match_host: r.match_host.clone(),
+                        group_id: r.group_id.clone(),
+                        proxy_name: r.proxy_name.clone(),
+                    })
+                    .collect(),
+            },
+            IngressListenerMode::Tcp { group_id, proxy_name } => {
+                ProtoIngressListenerMode::Tcp {
+                    group_id: group_id.clone(),
+                    proxy_name: proxy_name.clone(),
+                }
+            }
+        },
+    }
 }
 
-/// A single token entry in the in-memory cache sent to server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenCacheEntry {
-    /// Full 64-char hex SHA-256 of the raw token.
-    pub hash_hex: String,
-    /// The client group this token belongs to.
-    pub client_group: String,
-    /// "active" | "disabled"
-    pub client_status: String,
-    /// "active" | "revoked"
-    pub token_status: String,
+fn proto_group(g: &ClientGroup) -> ProtoClientGroup {
+    ProtoClientGroup {
+        group_id: g.group_id.clone(),
+        config_version: g.config_version.clone(),
+        upstreams: g
+            .upstreams
+            .iter()
+            .map(|u| ProtoClientUpstream {
+                name: u.name.clone(),
+                lb_policy: u.lb_policy.clone(),
+                servers: u
+                    .servers
+                    .iter()
+                    .map(|s| ProtoUpstreamServer { address: s.address.clone(), resolve: s.resolve })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
-/// Message envelope pushed from ctld → server over the watch stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WatchEvent {
-    /// Full state snapshot (response to WatchRequest or post-reconnect).
-    Snapshot(ConfigSnapshot),
-    /// Incremental patch — currently always a full Snapshot re-send.
-    /// Reserved for future delta optimisation.
-    Patch(ConfigSnapshot),
+fn proto_egress_upstream(u: &EgressUpstreamDef) -> ProtoEgressUpstreamDef {
+    ProtoEgressUpstreamDef {
+        name: u.name.clone(),
+        lb_policy: u.lb_policy.clone(),
+        servers: u
+            .servers
+            .iter()
+            .map(|s| ProtoUpstreamServer { address: s.address.clone(), resolve: s.resolve })
+            .collect(),
+    }
+}
+
+fn proto_egress_vhost(r: &EgressVhostRule) -> ProtoEgressVhostRule {
+    ProtoEgressVhostRule {
+        match_host: r.match_host.clone(),
+        action_upstream: r.action_upstream.clone(),
+    }
 }
