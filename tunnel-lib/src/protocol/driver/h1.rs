@@ -71,6 +71,26 @@ impl Http1Driver {
         Ok(())
     }
 }
+
+async fn read_into_bytes_mut(
+    recv: &mut RecvStream,
+    dst: &mut BytesMut,
+    max_read: usize,
+) -> std::result::Result<Option<usize>, quinn::ReadError> {
+    dst.reserve(max_read);
+    let start = dst.len();
+    let spare = dst.spare_capacity_mut();
+    let take = spare.len().min(max_read);
+    let raw = spare.as_mut_ptr().cast::<u8>();
+    let out = unsafe { std::slice::from_raw_parts_mut(raw, take) };
+    match recv.read(out).await? {
+        Some(n) => {
+            unsafe { dst.set_len(start + n) };
+            Ok(Some(n))
+        }
+        None => Ok(None),
+    }
+}
 struct ParsedHead {
     header_end: usize,
     method: Method,
@@ -123,11 +143,9 @@ impl ProtocolDriver for Http1Driver {
                     }
                     let old_len = self.read_buf.len();
                     let spare = 8192 - old_len;
-                    self.read_buf.resize(old_len + spare, 0);
-                    match recv.read(&mut self.read_buf[old_len..]).await? {
-                        Some(n) => self.read_buf.truncate(old_len + n),
+                    match read_into_bytes_mut(&mut recv, &mut self.read_buf, spare).await? {
+                        Some(_) => {}
                         None => {
-                            self.read_buf.truncate(old_len);
                             if old_len == 0 {
                                 self.recv = Some(recv);
                                 return Ok(None);
@@ -189,6 +207,7 @@ impl ProtocolDriver for Http1Driver {
                     body_prefix: Some(body_prefix),
                     remaining: body_remaining,
                     reclaim_tx: Some(reclaim_tx),
+                    scratch: vec![0u8; 8192],
                 },
                 |mut state| async move {
                     if let Some(prefix) = state.body_prefix.take() {
@@ -210,25 +229,19 @@ impl ProtocolDriver for Http1Driver {
                         Some(r) => r,
                         None => return Ok(None),
                     };
-                    let to_read = state.remaining.min(8192);
-                    let mut buf = BytesMut::zeroed(to_read);
-                    match recv.read(&mut buf[..]).await {
+                    let to_read = state.remaining.min(state.scratch.len());
+                    match recv.read(&mut state.scratch[..to_read]).await {
                         Ok(Some(n)) => {
-                            let got = n.min(state.remaining);
-                            state.remaining -= got;
-                            let mut buf = buf;
-                            buf.truncate(n);
-                            let overflow = if n > got {
-                                buf.split_off(got).freeze()
-                            } else {
-                                Bytes::new()
-                            };
-                            let data = buf.freeze();
+                            state.remaining -= n;
+                            let data = Bytes::copy_from_slice(&state.scratch[..n]);
                             if state.remaining == 0 {
                                 if let (Some(tx), Some(recv)) =
                                     (state.reclaim_tx.take(), state.recv.take())
                                 {
-                                    let _ = tx.send(Reclaim { recv, overflow });
+                                    let _ = tx.send(Reclaim {
+                                        recv,
+                                        overflow: Bytes::new(),
+                                    });
                                 }
                             }
                             Ok(Some((hyper::body::Frame::data(data), state)))
@@ -323,4 +336,5 @@ struct BodyState {
     body_prefix: Option<Bytes>,
     remaining: usize,
     reclaim_tx: Option<oneshot::Sender<Reclaim>>,
+    scratch: Vec<u8>,
 }

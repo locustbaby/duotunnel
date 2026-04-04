@@ -1,7 +1,7 @@
 use crate::protocol::rewrite::Rewriter;
 use crate::transport::addr::parse_upstream;
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::{header, HeaderMap, Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -17,6 +17,26 @@ pub type HttpsClient = Client<
 >;
 pub type H2cClient =
     Client<HttpConnector, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+
+async fn read_into_bytes_mut(
+    recv: &mut RecvStream,
+    dst: &mut BytesMut,
+    max_read: usize,
+) -> std::result::Result<Option<usize>, quinn::ReadError> {
+    dst.reserve(max_read);
+    let start = dst.len();
+    let spare = dst.spare_capacity_mut();
+    let take = spare.len().min(max_read);
+    let raw = spare.as_mut_ptr().cast::<u8>();
+    let out = unsafe { std::slice::from_raw_parts_mut(raw, take) };
+    match recv.read(out).await? {
+        Some(n) => {
+            unsafe { dst.set_len(start + n) };
+            Ok(Some(n))
+        }
+        None => Ok(None),
+    }
+}
 #[derive(Debug, Clone)]
 pub struct HttpClientParams {
     pub pool_idle_timeout_secs: u64,
@@ -67,7 +87,6 @@ pub async fn forward_http(
     client: &HttpsClient,
     rewriter: Option<&Rewriter>,
 ) -> Result<()> {
-    use bytes::BytesMut;
     let start_time = std::time::Instant::now();
     let parsed = parse_upstream(upstream_addr);
 
@@ -88,11 +107,9 @@ pub async fn forward_http(
                 }
                 let old_len = head_buf.len();
                 let spare = (MAX_HEADER_BUF - old_len).min(8192);
-                head_buf.resize(old_len + spare, 0);
-                match recv.read(&mut head_buf[old_len..]).await? {
-                    Some(n) => head_buf.truncate(old_len + n),
+                match read_into_bytes_mut(&mut recv, &mut head_buf, spare).await? {
+                    Some(_) => {}
                     None => {
-                        head_buf.truncate(old_len);
                         if old_len == 0 {
                             return Ok(());
                         }
@@ -153,7 +170,7 @@ pub async fn forward_http(
                 Some(remaining_first),
                 0usize,
                 content_length,
-                bytes::BytesMut::with_capacity(8192),
+                vec![0u8; 8192],
             ),
             |(mut recv, first_chunk, mut read, total, mut buf)| async move {
                 if let Some(chunk) = first_chunk {
@@ -170,14 +187,11 @@ pub async fn forward_http(
                     return Ok(None);
                 }
                 let remaining = total - read;
-                let to_read = 8192.min(remaining);
-                buf.clear();
-                buf.resize(to_read, 0);
+                let to_read = buf.len().min(remaining);
                 match recv.read(&mut buf[..to_read]).await {
                     Ok(Some(n)) if n > 0 => {
                         read += n;
-                        buf.truncate(n);
-                        let chunk = buf.split().freeze();
+                        let chunk = Bytes::copy_from_slice(&buf[..n]);
                         Ok(Some((
                             hyper::body::Frame::data(chunk),
                             (recv, None, read, total, buf),
