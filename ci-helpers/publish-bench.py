@@ -14,6 +14,7 @@ def main():
     p.add_argument("--frp-result", default="")
     p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--flamegraph", default="")
+    p.add_argument("--flamegraph-client", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -27,6 +28,8 @@ def main():
             entry["resources"] = json.load(f)
     if args.flamegraph:
         entry.setdefault("artifacts", {})["flamegraph"] = args.flamegraph
+    if args.flamegraph_client:
+        entry.setdefault("artifacts", {})["flamegraph_client"] = args.flamegraph_client
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -80,9 +83,11 @@ def main():
     if os.path.isdir(flame_dir):
         keep = set()
         for e in entries:
-            pth = (e.get("artifacts") or {}).get("flamegraph")
-            if isinstance(pth, str) and pth.startswith("flamegraphs/"):
-                keep.add(pth.split("/", 1)[1])
+            arts = e.get("artifacts") or {}
+            for key in ("flamegraph", "flamegraph_client"):
+                pth = arts.get(key)
+                if isinstance(pth, str) and pth.startswith("flamegraphs/"):
+                    keep.add(pth.split("/", 1)[1])
         for name in os.listdir(flame_dir):
             fp = os.path.join(flame_dir, name)
             if os.path.isfile(fp) and name not in keep:

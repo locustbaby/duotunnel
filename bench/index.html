@@ -375,6 +375,7 @@ function renderDetail(entry) {
   const prevSum = prev ? (prev.summary || {}) : {};
   const res = entry.resources || null;
   const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
+  const flamegraphClient = entry.artifacts && entry.artifacts.flamegraph_client ? entry.artifacts.flamegraph_client : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
 
@@ -394,12 +395,13 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${flamegraph ? `
+  ${(flamegraph || flamegraphClient) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Profiles</h3>
-      <div style="font-size:13px">
-        <a href="${esc(flamegraph)}" target="_blank">CPU Flamegraph (SVG)</a>
+      <div style="font-size:13px;display:flex;gap:16px">
+        ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">CPU Flamegraph — Server (SVG)</a>` : ''}
+        ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">CPU Flamegraph — Client (SVG)</a>` : ''}
       </div>
     </div>
   </div>` : ''}

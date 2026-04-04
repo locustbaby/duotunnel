@@ -862,7 +862,12 @@ jobs:
             [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
             sleep 0.2
           done
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            setsid sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph-client.svg -- \
+              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          else
+            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          fi
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
@@ -929,7 +934,12 @@ jobs:
           done
 
           echo "Restarting client..."
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            setsid sudo ~/.cargo/bin/flamegraph --root -o /tmp/flamegraph-client.svg -- \
+              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          else
+            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          fi
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
@@ -1069,14 +1079,15 @@ jobs:
         run: |
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
             SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
-            if [ -n "$SERVER_PID" ]; then
-              sudo kill -INT -- "-$SERVER_PID" 2>/dev/null || sudo kill -INT "$SERVER_PID" 2>/dev/null || true
-            fi
+            CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
+            # Send SIGINT to process groups so flamegraph can finalize perf data
+            [ -n "$SERVER_PID" ] && { sudo kill -INT -- "-$SERVER_PID" 2>/dev/null || sudo kill -INT "$SERVER_PID" 2>/dev/null || true; }
+            [ -n "$CLIENT_PID" ] && { sudo kill -INT -- "-$CLIENT_PID" 2>/dev/null || sudo kill -INT "$CLIENT_PID" 2>/dev/null || true; }
             for i in $(seq 1 120); do
-              [ -s /tmp/flamegraph.svg ] && break
-              if [ -n "$SERVER_PID" ] && ! ps -p "$SERVER_PID" >/dev/null 2>&1; then
-                [ -s /tmp/flamegraph.svg ] && break
-              fi
+              SERVER_DONE=0; CLIENT_DONE=0
+              { [ -s /tmp/flamegraph.svg ] || { [ -n "$SERVER_PID" ] && ! ps -p "$SERVER_PID" >/dev/null 2>&1; }; } && SERVER_DONE=1
+              { [ -s /tmp/flamegraph-client.svg ] || { [ -n "$CLIENT_PID" ] && ! ps -p "$CLIENT_PID" >/dev/null 2>&1; }; } && CLIENT_DONE=1
+              [ "$SERVER_DONE" = "1" ] && [ "$CLIENT_DONE" = "1" ] && break
               sleep 1
             done
           fi
@@ -1187,12 +1198,19 @@ jobs:
               FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
             fi
           fi
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
           if [ -s /tmp/flamegraph.svg ]; then
             mkdir -p bench/flamegraphs
-            SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
             FLAMEGRAPH_REL="flamegraphs/${SHORT_SHA}-${{ github.run_id }}.svg"
             cp /tmp/flamegraph.svg "bench/${FLAMEGRAPH_REL}"
             FLAMEGRAPH_ARG="--flamegraph ${FLAMEGRAPH_REL}"
+          fi
+          FLAMEGRAPH_CLIENT_ARG=""
+          if [ -s /tmp/flamegraph-client.svg ]; then
+            mkdir -p bench/flamegraphs
+            FLAMEGRAPH_CLIENT_REL="flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
+            cp /tmp/flamegraph-client.svg "bench/${FLAMEGRAPH_CLIENT_REL}"
+            FLAMEGRAPH_CLIENT_ARG="--flamegraph-client ${FLAMEGRAPH_CLIENT_REL}"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results.json \
@@ -1201,7 +1219,7 @@ jobs:
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --resources /tmp/resource-data.json \
-            $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG
+            $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
@@ -1228,14 +1246,16 @@ jobs:
             /tmp/frps.log
             /tmp/frpc.log
 
-      - name: Upload flamegraph
+      - name: Upload flamegraphs
         if: always() && env.COLLECT_FLAMEGRAPH == '1'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: server-cpu-flamegraph-${{ github.run_id }}
+          name: cpu-flamegraphs-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: ignore
-          path: /tmp/flamegraph.svg
+          path: |
+            /tmp/flamegraph.svg
+            /tmp/flamegraph-client.svg
 
       - name: Cleanup
         if: always()
