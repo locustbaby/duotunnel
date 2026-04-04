@@ -775,7 +775,8 @@ jobs:
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
             # frame pointers let perf unwind stacks without DWARF (--call-graph fp):
             # ~1-3% overhead vs 5-15% for dwarf, and eliminates [unknown] frames
-            CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}\x1f-Cforce-frame-pointers=yes" \
+            SEP=$'\x1f'
+            CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes" \
               cargo build --release
           else
             cargo build --release
