@@ -228,14 +228,28 @@ jobs:
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
-            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+              break
+            fi
+            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+              break
+            fi
             sleep 0.5
           done
-          if ! grep -q "Login successful" /tmp/ci-client.log; then
+          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
             echo "ERROR: client did not login"
             echo "=== ctld ===" && cat /tmp/ci-ctld.log
             echo "=== server ===" && cat /tmp/ci-server.log
             echo "=== client ===" && cat /tmp/ci-client.log
+            echo "=== listeners :8082 ===" && ss -ltnp '( sport = :8082 )' || true
+            exit 1
+          fi
+          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+            echo "ERROR: client entry listener is not ready on :8082"
+            echo "=== ctld ===" && cat /tmp/ci-ctld.log
+            echo "=== server ===" && cat /tmp/ci-server.log
+            echo "=== client ===" && cat /tmp/ci-client.log
+            echo "=== listeners :8082 ===" && ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           echo "Client connected and logged in"
@@ -878,12 +892,23 @@ jobs:
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
-            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+              break
+            fi
+            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+              break
+            fi
             sleep 0.5
           done
-          if ! grep -q "Login successful" /tmp/ci-client.log; then
+          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
             echo "ERROR: client did not login"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+            echo "ERROR: client entry listener is not ready on :8082"
+            cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
@@ -954,12 +979,23 @@ jobs:
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
-            grep -q "Login successful" /tmp/ci-client.log 2>/dev/null && break
+            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+              break
+            fi
+            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+              break
+            fi
             sleep 0.5
           done
-          if ! grep -q "Login successful" /tmp/ci-client.log; then
+          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
             echo "ERROR: client did not login after restart"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+            echo "ERROR: client entry listener is not ready on :8082 after restart"
+            cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
