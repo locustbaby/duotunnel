@@ -40,6 +40,15 @@ def main():
             ph["start"] += frp_offset
             ph["end"] += frp_offset
             entry.setdefault("phases", []).append(ph)
+    if isinstance(entry.get("phases"), list):
+        entry["phases"] = sorted(
+            entry["phases"],
+            key=lambda p: (
+                p.get("start", 0) if isinstance(p, dict) else 0,
+                p.get("end", 0) if isinstance(p, dict) else 0,
+                p.get("name", "") if isinstance(p, dict) else "",
+            ),
+        )
 
     PREFIX = "window.BENCHMARK_DATA = "
     SUFFIX = ";"
