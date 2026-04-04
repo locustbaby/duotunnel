@@ -327,7 +327,7 @@ export function ingressHttpGetNoKeepalive() {
 export function egressHttpGetNoKeepalive() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://127.0.0.1:8081/?id=${id}`, {
+  const res = http.get(`http://127.0.0.1:8082/?id=${id}`, {
     headers: { Host: 'echo.local', Connection: 'close' },
     timeout: '10s',
     tags: { name: sn },
@@ -357,7 +357,7 @@ export function egressHttpGet() {
   const sn = exec.scenario.name;
   const withBody = !(sn.includes('_3000qps') || sn.includes('_8000qps'));
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://127.0.0.1:8081/?id=${id}`, {
+  const res = http.get(`http://127.0.0.1:8082/?id=${id}`, {
     headers: { Host: 'echo.local' },
     timeout: '10s',
     tags: { name: sn },
@@ -373,7 +373,7 @@ export function egressHttpPost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.post(
-    'http://127.0.0.1:8081/',
+    'http://127.0.0.1:8082/',
     JSON.stringify({ bench: 'egress-post', id: id }),
     {
       headers: { Host: 'echo.local', 'Content-Type': 'application/json' },
@@ -449,7 +449,7 @@ export function ingressPost100K() {
 export function egressPost10K() {
   const sn = exec.scenario.name;
   const res = http.post(
-    'http://127.0.0.1:8081/',
+    'http://127.0.0.1:8082/',
     PAYLOAD_10K,
     {
       headers: { Host: 'echo.local', 'Content-Type': 'application/octet-stream' },
@@ -613,7 +613,7 @@ export function bidirectional() {
     tags: { name: sn },
     responseType: 'text',
   });
-  const egRes = http.get(`http://127.0.0.1:8081/?id=${id}`, {
+  const egRes = http.get(`http://127.0.0.1:8082/?id=${id}`, {
     headers: { Host: 'echo.local' },
     timeout: '10s',
     tags: { name: sn },

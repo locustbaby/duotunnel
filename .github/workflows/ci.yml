@@ -100,7 +100,7 @@ jobs:
   #   ci-test-client
   #     │ ingress → echo.local:8080 (server http listener) ──QUIC:10086──→ client
   #     │                                                                   │ egress
-  #     │ egress  → 127.0.0.1:8081 (client http_entry_port)                │
+  #     │ egress  → 127.0.0.1:8082 (client http_entry_port)                │
   #     └─────────────────────────────────────────────────────────────────────→ backends
   #
   # Test sections:
@@ -212,10 +212,12 @@ jobs:
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
           # Wait for ctld's db_poll to detect the new token and push a Patch to server.
           # Poll interval is 1500ms; record current patch count and wait for it to increase.
-          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+          PATCHES_BEFORE=${PATCHES_BEFORE:-0}
           for i in $(seq 1 25); do
-            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
-            [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
+            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+            PATCHES_NOW=${PATCHES_NOW:-0}
+            [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
             sleep 0.2
           done
           echo "Token ready, server notified"
@@ -273,10 +275,10 @@ jobs:
             --body '{"ci":"ext-post-test"}' \
             --allow-status 429
 
-      - name: "[Ext-HTTP] GET egress — client:8081 → server → beeceptor"
+      - name: "[Ext-HTTP] GET egress — client:8082 → server → beeceptor"
         continue-on-error: true
         run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http "http://127.0.0.1:8082/" \
             --header "Host: echo.free.beeceptor.com" \
             --allow-status 429
 
@@ -292,7 +294,7 @@ jobs:
             (./target/release/ci-test-client http "http://echo.beeceptor.test:8080/" \
                --allow-status 429 \
                > /tmp/ext-bidir-in-$i.txt 2>&1 && echo "in-$i:OK" || echo "in-$i:FAIL") &
-            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            (./target/release/ci-test-client http "http://127.0.0.1:8082/" \
                --header "Host: echo.free.beeceptor.com" \
                --allow-status 429 \
                > /tmp/ext-bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" || echo "eg-$i:FAIL") &
@@ -356,14 +358,14 @@ jobs:
           if [ "$OK" -ge 8 ]; then echo "PASS: $OK/10"
           else echo "FAIL: only $OK/10 (expected >= 8)"; exit 1; fi
 
-      - name: "[HTTP] GET egress — client:8081 → server → http-echo"
+      - name: "[HTTP] GET egress — client:8082 → server → http-echo"
         run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http "http://127.0.0.1:8082/" \
             --header "Host: echo.local"
 
       - name: "[HTTP] POST + body verify egress"
         run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http "http://127.0.0.1:8082/" \
             --method POST \
             --header "Host: echo.local" \
             --body '{"tunnel":"ci","test":"egress-post-456"}' \
@@ -371,14 +373,14 @@ jobs:
 
       - name: "[HTTP] DELETE egress — method echoed"
         run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http "http://127.0.0.1:8082/" \
             --method DELETE \
             --header "Host: echo.local" \
             --expect-body "DELETE"
 
       - name: "[HTTP] Custom header forwarding egress"
         run: |
-          ./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http "http://127.0.0.1:8082/" \
             --header "Host: echo.local" \
             --header "X-Egress-Test: forwarded" \
             --expect-body "x-egress-test"
@@ -404,14 +406,14 @@ jobs:
             --header "X-H2-Test: h2c-header" \
             --expect-body "x-h2-test"
 
-      - name: "[HTTP2] GET h2c egress — client:8081"
+      - name: "[HTTP2] GET h2c egress — client:8082"
         run: |
-          ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http2 "http://127.0.0.1:8082/" \
             --header "Host: echo.local"
 
       - name: "[HTTP2] POST h2c + body verify egress"
         run: |
-          ./target/release/ci-test-client http2 "http://127.0.0.1:8081/" \
+          ./target/release/ci-test-client http2 "http://127.0.0.1:8082/" \
             --header "Host: echo.local" \
             --method POST \
             --body '{"h2":"egress-post-test"}' \
@@ -463,7 +465,7 @@ jobs:
             (./target/release/ci-test-client http "http://echo.local:8080/" \
                > /tmp/bidir-in-$i.txt 2>&1 && echo "in-$i:OK" >> /tmp/bidir-in-$i.txt \
                || echo "in-$i:FAIL" >> /tmp/bidir-in-$i.txt) &
-            (./target/release/ci-test-client http "http://127.0.0.1:8081/" \
+            (./target/release/ci-test-client http "http://127.0.0.1:8082/" \
                --header "Host: echo.local" \
                > /tmp/bidir-eg-$i.txt 2>&1 && echo "eg-$i:OK" >> /tmp/bidir-eg-$i.txt \
                || echo "eg-$i:FAIL" >> /tmp/bidir-eg-$i.txt) &
@@ -729,7 +731,7 @@ jobs:
   #
   # Scenarios (all via local echo backends):
   #   HTTP ingress GET/POST    — echo.local:8080 → QUIC → client → echo:9999
-  #   HTTP egress  GET/POST    — 127.0.0.1:8081  → QUIC → server → echo:9999
+  #   HTTP egress  GET/POST    — 127.0.0.1:8082  → QUIC → server → echo:9999
   #   WebSocket ingress        — ws.local:8080   → QUIC → client → ws-echo:8765
   #   gRPC Health + Echo       — grpc.local:8080 → QUIC → client → grpc:50051
   #   Bidirectional            — ingress + egress simultaneously
@@ -865,10 +867,12 @@ jobs:
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
           # Wait for ctld's db_poll to push the new token to server before connecting client.
-          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
+          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+          PATCHES_BEFORE=${PATCHES_BEFORE:-0}
           for i in $(seq 1 25); do
-            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || echo 0)
-            [ "${PATCHES_NOW:-0}" -gt "${PATCHES_BEFORE:-0}" ] && break
+            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+            PATCHES_NOW=${PATCHES_NOW:-0}
+            [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
             sleep 0.2
           done
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
@@ -902,16 +906,16 @@ jobs:
               fi
               sleep 0.5
             done
-            echo "Probing egress (127.0.0.1:8081)..."
+            echo "Probing egress (127.0.0.1:8082)..."
             for i in $(seq 1 10); do
-              if curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8081/ > /dev/null 2>&1; then
+              if curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null 2>&1; then
                 echo "  egress OK after probe $i"
                 break
               fi
               sleep 0.5
             done
             curl -sf --max-time 5 http://echo.local:8080/ > /dev/null && \
-            curl -sf --max-time 5 -H "Host: echo.local" http://127.0.0.1:8081/ > /dev/null
+            curl -sf --max-time 5 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null
           }
 
           if warmup_probe; then

@@ -3,7 +3,7 @@ tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
 auth_token: "set-via-TUNNEL_CLIENT__AUTH_TOKEN-env"
-http_entry_port: 8081
+http_entry_port: 8082
 quic:
   connections: 4
   keepalive_secs: 10
