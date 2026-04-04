@@ -12,10 +12,9 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
-use tunnel_service::proto::{ConfigSnapshot, WatchEvent, WatchRequest};
-use tunnel_store::rules::{
-    ClientGroup, EgressUpstreamDef, EgressVhostRule, IngressListener as ProtoListener,
-    IngressListenerMode,
+use tunnel_lib::ctld_proto::{
+    ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
+    ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
 };
 
 use crate::config::{
@@ -144,15 +143,15 @@ fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
 // ── Type conversions: tunnel_store routing types → server config types ────────
 
 fn proto_to_tunnel_management(
-    listeners: &[ProtoListener],
-    groups: &[ClientGroup],
+    listeners: &[ProtoIngressListener],
+    groups: &[ProtoClientGroup],
 ) -> TunnelManagement {
     let ingress = listeners
         .iter()
         .map(|l| IngressListener {
             port: l.port,
             mode: match &l.mode {
-                IngressListenerMode::Http { vhost } => IngressMode::Http(HttpListenerConfig {
+                ProtoIngressListenerMode::Http { vhost } => IngressMode::Http(HttpListenerConfig {
                     vhost: vhost
                         .iter()
                         .map(|r| VhostRule {
@@ -162,7 +161,7 @@ fn proto_to_tunnel_management(
                         })
                         .collect(),
                 }),
-                IngressListenerMode::Tcp { group_id, proxy_name } => {
+                ProtoIngressListenerMode::Tcp { group_id, proxy_name } => {
                     IngressMode::Tcp(TcpListenerConfig {
                         client_group: group_id.clone(),
                         proxy_name: proxy_name.clone(),
@@ -206,8 +205,8 @@ fn proto_to_tunnel_management(
 }
 
 fn proto_to_server_egress(
-    upstreams: &[EgressUpstreamDef],
-    vhost_rules: &[EgressVhostRule],
+    upstreams: &[ProtoEgressUpstreamDef],
+    vhost_rules: &[ProtoEgressVhostRule],
 ) -> ServerEgressUpstream {
     let upstream_map = upstreams
         .iter()

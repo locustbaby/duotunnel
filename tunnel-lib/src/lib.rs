@@ -1,4 +1,5 @@
 pub mod config;
+pub mod ctld_proto;
 pub mod egress;
 pub mod engine;
 pub mod infra;

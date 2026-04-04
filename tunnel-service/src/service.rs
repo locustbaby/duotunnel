@@ -83,12 +83,14 @@ impl ControlService {
     ) -> Result<ConfigSnapshot> {
         let routing = rule_store.load_routing().await?;
         let token_cache = load_token_cache(pool).await?;
+        let (ingress_listeners, client_groups, egress_upstreams, egress_vhost_rules) =
+            crate::proto::routing_data_to_proto(&routing);
         Ok(ConfigSnapshot {
             resource_version: version,
-            ingress_listeners: routing.ingress_listeners,
-            client_groups: routing.client_groups,
-            egress_upstreams: routing.egress_upstreams,
-            egress_vhost_rules: routing.egress_vhost_rules,
+            ingress_listeners,
+            client_groups,
+            egress_upstreams,
+            egress_vhost_rules,
             token_cache,
         })
     }
