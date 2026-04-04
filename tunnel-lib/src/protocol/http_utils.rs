@@ -1,4 +1,28 @@
 use hyper::header::{self, HeaderMap, HeaderName};
+
+/// Extract the value of the `Host` header from a raw HTTP/1.x request buffer.
+/// Returns `None` if the buffer is not valid UTF-8 or has no Host header.
+pub fn extract_host_from_http(data: &[u8]) -> Option<String> {
+    let data_str = std::str::from_utf8(data).ok()?;
+    let mut lines = data_str.lines();
+    lines.next(); // skip request line
+    for line in lines {
+        if line.len() > 5 && line[..5].eq_ignore_ascii_case("host:") {
+            return Some(line[5..].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Extract the HTTP method and path from the first line of a raw HTTP/1.x request buffer.
+pub fn extract_method_path_from_http(data: &[u8]) -> Option<(String, String)> {
+    let data_str = std::str::from_utf8(data).ok()?;
+    let first_line = data_str.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    Some((method, path))
+}
 pub fn sanitize_request_headers(headers: &mut HeaderMap) {
     let mut headers_to_remove = Vec::new();
     if let Some(connection) = headers.get(header::CONNECTION) {

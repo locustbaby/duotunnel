@@ -162,25 +162,9 @@ impl<T: Clone + Send + Sync> Default for PortRouter<T> {
         Self::new()
     }
 }
-pub fn extract_host_from_http(data: &[u8]) -> Option<String> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let mut lines = data_str.lines();
-    lines.next();
-    for line in lines {
-        if line.len() > 5 && line[..5].eq_ignore_ascii_case("host:") {
-            return Some(line[5..].trim().to_string());
-        }
-    }
-    None
-}
-pub fn extract_method_path_from_http(data: &[u8]) -> Option<(String, String)> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let first_line = data_str.lines().next()?;
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
-    Some((method, path))
-}
+// HTTP parsing helpers live in protocol::http_utils; re-exported here for
+// backwards compatibility with existing callers.
+pub use crate::protocol::http_utils::{extract_host_from_http, extract_method_path_from_http};
 pub type SharedVhostRouter<T> = Arc<VhostRouter<T>>;
 pub fn new_shared_vhost_router<T: Clone + Send + Sync>() -> SharedVhostRouter<T> {
     Arc::new(VhostRouter::new())

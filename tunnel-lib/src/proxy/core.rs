@@ -1,6 +1,5 @@
 use super::peers::PeerKind;
 use anyhow::Result;
-use bytes::BytesMut;
 use std::net::SocketAddr;
 use crate::models::msg::RoutingInfo;
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +25,12 @@ pub trait ProxyApp: Send + Sync {
 pub struct ProxyEngine<A: ProxyApp> {
     app: A,
 }
+
+thread_local! {
+    /// Per-worker-thread reusable peek buffer. Avoids zeroed() allocation on every stream.
+    static STREAM_PEEK_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl<A: ProxyApp> ProxyEngine<A> {
     pub fn new(app: A) -> Self {
         Self { app }
@@ -37,37 +42,33 @@ impl<A: ProxyApp> ProxyEngine<A> {
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
-        let mut buf = BytesMut::zeroed(4096);
-        let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
-        buf.truncate(n);
-        let initial_bytes: bytes::Bytes = buf.freeze();
-        let protocol = if let Some(ref ri) = routing_info {
-            match ri.protocol.as_str() {
-                "h2" => Protocol::H2,
-                "websocket" => Protocol::WebSocket,
-                "h1" => Protocol::H1,
-                "tcp" => Protocol::Tcp,
-                _ => {
-                    if n > 0 && is_websocket_upgrade(&initial_bytes) {
-                        Protocol::WebSocket
-                    } else if n > 0 {
-                        Protocol::H1
-                    } else {
-                        Protocol::Unknown
-                    }
-                }
-            }
-        } else if n > 0 && is_websocket_upgrade(&initial_bytes) {
-            Protocol::WebSocket
-        } else if n > 0 {
-            Protocol::H1
+        // Take the thread-local buffer so we can use it across the await point.
+        // The TL slot holds an empty Vec while this frame is live; it is restored below.
+        let mut tl_buf = STREAM_PEEK_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        if tl_buf.capacity() < 4096 {
+            tl_buf.reserve(4096);
+        }
+        // SAFETY: capacity >= 4096; recv.read() overwrites bytes before any read occurs.
+        unsafe { tl_buf.set_len(4096) };
+        let n = recv.read(&mut tl_buf[..]).await?.unwrap_or(0);
+
+        let initial_bytes: bytes::Bytes = if n > 0 {
+            // Copy only the actual bytes into a frozen Bytes; return buffer to TL pool.
+            let b = bytes::Bytes::copy_from_slice(&tl_buf[..n]);
+            tl_buf.truncate(0);
+            STREAM_PEEK_BUF.with(|cell| *cell.borrow_mut() = tl_buf);
+            b
         } else {
-            Protocol::Unknown
+            tl_buf.truncate(0);
+            STREAM_PEEK_BUF.with(|cell| *cell.borrow_mut() = tl_buf);
+            bytes::Bytes::new()
         };
+
+        let protocol = detect_protocol(n, &initial_bytes, routing_info.as_ref());
         let mut ctx = Context {
             client_addr,
             protocol,
-            initial_bytes: Some(initial_bytes),
+            initial_bytes: if n > 0 { Some(initial_bytes) } else { None },
             routing_info,
         };
         let peer = self.app.upstream_peer(&mut ctx).await?;
@@ -75,7 +76,23 @@ impl<A: ProxyApp> ProxyEngine<A> {
         Ok(())
     }
 }
-fn is_websocket_upgrade(data: &[u8]) -> bool {
+
+/// Determine protocol from routing_info hint or from the first bytes of the stream.
+/// Consolidates the websocket upgrade check into a single httparse pass.
+fn detect_protocol(n: usize, data: &[u8], routing_info: Option<&RoutingInfo>) -> Protocol {
+    if let Some(ri) = routing_info {
+        match ri.protocol.as_str() {
+            "h2" => return Protocol::H2,
+            "websocket" => return Protocol::WebSocket,
+            "h1" => return Protocol::H1,
+            "tcp" => return Protocol::Tcp,
+            _ => {}
+        }
+    }
+    if n == 0 {
+        return Protocol::Unknown;
+    }
+    // Single httparse pass: detect both WebSocket upgrade and H1 together.
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     if req.parse(data).is_ok() {
@@ -85,9 +102,10 @@ fn is_websocket_upgrade(data: &[u8]) -> bool {
                     .unwrap_or("")
                     .eq_ignore_ascii_case("websocket")
             {
-                return true;
+                return Protocol::WebSocket;
             }
         }
+        return Protocol::H1;
     }
-    false
+    Protocol::H1
 }
