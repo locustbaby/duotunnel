@@ -12,13 +12,17 @@ pub struct PkiParams {
 }
 impl Default for PkiParams {
     fn default() -> Self {
-        Self { cert_cache_ttl_secs: 3600 }
+        Self {
+            cert_cache_ttl_secs: 3600,
+        }
     }
 }
 
 pub fn init_cert_cache(params: &PkiParams) {
     let mut guard = CERT_CACHE.write().unwrap();
-    *guard = Some(CertCache::new(Duration::from_secs(params.cert_cache_ttl_secs)));
+    *guard = Some(CertCache::new(Duration::from_secs(
+        params.cert_cache_ttl_secs,
+    )));
 }
 
 struct CachedEntry {
@@ -36,7 +40,10 @@ struct CertCache {
 
 impl CertCache {
     fn new(ttl: Duration) -> Self {
-        Self { entries: HashMap::new(), ttl }
+        Self {
+            entries: HashMap::new(),
+            ttl,
+        }
     }
 
     fn get(&self, host: &str) -> Option<Arc<rustls::ServerConfig>> {
@@ -52,7 +59,13 @@ impl CertCache {
     fn insert(&mut self, host: String, server_config: Arc<rustls::ServerConfig>) {
         let ttl = self.ttl;
         self.entries.retain(|_, e| e.created_at.elapsed() < ttl);
-        self.entries.insert(host, CachedEntry { server_config, created_at: Instant::now() });
+        self.entries.insert(
+            host,
+            CachedEntry {
+                server_config,
+                created_at: Instant::now(),
+            },
+        );
     }
 }
 
@@ -76,7 +89,9 @@ pub fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::ServerConfi
     // Slow path: write lock — check again, then generate.
     let mut guard = CERT_CACHE.write().unwrap();
     let cache = guard.get_or_insert_with(|| {
-        CertCache::new(Duration::from_secs(PkiParams::default().cert_cache_ttl_secs))
+        CertCache::new(Duration::from_secs(
+            PkiParams::default().cert_cache_ttl_secs,
+        ))
     });
     // Second check inside write lock eliminates the race.
     if let Some(cfg) = cache.get(host) {
@@ -116,8 +131,7 @@ pub fn generate_self_signed_cert_for_host(
     Ok((vec![CertificateDer::from(cert_der)], key))
 }
 
-pub fn generate_self_signed_cert() -> Result<
-    (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
-> {
+pub fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>
+{
     generate_self_signed_cert_for_host("localhost")
 }
