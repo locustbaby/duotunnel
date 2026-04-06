@@ -164,7 +164,9 @@ fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
     #[cfg(feature = "profiling")]
-    spawn_pprof_collector();
+    if pprof_enabled() {
+        spawn_pprof_collector();
+    }
     run_with_tokio(async_main())
 }
 async fn async_main() -> Result<()> {
@@ -179,6 +181,47 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     builder.enable_all();
     let runtime = builder.build()?;
     runtime.block_on(fut)
+}
+#[cfg(feature = "profiling")]
+fn init_observability(log_level: &str) -> Option<tracing_chrome::FlushGuard> {
+    if env_flag("CHROME_TRACE_ENABLED") {
+        use tracing_subscriber::prelude::*;
+
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+        let out =
+            std::env::var("CHROME_TRACE_OUT").unwrap_or_else(|_| "/tmp/server-trace.json".into());
+        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().file(out).build();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(chrome_layer)
+            .init();
+        Some(guard)
+    } else {
+        tunnel_lib::infra::observability::init_tracing(log_level);
+        None
+    }
+}
+#[cfg(not(feature = "profiling"))]
+fn init_observability(log_level: &str) {
+    tunnel_lib::infra::observability::init_tracing(log_level);
+}
+#[cfg(feature = "profiling")]
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            v == "1"
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
+}
+#[cfg(feature = "profiling")]
+fn pprof_enabled() -> bool {
+    env_flag("PPROF_ENABLED")
 }
 /// Starts a background thread that collects a CPU profile for the lifetime of
 /// the process and writes a flamegraph SVG when SIGUSR1 is received.
@@ -228,7 +271,10 @@ fn write_pprof_svg(report: &pprof::Report, out: &str) -> anyhow::Result<()> {
 async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
-    tunnel_lib::infra::observability::init_tracing(log_level);
+    #[cfg(feature = "profiling")]
+    let _chrome_trace_guard = init_observability(log_level);
+    #[cfg(not(feature = "profiling"))]
+    init_observability(log_level);
     let pool = tunnel_store::open_sqlite_pool(&config.server.database_url).await?;
     let auth = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool);
     auth.migrate().await?;
@@ -275,7 +321,10 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         config::validate_server_config(&config)?;
     }
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
-    tunnel_lib::infra::observability::init_tracing(log_level);
+    #[cfg(feature = "profiling")]
+    let _chrome_trace_guard = init_observability(log_level);
+    #[cfg(not(feature = "profiling"))]
+    init_observability(log_level);
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
