@@ -1280,7 +1280,7 @@ jobs:
             curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 \
               || { echo "ERROR: server healthz never became ready"; cat "/tmp/ci-server-${SUFFIX}.log"; exit 1; }
 
-            CLIENT_NAME="ci-group-${SUFFIX}"
+            CLIENT_NAME="ci-group"
             TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
               client create-client "${CLIENT_NAME}" 2>/dev/null | awk '/^Token:/ {print $2; exit}')
             if [ -z "$TOKEN" ]; then
@@ -1314,19 +1314,70 @@ jobs:
               exit 1
             fi
 
-            ok=0
-            for i in $(seq 1 30); do
-              if curl -sf --max-time 3 http://echo.local:8080/ > /dev/null 2>&1 && \
-                 curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null 2>&1; then
-                ok=1
-                break
+            warmup_probe() {
+              for i in $(seq 1 10); do
+                if curl -sf --max-time 3 http://echo.local:8080/ > /dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.5
+              done
+              for i in $(seq 1 10); do
+                if curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.5
+              done
+              curl -sf --max-time 5 http://echo.local:8080/ > /dev/null && \
+              curl -sf --max-time 5 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null
+            }
+
+            if ! warmup_probe; then
+              echo "WARNING: warmup failed, restarting client then server..."
+              kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+              sleep 0.5
+              kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+              sleep 0.5
+
+              PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/server-pprof \
+                ./target/release/server --config ci-helpers/server.yaml \
+                --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
+              echo $! > /tmp/server.pid
+              for i in $(seq 1 60); do
+                curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+                sleep 0.5
+              done
+              if ! curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1; then
+                echo "ERROR: server healthz not ready after restart"
+                cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
+                exit 1
               fi
-              sleep 1
-            done
-            if [ "$ok" -ne 1 ]; then
-              echo "ERROR: warmup failed"
-              cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
-              exit 1
+
+              PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/client-pprof \
+                ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
+              echo $! > /tmp/client.pid
+              for i in $(seq 1 60); do
+                if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+                  break
+                fi
+                curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
+                sleep 0.5
+              done
+              if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+                echo "ERROR: client did not login after restart"
+                cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
+                exit 1
+              fi
+              if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+                echo "ERROR: client healthz not ready after restart"
+                cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
+                exit 1
+              fi
+
+              if ! warmup_probe; then
+                echo "ERROR: warmup failed"
+                cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
+                exit 1
+              fi
             fi
 
             (cd ci-helpers/k6 && k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js)
