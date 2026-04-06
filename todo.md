@@ -11,7 +11,7 @@ After `dial9-tokio-telemetry` publishes a crate version that includes commit `64
 **Implementation notes**:
 1. Remove `[patch.crates-io].dial9-tokio-telemetry`.
 2. Keep `client/server` using the same released crates.io version.
-3. Verify CI stress-test still emits server/client trace artifacts and dashboard links.
+3. Verify CI `stress-test` + `stress-trace-8k` merged publish path keeps dashboard metrics and phase visualization correct.
 
 ## Auth & Config Source Plan
 

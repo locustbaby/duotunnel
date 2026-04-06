@@ -26,14 +26,45 @@ function filterCases(cases, profile) {
   return cases;
 }
 
+function parseSeconds(v) {
+  if (v === undefined || v === null) return 0;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim();
+  if (s.endsWith('s')) return Number(s.slice(0, -1)) || 0;
+  return Number(s) || 0;
+}
+
+function formatSeconds(v) {
+  const n = Math.max(0, Number(v) || 0);
+  const s = Number.isInteger(n) ? String(n) : String(Number(n.toFixed(3)));
+  return `${s}s`;
+}
+
+function normalizeCaseStartTimes(cases) {
+  const cloned = cases.map((c) => ({ ...c, scenario: { ...(c.scenario || {}) } }));
+  if (!cloned.length) return { cases: cloned, offset: 0 };
+  const minStart = Math.min(...cloned.map((c) => parseSeconds(c.scenario.startTime || 0)));
+  if (minStart <= 0) return { cases: cloned, offset: 0 };
+  for (const c of cloned) {
+    const shifted = parseSeconds(c.scenario.startTime || 0) - minStart;
+    c.scenario.startTime = formatSeconds(shifted);
+  }
+  return { cases: cloned, offset: minStart };
+}
+
 function filterPhases(phases, activeCases) {
   const active = new Set(activeCases.map((c) => c.name));
   return phases.filter((p) => (p.scenarios || []).some((s) => active.has(s)));
 }
 
 const BENCH_PROFILE = activeProfile();
-const ACTIVE_CASES = filterCases(DUOTUNNEL_CASES, BENCH_PROFILE);
-const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, ACTIVE_CASES);
+const FILTERED_CASES = filterCases(DUOTUNNEL_CASES, BENCH_PROFILE);
+const { cases: ACTIVE_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
+const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
+  ...p,
+  start: Math.max(0, (p.start || 0) - ACTIVE_OFFSET),
+  end: Math.max(0, (p.end || 0) - ACTIVE_OFFSET),
+}));
 
 const { reqCounters, errCounters } = buildCounters(ACTIVE_CASES, Counter);
 

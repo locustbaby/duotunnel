@@ -1231,68 +1231,19 @@ jobs:
             --output       /tmp/resource-data.json \
             || echo "Resource parsing failed (non-fatal)"
 
-      - name: Check benchmark output exists
-        id: bench_check
+      - name: Upload benchmark outputs (core)
         if: always()
-        run: |
-          if [ -s /tmp/bench-results.json ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish benchmark to gh-pages
-        if: github.ref == 'refs/heads/main' && steps.bench_check.outputs.exists == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd /tmp
-          git clone --branch gh-pages --single-branch --depth 1 \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" gh-pages-repo \
-            || { mkdir gh-pages-repo && cd gh-pages-repo && git init && git checkout --orphan gh-pages && cd /tmp; }
-          cd gh-pages-repo
-          mkdir -p bench
-          cp "${{ github.workspace }}/bench/index.html" bench/index.html
-          FRP_ARG=""
-          FRP_OFFSET_ARG=""
-          TOKIO_TRACE_SERVER_URL_ARG=""
-          TOKIO_TRACE_CLIENT_URL_ARG=""
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          PAGES_BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
-          if [ -s /tmp/bench-results-frp.json ]; then
-            FRP_ARG="--frp-result /tmp/bench-results-frp.json"
-            if [ -f /tmp/frp_k6_start_epoch ] && [ -f /tmp/sampling_start_epoch ]; then
-              FRP_K6_OFFSET=$(( $(cat /tmp/frp_k6_start_epoch) - $(cat /tmp/sampling_start_epoch) ))
-              FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
-            fi
-          fi
-          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
-          if [ -s /tmp/server-trace.bin ]; then
-            mkdir -p bench/traces
-            TOKIO_TRACE_SERVER_REL="traces/${SHORT_SHA}-${{ github.run_id }}-server.bin"
-            cp /tmp/server-trace.bin "bench/${TOKIO_TRACE_SERVER_REL}"
-            TOKIO_TRACE_SERVER_URL_ARG="--tokio-trace-server-url ${PAGES_BASE_URL}/bench/${TOKIO_TRACE_SERVER_REL}"
-          fi
-          if [ -s /tmp/client-trace.bin ]; then
-            mkdir -p bench/traces
-            TOKIO_TRACE_CLIENT_REL="traces/${SHORT_SHA}-${{ github.run_id }}-client.bin"
-            cp /tmp/client-trace.bin "bench/${TOKIO_TRACE_CLIENT_REL}"
-            TOKIO_TRACE_CLIENT_URL_ARG="--tokio-trace-client-url ${PAGES_BASE_URL}/bench/${TOKIO_TRACE_CLIENT_REL}"
-          fi
-          python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
-            --result /tmp/bench-results.json \
-            --data   bench/data.js \
-            --sha    "${{ github.sha }}" \
-            --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
-            --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            --resources /tmp/resource-data.json \
-            $FRP_ARG $FRP_OFFSET_ARG $TOKIO_TRACE_SERVER_URL_ARG $TOKIO_TRACE_CLIENT_URL_ARG
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bench/
-          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
-          git commit -m "bench: update data for $(echo '${{ github.sha }}' | cut -c1-7)"
-          git push --force origin gh-pages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-core-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/bench-results.json
+            /tmp/bench-results-frp.json
+            /tmp/resource-data.json
+            /tmp/sampling_start_epoch
+            /tmp/frp_k6_start_epoch
 
       - name: Dump tunnel error logs
         if: always()
@@ -1486,6 +1437,16 @@ jobs:
         run: |
           k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js
 
+      - name: Upload benchmark outputs (8k)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-trace-8k-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/bench-results.json
+
       - name: Stop tunnel for trace flush
         if: always()
         run: |
@@ -1530,3 +1491,171 @@ jobs:
           kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+
+  publish-bench:
+    name: Publish Benchmark (merged)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [stress-test, stress-trace-8k]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download core benchmark outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-core-results-${{ github.run_id }}
+          path: /tmp/core
+
+      - name: Download 8k benchmark outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-trace-8k-results-${{ github.run_id }}
+          path: /tmp/trace8k
+          if-no-files-found: ignore
+
+      - name: Merge benchmark outputs
+        run: |
+          if [ ! -s /tmp/core/bench-results.json ]; then
+            echo "ERROR: missing core benchmark output"
+            exit 1
+          fi
+          python3 - << 'PY'
+          import json
+          from copy import deepcopy
+
+          core_path = "/tmp/core/bench-results.json"
+          extra_path = "/tmp/trace8k/bench-results.json"
+          out_path = "/tmp/bench-results-merged.json"
+
+          def r2(v):
+              return round(float(v), 2)
+
+          with open(core_path, "r", encoding="utf-8") as f:
+              core = json.load(f)
+
+          merged = deepcopy(core)
+
+          if merged.get("scenarios") is None:
+              merged["scenarios"] = []
+          if merged.get("phases") is None:
+              merged["phases"] = []
+
+          sc_by_name = {}
+          for s in merged["scenarios"]:
+              if isinstance(s, dict) and "name" in s:
+                  sc_by_name[s["name"]] = s
+
+          if extra_path:
+              try:
+                  with open(extra_path, "r", encoding="utf-8") as f:
+                      extra = json.load(f)
+              except FileNotFoundError:
+                  extra = None
+              if extra:
+                  for s in extra.get("scenarios", []):
+                      if isinstance(s, dict) and "name" in s:
+                          sc_by_name[s["name"]] = s
+
+                  core_max_end = 0
+                  for p in merged.get("phases", []):
+                      if isinstance(p, dict):
+                          core_max_end = max(core_max_end, float(p.get("end", 0) or 0))
+                  phase_offset = core_max_end + 5
+
+                  for p in extra.get("phases", []):
+                      if not isinstance(p, dict):
+                          continue
+                      np = deepcopy(p)
+                      np["start"] = r2(float(np.get("start", 0) or 0) + phase_offset)
+                      np["end"] = r2(float(np.get("end", 0) or 0) + phase_offset)
+                      name = str(np.get("name", ""))
+                      if name and not name.endswith(" (8k)"):
+                          np["name"] = f"{name} (8k)"
+                      merged["phases"].append(np)
+
+                  core_catalog = merged.get("catalog") or {}
+                  extra_catalog = extra.get("catalog") or {}
+                  core_case_order = list(core_catalog.get("caseOrder") or [])
+                  for n in extra_catalog.get("caseOrder") or []:
+                      if n not in core_case_order:
+                          core_case_order.append(n)
+                  core_catalog["caseOrder"] = core_case_order
+
+                  categories = []
+                  seen_cat = set()
+                  for c in (core_catalog.get("categories") or []) + (extra_catalog.get("categories") or []):
+                      if not isinstance(c, dict):
+                          continue
+                      cid = c.get("id")
+                      if cid in seen_cat:
+                          continue
+                      seen_cat.add(cid)
+                      categories.append(c)
+                  core_catalog["categories"] = categories
+                  merged["catalog"] = core_catalog
+
+          merged["scenarios"] = list(sc_by_name.values())
+
+          total_requests = 0.0
+          total_errors = 0.0
+          total_rps = 0.0
+          for s in merged["scenarios"]:
+              req = float(s.get("requests", 0) or 0)
+              err = float(s.get("err", 0) or 0)
+              rps = float(s.get("rps", 0) or 0)
+              total_requests += req
+              total_errors += req * err / 100.0
+              if bool(s.get("includeInTotalRps", False)):
+                  total_rps += rps
+
+          total_err = 0.0 if total_requests <= 0 else (total_errors / total_requests * 100.0)
+          merged["summary"] = {
+              "totalRPS": r2(total_rps),
+              "totalErr": r2(total_err),
+              "totalRequests": int(round(total_requests)),
+          }
+
+          with open(out_path, "w", encoding="utf-8") as f:
+              json.dump(merged, f, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Publish benchmark to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd /tmp
+          git clone --branch gh-pages --single-branch --depth 1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" gh-pages-repo \
+            || { mkdir gh-pages-repo && cd gh-pages-repo && git init && git checkout --orphan gh-pages && cd /tmp; }
+          cd gh-pages-repo
+          mkdir -p bench
+          cp "${{ github.workspace }}/bench/index.html" bench/index.html
+          FRP_ARG=""
+          FRP_OFFSET_ARG=""
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          if [ -s /tmp/core/bench-results-frp.json ]; then
+            FRP_ARG="--frp-result /tmp/core/bench-results-frp.json"
+            if [ -f /tmp/core/frp_k6_start_epoch ] && [ -f /tmp/core/sampling_start_epoch ]; then
+              FRP_K6_OFFSET=$(( $(cat /tmp/core/frp_k6_start_epoch) - $(cat /tmp/core/sampling_start_epoch) ))
+              FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
+            fi
+          fi
+          RES_ARG=""
+          if [ -s /tmp/core/resource-data.json ]; then
+            RES_ARG="--resources /tmp/core/resource-data.json"
+          fi
+          python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
+            --result /tmp/bench-results-merged.json \
+            --data   bench/data.js \
+            --sha    "${{ github.sha }}" \
+            --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
+            --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
+            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench/
+          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
+          git commit -m "bench: update data for $(echo '${{ github.sha }}' | cut -c1-7)"
+          git push --force origin gh-pages

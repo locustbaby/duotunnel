@@ -614,6 +614,7 @@ export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
       protocol: c.protocol,
       direction: c.direction,
       category: c.category,
+      includeInTotalRps: !!c.includeInTotalRps,
       p50,
       p95,
       p99,
