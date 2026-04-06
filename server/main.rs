@@ -160,7 +160,7 @@ fn build_config_source(config_path: &str, rule_store: Arc<dyn RuleStore>) -> Arc
     ))
 }
 fn main() -> Result<()> {
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
     #[cfg(feature = "profiling")]
@@ -296,7 +296,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     #[cfg(not(feature = "profiling"))]
     tunnel_lib::infra::observability::init_tracing(log_level);
     #[cfg(feature = "profiling")]
-    let _chrome_guard = init_tracing_with_chrome(log_level);
+    let chrome_guard = init_tracing_with_chrome(log_level);
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
@@ -389,13 +389,14 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     }
     #[cfg(feature = "profiling")]
     {
-        // In profiling mode wait for either the QUIC server to finish or SIGTERM,
-        // then return normally so _chrome_guard is dropped and the trace is flushed.
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
         tokio::select! {
             r = quic_handle => { r??; }
-            _ = sigterm.recv() => { info!("received SIGTERM, flushing traces"); }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, flushing traces");
+                chrome_guard.flush();
+            }
         }
     }
     #[cfg(not(feature = "profiling"))]

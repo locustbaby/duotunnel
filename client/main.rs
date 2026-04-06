@@ -34,7 +34,7 @@ struct Args {
     config: String,
 }
 fn main() -> Result<()> {
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
     #[cfg(feature = "profiling")]
@@ -48,7 +48,7 @@ async fn async_main() -> Result<()> {
     #[cfg(not(feature = "profiling"))]
     tunnel_lib::infra::observability::init_tracing(log_level);
     #[cfg(feature = "profiling")]
-    let _chrome_guard = init_tracing_with_chrome(log_level);
+    let chrome_guard = init_tracing_with_chrome(log_level);
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
     let endpoint = build_quic_endpoint(&config)?;
@@ -60,27 +60,37 @@ async fn async_main() -> Result<()> {
             cancel_clone.cancel();
         }
     });
+    let run_cancel = cancel.clone();
+    let run_fut = async move {
+        if config.quic.connections > 1 {
+            info!(
+                connections = % config.quic.connections, "using multi-QUIC connection pool"
+            );
+            pool::run_pool(config, endpoint, run_cancel).await
+        } else {
+            connect::run_supervisor(config, endpoint, run_cancel).await
+        }
+    };
+    tokio::pin!(run_fut);
     #[cfg(feature = "profiling")]
     {
-        // In profiling mode also listen for SIGTERM so the chrome trace guard is
-        // dropped (and flushed) before the process exits.
         use tokio::signal::unix::{signal, SignalKind};
-        let cancel_sigterm = cancel.clone();
-        tokio::spawn(async move {
-            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-            sigterm.recv().await;
-            info!("received SIGTERM, flushing traces");
-            cancel_sigterm.cancel();
-        });
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            res = &mut run_fut => res,
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, flushing traces");
+                chrome_guard.flush();
+                cancel.cancel();
+                match tokio::time::timeout(Duration::from_secs(15), &mut run_fut).await {
+                    Ok(res) => res,
+                    Err(_) => Ok(()),
+                }
+            }
+        }
     }
-    if config.quic.connections > 1 {
-        info!(
-            connections = % config.quic.connections, "using multi-QUIC connection pool"
-        );
-        pool::run_pool(config, endpoint, cancel).await
-    } else {
-        connect::run_supervisor(config, endpoint, cancel).await
-    }
+    #[cfg(not(feature = "profiling"))]
+    run_fut.await
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();

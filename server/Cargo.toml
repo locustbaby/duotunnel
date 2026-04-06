@@ -19,8 +19,8 @@ subtle = "2"
 hex = "0.4"
 tokio = { version = "1.49", features = ["full", "io-util"] }
 tokio-util = "0.7"
-quinn = "0.11"
-rustls = { version = "0.23", features = ["ring"] }
+quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 webpki-roots = "0.26"
 serde_yaml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
@@ -35,7 +35,7 @@ httparse = "1.9"
 rcgen = "0.14"
 hyper = { version = "1.8", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
-hyper-rustls = { version = "0.27", features = ["http2", "ring"] }
+hyper-rustls = { version = "0.27", features = ["http2", "aws-lc-rs"] }
 http-body-util = "0.1"
 async-trait = "0.1"
 tokio-rustls = "0.26"

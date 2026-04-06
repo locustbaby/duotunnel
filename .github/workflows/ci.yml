@@ -1255,8 +1255,13 @@ jobs:
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
 
   stress-profile-8k:
-    name: Stress Profile 8K (pprof + Chrome Trace)
+    name: Stress Profile 8K (q${{ matrix.quic_connections }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        quic_connections: [1, 4]
     permissions:
       contents: read
     steps:
@@ -1278,16 +1283,10 @@ jobs:
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      - name: Cache release build artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: target/release
-          key: release-bins-profile-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
-
       - name: Build all binaries (profiling + debuginfo)
         run: |
           SEP=$'\x1f'
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1" \
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}-Cdebug-assertions=yes" \
             cargo build --release --workspace \
               --features server/profiling \
               --features client/profiling
@@ -1305,6 +1304,10 @@ jobs:
           127.0.0.1  ws.local
           127.0.0.1  grpc.local
           EOF
+
+      - name: Cooldown before q4 run
+        if: matrix.quic_connections == 4
+        run: sleep 10
 
       - name: Start all backends + tunnel (profiling)
         timeout-minutes: 2
@@ -1341,7 +1344,7 @@ jobs:
             || ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "${{ matrix.quic_connections }}"
 
           PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
           PATCHES_BEFORE=${PATCHES_BEFORE:-0}
@@ -1409,10 +1412,20 @@ jobs:
           sleep 2
 
       - name: Upload benchmark outputs (8k)
-        if: always()
+        if: always() && matrix.quic_connections == 4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/bench-results.json
+
+      - name: Upload benchmark outputs (8k, q${{ matrix.quic_connections }})
+        if: always() && matrix.quic_connections != 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-profile-8k-results-q${{ matrix.quic_connections }}-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
@@ -1425,18 +1438,24 @@ jobs:
           SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
           [ -n "$CLIENT_PID" ] && kill -TERM "$CLIENT_PID" 2>/dev/null || true
           [ -n "$SERVER_PID" ] && kill -TERM "$SERVER_PID" 2>/dev/null || true
-          for i in $(seq 1 20); do
+          for i in $(seq 1 60); do
             CDONE=1; SDONE=1
             [ -n "$CLIENT_PID" ] && kill -0 "$CLIENT_PID" 2>/dev/null && CDONE=0
             [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null && SDONE=0
             [ "$CDONE" = "1" ] && [ "$SDONE" = "1" ] && break
             sleep 0.5
           done
+          for f in /tmp/server-trace.json /tmp/client-trace.json; do
+            for i in $(seq 1 20); do
+              [ -s "$f" ] && break
+              sleep 0.5
+            done
+          done
           [ -n "$CLIENT_PID" ] && kill -9 "$CLIENT_PID" 2>/dev/null || true
           [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
 
       - name: Upload pprof flamegraphs
-        if: always()
+        if: always() && matrix.quic_connections == 4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pprof-flamegraphs-8k-${{ github.run_id }}
@@ -1446,11 +1465,33 @@ jobs:
             /tmp/server-pprof.svg
             /tmp/client-pprof.svg
 
+      - name: Upload pprof flamegraphs (q${{ matrix.quic_connections }})
+        if: always() && matrix.quic_connections != 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pprof-flamegraphs-8k-q${{ matrix.quic_connections }}-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/server-pprof.svg
+            /tmp/client-pprof.svg
+
       - name: Upload Chrome traces
-        if: always()
+        if: always() && matrix.quic_connections == 4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chrome-traces-8k-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/server-trace.json
+            /tmp/client-trace.json
+
+      - name: Upload Chrome traces (q${{ matrix.quic_connections }})
+        if: always() && matrix.quic_connections != 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chrome-traces-8k-q${{ matrix.quic_connections }}-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
@@ -1461,7 +1502,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-profile-8k-logs-${{ github.run_id }}
+          name: stress-profile-8k-logs-q${{ matrix.quic_connections }}-${{ github.run_id }}
           retention-days: 7
           path: |
             /tmp/ci-server.log

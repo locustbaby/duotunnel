@@ -16,8 +16,8 @@ profiling = ["dep:pprof", "dep:libc", "dep:tracing-chrome"]
 tunnel-lib = { path = "../tunnel-lib" }
 tokio = { version = "1.49", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
-quinn = "0.11"
-rustls = { version = "0.23", features = ["ring"] }
+quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 serde = { version = "1.0", features = ["derive"] }
@@ -32,7 +32,7 @@ bytes = "1.9"
 httparse = "1.9"
 hyper = { version = "1.8", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
-hyper-rustls = { version = "0.27", features = ["http2", "ring"] }
+hyper-rustls = { version = "0.27", features = ["http2", "aws-lc-rs"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.0"
 http-body-util = "0.1"
