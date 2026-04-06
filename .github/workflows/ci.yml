@@ -794,7 +794,7 @@ jobs:
     permissions:
       contents: write
     env:
-      COLLECT_FLAMEGRAPH: ${{ (github.event_name != 'workflow_dispatch' || inputs.collect_flamegraph) && '1' || '0' }}
+      COLLECT_FLAMEGRAPH: "0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -1137,7 +1137,7 @@ jobs:
         working-directory: ci-helpers/k6
         run: |
           date +%s > /tmp/k6_start_epoch
-          k6 run -e GITHUB_SHA=${{ github.sha }} bench.js &
+          k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=core bench.js &
           echo $! > /tmp/k6.pid
           wait "$(cat /tmp/k6.pid)"
 
@@ -1327,6 +1327,204 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+
+  stress-trace-8k:
+    name: Stress Trace 8K (dial9)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Cache cargo registry + index
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Cache release build artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target/release
+          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
+          restore-keys: release-bins-${{ runner.os }}-
+
+      - name: Build all binaries (dial9)
+        run: |
+          SEP=$'\x1f'
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}--cfg${SEP}tokio_unstable" \
+            cargo build --release --workspace --features server/dial9-telemetry --features client/dial9-telemetry
+
+      - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Enable perf events for tokio telemetry
+        run: |
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
+            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
+            sudo sysctl -w kernel.kptr_restrict=0 || true
+          echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
+          echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict)"
+
+      - name: Tune kernel parameters
+        if: ${{ inputs.tune_kernel != 'false' }}
+        run: sudo bash scripts/tune-os.sh
+
+      - name: Configure /etc/hosts
+        run: |
+          sudo tee -a /etc/hosts << 'EOF'
+          127.0.0.1  echo.local
+          127.0.0.1  ws.local
+          127.0.0.1  grpc.local
+          EOF
+
+      - name: Start all backends + tunnel (dial9)
+        timeout-minutes: 2
+        run: |
+          ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
+          ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
+          ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log  2>&1 & echo $! > /tmp/grpc-echo.pid
+          for i in $(seq 1 20); do
+            curl -sf --max-time 2 http://127.0.0.1:9999/ > /dev/null && break
+            sleep 0.2
+          done
+          sleep 0.5
+
+          mkdir -p data
+          ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
+          echo $! > /tmp/ctld.pid
+          for i in $(seq 1 30); do
+            grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
+              /tmp/ci-ctld.log 2>/dev/null && break
+            sleep 0.2
+          done
+
+          DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+            ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 20); do
+            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
+            sleep 0.3
+          done
+
+          TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
+            client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
+            || ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
+            client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
+          if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
+          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+
+          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+          PATCHES_BEFORE=${PATCHES_BEFORE:-0}
+          for i in $(seq 1 25); do
+            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
+            PATCHES_NOW=${PATCHES_NOW:-0}
+            [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
+            sleep 0.2
+          done
+
+          DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          echo $! > /tmp/client.pid
+          for i in $(seq 1 40); do
+            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+              break
+            fi
+            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+              break
+            fi
+            sleep 0.5
+          done
+          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+            echo "ERROR: client did not login"
+            cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
+            echo "ERROR: client entry listener is not ready on :8082"
+            cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            ss -ltnp '( sport = :8082 )' || true
+            exit 1
+          fi
+
+      - name: Warmup — verify tunnel is serving
+        timeout-minutes: 2
+        run: |
+          ok=0
+          for i in $(seq 1 10); do
+            if curl -sf --max-time 3 http://echo.local:8080/ > /dev/null 2>&1 && \
+               curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "ERROR: warmup failed"
+            cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
+            exit 1
+          fi
+
+      - name: Run k6 stress test (8k only)
+        working-directory: ci-helpers/k6
+        run: |
+          k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js
+
+      - name: Stop tunnel for trace flush
+        if: always()
+        run: |
+          kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 3
+          kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-trace-8k-logs-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/ci-ctld.log
+            /tmp/http-echo.log
+            /tmp/ws-echo.log
+            /tmp/grpc-echo.log
+            /tmp/bench-results.json
+
+      - name: Upload tokio traces (8k)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tokio-telemetry-traces-8k-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            /tmp/server-trace.bin
+            /tmp/client-trace.bin
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/ctld.pid      2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true

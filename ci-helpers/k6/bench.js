@@ -14,7 +14,28 @@ import {
   buildSummaryOutput,
 } from './catalog.js';
 
-const { reqCounters, errCounters } = buildCounters(DUOTUNNEL_CASES, Counter);
+function activeProfile() {
+  const p = (__ENV.BENCH_PROFILE || 'full').toLowerCase();
+  if (p === '8k' || p === 'core' || p === 'full') return p;
+  return 'full';
+}
+
+function filterCases(cases, profile) {
+  if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps'));
+  if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps'));
+  return cases;
+}
+
+function filterPhases(phases, activeCases) {
+  const active = new Set(activeCases.map((c) => c.name));
+  return phases.filter((p) => (p.scenarios || []).some((s) => active.has(s)));
+}
+
+const BENCH_PROFILE = activeProfile();
+const ACTIVE_CASES = filterCases(DUOTUNNEL_CASES, BENCH_PROFILE);
+const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, ACTIVE_CASES);
+
+const { reqCounters, errCounters } = buildCounters(ACTIVE_CASES, Counter);
 
 const PAYLOAD_1K = 'x'.repeat(1024);
 const PAYLOAD_10K = 'x'.repeat(10240);
@@ -22,11 +43,11 @@ const PAYLOAD_100K = 'x'.repeat(102400);
 
 export const options = {
   discardResponseBodies: true,
-  scenarios: buildScenarios(DUOTUNNEL_CASES),
+  scenarios: buildScenarios(ACTIVE_CASES),
 
   noConnectionReuse: false,
 
-  thresholds: buildThresholds(DUOTUNNEL_CASES),
+  thresholds: buildThresholds(ACTIVE_CASES),
 };
 
 function track(ok) {
@@ -372,7 +393,7 @@ export function bidirectional() {
 }
 
 export function handleSummary(data) {
-  const output = buildSummaryOutput(data, DUOTUNNEL_CASES, DUOTUNNEL_PHASES);
+  const output = buildSummaryOutput(data, ACTIVE_CASES, ACTIVE_PHASES);
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: false }),

@@ -1,5 +1,18 @@
 # Tunnel TODO
 
+## Build & Dependency Plan
+
+### [TODO-54] Dial9 release follow-up
+**Priority**: High | **Status**: TODO
+
+**Goal**:
+After `dial9-tokio-telemetry` publishes a crate version that includes commit `64564b26`, remove the git `rev` patch and switch back to crates.io version pin.
+
+**Implementation notes**:
+1. Remove `[patch.crates-io].dial9-tokio-telemetry`.
+2. Keep `client/server` using the same released crates.io version.
+3. Verify CI stress-test still emits server/client trace artifacts and dashboard links.
+
 ## Auth & Config Source Plan
 
 ### [TODO-48] Token-only Client Registration/Login ✅
