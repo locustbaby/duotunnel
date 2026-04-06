@@ -55,7 +55,6 @@ pub async fn start_entry_listener(
         }
     }
 }
-#[cfg_attr(feature = "profiling", tracing::instrument(skip_all))]
 async fn handle_entry_connection(
     conn: Connection,
     local_stream: TcpStream,

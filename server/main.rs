@@ -218,24 +218,6 @@ fn spawn_pprof_collector() {
 }
 
 #[cfg(feature = "profiling")]
-fn init_tracing_with_chrome(log_level: &str) -> tracing_chrome::FlushGuard {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-    let trace_out =
-        std::env::var("CHROME_TRACE_OUT").unwrap_or_else(|_| "/tmp/server-trace.json".into());
-    let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
-        .file(trace_out)
-        .build();
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(chrome_layer)
-        .with(filter)
-        .init();
-    guard
-}
-
-#[cfg(feature = "profiling")]
 fn write_pprof_svg(report: &pprof::Report, out: &str) -> anyhow::Result<()> {
     let path = format!("{out}.svg");
     let mut f = std::fs::File::create(&path)?;
@@ -293,10 +275,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         config::validate_server_config(&config)?;
     }
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
-    #[cfg(not(feature = "profiling"))]
     tunnel_lib::infra::observability::init_tracing(log_level);
-    #[cfg(feature = "profiling")]
-    let chrome_guard = init_tracing_with_chrome(log_level);
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
@@ -387,19 +366,6 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
             }
         });
     }
-    #[cfg(feature = "profiling")]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            r = quic_handle => { r??; }
-            _ = sigterm.recv() => {
-                info!("received SIGTERM, flushing traces");
-                chrome_guard.flush();
-            }
-        }
-    }
-    #[cfg(not(feature = "profiling"))]
     quic_handle.await??;
     Ok(())
 }

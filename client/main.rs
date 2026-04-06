@@ -45,10 +45,7 @@ async fn async_main() -> Result<()> {
     let args = Args::parse();
     let config = ClientConfigFile::load(&args.config)?;
     let log_level = config.log_level.as_deref().unwrap_or("info");
-    #[cfg(not(feature = "profiling"))]
     tunnel_lib::infra::observability::init_tracing(log_level);
-    #[cfg(feature = "profiling")]
-    let chrome_guard = init_tracing_with_chrome(log_level);
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
     let endpoint = build_quic_endpoint(&config)?;
@@ -71,25 +68,6 @@ async fn async_main() -> Result<()> {
             connect::run_supervisor(config, endpoint, run_cancel).await
         }
     };
-    tokio::pin!(run_fut);
-    #[cfg(feature = "profiling")]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            res = &mut run_fut => res,
-            _ = sigterm.recv() => {
-                info!("received SIGTERM, flushing traces");
-                chrome_guard.flush();
-                cancel.cancel();
-                match tokio::time::timeout(Duration::from_secs(15), &mut run_fut).await {
-                    Ok(res) => res,
-                    Err(_) => Ok(()),
-                }
-            }
-        }
-    }
-    #[cfg(not(feature = "profiling"))]
     run_fut.await
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
@@ -98,24 +76,6 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let runtime = builder.build()?;
     runtime.block_on(fut)
 }
-#[cfg(feature = "profiling")]
-fn init_tracing_with_chrome(log_level: &str) -> tracing_chrome::FlushGuard {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-    let trace_out =
-        std::env::var("CHROME_TRACE_OUT").unwrap_or_else(|_| "/tmp/client-trace.json".into());
-    let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
-        .file(trace_out)
-        .build();
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(chrome_layer)
-        .with(filter)
-        .init();
-    guard
-}
-
 #[cfg(feature = "profiling")]
 fn spawn_pprof_collector() {
     use std::sync::atomic::{AtomicBool, Ordering};

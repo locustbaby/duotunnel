@@ -43,7 +43,6 @@ pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     }
     Ok(())
 }
-#[cfg_attr(feature = "profiling", tracing::instrument(skip_all))]
 async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();

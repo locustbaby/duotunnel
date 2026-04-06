@@ -10,7 +10,7 @@ path = "main.rs"
 
 [features]
 default = []
-profiling = ["dep:pprof", "dep:libc", "dep:tracing-chrome"]
+profiling = ["dep:pprof", "dep:libc"]
 
 [dependencies]
 tunnel-lib = { path = "../tunnel-lib" }
@@ -50,4 +50,3 @@ crossbeam-utils = "0.8"
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 pprof = { version = "0.14", features = ["flamegraph", "frame-pointer"], optional = true }
 libc = { version = "0.2", optional = true }
-tracing-chrome = { version = "0.7", optional = true }

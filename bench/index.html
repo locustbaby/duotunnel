@@ -433,11 +433,6 @@ function renderOverview() {
   })();
 }
 
-function perfettoUrl(relPath) {
-  const base = location.href.replace(/\/[^/]*(\?.*)?$/, '/');
-  return 'https://ui.perfetto.dev/#!/?url=' + encodeURIComponent(base + relPath);
-}
-
 function renderDetail(entry) {
   const prev = prevOf(entry);
   const sc = entry.scenarios || [];
@@ -446,8 +441,6 @@ function renderDetail(entry) {
   const res = entry.resources || null;
   const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
   const flamegraphClient = entry.artifacts && entry.artifacts.flamegraph_client ? entry.artifacts.flamegraph_client : '';
-  const chromeTrace = entry.artifacts && entry.artifacts.chrome_trace ? entry.artifacts.chrome_trace : '';
-  const chromeTraceClient = entry.artifacts && entry.artifacts.chrome_trace_client ? entry.artifacts.chrome_trace_client : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
@@ -469,15 +462,13 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(flamegraph || flamegraphClient || chromeTrace || chromeTraceClient) ? `
+  ${(flamegraph || flamegraphClient) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Profiles (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:24px;flex-wrap:wrap">
         ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">Server Flamegraph (pprof)</a>` : ''}
         ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">Client Flamegraph (pprof)</a>` : ''}
-        ${chromeTrace ? `<a href="${perfettoUrl(chromeTrace)}" target="_blank">Server Trace (Perfetto)</a>` : ''}
-        ${chromeTraceClient ? `<a href="${perfettoUrl(chromeTraceClient)}" target="_blank">Client Trace (Perfetto)</a>` : ''}
       </div>
     </div>
   </div>` : ''}

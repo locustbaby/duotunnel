@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tracing::info;
 use tunnel_lib::proxy::core::ProxyEngine;
 use tunnel_lib::recv_routing_info;
-#[cfg_attr(feature = "profiling", tracing::instrument(skip_all))]
 pub async fn handle_work_stream(
     send: SendStream,
     mut recv: RecvStream,

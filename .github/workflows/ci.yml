@@ -32,7 +32,7 @@ on:
         type: boolean
         default: true
       collect_profiles:
-        description: 'Collect pprof CPU flamegraph + Chrome Trace during 8k stress test'
+        description: 'Collect pprof CPU flamegraph during 8k stress test'
         type: boolean
         default: true
 
@@ -1286,7 +1286,7 @@ jobs:
       - name: Build all binaries (profiling + debuginfo)
         run: |
           SEP=$'\x1f'
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}-Cdebug-assertions=yes" \
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1" \
             cargo build --release --workspace \
               --features server/profiling \
               --features client/profiling
@@ -1330,7 +1330,7 @@ jobs:
             sleep 0.2
           done
 
-          PPROF_OUT=/tmp/server-pprof CHROME_TRACE_OUT=/tmp/server-trace.json \
+          PPROF_OUT=/tmp/server-pprof \
             ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
@@ -1355,7 +1355,7 @@ jobs:
             sleep 0.2
           done
 
-          PPROF_OUT=/tmp/client-pprof CHROME_TRACE_OUT=/tmp/client-trace.json \
+          PPROF_OUT=/tmp/client-pprof \
             ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
@@ -1445,12 +1445,6 @@ jobs:
             [ "$CDONE" = "1" ] && [ "$SDONE" = "1" ] && break
             sleep 0.5
           done
-          for f in /tmp/server-trace.json /tmp/client-trace.json; do
-            for i in $(seq 1 20); do
-              [ -s "$f" ] && break
-              sleep 0.5
-            done
-          done
           [ -n "$CLIENT_PID" ] && kill -9 "$CLIENT_PID" 2>/dev/null || true
           [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
 
@@ -1475,28 +1469,6 @@ jobs:
           path: |
             /tmp/server-pprof.svg
             /tmp/client-pprof.svg
-
-      - name: Upload Chrome traces
-        if: always() && matrix.quic_connections == 4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: chrome-traces-8k-${{ github.run_id }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            /tmp/server-trace.json
-            /tmp/client-trace.json
-
-      - name: Upload Chrome traces (q${{ matrix.quic_connections }})
-        if: always() && matrix.quic_connections != 4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: chrome-traces-8k-q${{ matrix.quic_connections }}-${{ github.run_id }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            /tmp/server-trace.json
-            /tmp/client-trace.json
 
       - name: Upload logs
         if: always()
@@ -1551,13 +1523,6 @@ jobs:
         with:
           name: pprof-flamegraphs-8k-${{ github.run_id }}
           path: /tmp/pprof8k
-          if-no-files-found: ignore
-
-      - name: Download Chrome traces (8k)
-        uses: actions/download-artifact@v4
-        with:
-          name: chrome-traces-8k-${{ github.run_id }}
-          path: /tmp/traces8k
           if-no-files-found: ignore
 
       - name: Merge benchmark outputs
@@ -1703,27 +1668,13 @@ jobs:
               FLAMEGRAPH_CLIENT_ARG="--flamegraph-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
             fi
           fi
-          CHROME_TRACE_ARG=""
-          CHROME_TRACE_CLIENT_ARG=""
-          if [ -s /tmp/traces8k/server-trace.json ] || [ -s /tmp/traces8k/client-trace.json ]; then
-            mkdir -p bench/traces
-            if [ -s /tmp/traces8k/server-trace.json ]; then
-              gzip -c /tmp/traces8k/server-trace.json > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.json.gz"
-              CHROME_TRACE_ARG="--chrome-trace traces/${SHORT_SHA}-${{ github.run_id }}-server.json.gz"
-            fi
-            if [ -s /tmp/traces8k/client-trace.json ]; then
-              gzip -c /tmp/traces8k/client-trace.json > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.json.gz"
-              CHROME_TRACE_CLIENT_ARG="--chrome-trace-client traces/${SHORT_SHA}-${{ github.run_id }}-client.json.gz"
-            fi
-          fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results-merged.json \
             --data   bench/data.js \
             --sha    "${{ github.sha }}" \
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG \
-            $CHROME_TRACE_ARG $CHROME_TRACE_CLIENT_ARG
+            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/

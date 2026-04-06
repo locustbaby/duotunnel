@@ -15,8 +15,6 @@ def main():
     p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--flamegraph", default="")
     p.add_argument("--flamegraph-client", default="")
-    p.add_argument("--chrome-trace", default="")
-    p.add_argument("--chrome-trace-client", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -32,10 +30,6 @@ def main():
         entry.setdefault("artifacts", {})["flamegraph"] = args.flamegraph
     if args.flamegraph_client:
         entry.setdefault("artifacts", {})["flamegraph_client"] = args.flamegraph_client
-    if args.chrome_trace:
-        entry.setdefault("artifacts", {})["chrome_trace"] = args.chrome_trace
-    if args.chrome_trace_client:
-        entry.setdefault("artifacts", {})["chrome_trace_client"] = args.chrome_trace_client
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -88,7 +82,6 @@ def main():
     bench_dir = os.path.dirname(args.data)
     for subdir, keys, prefix in [
         ("flamegraphs", ("flamegraph", "flamegraph_client"), "flamegraphs/"),
-        ("traces", ("chrome_trace", "chrome_trace_client"), "traces/"),
     ]:
         d = os.path.join(bench_dir, subdir)
         if not os.path.isdir(d):
