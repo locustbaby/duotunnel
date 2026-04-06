@@ -1,0 +1,10 @@
+[package]
+name = "trace-parser"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+dial9-trace-format = { git = "https://github.com/dial9-rs/dial9-tokio-telemetry" }
+flate2 = "1"

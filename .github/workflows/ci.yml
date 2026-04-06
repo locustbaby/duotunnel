@@ -1318,7 +1318,7 @@ jobs:
       - name: Build all binaries (dial9)
         run: |
           SEP=$'\x1f'
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}--cfg${SEP}tokio_unstable" \
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
             cargo build --release --workspace --features server/dial9-telemetry --features client/dial9-telemetry
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
