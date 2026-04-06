@@ -32,9 +32,9 @@ on:
         type: boolean
         default: true
       collect_flamegraph:
-        description: 'Collect server CPU flamegraph during stress test'
+        description: 'Collect dial9 tokio telemetry traces during stress test'
         type: boolean
-        default: false
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -794,7 +794,7 @@ jobs:
     permissions:
       contents: write
     env:
-      COLLECT_FLAMEGRAPH: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.collect_flamegraph)) && '1' || '0' }}
+      COLLECT_FLAMEGRAPH: ${{ (github.event_name != 'workflow_dispatch' || inputs.collect_flamegraph) && '1' || '0' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -824,43 +824,27 @@ jobs:
       - name: Build all binaries
         run: |
           if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            # frame pointers let perf unwind stacks without DWARF (--call-graph fp):
-            # ~1-3% overhead vs 5-15% for dwarf, and eliminates [unknown] frames
             SEP=$'\x1f'
-            CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes" \
-              cargo build --release
+            CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}--cfg${SEP}tokio_unstable" \
+              cargo build --release --workspace --features server/dial9-telemetry --features client/dial9-telemetry
           else
             cargo build --release
           fi
-
-      - name: Install flamegraph tools
-        if: env.COLLECT_FLAMEGRAPH == '1'
-        run: cargo install inferno
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
       - name: Install sysstat
         run: sudo apt-get install -y -qq sysstat
 
-      - name: Install perf tools
-        if: env.COLLECT_FLAMEGRAPH == '1'
-        run: sudo apt-get install -y -qq linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
-
-      - name: Enable perf for flamegraph
+      - name: Enable perf events for tokio telemetry
         if: env.COLLECT_FLAMEGRAPH == '1'
         run: |
-          # sysctl may be blocked by cgroup; write directly to /proc as fallback
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
             sudo sysctl -w kernel.perf_event_paranoid=-1 || true
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
             sudo sysctl -w kernel.kptr_restrict=0 || true
-          # Verify perf works; disable flamegraph collection if not
-          if ! sudo perf stat -e cycles -- true 2>/dev/null; then
-            echo "WARNING: perf not functional, disabling flamegraph collection"
-            echo "COLLECT_FLAMEGRAPH=0" >> "$GITHUB_ENV"
-          else
-            echo "perf OK, paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
-          fi
+          echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
+          echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict)"
 
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
@@ -895,19 +879,19 @@ jobs:
             sleep 0.2
           done
 
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          else
+            ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          fi
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
             sleep 0.3
           done
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo perf record -F 99 --call-graph fp \
-              -o /tmp/perf-server.data -p "$(cat /tmp/server.pid)" \
-              > /tmp/perf-server.log 2>&1 &
-            echo $! > /tmp/perf-server.pid
-          fi
 
           TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
@@ -924,7 +908,12 @@ jobs:
             [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
             sleep 0.2
           done
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          else
+            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          fi
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -945,12 +934,6 @@ jobs:
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             ss -ltnp '( sport = :8082 )' || true
             exit 1
-          fi
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo perf record -F 99 --call-graph fp \
-              -o /tmp/perf-client.data -p "$(cat /tmp/client.pid)" \
-              > /tmp/perf-client.log 2>&1 &
-            echo $! > /tmp/perf-client.pid
           fi
           echo "All backends + tunnel ready"
 
@@ -993,25 +976,27 @@ jobs:
           sleep 0.5
 
           echo "Restarting server..."
-          # Kill old perf recorders before restarting processes
-          sudo kill "$(cat /tmp/perf-server.pid 2>/dev/null)" 2>/dev/null || true
-          sudo kill "$(cat /tmp/perf-client.pid 2>/dev/null)" 2>/dev/null || true
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          else
+            ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
+          fi
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
             sleep 0.3
           done
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo perf record -F 99 --call-graph fp \
-              -o /tmp/perf-server.data -p "$(cat /tmp/server.pid)" \
-              > /tmp/perf-server.log 2>&1 &
-            echo $! > /tmp/perf-server.pid
-          fi
 
           echo "Restarting client..."
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
+            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          else
+            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
+          fi
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -1033,13 +1018,6 @@ jobs:
             ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo perf record -F 99 --call-graph fp \
-              -o /tmp/perf-client.data -p "$(cat /tmp/client.pid)" \
-              > /tmp/perf-client.log 2>&1 &
-            echo $! > /tmp/perf-client.pid
-          fi
-
           echo "Retrying warmup after restart..."
           if warmup_probe; then
             echo "Tunnel warm and serving (after restart)"
@@ -1166,37 +1144,23 @@ jobs:
       - name: Stop duotunnel server and client
         if: always()
         run: |
-          # Stop perf recorders first (SIGINT flushes perf.data), then kill app processes
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            sudo kill -INT "$(cat /tmp/perf-server.pid 2>/dev/null)" 2>/dev/null || true
-            sudo kill -INT "$(cat /tmp/perf-client.pid 2>/dev/null)" 2>/dev/null || true
-            # Wait for perf to finish writing perf.data files
-            for i in $(seq 1 30); do
-              SDONE=1; CDONE=1
-              ps -p "$(cat /tmp/perf-server.pid 2>/dev/null)" >/dev/null 2>&1 && SDONE=0
-              ps -p "$(cat /tmp/perf-client.pid 2>/dev/null)" >/dev/null 2>&1 && CDONE=0
-              [ "$SDONE" = "1" ] && [ "$CDONE" = "1" ] && break
-              sleep 1
-            done
-          fi
           SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
           if [ -n "$SERVER_PID" ]; then
-            sudo kill -TERM -- "-$SERVER_PID" 2>/dev/null || kill -9 "$SERVER_PID" 2>/dev/null || true
+            kill -TERM "$SERVER_PID" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              kill -0 "$SERVER_PID" 2>/dev/null || break
+              sleep 0.5
+            done
+            kill -9 "$SERVER_PID" 2>/dev/null || true
           fi
-          kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 0.5
-          # Convert perf.data → flamegraph SVGs
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            if [ -s /tmp/perf-server.data ]; then
-              sudo perf script -i /tmp/perf-server.data 2>/dev/null \
-                | ~/.cargo/bin/inferno-collapse-perf 2>/dev/null \
-                | ~/.cargo/bin/inferno-flamegraph > /tmp/flamegraph.svg 2>/dev/null || true
-            fi
-            if [ -s /tmp/perf-client.data ]; then
-              sudo perf script -i /tmp/perf-client.data 2>/dev/null \
-                | ~/.cargo/bin/inferno-collapse-perf 2>/dev/null \
-                | ~/.cargo/bin/inferno-flamegraph > /tmp/flamegraph-client.svg 2>/dev/null || true
-            fi
+          CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
+          if [ -n "$CLIENT_PID" ]; then
+            kill -TERM "$CLIENT_PID" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              kill -0 "$CLIENT_PID" 2>/dev/null || break
+              sleep 0.5
+            done
+            kill -9 "$CLIENT_PID" 2>/dev/null || true
           fi
 
       - name: Stop resource sampling
@@ -1291,7 +1255,10 @@ jobs:
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           FRP_ARG=""
           FRP_OFFSET_ARG=""
-          FLAMEGRAPH_ARG=""
+          TOKIO_TRACE_SERVER_URL_ARG=""
+          TOKIO_TRACE_CLIENT_URL_ARG=""
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          PAGES_BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}"
           if [ -s /tmp/bench-results-frp.json ]; then
             FRP_ARG="--frp-result /tmp/bench-results-frp.json"
             if [ -f /tmp/frp_k6_start_epoch ] && [ -f /tmp/sampling_start_epoch ]; then
@@ -1300,18 +1267,17 @@ jobs:
             fi
           fi
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
-          if [ -s /tmp/flamegraph.svg ]; then
-            mkdir -p bench/flamegraphs
-            FLAMEGRAPH_REL="flamegraphs/${SHORT_SHA}-${{ github.run_id }}.svg"
-            cp /tmp/flamegraph.svg "bench/${FLAMEGRAPH_REL}"
-            FLAMEGRAPH_ARG="--flamegraph ${FLAMEGRAPH_REL}"
+          if [ -s /tmp/server-trace.bin ]; then
+            mkdir -p bench/traces
+            TOKIO_TRACE_SERVER_REL="traces/${SHORT_SHA}-${{ github.run_id }}-server.bin"
+            cp /tmp/server-trace.bin "bench/${TOKIO_TRACE_SERVER_REL}"
+            TOKIO_TRACE_SERVER_URL_ARG="--tokio-trace-server-url ${PAGES_BASE_URL}/bench/${TOKIO_TRACE_SERVER_REL}"
           fi
-          FLAMEGRAPH_CLIENT_ARG=""
-          if [ -s /tmp/flamegraph-client.svg ]; then
-            mkdir -p bench/flamegraphs
-            FLAMEGRAPH_CLIENT_REL="flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
-            cp /tmp/flamegraph-client.svg "bench/${FLAMEGRAPH_CLIENT_REL}"
-            FLAMEGRAPH_CLIENT_ARG="--flamegraph-client ${FLAMEGRAPH_CLIENT_REL}"
+          if [ -s /tmp/client-trace.bin ]; then
+            mkdir -p bench/traces
+            TOKIO_TRACE_CLIENT_REL="traces/${SHORT_SHA}-${{ github.run_id }}-client.bin"
+            cp /tmp/client-trace.bin "bench/${TOKIO_TRACE_CLIENT_REL}"
+            TOKIO_TRACE_CLIENT_URL_ARG="--tokio-trace-client-url ${PAGES_BASE_URL}/bench/${TOKIO_TRACE_CLIENT_REL}"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results.json \
@@ -1320,7 +1286,7 @@ jobs:
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --resources /tmp/resource-data.json \
-            $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG
+            $FRP_ARG $FRP_OFFSET_ARG $TOKIO_TRACE_SERVER_URL_ARG $TOKIO_TRACE_CLIENT_URL_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
@@ -1347,16 +1313,16 @@ jobs:
             /tmp/frps.log
             /tmp/frpc.log
 
-      - name: Upload flamegraphs
+      - name: Upload tokio traces
         if: always() && env.COLLECT_FLAMEGRAPH == '1'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cpu-flamegraphs-${{ github.run_id }}
+          name: tokio-telemetry-traces-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: ignore
           path: |
-            /tmp/flamegraph.svg
-            /tmp/flamegraph-client.svg
+            /tmp/server-trace.bin
+            /tmp/client-trace.bin
 
       - name: Cleanup
         if: always()

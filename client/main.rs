@@ -8,9 +8,12 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "dial9-telemetry")]
+use std::path::PathBuf;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -32,11 +35,17 @@ struct Args {
     #[arg(short, long, default_value = "config/client.yaml")]
     config: String,
 }
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
+    #[cfg(feature = "dial9-telemetry")]
+    if let Some(trace_path) = std::env::var_os("DIAL9_TRACE_PATH").map(PathBuf::from) {
+        return run_with_dial9(trace_path, async_main());
+    }
+    run_with_tokio(async_main())
+}
+async fn async_main() -> Result<()> {
     let args = Args::parse();
     let config = ClientConfigFile::load(&args.config)?;
     let log_level = config.log_level.as_deref().unwrap_or("info");
@@ -60,6 +69,30 @@ async fn main() -> Result<()> {
     } else {
         connect::run_supervisor(config, endpoint, cancel).await
     }
+}
+fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = builder.build()?;
+    runtime.block_on(fut)
+}
+#[cfg(feature = "dial9-telemetry")]
+fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
+    use dial9_tokio_telemetry::telemetry::{
+        CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
+    };
+    let writer = RotatingWriter::single_file(&trace_path)?;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let (runtime, _guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_trace_path(trace_path)
+        .with_cpu_profiling(CpuProfilingConfig::default())
+        .with_sched_events(SchedEventConfig {
+            include_kernel: true,
+        })
+        .build_and_start_with_writer(builder, writer)?;
+    runtime.block_on(fut)
 }
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;
