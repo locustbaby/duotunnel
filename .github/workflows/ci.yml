@@ -31,8 +31,8 @@ on:
         description: 'Apply kernel tuning (tune-os.sh) before stress test'
         type: boolean
         default: true
-      collect_flamegraph:
-        description: 'Collect dial9 tokio telemetry traces during stress test'
+      collect_profiles:
+        description: 'Collect pprof CPU flamegraph + Chrome Trace during 8k stress test'
         type: boolean
         default: true
 
@@ -793,8 +793,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      COLLECT_FLAMEGRAPH: "0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -822,29 +820,12 @@ jobs:
           restore-keys: release-bins-${{ runner.os }}-
 
       - name: Build all binaries
-        run: |
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            SEP=$'\x1f'
-            CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}--cfg${SEP}tokio_unstable" \
-              cargo build --release --workspace --features server/dial9-telemetry --features client/dial9-telemetry
-          else
-            cargo build --release
-          fi
+        run: cargo build --release
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
       - name: Install sysstat
         run: sudo apt-get install -y -qq sysstat
-
-      - name: Enable perf events for tokio telemetry
-        if: env.COLLECT_FLAMEGRAPH == '1'
-        run: |
-          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
-            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
-          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
-            sudo sysctl -w kernel.kptr_restrict=0 || true
-          echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
-          echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict)"
 
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
@@ -879,14 +860,8 @@ jobs:
             sleep 0.2
           done
 
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
-              ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          else
-            ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          fi
+          ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
           for i in $(seq 1 20); do
             grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
@@ -908,12 +883,7 @@ jobs:
             [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
             sleep 0.2
           done
-          if [ "$COLLECT_FLAMEGRAPH" = "1" ]; then
-            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
-              ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          else
-            ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          fi
+          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -1284,8 +1254,8 @@ jobs:
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
 
-  stress-trace-8k:
-    name: Stress Trace 8K (dial9)
+  stress-profile-8k:
+    name: Stress Profile 8K (pprof + Chrome Trace)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1312,25 +1282,18 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target/release
-          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
-          restore-keys: release-bins-${{ runner.os }}-
+          key: release-bins-profile-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
+          restore-keys: release-bins-profile-${{ runner.os }}-
 
-      - name: Build all binaries (dial9)
+      - name: Build all binaries (profiling + debuginfo)
         run: |
           SEP=$'\x1f'
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
-            cargo build --release --workspace --features server/dial9-telemetry --features client/dial9-telemetry
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1" \
+            cargo build --release --workspace \
+              --features server/profiling \
+              --features client/profiling
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
-
-      - name: Enable perf events for tokio telemetry
-        run: |
-          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
-            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
-          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
-            sudo sysctl -w kernel.kptr_restrict=0 || true
-          echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
-          echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict)"
 
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
@@ -1344,7 +1307,7 @@ jobs:
           127.0.0.1  grpc.local
           EOF
 
-      - name: Start all backends + tunnel (dial9)
+      - name: Start all backends + tunnel (profiling)
         timeout-minutes: 2
         run: |
           ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
@@ -1365,7 +1328,7 @@ jobs:
             sleep 0.2
           done
 
-          DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+          PPROF_OUT=/tmp/server-pprof \
             ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
@@ -1390,7 +1353,7 @@ jobs:
             sleep 0.2
           done
 
-          DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+          PPROF_OUT=/tmp/client-pprof \
             ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
           for i in $(seq 1 40); do
@@ -1437,17 +1400,26 @@ jobs:
         run: |
           k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js
 
+      - name: Dump pprof profiles (SIGUSR1)
+        if: always()
+        run: |
+          SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
+          CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
+          [ -n "$SERVER_PID" ] && kill -USR1 "$SERVER_PID" 2>/dev/null || true
+          [ -n "$CLIENT_PID" ] && kill -USR1 "$CLIENT_PID" 2>/dev/null || true
+          sleep 2
+
       - name: Upload benchmark outputs (8k)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-trace-8k-results-${{ github.run_id }}
+          name: stress-profile-8k-results-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
             /tmp/bench-results.json
 
-      - name: Stop tunnel for trace flush
+      - name: Stop tunnel
         if: always()
         run: |
           CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
@@ -1464,11 +1436,22 @@ jobs:
           [ -n "$CLIENT_PID" ] && kill -9 "$CLIENT_PID" 2>/dev/null || true
           [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
 
+      - name: Upload pprof flamegraphs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pprof-flamegraphs-8k-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/server-pprof.svg
+            /tmp/client-pprof.svg
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-trace-8k-logs-${{ github.run_id }}
+          name: stress-profile-8k-logs-${{ github.run_id }}
           retention-days: 7
           path: |
             /tmp/ci-server.log
@@ -1478,17 +1461,6 @@ jobs:
             /tmp/ws-echo.log
             /tmp/grpc-echo.log
             /tmp/bench-results.json
-
-      - name: Upload tokio traces (8k)
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: tokio-telemetry-traces-8k-${{ github.run_id }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            /tmp/server-trace.bin
-            /tmp/client-trace.bin
 
       - name: Cleanup
         if: always()
@@ -1504,7 +1476,7 @@ jobs:
     name: Publish Benchmark (merged)
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [stress-test, stress-trace-8k]
+    needs: [stress-test, stress-profile-8k]
     permissions:
       contents: write
     steps:
@@ -1519,15 +1491,15 @@ jobs:
       - name: Download 8k benchmark outputs
         uses: actions/download-artifact@v4
         with:
-          name: stress-trace-8k-results-${{ github.run_id }}
-          path: /tmp/trace8k
+          name: stress-profile-8k-results-${{ github.run_id }}
+          path: /tmp/profile8k
           if-no-files-found: ignore
 
-      - name: Download tokio traces (8k)
+      - name: Download pprof flamegraphs (8k)
         uses: actions/download-artifact@v4
         with:
-          name: tokio-telemetry-traces-8k-${{ github.run_id }}
-          path: /tmp/traces8k
+          name: pprof-flamegraphs-8k-${{ github.run_id }}
+          path: /tmp/pprof8k
           if-no-files-found: ignore
 
       - name: Merge benchmark outputs
@@ -1543,7 +1515,7 @@ jobs:
           import os
 
           core_path = "/tmp/core/bench-results.json"
-          extra_path = "/tmp/trace8k/bench-results.json" if os.path.isfile("/tmp/trace8k/bench-results.json") else None
+          extra_path = "/tmp/profile8k/bench-results.json" if os.path.isfile("/tmp/profile8k/bench-results.json") else None
           out_path = "/tmp/bench-results-merged.json"
 
           def r2(v):
@@ -1660,19 +1632,17 @@ jobs:
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
-          TRACE_SERVER_ARG=""
-          TRACE_CLIENT_ARG=""
-          if [ -s /tmp/traces8k/server-trace.bin ] || [ -s /tmp/traces8k/client-trace.bin ]; then
-            mkdir -p bench/traces
-            REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
-            PAGES_BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
-            if [ -s /tmp/traces8k/server-trace.bin ]; then
-              gzip -c /tmp/traces8k/server-trace.bin > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
-              TRACE_SERVER_ARG="--tokio-trace-server-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
+          FLAMEGRAPH_ARG=""
+          FLAMEGRAPH_CLIENT_ARG=""
+          if [ -s /tmp/pprof8k/server-pprof.svg ] || [ -s /tmp/pprof8k/client-pprof.svg ]; then
+            mkdir -p bench/flamegraphs
+            if [ -s /tmp/pprof8k/server-pprof.svg ]; then
+              cp /tmp/pprof8k/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
+              FLAMEGRAPH_ARG="--flamegraph flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
             fi
-            if [ -s /tmp/traces8k/client-trace.bin ]; then
-              gzip -c /tmp/traces8k/client-trace.bin > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
-              TRACE_CLIENT_ARG="--tokio-trace-client-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
+            if [ -s /tmp/pprof8k/client-pprof.svg ]; then
+              cp /tmp/pprof8k/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
+              FLAMEGRAPH_CLIENT_ARG="--flamegraph-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
             fi
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
@@ -1681,7 +1651,7 @@ jobs:
             --sha    "${{ github.sha }}" \
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $TRACE_SERVER_ARG $TRACE_CLIENT_ARG
+            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/

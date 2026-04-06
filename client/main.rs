@@ -12,8 +12,6 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "dial9-telemetry")]
-use std::path::PathBuf;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -39,10 +37,8 @@ fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    #[cfg(feature = "dial9-telemetry")]
-    if let Some(trace_path) = std::env::var_os("DIAL9_TRACE_PATH").map(PathBuf::from) {
-        return run_with_dial9(trace_path, async_main());
-    }
+    #[cfg(feature = "profiling")]
+    spawn_pprof_collector();
     run_with_tokio(async_main())
 }
 async fn async_main() -> Result<()> {
@@ -76,26 +72,37 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let runtime = builder.build()?;
     runtime.block_on(fut)
 }
-#[cfg(feature = "dial9-telemetry")]
-fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
-    use dial9_tokio_telemetry::telemetry::{
-        CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
-    };
-    let writer = RotatingWriter::single_file(&trace_path)?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_trace_path(trace_path)
-        .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-        })
-        .build_and_start_with_writer(builder, writer)?;
-    let result = runtime.block_on(fut);
-    drop(runtime);
-    drop(guard);
-    result
+#[cfg(feature = "profiling")]
+fn spawn_pprof_collector() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static DUMP: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_usr1(_: libc::c_int) {
+        DUMP.store(true, Ordering::Relaxed);
+    }
+    unsafe { libc::signal(libc::SIGUSR1, on_usr1 as libc::sighandler_t) };
+
+    std::thread::spawn(move || {
+        let out = std::env::var("PPROF_OUT").unwrap_or_else(|_| "/tmp/client-pprof".into());
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(99)
+            .blocklist(&["libc", "libgcc", "pthread"])
+            .build()
+            .expect("pprof guard");
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if DUMP.swap(false, Ordering::Relaxed) {
+                if let Ok(report) = guard.report().build() {
+                    let path = format!("{out}.svg");
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let _ = report.flamegraph(&mut f);
+                        eprintln!("pprof: wrote {path}");
+                    }
+                }
+            }
+        }
+    });
 }
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;

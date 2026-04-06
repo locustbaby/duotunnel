@@ -10,7 +10,7 @@ path = "main.rs"
 
 [features]
 default = []
-dial9-telemetry = ["dep:dial9-tokio-telemetry"]
+profiling = ["dep:pprof", "dep:libc"]
 
 [dependencies]
 tunnel-lib = { path = "../tunnel-lib" }
@@ -43,4 +43,5 @@ arc-swap = "1.7"
 figment = { version = "0.10", features = ["yaml", "env"] }
 rand = "0.9"
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
-dial9-tokio-telemetry = { version = "0.2.0", features = ["cpu-profiling"], optional = true }
+pprof = { version = "0.14", features = ["flamegraph", "frame-pointer"], optional = true }
+libc = { version = "0.2", optional = true }

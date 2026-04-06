@@ -441,11 +441,6 @@ function renderDetail(entry) {
   const res = entry.resources || null;
   const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
   const flamegraphClient = entry.artifacts && entry.artifacts.flamegraph_client ? entry.artifacts.flamegraph_client : '';
-  const tokioTraceServerUrl = entry.artifacts && entry.artifacts.tokio_trace_server_url ? entry.artifacts.tokio_trace_server_url : '';
-  const tokioTraceClientUrl = entry.artifacts && entry.artifacts.tokio_trace_client_url ? entry.artifacts.tokio_trace_client_url : '';
-  const tokioTraceViewer = 'https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/?trace=';
-  const tokioTraceServerViewer = tokioTraceServerUrl ? tokioTraceViewer + encodeURIComponent(tokioTraceServerUrl) : '';
-  const tokioTraceClientViewer = tokioTraceClientUrl ? tokioTraceViewer + encodeURIComponent(tokioTraceClientUrl) : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
@@ -467,17 +462,13 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(flamegraph || flamegraphClient || tokioTraceServerViewer || tokioTraceClientViewer) ? `
+  ${(flamegraph || flamegraphClient) ? `
   <div class="row full">
     <div class="panel auto">
-      <h3>Profiles</h3>
+      <h3>CPU Flamegraphs (pprof)</h3>
       <div style="font-size:13px;display:flex;gap:16px">
-        ${tokioTraceServerViewer ? `<a href="${esc(tokioTraceServerViewer)}" target="_blank">Tokio Telemetry — Server</a>` : ''}
-        ${tokioTraceClientViewer ? `<a href="${esc(tokioTraceClientViewer)}" target="_blank">Tokio Telemetry — Client</a>` : ''}
-        ${tokioTraceServerUrl ? `<a href="${esc(tokioTraceServerUrl)}" target="_blank">Trace File — Server (.bin)</a>` : ''}
-        ${tokioTraceClientUrl ? `<a href="${esc(tokioTraceClientUrl)}" target="_blank">Trace File — Client (.bin)</a>` : ''}
-        ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">CPU Flamegraph — Server (SVG)</a>` : ''}
-        ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">CPU Flamegraph — Client (SVG)</a>` : ''}
+        ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">Server Flamegraph (SVG)</a>` : ''}
+        ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">Client Flamegraph (SVG)</a>` : ''}
       </div>
     </div>
   </div>` : ''}

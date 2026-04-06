@@ -11,8 +11,6 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-#[cfg(feature = "dial9-telemetry")]
-use std::path::PathBuf;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
 mod config;
@@ -165,10 +163,8 @@ fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    #[cfg(feature = "dial9-telemetry")]
-    if let Some(trace_path) = std::env::var_os("DIAL9_TRACE_PATH").map(PathBuf::from) {
-        return run_with_dial9(trace_path, async_main());
-    }
+    #[cfg(feature = "profiling")]
+    spawn_pprof_collector();
     run_with_tokio(async_main())
 }
 async fn async_main() -> Result<()> {
@@ -184,26 +180,50 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let runtime = builder.build()?;
     runtime.block_on(fut)
 }
-#[cfg(feature = "dial9-telemetry")]
-fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
-    use dial9_tokio_telemetry::telemetry::{
-        CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
-    };
-    let writer = RotatingWriter::single_file(&trace_path)?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_trace_path(trace_path)
-        .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-        })
-        .build_and_start_with_writer(builder, writer)?;
-    let result = runtime.block_on(fut);
-    drop(runtime);
-    drop(guard);
-    result
+/// Starts a background thread that collects a CPU profile for the lifetime of
+/// the process and writes a flamegraph SVG when SIGUSR1 is received.
+/// Output path is controlled by `PPROF_OUT` (default: `/tmp/server-pprof`).
+/// Usage: `kill -USR1 $(pgrep server)` to dump mid-run.
+#[cfg(feature = "profiling")]
+fn spawn_pprof_collector() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    static DUMP: AtomicBool = AtomicBool::new(false);
+
+    // Install a minimal async-signal-safe SIGUSR1 handler that just sets a flag.
+    extern "C" fn on_usr1(_: libc::c_int) {
+        DUMP.store(true, Ordering::Relaxed);
+    }
+    unsafe { libc::signal(libc::SIGUSR1, on_usr1 as libc::sighandler_t) };
+
+    std::thread::spawn(move || {
+        let out = std::env::var("PPROF_OUT").unwrap_or_else(|_| "/tmp/server-pprof".into());
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(99)
+            .blocklist(&["libc", "libgcc", "pthread"])
+            .build()
+            .expect("pprof guard");
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if DUMP.swap(false, Ordering::Relaxed) {
+                if let Ok(report) = guard.report().build() {
+                    if let Err(e) = write_pprof_svg(&report, &out) {
+                        eprintln!("pprof write error: {e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(feature = "profiling")]
+fn write_pprof_svg(report: &pprof::Report, out: &str) -> anyhow::Result<()> {
+    let path = format!("{out}.svg");
+    let mut f = std::fs::File::create(&path)?;
+    report.flamegraph(&mut f)?;
+    eprintln!("pprof: wrote {path}");
+    Ok(())
 }
 async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;

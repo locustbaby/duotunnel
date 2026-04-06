@@ -15,8 +15,6 @@ def main():
     p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--flamegraph", default="")
     p.add_argument("--flamegraph-client", default="")
-    p.add_argument("--tokio-trace-server-url", default="")
-    p.add_argument("--tokio-trace-client-url", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -32,10 +30,6 @@ def main():
         entry.setdefault("artifacts", {})["flamegraph"] = args.flamegraph
     if args.flamegraph_client:
         entry.setdefault("artifacts", {})["flamegraph_client"] = args.flamegraph_client
-    if args.tokio_trace_server_url:
-        entry.setdefault("artifacts", {})["tokio_trace_server_url"] = args.tokio_trace_server_url
-    if args.tokio_trace_client_url:
-        entry.setdefault("artifacts", {})["tokio_trace_client_url"] = args.tokio_trace_client_url
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -96,24 +90,6 @@ def main():
                     keep.add(pth.split("/", 1)[1])
         for name in os.listdir(flame_dir):
             fp = os.path.join(flame_dir, name)
-            if os.path.isfile(fp) and name not in keep:
-                os.remove(fp)
-    trace_dir = os.path.join(os.path.dirname(args.data), "traces")
-    if os.path.isdir(trace_dir):
-        keep = set()
-        for e in entries:
-            arts = e.get("artifacts") or {}
-            for key in ("tokio_trace_server_url", "tokio_trace_client_url"):
-                pth = arts.get(key)
-                if not isinstance(pth, str):
-                    continue
-                marker = "/bench/traces/"
-                idx = pth.find(marker)
-                if idx == -1:
-                    continue
-                keep.add(pth[idx + len(marker):])
-        for name in os.listdir(trace_dir):
-            fp = os.path.join(trace_dir, name)
             if os.path.isfile(fp) and name not in keep:
                 os.remove(fp)
 
