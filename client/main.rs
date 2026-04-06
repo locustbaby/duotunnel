@@ -60,6 +60,19 @@ async fn async_main() -> Result<()> {
             cancel_clone.cancel();
         }
     });
+    #[cfg(feature = "profiling")]
+    {
+        // In profiling mode also listen for SIGTERM so the chrome trace guard is
+        // dropped (and flushed) before the process exits.
+        use tokio::signal::unix::{signal, SignalKind};
+        let cancel_sigterm = cancel.clone();
+        tokio::spawn(async move {
+            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+            sigterm.recv().await;
+            info!("received SIGTERM, flushing traces");
+            cancel_sigterm.cancel();
+        });
+    }
     if config.quic.connections > 1 {
         info!(
             connections = % config.quic.connections, "using multi-QUIC connection pool"

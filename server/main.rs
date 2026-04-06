@@ -387,6 +387,18 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
             }
         });
     }
+    #[cfg(feature = "profiling")]
+    {
+        // In profiling mode wait for either the QUIC server to finish or SIGTERM,
+        // then return normally so _chrome_guard is dropped and the trace is flushed.
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            r = quic_handle => { r??; }
+            _ = sigterm.recv() => { info!("received SIGTERM, flushing traces"); }
+        }
+    }
+    #[cfg(not(feature = "profiling"))]
     quic_handle.await??;
     Ok(())
 }
