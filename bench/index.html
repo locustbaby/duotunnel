@@ -433,9 +433,9 @@ function renderOverview() {
   })();
 }
 
-function speedscopeUrl(relPath) {
+function perfettoUrl(relPath) {
   const base = location.href.replace(/\/[^/]*(\?.*)?$/, '/');
-  return 'https://www.speedscope.app/#profileURL=' + encodeURIComponent(base + relPath);
+  return 'https://ui.perfetto.dev/#!/?url=' + encodeURIComponent(base + relPath);
 }
 
 function renderDetail(entry) {
@@ -476,8 +476,8 @@ function renderDetail(entry) {
       <div style="font-size:13px;display:flex;gap:24px;flex-wrap:wrap">
         ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">Server Flamegraph (pprof)</a>` : ''}
         ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">Client Flamegraph (pprof)</a>` : ''}
-        ${chromeTrace ? `<a href="${speedscopeUrl(chromeTrace)}" target="_blank">Server Trace (speedscope)</a>` : ''}
-        ${chromeTraceClient ? `<a href="${speedscopeUrl(chromeTraceClient)}" target="_blank">Client Trace (speedscope)</a>` : ''}
+        ${chromeTrace ? `<a href="${perfettoUrl(chromeTrace)}" target="_blank">Server Trace (Perfetto)</a>` : ''}
+        ${chromeTraceClient ? `<a href="${perfettoUrl(chromeTraceClient)}" target="_blank">Client Trace (Perfetto)</a>` : ''}
       </div>
     </div>
   </div>` : ''}

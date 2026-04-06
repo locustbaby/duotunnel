@@ -2,9 +2,10 @@ use crate::app::{ClientApp, LocalProxyMap};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, instrument};
 use tunnel_lib::proxy::core::ProxyEngine;
 use tunnel_lib::recv_routing_info;
+#[instrument(skip_all)]
 pub async fn handle_work_stream(
     send: SendStream,
     mut recv: RecvStream,

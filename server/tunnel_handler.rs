@@ -1,8 +1,9 @@
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 use tunnel_lib::proxy::core::{Protocol, ProxyApp, ProxyEngine};
 use tunnel_lib::recv_routing_info;
 
+#[instrument(skip_all)]
 pub async fn handle_tunnel_stream<A: ProxyApp>(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
