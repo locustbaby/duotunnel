@@ -1,5 +1,6 @@
 use crate::config::ClientConfigFile;
 use anyhow::Result;
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -7,6 +8,7 @@ pub async fn run_pool(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
+    ready: Arc<AtomicBool>,
 ) -> Result<()> {
     let n = config.quic.connections.max(1) as usize;
     info!(connections = n, "starting QUIC connection pool");
@@ -15,8 +17,9 @@ pub async fn run_pool(
         let slot_config = config.clone();
         let endpoint = endpoint.clone();
         let slot_cancel = cancel.clone();
+        let slot_ready = ready.clone();
         slots.spawn(async move {
-            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel).await
+            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel, slot_ready).await
         });
     }
     while let Some(join_result) = slots.join_next().await {

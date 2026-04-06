@@ -3,15 +3,17 @@ use crate::egress::EgressProxy;
 use crate::handlers::SEMAPHORE_WAIT_MS;
 use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
-pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
+pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
     let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
     let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
+    ready.store(true, Ordering::Release);
     info!(addr = % addr, "QUIC server listening");
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();

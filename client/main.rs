@@ -10,6 +10,7 @@ use clap::Parser;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -43,6 +44,45 @@ fn main() -> Result<()> {
     }
     run_with_tokio(async_main())
 }
+async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(addr = %addr, error = %e, "failed to bind healthz server");
+            return;
+        }
+    };
+    info!(addr = %addr, "healthz server started");
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else { continue };
+        let ready = ready.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
+            let (status, body) = if req.starts_with("GET /healthz") {
+                if ready.load(Ordering::Acquire) {
+                    ("200 OK", "ok\n")
+                } else {
+                    ("503 Service Unavailable", "not ready\n")
+                }
+            } else {
+                ("200 OK", "ok\n")
+            };
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+    }
+}
+
 async fn async_main() -> Result<()> {
     let args = Args::parse();
     let config = ClientConfigFile::load(&args.config)?;
@@ -62,15 +102,20 @@ async fn async_main() -> Result<()> {
             cancel_clone.cancel();
         }
     });
+    let ready = Arc::new(AtomicBool::new(false));
+    if let Some(port) = config.metrics_port {
+        tokio::spawn(run_healthz_server(port, ready.clone()));
+    }
     let run_cancel = cancel.clone();
+    let run_ready = ready.clone();
     let run_fut = async move {
         if config.quic.connections > 1 {
             info!(
                 connections = % config.quic.connections, "using multi-QUIC connection pool"
             );
-            pool::run_pool(config, endpoint, run_cancel).await
+            pool::run_pool(config, endpoint, run_cancel, run_ready).await
         } else {
-            connect::run_supervisor(config, endpoint, run_cancel).await
+            connect::run_supervisor(config, endpoint, run_cancel, run_ready).await
         }
     };
     run_fut.await
@@ -176,6 +221,7 @@ pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
     shutdown: CancellationToken,
+    ready: Arc<AtomicBool>,
 ) -> std::result::Result<(), ConnectError> {
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
@@ -235,6 +281,7 @@ pub(crate) async fn run_client(
         let entry_tcp_params = tcp_params.clone();
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
+        let ready_flag = ready.clone();
         tokio::spawn(async move {
             if let Err(e) = entry::start_entry_listener(
                 conn,
@@ -249,8 +296,10 @@ pub(crate) async fn run_client(
             {
                 error!(port = entry_port, error = % e, "entry listener failed");
             }
+            drop(ready_flag);
         });
     }
+    ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
             reason = conn.closed() => {

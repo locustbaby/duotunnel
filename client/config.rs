@@ -101,6 +101,8 @@ pub struct ClientConfigFile {
     #[serde(default)]
     pub http_entry_port: Option<u16>,
     #[serde(default)]
+    pub metrics_port: Option<u16>,
+    #[serde(default)]
     pub tls_skip_verify: bool,
     #[serde(default)]
     pub tls_ca_cert: Option<String>,

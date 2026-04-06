@@ -6,6 +6,7 @@ use figment::{
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -37,6 +38,9 @@ struct Config {
     /// the routing table is empty).  No-op on subsequent boots.
     #[serde(default)]
     server_config: Option<String>,
+    /// Port for the HTTP metrics + healthz endpoint.
+    #[serde(default)]
+    metrics_port: Option<u16>,
 }
 
 fn default_database_url() -> String {
@@ -79,6 +83,47 @@ enum Command {
     Client(CliCommand),
 }
 
+// ── Healthz HTTP server ───────────────────────────────────────────────────────
+
+async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(addr = %addr, error = %e, "failed to bind healthz server");
+            return;
+        }
+    };
+    info!(addr = %addr, "healthz server started");
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else { continue };
+        let ready = ready.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
+            let (status, body) = if req.starts_with("GET /healthz") {
+                if ready.load(Ordering::Acquire) {
+                    ("200 OK", "ok\n")
+                } else {
+                    ("503 Service Unavailable", "not ready\n")
+                }
+            } else {
+                ("200 OK", "ok\n")
+            };
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -92,6 +137,13 @@ async fn main() -> Result<()> {
         .init();
 
     info!(database_url = %cfg.database_url, watch_addr = %cfg.watch_addr, "starting tunnel-ctld");
+
+    let ready = Arc::new(AtomicBool::new(false));
+
+    if let Some(port) = cfg.metrics_port {
+        let ready2 = ready.clone();
+        tokio::spawn(run_healthz_server(port, ready2));
+    }
 
     let pool = open_sqlite_pool(&cfg.database_url).await?;
 
@@ -135,6 +187,9 @@ async fn main() -> Result<()> {
     }
 
     let svc = ControlService::new(auth_store, rule_store, pool).await?;
+
+    // All init done — mark ready.
+    ready.store(true, Ordering::Release);
 
     match args.command.unwrap_or(Command::Serve) {
         Command::Serve => {

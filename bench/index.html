@@ -441,6 +441,8 @@ function renderDetail(entry) {
   const res = entry.resources || null;
   const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
   const flamegraphClient = entry.artifacts && entry.artifacts.flamegraph_client ? entry.artifacts.flamegraph_client : '';
+  const flamegraphQ1 = entry.artifacts && entry.artifacts.flamegraph_q1 ? entry.artifacts.flamegraph_q1 : '';
+  const flamegraphQ1Client = entry.artifacts && entry.artifacts.flamegraph_q1_client ? entry.artifacts.flamegraph_q1_client : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
@@ -462,13 +464,15 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(flamegraph || flamegraphClient) ? `
+  ${(flamegraph || flamegraphClient || flamegraphQ1 || flamegraphQ1Client) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Profiles (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:24px;flex-wrap:wrap">
-        ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">Server Flamegraph (pprof)</a>` : ''}
-        ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">Client Flamegraph (pprof)</a>` : ''}
+        ${flamegraph ? `<span><b>q4:</b> <a href="${esc(flamegraph)}" target="_blank">Server</a></span>` : ''}
+        ${flamegraphClient ? `<span><a href="${esc(flamegraphClient)}" target="_blank">Client</a></span>` : ''}
+        ${flamegraphQ1 ? `<span><b>q1:</b> <a href="${esc(flamegraphQ1)}" target="_blank">Server</a></span>` : ''}
+        ${flamegraphQ1Client ? `<span><a href="${esc(flamegraphQ1Client)}" target="_blank">Client</a></span>` : ''}
       </div>
     </div>
   </div>` : ''}
@@ -578,12 +582,37 @@ function renderDetail(entry) {
   root.innerHTML = html;
 
   if (res) {
-    const annotations = phaseAnnotations(entry);
-    // Clip x-axis to last phase end + small padding, so trailing idle
-    // sampling time after k6 finishes doesn't create a blank region.
     const offset = entry?.resources?.k6OffsetSeconds || 0;
-    const phases = entry?.phases || FALLBACK_PHASES;
-    const lastPhaseEnd = Math.max(...phases.map(p => {
+    const allPhases = entry?.phases || FALLBACK_PHASES;
+
+    // Compute max timestamp present in resource data so we can clip the
+    // time axis and phase annotations to what the resource charts actually
+    // cover.  The merged entry includes q1/q4 profiling phases that run
+    // *after* the core monitoring window, so we must not extend xMax to
+    // those extra phases.
+    const resMaxT = (() => {
+      const proc = res.processes || {};
+      const allPts = [
+        ...(res.system?.cpu || []),
+        ...(res.network?.rx_kbs || []),
+        ...(res.network?.tx_kbs || []),
+        ...Object.values(proc).flatMap(p => [...(p.cpu||[]), ...(p.rss||[])]),
+      ];
+      if (!allPts.length) return 0;
+      return Math.max(...allPts.map(p => p.t ?? 0));
+    })();
+
+    // For the resource charts only include phases whose start falls within
+    // the resource data window (core phases).  q1/q4 profiling phases are
+    // offset far beyond the resource data and would produce a blank tail.
+    const corePhases = allPhases.filter(p => {
+      const isFrp = p.tunnel === 'frp';
+      const s = (p.start || 0) + (isFrp ? 0 : offset);
+      return resMaxT <= 0 || s <= resMaxT + 30;
+    });
+    const annotations = phaseAnnotations({...entry, phases: corePhases});
+
+    const lastPhaseEnd = Math.max(...corePhases.map(p => {
       const isFrp = p.tunnel === 'frp';
       return (p.end || 0) + (isFrp ? 0 : offset);
     }));

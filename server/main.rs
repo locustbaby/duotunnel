@@ -401,19 +401,21 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         hot_reload::spawn_config_watcher(config_path.to_string(), state.clone());
     }
 
-    let quic_state = state.clone();
-    let quic_handle =
-        tokio::spawn(async move { handlers::quic::run_quic_server(quic_state).await });
-    {
-        let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
-        sync_listeners(&state, &listeners);
-    }
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(metrics_port) = config.server.metrics_port {
+        let ready2 = ready.clone();
         tokio::spawn(async move {
-            if let Err(e) = handlers::metrics::run_metrics_server(metrics_port).await {
+            if let Err(e) = handlers::metrics::run_metrics_server(metrics_port, ready2).await {
                 error!(port = %metrics_port, error = %e, "Metrics server failed");
             }
         });
+    }
+    let quic_state = state.clone();
+    let quic_handle =
+        tokio::spawn(async move { handlers::quic::run_quic_server(quic_state, ready).await });
+    {
+        let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
+        sync_listeners(&state, &listeners);
     }
     quic_handle.await??;
     Ok(())

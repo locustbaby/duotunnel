@@ -175,12 +175,13 @@ jobs:
           ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             > /tmp/ci-ctld.log 2>&1 &
           echo $! > /tmp/ctld.pid
-          # Wait until ctld has finished its first-boot routing seed and is ready
-          for i in $(seq 1 30); do
-            grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
-              /tmp/ci-ctld.log 2>/dev/null && break
-            sleep 0.2
+          # Wait for ctld healthz (ready after DB init + routing seed)
+          for i in $(seq 1 60); do
+            curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
+          curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
+            || { echo "ERROR: ctld healthz never became ready"; cat /tmp/ci-ctld.log; exit 1; }
           echo "ctld ready"
 
       - name: Start tunnel server (ctld-managed mode)
@@ -190,10 +191,12 @@ jobs:
             --ctld-addr 127.0.0.1:7788 \
             > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          for i in $(seq 1 20); do
-            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
-            sleep 0.3
+          for i in $(seq 1 60); do
+            curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
+          curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 \
+            || { echo "ERROR: server healthz never became ready"; cat /tmp/ci-server.log; exit 1; }
           echo "Tunnel server ready"
 
       - name: Create client token
@@ -206,16 +209,8 @@ jobs:
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
           echo "$TOKEN" > /tmp/ci-token.txt
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
-          # Wait for ctld's db_poll to detect the new token and push a Patch to server.
-          # Poll interval is 1500ms; record current patch count and wait for it to increase.
-          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
-          PATCHES_BEFORE=${PATCHES_BEFORE:-0}
-          for i in $(seq 1 25); do
-            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
-            PATCHES_NOW=${PATCHES_NOW:-0}
-            [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
-            sleep 0.2
-          done
+          # Wait for ctld poll to push the new token to server (~1500ms poll interval)
+          sleep 3
           echo "Token ready, server notified"
 
       - name: Start tunnel client and wait for login
@@ -223,13 +218,11 @@ jobs:
         run: |
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
               break
             fi
-            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              break
-            fi
+            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -237,15 +230,13 @@ jobs:
             echo "=== ctld ===" && cat /tmp/ci-ctld.log
             echo "=== server ===" && cat /tmp/ci-server.log
             echo "=== client ===" && cat /tmp/ci-client.log
-            echo "=== listeners :8082 ===" && ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
-          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-            echo "ERROR: client entry listener is not ready on :8082"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+            echo "ERROR: client healthz not ready"
             echo "=== ctld ===" && cat /tmp/ci-ctld.log
             echo "=== server ===" && cat /tmp/ci-server.log
             echo "=== client ===" && cat /tmp/ci-client.log
-            echo "=== listeners :8082 ===" && ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           echo "Client connected and logged in"
@@ -565,30 +556,18 @@ jobs:
           ./target/release/server --config ci-helpers/server-standalone.yaml \
             > /tmp/sa-server.log 2>&1 &
           echo $! > /tmp/sa-server.pid
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/sa-server.pid)" 2>/dev/null; then
               break
             fi
-            if ss -lun '( sport = :10087 )' 2>/dev/null | tail -n +2 | grep -q ':10087'; then
-              break
-            fi
-            sleep 0.3
+            curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/sa-server.pid)" 2>/dev/null; then
             echo "ERROR: standalone server did not start"; cat /tmp/sa-server.log; exit 1
           fi
-          if ! ss -lun '( sport = :10087 )' 2>/dev/null | tail -n +2 | grep -q ':10087'; then
-            echo "ERROR: standalone server QUIC listener is not ready on :10087"
-            cat /tmp/sa-server.log; exit 1
-          fi
-          for i in $(seq 1 20); do
-            if ss -ltn '( sport = :8180 )' 2>/dev/null | tail -n +2 | grep -q ':8180'; then
-              break
-            fi
-            sleep 0.3
-          done
-          if ! ss -ltn '( sport = :8180 )' 2>/dev/null | tail -n +2 | grep -q ':8180'; then
-            echo "ERROR: standalone HTTP listener is not ready on :8180"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1; then
+            echo "ERROR: standalone server healthz not ready"
             cat /tmp/sa-server.log; exit 1
           fi
           echo "Standalone server ready"
@@ -617,13 +596,11 @@ jobs:
           " "$SA_TOKEN"
           ./target/release/client --config ci-helpers/client.yaml > /tmp/sa-client.log 2>&1 &
           echo $! > /tmp/sa-client.pid
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
               break
             fi
-            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              break
-            fi
+            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
@@ -632,11 +609,10 @@ jobs:
             echo "=== client ===" && cat /tmp/sa-client.log
             exit 1
           fi
-          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-            echo "ERROR: standalone client entry listener is not ready on :8082"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+            echo "ERROR: standalone client healthz not ready"
             echo "=== server ===" && cat /tmp/sa-server.log
             echo "=== client ===" && cat /tmp/sa-client.log
-            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           # Warmup: wait for QUIC streams to be ready before 7-D fires.
@@ -708,13 +684,11 @@ jobs:
           " "$NEW_TOKEN"
           ./target/release/client --config ci-helpers/client.yaml > /tmp/sa-client2.log 2>&1 &
           echo $! > /tmp/sa-client.pid
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
               break
             fi
-            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              break
-            fi
+            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
@@ -723,11 +697,10 @@ jobs:
             echo "=== client ===" && cat /tmp/sa-client2.log
             exit 1
           fi
-          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-            echo "ERROR: standalone client entry listener is not ready on :8082 after token rotate"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+            echo "ERROR: standalone client healthz not ready after token rotate"
             echo "=== server ===" && tail -30 /tmp/sa-server.log
             echo "=== client ===" && cat /tmp/sa-client2.log
-            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           # Warmup: wait for QUIC streams to be ready for traffic.
@@ -850,19 +823,22 @@ jobs:
           mkdir -p data
           ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
           echo $! > /tmp/ctld.pid
-          for i in $(seq 1 30); do
-            grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
-              /tmp/ci-ctld.log 2>/dev/null && break
-            sleep 0.2
+          for i in $(seq 1 60); do
+            curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
+          curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
+            || { echo "ERROR: ctld healthz never became ready"; cat /tmp/ci-ctld.log; exit 1; }
 
           ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          for i in $(seq 1 20); do
-            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
-            sleep 0.3
+          for i in $(seq 1 60); do
+            curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
+          curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 \
+            || { echo "ERROR: server healthz never became ready"; cat /tmp/ci-server.log; exit 1; }
 
           TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
@@ -870,24 +846,15 @@ jobs:
             client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
-          # Wait for ctld's db_poll to push the new token to server before connecting client.
-          PATCHES_BEFORE=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
-          PATCHES_BEFORE=${PATCHES_BEFORE:-0}
-          for i in $(seq 1 25); do
-            PATCHES_NOW=$(grep -c "received Patch from ctld" /tmp/ci-server.log 2>/dev/null || true)
-            PATCHES_NOW=${PATCHES_NOW:-0}
-            [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
-            sleep 0.2
-          done
+          # Wait for ctld poll to push new token to server (~1500ms poll interval)
+          sleep 3
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
               break
             fi
-            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              break
-            fi
+            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -895,10 +862,9 @@ jobs:
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
           fi
-          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-            echo "ERROR: client entry listener is not ready on :8082"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+            echo "ERROR: client healthz not ready"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
-            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           echo "All backends + tunnel ready"
@@ -945,21 +911,19 @@ jobs:
           ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          for i in $(seq 1 20); do
-            grep -q "QUIC server listening" /tmp/ci-server.log 2>/dev/null && break
-            sleep 0.3
+          for i in $(seq 1 60); do
+            curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+            sleep 0.5
           done
 
           echo "Restarting client..."
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
           echo $! > /tmp/client.pid
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
               break
             fi
-            if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              break
-            fi
+            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
           if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -967,10 +931,9 @@ jobs:
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
           fi
-          if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-            echo "ERROR: client entry listener is not ready on :8082 after restart"
+          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+            echo "ERROR: client healthz not ready after restart"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
-            ss -ltnp '( sport = :8082 )' || true
             exit 1
           fi
           echo "Retrying warmup after restart..."
@@ -1287,9 +1250,9 @@ jobs:
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
             ./target/release/grpc-echo-server 50051 > "/tmp/grpc-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/grpc-echo.pid
-            for i in $(seq 1 20); do
+            for i in $(seq 1 30); do
               curl -sf --max-time 2 http://127.0.0.1:9999/ > /dev/null && break
-              sleep 0.2
+              sleep 0.5
             done
             sleep 0.5
 
@@ -1297,20 +1260,25 @@ jobs:
             mkdir -p data
             ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > "/tmp/ci-ctld-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/ctld.pid
-            for i in $(seq 1 30); do
-              grep -q "routing seeded from server config\|routing DB already populated\|starting tunnel-ctld" \
-                "/tmp/ci-ctld-${SUFFIX}.log" 2>/dev/null && break
-              sleep 0.2
+            # Wait for ctld healthz (ready after DB init + routing seed)
+            for i in $(seq 1 60); do
+              curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
+              sleep 0.5
             done
+            curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
+              || { echo "ERROR: ctld healthz never became ready"; cat "/tmp/ci-ctld-${SUFFIX}.log"; exit 1; }
 
             PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/server-pprof \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/server.pid
-            for i in $(seq 1 20); do
-              grep -q "QUIC server listening" "/tmp/ci-server-${SUFFIX}.log" 2>/dev/null && break
-              sleep 0.3
+            # Wait for server healthz (ready after QUIC endpoint binds)
+            for i in $(seq 1 60); do
+              curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+              sleep 0.5
             done
+            curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 \
+              || { echo "ERROR: server healthz never became ready"; cat "/tmp/ci-server-${SUFFIX}.log"; exit 1; }
 
             CLIENT_NAME="ci-group-${SUFFIX}"
             TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
@@ -1322,25 +1290,17 @@ jobs:
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
             python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$Q"
 
-            PATCHES_BEFORE=$(grep -c "received Patch from ctld" "/tmp/ci-server-${SUFFIX}.log" 2>/dev/null || true)
-            PATCHES_BEFORE=${PATCHES_BEFORE:-0}
-            for i in $(seq 1 25); do
-              PATCHES_NOW=$(grep -c "received Patch from ctld" "/tmp/ci-server-${SUFFIX}.log" 2>/dev/null || true)
-              PATCHES_NOW=${PATCHES_NOW:-0}
-              [ "$PATCHES_NOW" -gt "$PATCHES_BEFORE" ] && break
-              sleep 0.2
-            done
+            # Wait for ctld poll to push new token to server (~1500ms poll interval)
+            sleep 3
 
             PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/client-pprof \
               ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/client.pid
-            for i in $(seq 1 40); do
+            for i in $(seq 1 60); do
               if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
                 break
               fi
-              if ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-                break
-              fi
+              curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
               sleep 0.5
             done
             if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
@@ -1348,21 +1308,20 @@ jobs:
               cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
               exit 1
             fi
-            if ! ss -ltn '( sport = :8082 )' 2>/dev/null | tail -n +2 | grep -q ':8082'; then
-              echo "ERROR: client entry listener is not ready on :8082"
+            if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
+              echo "ERROR: client healthz not ready"
               cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
-              ss -ltnp '( sport = :8082 )' || true
               exit 1
             fi
 
             ok=0
-            for i in $(seq 1 10); do
+            for i in $(seq 1 30); do
               if curl -sf --max-time 3 http://echo.local:8080/ > /dev/null 2>&1 && \
                  curl -sf --max-time 3 -H "Host: echo.local" http://127.0.0.1:8082/ > /dev/null 2>&1; then
                 ok=1
                 break
               fi
-              sleep 0.5
+              sleep 1
             done
             if [ "$ok" -ne 1 ]; then
               echo "ERROR: warmup failed"
@@ -1512,11 +1471,25 @@ jobs:
           path: /tmp/profile8k
           if-no-files-found: ignore
 
-      - name: Download pprof flamegraphs (8k)
+      - name: Download 8k benchmark outputs (q1)
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-profile-8k-results-q1-${{ github.run_id }}
+          path: /tmp/profile8k-q1
+          if-no-files-found: ignore
+
+      - name: Download pprof flamegraphs (8k, q4)
         uses: actions/download-artifact@v4
         with:
           name: pprof-flamegraphs-8k-${{ github.run_id }}
           path: /tmp/pprof8k
+          if-no-files-found: ignore
+
+      - name: Download pprof flamegraphs (8k, q1)
+        uses: actions/download-artifact@v4
+        with:
+          name: pprof-flamegraphs-8k-q1-${{ github.run_id }}
+          path: /tmp/pprof8k-q1
           if-no-files-found: ignore
 
       - name: Merge benchmark outputs
@@ -1532,7 +1505,8 @@ jobs:
           import os
 
           core_path = "/tmp/core/bench-results.json"
-          extra_path = "/tmp/profile8k/bench-results.json" if os.path.isfile("/tmp/profile8k/bench-results.json") else None
+          extra_q1_path = "/tmp/profile8k-q1/bench-results.json" if os.path.isfile("/tmp/profile8k-q1/bench-results.json") else None
+          extra_q4_path = "/tmp/profile8k/bench-results.json" if os.path.isfile("/tmp/profile8k/bench-results.json") else None
           out_path = "/tmp/bench-results-merged.json"
 
           def r2(v):
@@ -1553,51 +1527,71 @@ jobs:
               if isinstance(s, dict) and "name" in s:
                   sc_by_name[s["name"]] = s
 
-          if extra_path:
+          def merge_extra(extra_path, label, include_in_total_rps):
+              if not extra_path:
+                  return
               with open(extra_path, "r", encoding="utf-8") as f:
                   extra = json.load(f)
-              if extra:
-                  for s in extra.get("scenarios", []):
-                      if isinstance(s, dict) and "name" in s:
-                          sc_by_name[s["name"]] = s
+              if not extra:
+                  return
 
-                  core_max_end = 0
-                  for p in merged.get("phases", []):
-                      if isinstance(p, dict):
-                          core_max_end = max(core_max_end, float(p.get("end", 0) or 0))
-                  phase_offset = core_max_end + 5
+              name_map = {}
+              for s in extra.get("scenarios", []):
+                  if not isinstance(s, dict):
+                      continue
+                  ns = deepcopy(s)
+                  old_name = str(ns.get("name", "") or "")
+                  if old_name:
+                      new_name = f"{old_name} ({label})"
+                      name_map[old_name] = new_name
+                      ns["name"] = new_name
+                  if not include_in_total_rps:
+                      ns["includeInTotalRps"] = False
+                  if "name" in ns:
+                      sc_by_name[ns["name"]] = ns
 
-                  for p in extra.get("phases", []):
-                      if not isinstance(p, dict):
-                          continue
-                      np = deepcopy(p)
-                      np["start"] = r2(float(np.get("start", 0) or 0) + phase_offset)
-                      np["end"] = r2(float(np.get("end", 0) or 0) + phase_offset)
-                      name = str(np.get("name", ""))
-                      if name and not name.endswith(" (8k)"):
-                          np["name"] = f"{name} (8k)"
-                      merged["phases"].append(np)
+              core_max_end = 0
+              for p in merged.get("phases", []):
+                  if isinstance(p, dict):
+                      core_max_end = max(core_max_end, float(p.get("end", 0) or 0))
+              phase_offset = core_max_end + 5
 
-                  core_catalog = merged.get("catalog") or {}
-                  extra_catalog = extra.get("catalog") or {}
-                  core_case_order = list(core_catalog.get("caseOrder") or [])
-                  for n in extra_catalog.get("caseOrder") or []:
-                      if n not in core_case_order:
-                          core_case_order.append(n)
-                  core_catalog["caseOrder"] = core_case_order
+              for p in extra.get("phases", []):
+                  if not isinstance(p, dict):
+                      continue
+                  np = deepcopy(p)
+                  np["start"] = r2(float(np.get("start", 0) or 0) + phase_offset)
+                  np["end"] = r2(float(np.get("end", 0) or 0) + phase_offset)
+                  phase_name = str(np.get("name", ""))
+                  np["name"] = f"{phase_name} ({label})" if phase_name else label
+                  if isinstance(np.get("scenarios"), list):
+                      np["scenarios"] = [name_map.get(n, n) for n in np.get("scenarios", [])]
+                  merged["phases"].append(np)
 
-                  categories = []
-                  seen_cat = set()
-                  for c in (core_catalog.get("categories") or []) + (extra_catalog.get("categories") or []):
-                      if not isinstance(c, dict):
-                          continue
-                      cid = c.get("id")
-                      if cid in seen_cat:
-                          continue
-                      seen_cat.add(cid)
-                      categories.append(c)
-                  core_catalog["categories"] = categories
-                  merged["catalog"] = core_catalog
+              core_catalog = merged.get("catalog") or {}
+              extra_catalog = extra.get("catalog") or {}
+              core_case_order = list(core_catalog.get("caseOrder") or [])
+              for n in extra_catalog.get("caseOrder") or []:
+                  nn = name_map.get(n, n)
+                  if nn not in core_case_order:
+                      core_case_order.append(nn)
+              core_catalog["caseOrder"] = core_case_order
+
+              categories = []
+              seen_cat = set()
+              for c in (core_catalog.get("categories") or []) + (extra_catalog.get("categories") or []):
+                  if not isinstance(c, dict):
+                      continue
+                  cid = c.get("id")
+                  if cid in seen_cat:
+                      continue
+                  seen_cat.add(cid)
+                  categories.append(c)
+              core_catalog["categories"] = categories
+              merged["catalog"] = core_catalog
+
+          merge_extra(extra_q1_path, "8k-q1", False)
+          merge_extra(extra_q4_path, "8k-q4", True)
 
           merged["scenarios"] = list(sc_by_name.values())
 
@@ -1651,16 +1645,24 @@ jobs:
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
           FLAMEGRAPH_ARG=""
           FLAMEGRAPH_CLIENT_ARG=""
-          if [ -s /tmp/pprof8k/server-pprof.svg ] || [ -s /tmp/pprof8k/client-pprof.svg ]; then
-            mkdir -p bench/flamegraphs
-            if [ -s /tmp/pprof8k/server-pprof.svg ]; then
-              cp /tmp/pprof8k/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
-              FLAMEGRAPH_ARG="--flamegraph flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
-            fi
-            if [ -s /tmp/pprof8k/client-pprof.svg ]; then
-              cp /tmp/pprof8k/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
-              FLAMEGRAPH_CLIENT_ARG="--flamegraph-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
-            fi
+          FLAMEGRAPH_Q1_ARG=""
+          FLAMEGRAPH_Q1_CLIENT_ARG=""
+          mkdir -p bench/flamegraphs
+          if [ -s /tmp/pprof8k/server-pprof.svg ]; then
+            cp /tmp/pprof8k/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
+            FLAMEGRAPH_ARG="--flamegraph flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
+          fi
+          if [ -s /tmp/pprof8k/client-pprof.svg ]; then
+            cp /tmp/pprof8k/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
+            FLAMEGRAPH_CLIENT_ARG="--flamegraph-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
+          fi
+          if [ -s /tmp/pprof8k-q1/server-pprof.svg ]; then
+            cp /tmp/pprof8k-q1/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-server.svg"
+            FLAMEGRAPH_Q1_ARG="--flamegraph-q1 flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-server.svg"
+          fi
+          if [ -s /tmp/pprof8k-q1/client-pprof.svg ]; then
+            cp /tmp/pprof8k-q1/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-client.svg"
+            FLAMEGRAPH_Q1_CLIENT_ARG="--flamegraph-q1-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-client.svg"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results-merged.json \
@@ -1668,7 +1670,8 @@ jobs:
             --sha    "${{ github.sha }}" \
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG
+            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG \
+            $FLAMEGRAPH_Q1_ARG $FLAMEGRAPH_Q1_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/

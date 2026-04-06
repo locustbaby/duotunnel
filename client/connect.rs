@@ -1,5 +1,6 @@
 use crate::config::ClientConfigFile;
 use anyhow::{anyhow, Result};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -47,6 +48,7 @@ pub async fn run_supervisor(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
+    ready: Arc<AtomicBool>,
 ) -> Result<()> {
     let initial_delay = Duration::from_millis(config.reconnect.initial_delay_ms);
     let max_delay = Duration::from_millis(config.reconnect.max_delay_ms);
@@ -65,8 +67,8 @@ pub async fn run_supervisor(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => { info!(server = % config.server_address(),
-            "shutdown signal received"); return Ok(()); } result = crate ::run_client(&
-            config, & endpoint, cancel.clone()) => { match result { Ok(_) => { backoff.reset();
+            "shutdown signal received"); return Ok(()); } result = crate::run_client(&
+            config, &endpoint, cancel.clone(), ready.clone()) => { match result { Ok(_) => { backoff.reset();
             info!(server = % config.server_address(),
             "connection ended, restarting loop"); } Err(e) => { if e.class() ==
             FailureClass::Fatal { error!(server = % config.server_address(), error = % e,
