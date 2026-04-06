@@ -1293,6 +1293,7 @@ jobs:
             done
             sleep 0.5
 
+            rm -rf data
             mkdir -p data
             ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > "/tmp/ci-ctld-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/ctld.pid
@@ -1311,10 +1312,13 @@ jobs:
               sleep 0.3
             done
 
+            CLIENT_NAME="ci-group-${SUFFIX}"
             TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
-              client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
-              || ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
-              client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
+              client create-client "${CLIENT_NAME}" 2>/dev/null | awk '/^Token:/ {print $2; exit}')
+            if [ -z "$TOKEN" ]; then
+              TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
+                client rotate-token "${CLIENT_NAME}" 2>/dev/null | awk '{print $NF}' | tail -n1)
+            fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
             python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$Q"
 
