@@ -22,3 +22,6 @@ panic = "abort"        # No unwinding machinery; smaller binary + faster panic p
 
 [patch.crates-io]
 dial9-tokio-telemetry = { git = "https://github.com/dial9-rs/dial9-tokio-telemetry.git", rev = "64564b26b7f114a9788003f07e8bfc24307f31b5" }
+
+[workspace.metadata.todo]
+dial9_release_followup = "Switch dial9-tokio-telemetry from git rev to crates.io release after upstream publish."
