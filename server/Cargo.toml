@@ -19,7 +19,7 @@ subtle = "2"
 hex = "0.4"
 tokio = { version = "1.49", features = ["full", "io-util"] }
 tokio-util = "0.7"
-quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
+quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 webpki-roots = "0.26"
 serde_yaml = "0.9"
