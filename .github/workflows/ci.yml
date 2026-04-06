@@ -1667,12 +1667,12 @@ jobs:
             REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
             PAGES_BASE="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
             if [ -s /tmp/traces8k/server-trace.bin ]; then
-              cp /tmp/traces8k/server-trace.bin "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin"
-              TRACE_SERVER_ARG="--tokio-trace-server-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-server.bin"
+              gzip -c /tmp/traces8k/server-trace.bin > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
+              TRACE_SERVER_ARG="--tokio-trace-server-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
             fi
             if [ -s /tmp/traces8k/client-trace.bin ]; then
-              cp /tmp/traces8k/client-trace.bin "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin"
-              TRACE_CLIENT_ARG="--tokio-trace-client-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-client.bin"
+              gzip -c /tmp/traces8k/client-trace.bin > "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
+              TRACE_CLIENT_ARG="--tokio-trace-client-url ${PAGES_BASE}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
             fi
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
