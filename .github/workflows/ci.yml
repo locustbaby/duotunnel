@@ -1283,7 +1283,6 @@ jobs:
         with:
           path: target/release
           key: release-bins-profile-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
-          restore-keys: release-bins-profile-${{ runner.os }}-
 
       - name: Build all binaries (profiling + debuginfo)
         run: |
