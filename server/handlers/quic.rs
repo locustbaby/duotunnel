@@ -5,7 +5,7 @@ use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
@@ -43,7 +43,7 @@ pub async fn run_quic_server(state: Arc<ServerState>) -> Result<()> {
     }
     Ok(())
 }
-#[instrument(skip_all)]
+#[cfg_attr(feature = "profiling", tracing::instrument(skip_all))]
 async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();

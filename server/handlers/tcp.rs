@@ -52,6 +52,7 @@ pub async fn run_tcp_listener(
         });
     }
 }
+#[cfg_attr(feature = "profiling", tracing::instrument(skip_all))]
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
     stream: TcpStream,
