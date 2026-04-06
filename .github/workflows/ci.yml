@@ -1450,11 +1450,19 @@ jobs:
       - name: Stop tunnel for trace flush
         if: always()
         run: |
-          kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-          kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 3
-          kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
+          SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
+          [ -n "$CLIENT_PID" ] && kill -TERM "$CLIENT_PID" 2>/dev/null || true
+          [ -n "$SERVER_PID" ] && kill -TERM "$SERVER_PID" 2>/dev/null || true
+          for i in $(seq 1 20); do
+            CDONE=1; SDONE=1
+            [ -n "$CLIENT_PID" ] && kill -0 "$CLIENT_PID" 2>/dev/null && CDONE=0
+            [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null && SDONE=0
+            [ "$CDONE" = "1" ] && [ "$SDONE" = "1" ] && break
+            sleep 0.5
+          done
+          [ -n "$CLIENT_PID" ] && kill -9 "$CLIENT_PID" 2>/dev/null || true
+          [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
 
       - name: Upload logs
         if: always()
@@ -1477,7 +1485,7 @@ jobs:
         with:
           name: tokio-telemetry-traces-8k-${{ github.run_id }}
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             /tmp/server-trace.bin
             /tmp/client-trace.bin
@@ -1525,8 +1533,10 @@ jobs:
           import json
           from copy import deepcopy
 
+          import os
+
           core_path = "/tmp/core/bench-results.json"
-          extra_path = "/tmp/trace8k/bench-results.json"
+          extra_path = "/tmp/trace8k/bench-results.json" if os.path.isfile("/tmp/trace8k/bench-results.json") else None
           out_path = "/tmp/bench-results-merged.json"
 
           def r2(v):
@@ -1548,11 +1558,8 @@ jobs:
                   sc_by_name[s["name"]] = s
 
           if extra_path:
-              try:
-                  with open(extra_path, "r", encoding="utf-8") as f:
-                      extra = json.load(f)
-              except FileNotFoundError:
-                  extra = None
+              with open(extra_path, "r", encoding="utf-8") as f:
+                  extra = json.load(f)
               if extra:
                   for s in extra.get("scenarios", []):
                       if isinstance(s, dict) and "name" in s:
@@ -1634,7 +1641,6 @@ jobs:
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           FRP_ARG=""
           FRP_OFFSET_ARG=""
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
           if [ -s /tmp/core/bench-results-frp.json ]; then
             FRP_ARG="--frp-result /tmp/core/bench-results-frp.json"
             if [ -f /tmp/core/frp_k6_start_epoch ] && [ -f /tmp/core/sampling_start_epoch ]; then

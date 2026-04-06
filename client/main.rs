@@ -84,7 +84,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     let writer = RotatingWriter::single_file(&trace_path)?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    let (runtime, _guard) = TracedRuntime::builder()
+    let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_trace_path(trace_path)
         .with_cpu_profiling(CpuProfilingConfig::default())
@@ -92,7 +92,10 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
-    runtime.block_on(fut)
+    let result = runtime.block_on(fut);
+    drop(runtime);
+    drop(guard);
+    result
 }
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;
