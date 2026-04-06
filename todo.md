@@ -371,6 +371,23 @@ For load balancing, Pingora flattens the Hash Ring into a contiguous 1D array to
 
 ---
 
+## Upstream Bug / Patch
+
+### [TODO-55] quinn ConnectionDriver debug_span! per-poll overhead
+
+**Files**: `quinn/quinn/src/connection.rs:252`
+**Priority**: High
+
+`ConnectionDriver::poll` creates a `debug_span!("drive", id=...)` on **every single poll call** with no `#[cfg]` guard. Since quinn does not set `release_max_level_warn`, the span is constructed and subscriber-queried at runtime on every poll even when tracing is disabled. This shows up as ~36% CPU in flamegraphs under 8k QPS load.
+
+**Root cause**: Code leak — `debug_span!` at line 252 is unconditional, no feature flag or cfg gate.
+
+**Fix**: Patch quinn locally (pinned to tag `quinn-0.11.9`) via `[patch.crates-io]`. Wrap the span creation with `if tracing::enabled!(tracing::Level::DEBUG)` or gate with `#[cfg(feature = "tracing")]`. Also consider upstreaming a PR to quinn-rs.
+
+**Status**: Patching locally, tracking for upstream PR.
+
+---
+
 ## Bench Fixes
 
 ### [TODO-15] egress_http_post Overflow Phase Boundary

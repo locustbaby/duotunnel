@@ -11,6 +11,11 @@ members = [
 
 resolver = "2"
 
+[patch.crates-io]
+quinn = { git = "https://github.com/locustbaby/quinn", rev = "93e5b5874fe9b94c23eab09c2a54a19a41729947" }
+quinn-proto = { git = "https://github.com/locustbaby/quinn", rev = "93e5b5874fe9b94c23eab09c2a54a19a41729947" }
+quinn-udp = { git = "https://github.com/locustbaby/quinn", rev = "93e5b5874fe9b94c23eab09c2a54a19a41729947" }
+
 [profile.release]
 lto = "fat"            # Full cross-crate LTO: enables whole-program inlining and
                        # dead-code elimination across all crates.  ~5-15% better
