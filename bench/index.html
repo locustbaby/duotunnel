@@ -441,6 +441,8 @@ function renderDetail(entry) {
   const res = entry.resources || null;
   const flamegraph = entry.artifacts && entry.artifacts.flamegraph ? entry.artifacts.flamegraph : '';
   const flamegraphClient = entry.artifacts && entry.artifacts.flamegraph_client ? entry.artifacts.flamegraph_client : '';
+  const chromeTrace = entry.artifacts && entry.artifacts.chrome_trace ? entry.artifacts.chrome_trace : '';
+  const chromeTraceClient = entry.artifacts && entry.artifacts.chrome_trace_client ? entry.artifacts.chrome_trace_client : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
@@ -462,13 +464,15 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(flamegraph || flamegraphClient) ? `
+  ${(flamegraph || flamegraphClient || chromeTrace || chromeTraceClient) ? `
   <div class="row full">
     <div class="panel auto">
-      <h3>CPU Flamegraphs (pprof)</h3>
-      <div style="font-size:13px;display:flex;gap:16px">
-        ${flamegraph ? `<a href="${esc(flamegraph)}" target="_blank">Server Flamegraph (SVG)</a>` : ''}
-        ${flamegraphClient ? `<a href="${esc(flamegraphClient)}" target="_blank">Client Flamegraph (SVG)</a>` : ''}
+      <h3>Profiles (8k scenario)</h3>
+      <div style="font-size:13px;display:flex;gap:24px;flex-wrap:wrap">
+        ${flamegraph ? `<span><b>pprof CPU flamegraph:</b> <a href="${esc(flamegraph)}" target="_blank">Server SVG</a></span>` : ''}
+        ${flamegraphClient ? `<span><a href="${esc(flamegraphClient)}" target="_blank">Client SVG</a></span>` : ''}
+        ${chromeTrace ? `<span><b>Chrome Trace:</b> <a href="${esc(chromeTrace)}" download>Server trace.json.gz</a> <span style="color:var(--text2)">(open in chrome://tracing)</span></span>` : ''}
+        ${chromeTraceClient ? `<span><a href="${esc(chromeTraceClient)}" download>Client trace.json.gz</a></span>` : ''}
       </div>
     </div>
   </div>` : ''}

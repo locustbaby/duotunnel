@@ -15,6 +15,8 @@ def main():
     p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--flamegraph", default="")
     p.add_argument("--flamegraph-client", default="")
+    p.add_argument("--chrome-trace", default="")
+    p.add_argument("--chrome-trace-client", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -30,6 +32,10 @@ def main():
         entry.setdefault("artifacts", {})["flamegraph"] = args.flamegraph
     if args.flamegraph_client:
         entry.setdefault("artifacts", {})["flamegraph_client"] = args.flamegraph_client
+    if args.chrome_trace:
+        entry.setdefault("artifacts", {})["chrome_trace"] = args.chrome_trace
+    if args.chrome_trace_client:
+        entry.setdefault("artifacts", {})["chrome_trace_client"] = args.chrome_trace_client
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -79,17 +85,23 @@ def main():
     with open(args.data, "w") as f:
         f.write(PREFIX + json.dumps({"entries": entries}, indent=2) + SUFFIX + "\n")
 
-    flame_dir = os.path.join(os.path.dirname(args.data), "flamegraphs")
-    if os.path.isdir(flame_dir):
+    bench_dir = os.path.dirname(args.data)
+    for subdir, keys, prefix in [
+        ("flamegraphs", ("flamegraph", "flamegraph_client"), "flamegraphs/"),
+        ("traces", ("chrome_trace", "chrome_trace_client"), "traces/"),
+    ]:
+        d = os.path.join(bench_dir, subdir)
+        if not os.path.isdir(d):
+            continue
         keep = set()
         for e in entries:
             arts = e.get("artifacts") or {}
-            for key in ("flamegraph", "flamegraph_client"):
+            for key in keys:
                 pth = arts.get(key)
-                if isinstance(pth, str) and pth.startswith("flamegraphs/"):
+                if isinstance(pth, str) and pth.startswith(prefix):
                     keep.add(pth.split("/", 1)[1])
-        for name in os.listdir(flame_dir):
-            fp = os.path.join(flame_dir, name)
+        for name in os.listdir(d):
+            fp = os.path.join(d, name)
             if os.path.isfile(fp) and name not in keep:
                 os.remove(fp)
 
