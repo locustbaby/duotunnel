@@ -1734,20 +1734,24 @@ jobs:
           TRACE_SERVER_ARG=""; TRACE_CLIENT_ARG=""
           TRACE_Q1_SERVER_ARG=""; TRACE_Q1_CLIENT_ARG=""
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/raw/gh-pages/bench/traces"
-          if [ -s /tmp/dial9-traces-q4/server-trace.bin.gz ]; then
-            cp /tmp/dial9-traces-q4/server-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
+          Q4_SERVER=$(find /tmp/dial9-traces-q4 -name "server-trace.bin.gz" 2>/dev/null | head -1)
+          Q4_CLIENT=$(find /tmp/dial9-traces-q4 -name "client-trace.bin.gz" 2>/dev/null | head -1)
+          Q1_SERVER=$(find /tmp/dial9-traces-q1 -name "server-trace.bin.gz" 2>/dev/null | head -1)
+          Q1_CLIENT=$(find /tmp/dial9-traces-q1 -name "client-trace.bin.gz" 2>/dev/null | head -1)
+          if [ -n "$Q4_SERVER" ] && [ -s "$Q4_SERVER" ]; then
+            cp "$Q4_SERVER" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
             TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
           fi
-          if [ -s /tmp/dial9-traces-q4/client-trace.bin.gz ]; then
-            cp /tmp/dial9-traces-q4/client-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
+          if [ -n "$Q4_CLIENT" ] && [ -s "$Q4_CLIENT" ]; then
+            cp "$Q4_CLIENT" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
             TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
           fi
-          if [ -s /tmp/dial9-traces-q1/server-trace.bin.gz ]; then
-            cp /tmp/dial9-traces-q1/server-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
+          if [ -n "$Q1_SERVER" ] && [ -s "$Q1_SERVER" ]; then
+            cp "$Q1_SERVER" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
             TRACE_Q1_SERVER_ARG="--trace-q1-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
           fi
-          if [ -s /tmp/dial9-traces-q1/client-trace.bin.gz ]; then
-            cp /tmp/dial9-traces-q1/client-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
+          if [ -n "$Q1_CLIENT" ] && [ -s "$Q1_CLIENT" ]; then
+            cp "$Q1_CLIENT" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
             TRACE_Q1_CLIENT_ARG="--trace-q1-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
