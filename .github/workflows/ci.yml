@@ -1444,8 +1444,8 @@ jobs:
               ls -lh /tmp/server-trace* /tmp/client-trace* 2>&1 || true
               exit 1
             fi
-            gzip -c /tmp/server-trace.0.bin > "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
-            gzip -c /tmp/client-trace.0.bin > "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
+            cp /tmp/server-trace.0.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
+            cp /tmp/client-trace.0.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"
