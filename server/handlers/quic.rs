@@ -251,12 +251,30 @@ async fn run_control_stream(
 ) -> Result<()> {
     // Open a bidirectional stream: server writes, client replies.
     let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
+
+    // Send an initial Ping immediately so the client's accept_bi() unblocks.
+    // QUIC only notifies the peer about a new stream when data arrives; without
+    // this first send the client would wait until the 60-second timer fires.
+    let server_config_hash = {
+        let routing = state.routing.load();
+        build_client_config_for_group(&routing.tunnel_management, client_group)
+            .map(|c| config_hash(&c))
+            .unwrap_or(0)
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let initial_ping = Ping { seq: 0, timestamp_ms: ts, config_hash: server_config_hash };
+    send_message(&mut ctrl_send, MessageType::Ping, &initial_ping).await?;
+    debug!(conn_id = %conn_id, server_config_hash, "sent initial Ping on control stream");
+
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
     ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_ticker.tick().await; // consume the immediate first tick
 
-    let mut seq: u64 = 0;
-    let mut pending_pong: Option<u64> = None;
+    let mut seq: u64 = 1; // start at 1 since initial ping used seq=0
+    let mut pending_pong: Option<u64> = Some(0); // waiting for pong to initial ping
 
     loop {
         tokio::select! {
