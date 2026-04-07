@@ -86,19 +86,20 @@ def main():
         f.write(PREFIX + json.dumps({"entries": entries}, indent=2) + SUFFIX + "\n")
 
     bench_dir = os.path.dirname(args.data)
-    for subdir, keys, prefix in [
-        ("traces", ("trace_server", "trace_client", "trace_q1_server", "trace_q1_client"), "traces/"),
+    for subdir, keys in [
+        ("traces", ("trace_server", "trace_client", "trace_q1_server", "trace_q1_client")),
     ]:
         d = os.path.join(bench_dir, subdir)
         if not os.path.isdir(d):
             continue
         keep = set()
+        marker = f"/{subdir}/"
         for e in entries:
             arts = e.get("artifacts") or {}
             for key in keys:
                 pth = arts.get(key)
-                if isinstance(pth, str) and pth.startswith(prefix):
-                    keep.add(pth.split("/", 1)[1])
+                if isinstance(pth, str) and marker in pth:
+                    keep.add(pth.split(marker, 1)[1])
         for name in os.listdir(d):
             fp = os.path.join(d, name)
             if os.path.isfile(fp) and name not in keep:
