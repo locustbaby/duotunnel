@@ -1432,14 +1432,14 @@ jobs:
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            sleep 3
+            sleep 35
             kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
 
             mkdir -p "/tmp/trace-${SUFFIX}"
             cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
-            [ -f /tmp/server-trace.bin ] && gzip -c /tmp/server-trace.bin > "/tmp/trace-${SUFFIX}/server-trace.bin.gz" || true
-            [ -f /tmp/client-trace.bin ] && gzip -c /tmp/client-trace.bin > "/tmp/trace-${SUFFIX}/client-trace.bin.gz" || true
+            [ -f /tmp/server-trace.bin ] && cp /tmp/server-trace.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz" || true
+            [ -f /tmp/client-trace.bin ] && cp /tmp/client-trace.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz" || true
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"

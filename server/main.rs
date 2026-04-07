@@ -202,7 +202,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .build_and_start_with_writer(builder, writer)?;
     let result = runtime.block_on(fut);
     drop(runtime);
-    drop(guard);
+    let _ = guard.graceful_shutdown(std::time::Duration::from_secs(30));
     result
 }
 fn init_observability(log_level: &str) {
