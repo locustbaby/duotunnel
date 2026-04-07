@@ -141,7 +141,15 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
-    let result = runtime.block_on(fut);
+    let result = runtime.block_on(async {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )?;
+        tokio::select! {
+            r = fut => r,
+            _ = sigterm.recv() => Ok(()),
+        }
+    });
     drop(runtime);
     let _ = guard.graceful_shutdown(std::time::Duration::from_secs(30));
     result
