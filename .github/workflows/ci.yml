@@ -81,7 +81,96 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Job 2: Integration tests — end-to-end, all protocols
+  # Job 2a: Build release binaries — shared by integration-test and stress-test
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Cache cargo registry + index
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Build all binaries
+        run: cargo build --release --workspace
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bins-${{ github.run_id }}
+          retention-days: 1
+          path: |
+            target/release/server
+            target/release/client
+            target/release/tunnel-ctld
+            target/release/http-echo-server
+            target/release/ws-echo-server
+            target/release/grpc-echo-server
+            target/release/ci-test-client
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2b: Build dial9 binaries — shared by stress-trace-8k
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-dial9:
+    name: Build (dial9 + symbols)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Cache cargo registry + index
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Build all binaries (dial9 + symbols)
+        run: |
+          SEP=$'\x1f'
+          CARGO_PROFILE_RELEASE_STRIP=none \
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
+            cargo build --release --workspace \
+              --features server/dial9-telemetry \
+              --features client/dial9-telemetry
+
+      - name: Upload binaries (dial9)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bins-dial9-${{ github.run_id }}
+          retention-days: 1
+          path: |
+            target/release/server
+            target/release/client
+            target/release/tunnel-ctld
+            target/release/http-echo-server
+            target/release/ws-echo-server
+            target/release/grpc-echo-server
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 3: Integration tests — end-to-end, all protocols
   #
   # Local backends (ci-helpers binaries, always reachable):
   #   http-echo-server  127.0.0.1:9999  — HTTP/1.1 + HTTP/2 JSON echo
@@ -115,34 +204,18 @@ jobs:
   integration-test:
     name: Integration Test (all protocols)
     runs-on: ubuntu-latest
+    needs: [build]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
-
-      - name: Cache cargo registry + index
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-
-
-      - name: Cache release build artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
+          name: release-bins-${{ github.run_id }}
           path: target/release
-          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
-          restore-keys: release-bins-${{ runner.os }}-
 
-      - name: Build all binaries (server, client, ci-helpers)
-        run: cargo build --release
+      - name: Mark binaries executable
+        run: chmod +x target/release/server target/release/client target/release/tunnel-ctld target/release/http-echo-server target/release/ws-echo-server target/release/grpc-echo-server target/release/ci-test-client
 
       # /etc/hosts — map test domains to 127.0.0.1
       - name: Configure /etc/hosts for test domains
@@ -764,36 +837,20 @@ jobs:
   stress-test:
     name: Stress Test (k6 multi-protocol)
     runs-on: ubuntu-latest
+    needs: [build]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
-
-      - name: Cache cargo registry + index
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-
-
-      - name: Cache release build artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
+          name: release-bins-${{ github.run_id }}
           path: target/release
-          key: release-bins-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'src/**', 'tunnel-lib/**', 'server/**', 'client/**', 'ci-helpers/**') }}
-          restore-keys: release-bins-${{ runner.os }}-
 
-      - name: Build all binaries
-        run: cargo build --release
+      - name: Mark binaries executable
+        run: chmod +x target/release/server target/release/client target/release/tunnel-ctld target/release/http-echo-server target/release/ws-echo-server target/release/grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -1198,35 +1255,20 @@ jobs:
   stress-trace-8k:
     name: Stress Trace 8K (dial9)
     runs-on: ubuntu-latest
+    needs: [build-dial9]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
-
-      - name: Cache cargo registry + index
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Download dial9 binaries
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-
+          name: release-bins-dial9-${{ github.run_id }}
+          path: target/release
 
-      - name: Build all binaries (dial9 + symbols)
-        run: |
-          SEP=$'\x1f'
-          CARGO_PROFILE_RELEASE_STRIP=none \
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
-            cargo build --release --workspace \
-              --features server/dial9-telemetry \
-              --features client/dial9-telemetry
+      - name: Mark binaries executable
+        run: chmod +x target/release/server target/release/client target/release/tunnel-ctld target/release/http-echo-server target/release/ws-echo-server target/release/grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
