@@ -42,5 +42,6 @@ http = "1.0"
 arc-swap = "1.7"
 figment = { version = "0.10", features = ["yaml", "env"] }
 rand = "0.9"
+parking_lot = "0.12"
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 dial9-tokio-telemetry = { version = "0.2.0", features = ["cpu-profiling"], optional = true }

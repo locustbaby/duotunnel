@@ -18,18 +18,22 @@ pub use engine::bridge::{
 pub use engine::relay::{relay_bidirectional, relay_with_initial};
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use models::msg::{
-    recv_message, recv_message_type, recv_routing_info, send_message, send_routing_info,
-    ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig, UpstreamServer,
+    config_hash, recv_message, recv_message_type, recv_routing_info, send_message,
+    send_routing_info, ClientConfig, Login, LoginResp, MessageType, Ping, Pong, RoutingInfo,
+    UpstreamConfig, UpstreamServer,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::rewrite::Rewriter;
-pub use proxy::ProxyBufferParams;
-pub use proxy::UpstreamGroup;
+pub use proxy::{Balancer, BalancerExt, ProxyBufferParams, RoundRobin, UpstreamGroup};
 pub use transport::addr::{normalize_host, parse_upstream, UpstreamAddr};
 pub use transport::listener::{
-    extract_host_from_http, extract_method_path_from_http, new_shared_vhost_router, peek_bytes,
-    start_tcp_listener, PortRouter, SharedVhostRouter, VhostRouter,
+    build_reuseport_udp_socket, extract_host_from_http, extract_method_path_from_http,
+    new_shared_vhost_router, peek_bytes, start_tcp_listener, PortRouter, SharedVhostRouter,
+    VhostRouter,
 };
-pub use transport::quic::{build_transport_config, QuicTransportParams};
+pub use transport::quic::{
+    build_reuseport_server_endpoint, build_transport_config, create_server_config_with,
+    QuicTransportParams,
+};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;

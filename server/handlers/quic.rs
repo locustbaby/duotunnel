@@ -3,19 +3,39 @@ use crate::egress::EgressProxy;
 use crate::handlers::SEMAPHORE_WAIT_MS;
 use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
-pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
-    let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
-    let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
-    let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
-    ready.store(true, Ordering::Release);
-    info!(addr = % addr, "QUIC server listening");
-    while let Some(incoming) = endpoint.accept().await {
+use tunnel_lib::{
+    config_hash, recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
+    Ping, Pong,
+};
+
+/// Interval between application-layer pings sent by server to client.
+const PING_INTERVAL: Duration = Duration::from_secs(60);
+/// How long to wait for a Pong before closing the connection.
+const PONG_TIMEOUT: Duration = Duration::from_secs(15);
+/// Accept loop for a pre-built endpoint. Called by each per-thread runner.
+///
+/// `cancel` is a shared token: when any sibling thread exits (normally or via panic),
+/// the supervisor cancels the token so all other threads stop accepting new connections.
+pub async fn run_quic_server_on_endpoint(
+    endpoint: quinn::Endpoint,
+    state: Arc<ServerState>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    loop {
+        let incoming = tokio::select! {
+            _ = cancel.cancelled() => {
+                endpoint.close(0u32.into(), b"server shutdown");
+                break;
+            }
+            inc = endpoint.accept() => match inc {
+                Some(inc) => inc,
+                None => break,
+            },
+        };
         let state = state.clone();
         let permit = match tokio::time::timeout(
             Duration::from_millis(SEMAPHORE_WAIT_MS),
@@ -131,10 +151,34 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         &LoginResp::success(client_config, client_group.clone()),
     )
     .await?;
-    state
-        .registry
-        .register(conn_id.clone(), client_group.clone(), conn.clone());
+
+    state.registry.register(
+        conn_id.clone(),
+        client_group.clone(),
+        conn.clone(),
+    );
     metrics::client_registered(&client_group);
+
+    // Spawn the control stream task: handles Ping/Pong and config sync.
+    {
+        let conn_clone = conn.clone();
+        let conn_id_clone = conn_id.clone();
+        let client_group_clone = client_group.clone();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                run_control_stream(conn_clone, state_clone, &conn_id_clone, &client_group_clone)
+                    .await
+            {
+                debug!(
+                    conn_id = %conn_id_clone,
+                    error = %e,
+                    "control stream ended"
+                );
+            }
+        });
+    }
+
     let mut revocation_rx = state.revocation_tx.subscribe();
     loop {
         tokio::select! {
@@ -187,5 +231,124 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     }
     state.registry.unregister(&conn_id);
     metrics::client_unregistered(&client_group);
+    Ok(())
+}
+
+/// Manages the server→client control stream for a single connection.
+///
+/// Protocol (Ping/Pong carries config hash — no separate ConfigCheck/ConfigAck):
+///   Every PING_INTERVAL the server sends:
+///     Ping { seq, timestamp_ms, config_hash }   ← server's current hash for this group
+///   Client replies:
+///     Pong { seq, config_hash }                 ← client's currently-applied hash
+///   If hashes differ → server sends ConfigPush { full config }
+///   No Pong within PONG_TIMEOUT → server closes the connection
+async fn run_control_stream(
+    conn: quinn::Connection,
+    state: Arc<ServerState>,
+    conn_id: &str,
+    client_group: &str,
+) -> Result<()> {
+    // Open a bidirectional stream: server writes, client replies.
+    let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
+    let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
+    ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_ticker.tick().await; // consume the immediate first tick
+
+    let mut seq: u64 = 0;
+    let mut pending_pong: Option<u64> = None;
+
+    loop {
+        tokio::select! {
+            // Incoming Pong from client.
+            recv_result = recv_message_type(&mut ctrl_recv) => {
+                match recv_result {
+                    Ok(MessageType::Pong) => {
+                        let pong: Pong = match recv_message(&mut ctrl_recv).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                debug!(conn_id = %conn_id, error = %e, "failed to decode Pong");
+                                break;
+                            }
+                        };
+                        if pending_pong != Some(pong.seq) {
+                            // stale or duplicate pong — ignore
+                            continue;
+                        }
+                        pending_pong = None;
+                        ping_ticker.reset_after(PING_INTERVAL);
+
+                        // Compare config hashes; push full config if client is stale.
+                        let server_hash = {
+                            let routing = state.routing.load();
+                            build_client_config_for_group(&routing.tunnel_management, client_group)
+                                .map(|c| config_hash(&c))
+                                .unwrap_or(0)
+                        };
+                        if pong.config_hash != server_hash {
+                            let config = {
+                                let routing = state.routing.load();
+                                build_client_config_for_group(&routing.tunnel_management, client_group)
+                                    .unwrap_or_default()
+                            };
+                            if let Err(e) = send_message(
+                                &mut ctrl_send,
+                                MessageType::ConfigPush,
+                                &config,
+                            )
+                            .await
+                            {
+                                debug!(conn_id = %conn_id, error = %e, "failed to send ConfigPush");
+                                break;
+                            }
+                            info!(
+                                conn_id = %conn_id,
+                                client_group = %client_group,
+                                server_hash,
+                                client_hash = pong.config_hash,
+                                "sent ConfigPush (hash mismatch)"
+                            );
+                        } else {
+                            debug!(conn_id = %conn_id, seq = pong.seq, "pong received, config up-to-date");
+                        }
+                    }
+                    Ok(other) => {
+                        debug!(conn_id = %conn_id, msg_type = ?other, "unexpected msg on control recv");
+                    }
+                    Err(e) => {
+                        debug!(conn_id = %conn_id, error = %e, "control recv error");
+                        break;
+                    }
+                }
+            }
+            // Periodic Ping — also embeds the server's current config hash.
+            _ = ping_ticker.tick() => {
+                if pending_pong.is_some() {
+                    warn!(conn_id = %conn_id, "pong timeout, closing connection");
+                    conn.close(0u32.into(), b"pong timeout");
+                    break;
+                }
+                let server_config_hash = {
+                    let routing = state.routing.load();
+                    build_client_config_for_group(&routing.tunnel_management, client_group)
+                        .map(|c| config_hash(&c))
+                        .unwrap_or(0)
+                };
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let ping = Ping { seq, timestamp_ms: ts, config_hash: server_config_hash };
+                if let Err(e) = send_message(&mut ctrl_send, MessageType::Ping, &ping).await {
+                    debug!(conn_id = %conn_id, error = %e, "failed to send Ping");
+                    break;
+                }
+                debug!(conn_id = %conn_id, seq, server_config_hash, "sent Ping");
+                pending_pong = Some(seq);
+                seq = seq.wrapping_add(1);
+                ping_ticker.reset_after(PONG_TIMEOUT);
+            }
+        }
+    }
     Ok(())
 }

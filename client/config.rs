@@ -9,6 +9,10 @@ use tunnel_lib::transport::quic::QuicTransportParams;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ClientQuicConfig {
+    /// Number of OS threads (and independent quinn::Endpoints) to spawn.
+    /// Defaults to the number of logical CPUs. Replaces the old `connections` pool model.
+    pub threads: Option<u32>,
+    /// Deprecated: use `threads` instead. Kept for backward-compat config files.
     pub connections: u32,
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
@@ -23,6 +27,7 @@ pub struct ClientQuicConfig {
 impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
+            threads: None,
             connections: 1,
             max_concurrent_streams: 100,
             stream_window_mb: None,
@@ -32,6 +37,22 @@ impl Default for ClientQuicConfig {
             idle_timeout_secs: None,
             congestion: None,
         }
+    }
+}
+impl ClientQuicConfig {
+    /// Effective thread count: `threads` takes priority over deprecated `connections`.
+    /// Falls back to logical CPU count.
+    pub fn effective_threads(&self) -> u32 {
+        if let Some(t) = self.threads {
+            return t.max(1);
+        }
+        if self.connections > 1 {
+            return self.connections;
+        }
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        (cpus as u32).max(1)
     }
 }
 impl From<&ClientQuicConfig> for QuicTransportParams {

@@ -1,6 +1,6 @@
+use crate::pool::SharedConnectionPool;
 use anyhow::Result;
 use bytes::BytesMut;
-use quinn::Connection;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -10,8 +10,15 @@ use tracing::{debug, info, warn};
 use tunnel_lib::{
     detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, RoutingInfo, TcpParams,
 };
+
+/// Start the entry TCP listener.
+///
+/// The listener is process-level: it binds the port once and lives as long as the
+/// process. Each incoming TCP connection picks a healthy QUIC connection from the
+/// pool (round-robin) to `open_bi()` on, so the entry path uses all N QUIC
+/// connections and survives individual connection drops without interruption.
 pub async fn start_entry_listener(
-    conn: Connection,
+    pool: SharedConnectionPool,
     port: u16,
     cancel_token: CancellationToken,
     max_connections: u32,
@@ -43,11 +50,11 @@ pub async fn start_entry_listener(
                     }
                 };
                 debug!(peer_addr = %peer_addr, "new entry connection");
-                let conn = conn.clone();
+                let pool = pool.clone();
                 let tcp_params = tcp_params.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = handle_entry_connection(conn, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
+                    if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
                         debug!(error = %e, "entry connection error");
                     }
                 });
@@ -55,8 +62,9 @@ pub async fn start_entry_listener(
         }
     }
 }
+
 async fn handle_entry_connection(
-    conn: Connection,
+    pool: SharedConnectionPool,
     local_stream: TcpStream,
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
@@ -64,12 +72,16 @@ async fn handle_entry_connection(
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
-    // Single allocation: peek into zeroed BytesMut, then freeze — avoids copy_from_slice.
     let mut buf = BytesMut::zeroed(peek_buf_size);
     let n = local_stream.peek(&mut buf).await?;
     let initial_bytes = buf.freeze().slice(..n);
     let (protocol, host) = detect_protocol_and_host(&initial_bytes);
     debug!(protocol = % protocol, host = ? host, "detected protocol from entry");
+
+    let conn = pool
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no healthy QUIC connection available"))?;
+
     let (mut send, recv) = tokio::time::timeout(open_stream_timeout, conn.open_bi())
         .await
         .map_err(|_| anyhow::anyhow!("open_bi timed out after {:?}", open_stream_timeout))??;

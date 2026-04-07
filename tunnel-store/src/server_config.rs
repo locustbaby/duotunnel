@@ -47,6 +47,10 @@ pub struct ServerBasicConfig {
     pub max_tcp_connections: usize,
     #[serde(default)]
     pub metrics_port: Option<u16>,
+    /// Number of OS threads (and independent quinn::Endpoints) to spawn.
+    /// Defaults to the number of logical CPUs.
+    #[serde(default)]
+    pub threads: Option<u32>,
     #[serde(default)]
     pub quic: QuicConfig,
     #[serde(default)]

@@ -69,6 +69,43 @@ pub struct UpstreamServer {
     pub address: String,
     pub resolve: bool,
 }
+/// Server → Client heartbeat. Also carries the server's current config hash for this
+/// client group so the client can detect stale config without a separate round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ping {
+    pub seq: u64,
+    pub timestamp_ms: u64,
+    /// Hash of the config currently active for this client's group on the server.
+    pub config_hash: u64,
+}
+/// Client → Server heartbeat reply. Echoes seq and carries the client's own config hash
+/// so the server can push a ConfigPush if the two hashes differ.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pong {
+    pub seq: u64,
+    /// Hash of the config currently applied on the client side.
+    pub config_hash: u64,
+}
+
+/// FNV-1a 64-bit hash of a `ClientConfig`'s canonical binary encoding.
+///
+/// Uses a zero-dependency, endian-stable algorithm:
+///  1. bincode-serialize the config (deterministic across runs on same arch; we control both sides)
+///  2. fold bytes through FNV-1a
+///
+/// This is NOT cryptographic — it is a fast change-detection fingerprint.
+pub fn config_hash(config: &ClientConfig) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    let bytes = bincode::serialize(config).unwrap_or_default();
+    let mut h = FNV_OFFSET;
+    for b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingInfo {
     pub proxy_name: String,
