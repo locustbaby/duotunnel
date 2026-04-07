@@ -1297,7 +1297,7 @@ jobs:
           run_case() {
             Q="$1"
             SUFFIX="q${Q}"
-            rm -f /tmp/bench-results.json /tmp/server-trace.bin /tmp/client-trace.bin /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
+            rm -f /tmp/bench-results.json /tmp/server-trace.*.bin /tmp/client-trace.*.bin /tmp/server-trace.*.bin.active /tmp/client-trace.*.bin.active /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
             ./target/release/grpc-echo-server 50051 > "/tmp/grpc-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/grpc-echo.pid
@@ -1435,17 +1435,17 @@ jobs:
             sleep 35
             kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace.bin /tmp/client-trace.bin 2>&1 || true
+            echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace.0.bin /tmp/client-trace.0.bin 2>&1 || true
 
             mkdir -p "/tmp/trace-${SUFFIX}"
             cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
-            if [ ! -s /tmp/server-trace.bin ] || [ ! -s /tmp/client-trace.bin ]; then
-              echo "ERROR: expected dial9 single_file traces not found"
+            if [ ! -s /tmp/server-trace.0.bin ] || [ ! -s /tmp/client-trace.0.bin ]; then
+              echo "ERROR: expected dial9 trace segment files not found"
               ls -lh /tmp/server-trace* /tmp/client-trace* 2>&1 || true
               exit 1
             fi
-            gzip -c /tmp/server-trace.bin > "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
-            gzip -c /tmp/client-trace.bin > "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
+            gzip -c /tmp/server-trace.0.bin > "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
+            gzip -c /tmp/client-trace.0.bin > "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"

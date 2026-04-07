@@ -197,6 +197,17 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     let trace_path_display = trace_path.display().to_string();
+    let trace_file_display = {
+        let stem = trace_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("trace");
+        trace_path
+            .with_file_name(format!("{stem}.0.bin"))
+            .display()
+            .to_string()
+    };
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_trace_path(trace_path)
@@ -221,7 +232,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
-        Ok(()) => info!("dial9 trace flush complete, output: {trace_path_display}"),
+        Ok(()) => info!("dial9 trace flush complete, output: {trace_file_display}"),
         Err(e) => error!("dial9 trace flush error: {e}"),
     }
     result
