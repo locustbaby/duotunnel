@@ -336,6 +336,53 @@ While `BytesMut` with `Jemalloc` handles memory decently, allocating read/write 
 **Priority**: Low (High Complexity)
 Transition from Tokio's default work-stealing scheduler to a Strict `Share-Nothing` Thread-per-Core architecture. Similar to Pingora's `NoStealRuntime`, manually spawn multiple single-threaded Tokio executors (`Builder::new_current_thread`) mapped to specific NUMA Nodes. Work-stealing for heavy network IO causes severe CPU L2/L3 Cache misses when tasks cross cores. By locking processing to specific cores and removing global atomic structs like `DashMap`, we can achieve linearly scalable performance and **Deterministic Latency** without switching out of the Tokio ecosystem entirely.
 
+### [TODO-56] Endpoint-per-Thread Architecture (Eliminate quinn Mutex Contention)
+
+**Priority**: High
+**Status**: TODO
+**Related**: #12 (quinn Mutex), #13 (quiche tracking)
+
+**Goal**:
+Replace the current single shared `quinn::Endpoint` + multi-thread runtime with N independent OS threads, each running a `current_thread` tokio runtime with its own `Endpoint` and `Connection`. This eliminates quinn's per-connection `Mutex` contention entirely — single-thread means the Mutex fast-path is always uncontested, and quinn's driver naturally batches more writes per poll cycle.
+
+**Background**:
+quinn issue quinn-rs/quinn#1433 confirms that `current_thread` runtime reduces CPU by ~71% vs `multi_thread` for the same load, due to eliminated Mutex contention and better UDP datagram batching. Our 8000 QPS bench shows the bottleneck is exactly this Mutex (see dial9 trace: `SendStream::poll_write → non_tracking::Mutex::lock → futex_wait`).
+
+**Client-side changes** (`client/main.rs`):
+
+Current: 1 `multi_thread` runtime → 1 `Endpoint` → N `Connection` (via `pool.rs`)
+
+Target:
+```
+std::thread::spawn × N  (one per CPU or per configured connections)
+  └─ current_thread runtime
+       └─ quinn::Endpoint  (独立 UDP socket)
+            └─ quinn::Connection  (独立连接)
+                 └─ accept_bi / open_bi loop
+```
+
+1. In `main()`: spawn N OS threads instead of N tokio tasks
+2. Each thread builds its own `Endpoint` + calls `run_client()` directly
+3. Remove `pool.rs` — it becomes unnecessary
+4. Each thread is fully self-contained: no shared quinn state, no cross-thread Mutex
+
+**Server-side changes** (`server/main.rs`):
+
+More complex due to shared `Arc<ServerState>` (registry, routing, auth). Two options:
+- Option A: Keep `Arc<ServerState>` shared across threads (registry/auth still shared, only QUIC Endpoint isolated per thread) — partial win, eliminates UDP socket serialization but registry DashMap still has some contention
+- Option B: Full share-nothing — each thread has independent state, use `SO_REUSEPORT` on QUIC UDP port so kernel distributes incoming packets across threads — maximum isolation, linear scaling
+
+Start with Option A to validate, then consider Option B.
+
+**Validation**:
+1. Run bench with `connections: 1`, `worker_threads: 1` first — confirms single-thread eliminates red blocking in dial9 trace
+2. Then implement multi-thread endpoint-per-thread and confirm linear scaling
+
+**Expected outcome**:
+- dial9 trace: red (>1ms blocking) and parked regions disappear
+- server trace stall at ~22s disappears
+- 8000 QPS p99 latency drops significantly
+
 ### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
 **Priority**: Low (Experimental)
 Since QUIC relies entirely on UDP packets, the Linux kernel networking stack (sk_buff allocations, iptables, netfilter) introduces major latency. Using `AF_XDP` sockets allows reading the UDP datagrams directly from the NIC driver rings into user space, circumventing the kernel entirely.
