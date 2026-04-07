@@ -1337,18 +1337,7 @@ jobs:
                 client rotate-token "${CLIENT_NAME}" 2>/dev/null | awk '{print $NF}' | tail -n1)
             fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-            python3 -c "
-import re, sys
-f = 'ci-helpers/client.yaml'
-t, q = sys.argv[1], sys.argv[2]
-c = open(f).read()
-c = re.sub(r'^auth_token:.*', 'auth_token: \"' + t + '\"', c, flags=re.MULTILINE)
-if re.search(r'^\s*threads:', c, re.MULTILINE):
-    c = re.sub(r'^(\s*threads:)\s*\d+', r'\1 ' + q, c, flags=re.MULTILINE)
-else:
-    c = re.sub(r'^(quic:)', r'\1\n  threads: ' + q, c, flags=re.MULTILINE)
-open(f, 'w').write(c)
-" "$TOKEN" "$Q"
+            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
 
             sleep 3
 
