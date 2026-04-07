@@ -383,9 +383,9 @@ Start with Option A to validate, then consider Option B.
 - server trace stall at ~22s disappears
 - 8000 QPS p99 latency drops significantly
 
-**Current status (2026-04-07): Implemented but regressed — needs investigation**
+**Current status (2026-04-08): Client entry listener fixed; architecture question open for server**
 
-Endpoint-per-thread is implemented on branch `perf/quinn-endpoint-per-thread`. CI all-green (SIGTERM fix also landed), but benchmark shows **regression vs main**:
+Endpoint-per-thread is implemented on branch `perf/quinn-endpoint-per-thread`. CI all-green (SIGTERM fix also landed), but benchmark showed **regression vs main**:
 
 | Metric | main (single endpoint) | endpoint-per-thread |
 |--------|------------------------|---------------------|
@@ -394,16 +394,67 @@ Endpoint-per-thread is implemented on branch `perf/quinn-endpoint-per-thread`. C
 | p(95) duration | 39.1ms | 81.86ms |
 | egress p(95) | 43.26ms | 98.66ms |
 
-dial9 trace shows many `park` events even with per-thread endpoints.
+**Root cause confirmed**: Entry listener ran in outer `TracedRuntime` (multi-thread) and called `conn.open_bi()` on quinn connections living in separate `current_thread` runtimes. Cross-runtime wakeup → park/unpark on every entry request.
 
-**Root cause hypothesis**: Entry listener (`start_entry_listener`) runs in the outer `TracedRuntime` (multi-thread), but calls `conn.open_bi()` on quinn connections that live in separate `current_thread` runtimes (one per OS thread). This cross-runtime quinn call triggers cross-thread wakeups on every entry request, causing extra park/unpark overhead — the opposite of what endpoint-per-thread was meant to fix.
+**Client fix (done)**: Moved entry listener into each per-thread `current_thread` runtime with SO_REUSEPORT. Each thread has its own `watch::channel` for the live QUIC connection. `open_bi()` is now same-thread, no cross-runtime call. `build_reuseport_tcp_listener` abstracted into tunnel-lib.
 
-**Next steps to investigate**:
-1. Profile which path drives the park: is it `open_bi` cross-runtime, or `accept_bi` on the server side?
-2. Option A: Move entry listener into each per-thread runtime (each thread binds a SO_REUSEPORT TCP socket), eliminate cross-runtime calls entirely
-3. Option B: Keep shared entry listener but use a channel to dispatch `open_bi` requests to the owning thread's runtime
-4. Compare server-side traces: server also uses endpoint-per-thread — check if server park pattern changed
-5. Verify whether the bottleneck is still quinn Mutex or shifted elsewhere
+**Server: `LocalRegistry` workaround (done, but has a fundamental trade-off)**:
+Added `LocalRegistry` per QUIC endpoint thread + SO_REUSEPORT ingress listeners per thread. Each ingress listener selects only connections registered on its own thread → `open_bi()` same-thread.
+
+**Problem with current server approach**: Requires maintaining N thread-local registries. More importantly, this is unnecessary complexity — the real issue is that QUIC endpoints run in `current_thread` runtimes while ingress listeners are in the outer `multi_thread` runtime.
+
+**Better server architecture (to evaluate)**:
+
+Run everything in **one `multi_thread` runtime**:
+- N quinn endpoints via `tokio::spawn` (SO_REUSEPORT, each as a task not an OS thread)
+- Ingress listeners also `tokio::spawn` in the same runtime
+- `open_bi()` is always same-runtime → no cross-runtime overhead
+- Global registry works normally, no `LocalRegistry` needed
+- `listener_mgr` hot-reload continues to work unchanged
+
+The `current_thread` + OS thread approach was motivated by eliminating quinn's per-connection Mutex contention. But SO_REUSEPORT with N endpoints in `multi_thread` achieves the same endpoint isolation without needing separate runtimes. The Mutex contention was per-endpoint, not per-runtime.
+
+**Architecture options compared**:
+
+| | 方案A: multi_thread + N tasks | 方案B: Actor/channel dispatch | 方案C: LocalRegistry (current) |
+|---|---|---|---|
+| 复杂度 | 低 | 中 | 高 |
+| cross-runtime | 无 | 无 | 无 |
+| work-stealing | 有 | 无 | 无 |
+| quinn Mutex 竞争 | per-endpoint 分散 | 完全消除 | 完全消除 |
+| CPU cache 热度 | 一般 | 最高（thread-per-core）| 高 |
+| 理论延迟 | 中 | 最低 | 中 |
+| 维护成本 | 低 | 中 | 高 |
+
+**方案B 原理**（Actor/channel dispatch）：
+```
+OS thread per endpoint (current_thread runtime)
+  └── mpsc::Receiver<TcpStream>
+        → open_bi() 同线程（no cross-runtime）
+        → relay TCP ↔ QUIC
+
+ingress listener (outer runtime or SO_REUSEPORT per thread)
+  └── accept → round-robin → sender[i].send(stream)
+```
+channel 开销约 50-100ns，远小于有竞争时的 Mutex（500ns-5μs）。本质是 Nginx/Seastar 的 thread-per-core 架构。
+
+**方案A channel 开销分析**：
+- 8K QPS 下 quinn Mutex 竞争约 500ns-5μs per op
+- mpsc send 约 50-100ns
+- 方案B 在 quinn Mutex 是瓶颈时有明显优势
+
+**推荐执行顺序**：
+1. 先实现方案A（revert OS thread → multi_thread + N SO_REUSEPORT tasks），成本低
+2. CI benchmark：如果 park 消失、延迟达标 → 选A
+3. 如果还有明显 park → 在现有 OS thread 基础上加 channel dispatch（方案B），改动不大
+4. 方案B = 当前 OS thread 架构 + ingress 通过 `mpsc::Sender<TcpStream>` 发给对应 endpoint 线程处理
+
+**Next steps**:
+1. Revert server OS-thread approach → run N endpoints as tokio tasks in `multi_thread` runtime
+2. Revert `LocalRegistry` and per-thread ingress listener complexity
+3. Keep `build_reuseport_tcp_listener` in tunnel-lib (already useful)
+4. Benchmark: does multi_thread + N SO_REUSEPORT endpoints eliminate the park events?
+5. If yes: done. If no: add channel dispatch (方案B) on top of current OS thread architecture.
 
 ### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
 **Priority**: Low (Experimental)

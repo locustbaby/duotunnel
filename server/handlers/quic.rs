@@ -1,6 +1,7 @@
 use crate::config::build_client_config_for_group;
 use crate::egress::EgressProxy;
 use crate::handlers::SEMAPHORE_WAIT_MS;
+use crate::local_registry::SharedLocalRegistry;
 use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub async fn run_quic_server_on_endpoint(
     endpoint: quinn::Endpoint,
     state: Arc<ServerState>,
     cancel: CancellationToken,
+    local_registry: SharedLocalRegistry,
 ) -> Result<()> {
     loop {
         let incoming = tokio::select! {
@@ -37,6 +39,7 @@ pub async fn run_quic_server_on_endpoint(
             },
         };
         let state = state.clone();
+        let local_registry = local_registry.clone();
         let permit = match tokio::time::timeout(
             Duration::from_millis(SEMAPHORE_WAIT_MS),
             state.quic_semaphore.clone().acquire_owned(),
@@ -57,7 +60,7 @@ pub async fn run_quic_server_on_endpoint(
         tokio::spawn(async move {
             let _permit = permit;
             metrics::quic_connection_opened();
-            if let Err(e) = handle_quic_connection(state, incoming).await {
+            if let Err(e) = handle_quic_connection(state, incoming, local_registry).await {
                 error!(error = % e, "QUIC connection error");
             }
             metrics::quic_connection_closed();
@@ -65,7 +68,11 @@ pub async fn run_quic_server_on_endpoint(
     }
     Ok(())
 }
-async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
+async fn handle_quic_connection(
+    state: Arc<ServerState>,
+    incoming: quinn::Incoming,
+    local_registry: SharedLocalRegistry,
+) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
@@ -157,6 +164,8 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         client_group.clone(),
         conn.clone(),
     );
+    // Also register in the per-thread local registry for same-thread ingress dispatch.
+    local_registry.register(conn_id.clone(), client_group.clone(), conn.clone());
     metrics::client_registered(&client_group);
 
     // Spawn the control stream task: handles Ping/Pong and config sync.
@@ -230,6 +239,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         }
     }
     state.registry.unregister(&conn_id);
+    local_registry.unregister(&conn_id);
     metrics::client_unregistered(&client_group);
     Ok(())
 }

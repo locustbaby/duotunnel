@@ -49,7 +49,7 @@ pub async fn run_supervisor_with_shared(
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
     ready: Arc<AtomicBool>,
-    conn_pool: crate::pool::SharedConnectionPool,
+    conn_tx: crate::ConnWatch,
     shared_proxy_map: crate::SharedProxyMap,
 ) -> Result<()> {
     let initial_delay = Duration::from_millis(config.reconnect.initial_delay_ms);
@@ -73,7 +73,7 @@ pub async fn run_supervisor_with_shared(
                 info!(server = %config.server_address(), "shutdown signal received");
                 return Ok(());
             }
-            result = crate::run_client(&config, &endpoint, cancel.clone(), ready.clone(), conn_pool.clone(), shared_proxy_map.clone()) => {
+            result = crate::run_client(&config, &endpoint, cancel.clone(), ready.clone(), &conn_tx, shared_proxy_map.clone()) => {
                 match result {
                     Ok(_) => {
                         backoff.reset();

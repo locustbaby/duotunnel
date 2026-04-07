@@ -28,9 +28,9 @@ pub use protocol::rewrite::Rewriter;
 pub use proxy::{Balancer, BalancerExt, ProxyBufferParams, RoundRobin, UpstreamGroup};
 pub use transport::addr::{normalize_host, parse_upstream, UpstreamAddr};
 pub use transport::listener::{
-    build_reuseport_udp_socket, extract_host_from_http, extract_method_path_from_http,
-    new_shared_vhost_router, peek_bytes, start_tcp_listener, PortRouter, SharedVhostRouter,
-    VhostRouter,
+    build_reuseport_tcp_listener, build_reuseport_udp_socket, extract_host_from_http,
+    extract_method_path_from_http, new_shared_vhost_router, peek_bytes, start_tcp_listener,
+    PortRouter, SharedVhostRouter, VhostRouter,
 };
 pub use transport::quic::{
     build_reuseport_server_endpoint, build_transport_config, create_server_config_with,

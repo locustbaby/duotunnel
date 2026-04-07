@@ -27,6 +27,12 @@ pub fn build_reuseport_udp_socket(addr: SocketAddr) -> Result<std::net::UdpSocke
     socket.bind(&addr.into())?;
     Ok(socket.into())
 }
+/// Build a TCP listener with SO_REUSEPORT so multiple threads can bind the same port.
+/// Each thread gets its own fd; the kernel load-balances incoming connections.
+pub fn build_reuseport_tcp_listener(addr: SocketAddr) -> Result<TcpListener> {
+    build_reuseport_listener(addr)
+}
+
 fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
@@ -65,6 +71,7 @@ where
         });
     }
 }
+
 pub async fn peek_bytes(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
     stream.peek(buf).await
 }

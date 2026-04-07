@@ -22,6 +22,7 @@ mod handlers;
 mod hot_reload;
 mod listener_mgr;
 mod local_auth;
+mod local_registry;
 mod metrics;
 mod null_stores;
 mod registry;
@@ -438,7 +439,24 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
                     ready.store(true, std::sync::atomic::Ordering::Release);
                     tracing::info!(addr = %addr, "QUIC server listening");
                 }
-                handlers::quic::run_quic_server_on_endpoint(endpoint, state, cancel_inner).await
+                // Per-thread registry: only holds connections that arrived on this endpoint.
+                // Ingress listeners on the same thread use this to keep open_bi() same-thread.
+                let local_registry = local_registry::new_local_registry();
+                // Spawn per-thread SO_REUSEPORT ingress listeners.
+                let routing = state.routing.load_full();
+                handlers::ingress::spawn_ingress_listeners(
+                    state.clone(),
+                    local_registry.clone(),
+                    cancel_inner.clone(),
+                    routing,
+                );
+                handlers::quic::run_quic_server_on_endpoint(
+                    endpoint,
+                    state,
+                    cancel_inner,
+                    local_registry,
+                )
+                .await
             });
             // Signal siblings to stop when this thread exits for any reason.
             cancel.cancel();
