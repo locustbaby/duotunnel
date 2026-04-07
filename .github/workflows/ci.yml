@@ -31,6 +31,10 @@ on:
         description: 'Apply kernel tuning (tune-os.sh) before stress test'
         type: boolean
         default: true
+      run_q1:
+        description: 'Also run the q1 (1-connection) dial9 trace case'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -1191,12 +1195,9 @@ jobs:
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
 
-  stress-profile-8k:
-    name: Stress Profile 8K (q1->q4)
+  stress-trace-8k:
+    name: Stress Trace 8K (dial9)
     runs-on: ubuntu-latest
-    env:
-      PPROF_ENABLED: "1"
-      CHROME_TRACE_ENABLED: "0"
     permissions:
       contents: read
     steps:
@@ -1218,15 +1219,23 @@ jobs:
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      - name: Build all binaries (profiling + debuginfo)
+      - name: Build all binaries (dial9 + symbols)
         run: |
           SEP=$'\x1f'
-          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1" \
+          CARGO_PROFILE_RELEASE_STRIP=none \
+          CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
             cargo build --release --workspace \
-              --features server/profiling \
-              --features client/profiling
+              --features server/dial9-telemetry \
+              --features client/dial9-telemetry
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Enable perf events for tokio telemetry
+        run: |
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid || \
+            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict || \
+            sudo sysctl -w kernel.kptr_restrict=0 || true
 
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
@@ -1240,13 +1249,13 @@ jobs:
           127.0.0.1  grpc.local
           EOF
 
-      - name: Run profiling sequence (q1 then q4)
+      - name: Run dial9 trace sequence
         timeout-minutes: 25
         run: |
           run_case() {
             Q="$1"
             SUFFIX="q${Q}"
-            rm -f /tmp/bench-results.json /tmp/server-pprof.svg /tmp/client-pprof.svg
+            rm -f /tmp/bench-results.json /tmp/server-trace.bin /tmp/client-trace.bin
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
             ./target/release/grpc-echo-server 50051 > "/tmp/grpc-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/grpc-echo.pid
@@ -1260,7 +1269,6 @@ jobs:
             mkdir -p data
             ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml > "/tmp/ci-ctld-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/ctld.pid
-            # Wait for ctld healthz (ready after DB init + routing seed)
             for i in $(seq 1 60); do
               curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
               sleep 0.5
@@ -1268,11 +1276,10 @@ jobs:
             curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
               || { echo "ERROR: ctld healthz never became ready"; cat "/tmp/ci-ctld-${SUFFIX}.log"; exit 1; }
 
-            PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/server-pprof \
+            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/server.pid
-            # Wait for server healthz (ready after QUIC endpoint binds)
             for i in $(seq 1 60); do
               curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
               sleep 0.5
@@ -1290,10 +1297,9 @@ jobs:
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
             python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$Q"
 
-            # Wait for ctld poll to push new token to server (~1500ms poll interval)
             sleep 3
 
-            PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/client-pprof \
+            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
               ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/client.pid
             for i in $(seq 1 60); do
@@ -1338,7 +1344,7 @@ jobs:
               kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
               sleep 0.5
 
-              PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/server-pprof \
+              DIAL9_TRACE_PATH=/tmp/server-trace.bin \
                 ./target/release/server --config ci-helpers/server.yaml \
                 --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/server.pid
@@ -1352,7 +1358,7 @@ jobs:
                 exit 1
               fi
 
-              PPROF_ENABLED="${PPROF_ENABLED}" CHROME_TRACE_ENABLED="${CHROME_TRACE_ENABLED}" PPROF_OUT=/tmp/client-pprof \
+              DIAL9_TRACE_PATH=/tmp/client-trace.bin \
                 ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/client.pid
               for i in $(seq 1 60); do
@@ -1382,112 +1388,100 @@ jobs:
 
             (cd ci-helpers/k6 && k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js)
 
-            if [ "${PPROF_ENABLED}" = "1" ]; then
-              SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
-              CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
-              [ -n "$SERVER_PID" ] && kill -USR1 "$SERVER_PID" 2>/dev/null || true
-              [ -n "$CLIENT_PID" ] && kill -USR1 "$CLIENT_PID" 2>/dev/null || true
-              sleep 2
-            fi
+            kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+            kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+            sleep 3
+            kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+            kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
 
-            mkdir -p "/tmp/profile-${SUFFIX}"
-            cp /tmp/bench-results.json "/tmp/profile-${SUFFIX}/bench-results.json"
-            [ -f /tmp/server-pprof.svg ] && cp /tmp/server-pprof.svg "/tmp/profile-${SUFFIX}/server-pprof.svg" || true
-            [ -f /tmp/client-pprof.svg ] && cp /tmp/client-pprof.svg "/tmp/profile-${SUFFIX}/client-pprof.svg" || true
-            cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/ci-server.log"
-            cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/ci-client.log"
-            cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/ci-ctld.log"
-            cp "/tmp/http-echo-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/http-echo.log"
-            cp "/tmp/ws-echo-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/ws-echo.log"
-            cp "/tmp/grpc-echo-${SUFFIX}.log" "/tmp/profile-${SUFFIX}/grpc-echo.log"
+            mkdir -p "/tmp/trace-${SUFFIX}"
+            cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
+            [ -f /tmp/server-trace.bin ] && gzip -c /tmp/server-trace.bin > "/tmp/trace-${SUFFIX}/server-trace.bin.gz" || true
+            [ -f /tmp/client-trace.bin ] && gzip -c /tmp/client-trace.bin > "/tmp/trace-${SUFFIX}/client-trace.bin.gz" || true
+            cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
+            cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
+            cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"
+            cp "/tmp/http-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/http-echo.log"
+            cp "/tmp/ws-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ws-echo.log"
+            cp "/tmp/grpc-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/grpc-echo.log"
 
-            CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
-            SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
             CTLD_PID="$(cat /tmp/ctld.pid 2>/dev/null || true)"
-            [ -n "$CLIENT_PID" ] && kill -TERM "$CLIENT_PID" 2>/dev/null || true
-            [ -n "$SERVER_PID" ] && kill -TERM "$SERVER_PID" 2>/dev/null || true
             [ -n "$CTLD_PID" ] && kill -TERM "$CTLD_PID" 2>/dev/null || true
-            for i in $(seq 1 60); do
-              CDONE=1; SDONE=1; TDONE=1
-              [ -n "$CLIENT_PID" ] && kill -0 "$CLIENT_PID" 2>/dev/null && CDONE=0
-              [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null && SDONE=0
-              [ -n "$CTLD_PID" ] && kill -0 "$CTLD_PID" 2>/dev/null && TDONE=0
-              [ "$CDONE" = "1" ] && [ "$SDONE" = "1" ] && [ "$TDONE" = "1" ] && break
-              sleep 0.5
-            done
-            [ -n "$CLIENT_PID" ] && kill -9 "$CLIENT_PID" 2>/dev/null || true
-            [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null || true
+            sleep 1
             [ -n "$CTLD_PID" ] && kill -9 "$CTLD_PID" 2>/dev/null || true
             kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
             kill "$(cat /tmp/ws-echo.pid 2>/dev/null)" 2>/dev/null || true
             kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
           }
 
-          run_case 1
-          sleep 10
+          if [ "${{ inputs.run_q1 }}" = "true" ]; then
+            run_case 1
+            sleep 10
+          fi
           run_case 4
 
-      - name: Upload benchmark outputs (8k)
+      - name: Upload benchmark outputs (8k, q4)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            /tmp/profile-q4/bench-results.json
+            /tmp/trace-q4/bench-results.json
 
       - name: Upload benchmark outputs (8k, q1)
+        if: ${{ inputs.run_q1 == true }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-profile-8k-results-q1-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            /tmp/profile-q1/bench-results.json
+            /tmp/trace-q1/bench-results.json
 
-      - name: Upload pprof flamegraphs
-        if: always() && env.PPROF_ENABLED == '1'
+      - name: Upload dial9 traces (8k, q4)
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pprof-flamegraphs-8k-${{ github.run_id }}
+          name: dial9-traces-8k-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            /tmp/profile-q4/server-pprof.svg
-            /tmp/profile-q4/client-pprof.svg
+            /tmp/trace-q4/server-trace.bin.gz
+            /tmp/trace-q4/client-trace.bin.gz
 
-      - name: Upload pprof flamegraphs (q1)
-        if: always() && env.PPROF_ENABLED == '1'
+      - name: Upload dial9 traces (8k, q1)
+        if: always() && inputs.run_q1 == true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pprof-flamegraphs-8k-q1-${{ github.run_id }}
+          name: dial9-traces-8k-q1-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            /tmp/profile-q1/server-pprof.svg
-            /tmp/profile-q1/client-pprof.svg
+            /tmp/trace-q1/server-trace.bin.gz
+            /tmp/trace-q1/client-trace.bin.gz
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-profile-8k-logs-${{ github.run_id }}
+          name: stress-trace-8k-logs-${{ github.run_id }}
           retention-days: 7
           path: |
-            /tmp/profile-q1/ci-server.log
-            /tmp/profile-q1/ci-client.log
-            /tmp/profile-q1/ci-ctld.log
-            /tmp/profile-q1/http-echo.log
-            /tmp/profile-q1/ws-echo.log
-            /tmp/profile-q1/grpc-echo.log
-            /tmp/profile-q1/bench-results.json
-            /tmp/profile-q4/ci-server.log
-            /tmp/profile-q4/ci-client.log
-            /tmp/profile-q4/ci-ctld.log
-            /tmp/profile-q4/http-echo.log
-            /tmp/profile-q4/ws-echo.log
-            /tmp/profile-q4/grpc-echo.log
-            /tmp/profile-q4/bench-results.json
+            /tmp/trace-q4/ci-server.log
+            /tmp/trace-q4/ci-client.log
+            /tmp/trace-q4/ci-ctld.log
+            /tmp/trace-q4/http-echo.log
+            /tmp/trace-q4/ws-echo.log
+            /tmp/trace-q4/grpc-echo.log
+            /tmp/trace-q4/bench-results.json
+            /tmp/trace-q1/ci-server.log
+            /tmp/trace-q1/ci-client.log
+            /tmp/trace-q1/ci-ctld.log
+            /tmp/trace-q1/http-echo.log
+            /tmp/trace-q1/ws-echo.log
+            /tmp/trace-q1/grpc-echo.log
+            /tmp/trace-q1/bench-results.json
 
       - name: Cleanup
         if: always()
@@ -1503,7 +1497,7 @@ jobs:
     name: Publish Benchmark (merged)
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [stress-test, stress-profile-8k]
+    needs: [stress-test, stress-trace-8k]
     permissions:
       contents: write
     steps:
@@ -1529,18 +1523,18 @@ jobs:
           path: /tmp/profile8k-q1
           if-no-files-found: ignore
 
-      - name: Download pprof flamegraphs (8k, q4)
+      - name: Download dial9 traces (q4)
         uses: actions/download-artifact@v4
         with:
-          name: pprof-flamegraphs-8k-${{ github.run_id }}
-          path: /tmp/pprof8k
+          name: dial9-traces-8k-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4
           if-no-files-found: ignore
 
-      - name: Download pprof flamegraphs (8k, q1)
+      - name: Download dial9 traces (q1)
         uses: actions/download-artifact@v4
         with:
-          name: pprof-flamegraphs-8k-q1-${{ github.run_id }}
-          path: /tmp/pprof8k-q1
+          name: dial9-traces-8k-q1-${{ github.run_id }}
+          path: /tmp/dial9-traces-q1
           if-no-files-found: ignore
 
       - name: Merge benchmark outputs
@@ -1694,26 +1688,25 @@ jobs:
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
-          FLAMEGRAPH_ARG=""
-          FLAMEGRAPH_CLIENT_ARG=""
-          FLAMEGRAPH_Q1_ARG=""
-          FLAMEGRAPH_Q1_CLIENT_ARG=""
-          mkdir -p bench/flamegraphs
-          if [ -s /tmp/pprof8k/server-pprof.svg ]; then
-            cp /tmp/pprof8k/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
-            FLAMEGRAPH_ARG="--flamegraph flamegraphs/${SHORT_SHA}-${{ github.run_id }}-server.svg"
+          mkdir -p bench/traces
+          TRACE_SERVER_ARG=""; TRACE_CLIENT_ARG=""
+          TRACE_Q1_SERVER_ARG=""; TRACE_Q1_CLIENT_ARG=""
+          BASE_URL="${{ github.server_url }}/${{ github.repository }}/raw/gh-pages/bench/traces"
+          if [ -s /tmp/dial9-traces-q4/server-trace.bin.gz ]; then
+            cp /tmp/dial9-traces-q4/server-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
+            TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
           fi
-          if [ -s /tmp/pprof8k/client-pprof.svg ]; then
-            cp /tmp/pprof8k/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
-            FLAMEGRAPH_CLIENT_ARG="--flamegraph-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-client.svg"
+          if [ -s /tmp/dial9-traces-q4/client-trace.bin.gz ]; then
+            cp /tmp/dial9-traces-q4/client-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
+            TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
           fi
-          if [ -s /tmp/pprof8k-q1/server-pprof.svg ]; then
-            cp /tmp/pprof8k-q1/server-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-server.svg"
-            FLAMEGRAPH_Q1_ARG="--flamegraph-q1 flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-server.svg"
+          if [ -s /tmp/dial9-traces-q1/server-trace.bin.gz ]; then
+            cp /tmp/dial9-traces-q1/server-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
+            TRACE_Q1_SERVER_ARG="--trace-q1-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
           fi
-          if [ -s /tmp/pprof8k-q1/client-pprof.svg ]; then
-            cp /tmp/pprof8k-q1/client-pprof.svg "bench/flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-client.svg"
-            FLAMEGRAPH_Q1_CLIENT_ARG="--flamegraph-q1-client flamegraphs/${SHORT_SHA}-${{ github.run_id }}-q1-client.svg"
+          if [ -s /tmp/dial9-traces-q1/client-trace.bin.gz ]; then
+            cp /tmp/dial9-traces-q1/client-trace.bin.gz "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
+            TRACE_Q1_CLIENT_ARG="--trace-q1-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result /tmp/bench-results-merged.json \
@@ -1721,8 +1714,8 @@ jobs:
             --sha    "${{ github.sha }}" \
             --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
             --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
-            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $FLAMEGRAPH_ARG $FLAMEGRAPH_CLIENT_ARG \
-            $FLAMEGRAPH_Q1_ARG $FLAMEGRAPH_Q1_CLIENT_ARG
+            $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
+            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG $TRACE_Q1_SERVER_ARG $TRACE_Q1_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/

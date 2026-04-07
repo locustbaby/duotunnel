@@ -21,3 +21,6 @@ codegen-units = 1      # Single codegen unit enables better inlining
 strip = "debuginfo"    # Smaller binaries; retain symbol names for stack traces
 panic = "abort"        # No unwinding machinery; smaller binary + faster panic path
 
+[patch.crates-io]
+dial9-tokio-telemetry = { git = "https://github.com/dial9-rs/dial9-tokio-telemetry.git", rev = "64564b26b7f114a9788003f07e8bfc24307f31b5" }
+

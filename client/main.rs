@@ -13,6 +13,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "dial9-telemetry")]
+use std::path::PathBuf;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +40,9 @@ fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    #[cfg(feature = "profiling")]
-    if pprof_enabled() {
-        spawn_pprof_collector();
+    #[cfg(feature = "dial9-telemetry")]
+    if let Some(trace_path) = std::env::var_os("DIAL9_TRACE_PATH").map(PathBuf::from) {
+        return run_with_dial9(trace_path, async_main());
     }
     run_with_tokio(async_main())
 }
@@ -87,10 +89,7 @@ async fn async_main() -> Result<()> {
     let args = Args::parse();
     let config = ClientConfigFile::load(&args.config)?;
     let log_level = config.log_level.as_deref().unwrap_or("info");
-    #[cfg(feature = "profiling")]
-    let _chrome_trace_guard = init_observability(log_level);
-    #[cfg(not(feature = "profiling"))]
-    init_observability(log_level);
+    tunnel_lib::infra::observability::init_tracing(log_level);
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
     let endpoint = build_quic_endpoint(&config)?;
@@ -126,78 +125,26 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let runtime = builder.build()?;
     runtime.block_on(fut)
 }
-#[cfg(feature = "profiling")]
-fn init_observability(log_level: &str) -> Option<tracing_chrome::FlushGuard> {
-    if env_flag("CHROME_TRACE_ENABLED") {
-        use tracing_subscriber::prelude::*;
-
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-        let out =
-            std::env::var("CHROME_TRACE_OUT").unwrap_or_else(|_| "/tmp/client-trace.json".into());
-        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().file(out).build();
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(chrome_layer)
-            .init();
-        Some(guard)
-    } else {
-        tunnel_lib::infra::observability::init_tracing(log_level);
-        None
-    }
-}
-#[cfg(not(feature = "profiling"))]
-fn init_observability(log_level: &str) {
-    tunnel_lib::infra::observability::init_tracing(log_level);
-}
-#[cfg(feature = "profiling")]
-fn env_flag(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            v == "1"
-                || v.eq_ignore_ascii_case("true")
-                || v.eq_ignore_ascii_case("yes")
-                || v.eq_ignore_ascii_case("on")
-        }
-        Err(_) => false,
-    }
-}
-#[cfg(feature = "profiling")]
-fn pprof_enabled() -> bool {
-    env_flag("PPROF_ENABLED")
-}
-#[cfg(feature = "profiling")]
-fn spawn_pprof_collector() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static DUMP: AtomicBool = AtomicBool::new(false);
-
-    extern "C" fn on_usr1(_: libc::c_int) {
-        DUMP.store(true, Ordering::Relaxed);
-    }
-    unsafe { libc::signal(libc::SIGUSR1, on_usr1 as libc::sighandler_t) };
-
-    std::thread::spawn(move || {
-        let out = std::env::var("PPROF_OUT").unwrap_or_else(|_| "/tmp/client-pprof".into());
-        let guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(99)
-            .blocklist(&["libc", "libgcc", "pthread"])
-            .build()
-            .expect("pprof guard");
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if DUMP.swap(false, Ordering::Relaxed) {
-                if let Ok(report) = guard.report().build() {
-                    let path = format!("{out}.svg");
-                    if let Ok(mut f) = std::fs::File::create(&path) {
-                        let _ = report.flamegraph(&mut f);
-                        eprintln!("pprof: wrote {path}");
-                    }
-                }
-            }
-        }
-    });
+#[cfg(feature = "dial9-telemetry")]
+fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
+    use dial9_tokio_telemetry::telemetry::{
+        CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
+    };
+    let writer = RotatingWriter::single_file(&trace_path)?;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_trace_path(trace_path)
+        .with_cpu_profiling(CpuProfilingConfig::default())
+        .with_sched_events(SchedEventConfig {
+            include_kernel: true,
+        })
+        .build_and_start_with_writer(builder, writer)?;
+    let result = runtime.block_on(fut);
+    drop(runtime);
+    drop(guard);
+    result
 }
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config)?;

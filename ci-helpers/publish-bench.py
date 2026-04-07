@@ -13,10 +13,10 @@ def main():
     p.add_argument("--resources", default="")
     p.add_argument("--frp-result", default="")
     p.add_argument("--frp-k6-offset", type=int, default=0)
-    p.add_argument("--flamegraph", default="")
-    p.add_argument("--flamegraph-client", default="")
-    p.add_argument("--flamegraph-q1", default="")
-    p.add_argument("--flamegraph-q1-client", default="")
+    p.add_argument("--trace-server", default="")
+    p.add_argument("--trace-client", default="")
+    p.add_argument("--trace-q1-server", default="")
+    p.add_argument("--trace-q1-client", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -28,14 +28,14 @@ def main():
     if args.resources and os.path.exists(args.resources):
         with open(args.resources) as f:
             entry["resources"] = json.load(f)
-    if args.flamegraph:
-        entry.setdefault("artifacts", {})["flamegraph"] = args.flamegraph
-    if args.flamegraph_client:
-        entry.setdefault("artifacts", {})["flamegraph_client"] = args.flamegraph_client
-    if args.flamegraph_q1:
-        entry.setdefault("artifacts", {})["flamegraph_q1"] = args.flamegraph_q1
-    if args.flamegraph_q1_client:
-        entry.setdefault("artifacts", {})["flamegraph_q1_client"] = args.flamegraph_q1_client
+    if args.trace_server:
+        entry.setdefault("artifacts", {})["trace_server"] = args.trace_server
+    if args.trace_client:
+        entry.setdefault("artifacts", {})["trace_client"] = args.trace_client
+    if args.trace_q1_server:
+        entry.setdefault("artifacts", {})["trace_q1_server"] = args.trace_q1_server
+    if args.trace_q1_client:
+        entry.setdefault("artifacts", {})["trace_q1_client"] = args.trace_q1_client
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -87,7 +87,7 @@ def main():
 
     bench_dir = os.path.dirname(args.data)
     for subdir, keys, prefix in [
-        ("flamegraphs", ("flamegraph", "flamegraph_client", "flamegraph_q1", "flamegraph_q1_client"), "flamegraphs/"),
+        ("traces", ("trace_server", "trace_client", "trace_q1_server", "trace_q1_client"), "traces/"),
     ]:
         d = os.path.join(bench_dir, subdir)
         if not os.path.isdir(d):
