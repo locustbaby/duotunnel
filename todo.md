@@ -383,6 +383,28 @@ Start with Option A to validate, then consider Option B.
 - server trace stall at ~22s disappears
 - 8000 QPS p99 latency drops significantly
 
+**Current status (2026-04-07): Implemented but regressed — needs investigation**
+
+Endpoint-per-thread is implemented on branch `perf/quinn-endpoint-per-thread`. CI all-green (SIGTERM fix also landed), but benchmark shows **regression vs main**:
+
+| Metric | main (single endpoint) | endpoint-per-thread |
+|--------|------------------------|---------------------|
+| http_reqs | 288,951 @ 6418/s | 254,466 @ 5645/s |
+| p(90) duration | 28.55ms | 63.53ms |
+| p(95) duration | 39.1ms | 81.86ms |
+| egress p(95) | 43.26ms | 98.66ms |
+
+dial9 trace shows many `park` events even with per-thread endpoints.
+
+**Root cause hypothesis**: Entry listener (`start_entry_listener`) runs in the outer `TracedRuntime` (multi-thread), but calls `conn.open_bi()` on quinn connections that live in separate `current_thread` runtimes (one per OS thread). This cross-runtime quinn call triggers cross-thread wakeups on every entry request, causing extra park/unpark overhead — the opposite of what endpoint-per-thread was meant to fix.
+
+**Next steps to investigate**:
+1. Profile which path drives the park: is it `open_bi` cross-runtime, or `accept_bi` on the server side?
+2. Option A: Move entry listener into each per-thread runtime (each thread binds a SO_REUSEPORT TCP socket), eliminate cross-runtime calls entirely
+3. Option B: Keep shared entry listener but use a channel to dispatch `open_bi` requests to the owning thread's runtime
+4. Compare server-side traces: server also uses endpoint-per-thread — check if server park pattern changed
+5. Verify whether the bottleneck is still quinn Mutex or shifted elsewhere
+
 ### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
 **Priority**: Low (Experimental)
 Since QUIC relies entirely on UDP packets, the Linux kernel networking stack (sk_buff allocations, iptables, netfilter) introduces major latency. Using `AF_XDP` sockets allows reading the UDP datagrams directly from the NIC driver rings into user space, circumventing the kernel entirely.
