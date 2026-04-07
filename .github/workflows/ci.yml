@@ -1552,32 +1552,32 @@ jobs:
           path: /tmp/core
 
       - name: Download 8k benchmark outputs
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
-          if-no-files-found: ignore
 
       - name: Download 8k benchmark outputs (q1)
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: stress-profile-8k-results-q1-${{ github.run_id }}
           path: /tmp/profile8k-q1
-          if-no-files-found: ignore
 
       - name: Download dial9 traces (q4)
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: dial9-traces-8k-${{ github.run_id }}
           path: /tmp/dial9-traces-q4
-          if-no-files-found: ignore
 
       - name: Download dial9 traces (q1)
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: dial9-traces-8k-q1-${{ github.run_id }}
           path: /tmp/dial9-traces-q1
-          if-no-files-found: ignore
 
       - name: Merge benchmark outputs
         run: |
