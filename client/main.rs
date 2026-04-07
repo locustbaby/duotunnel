@@ -158,7 +158,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
-        Ok(()) => info!("dial9 trace flush complete, output: {trace_path_display}.0.bin.gz"),
+        Ok(()) => info!("dial9 trace flush complete, output: {trace_path_display}"),
         Err(e) => error!("dial9 trace flush error: {e}"),
     }
     result
