@@ -108,10 +108,26 @@ async fn async_main() -> Result<()> {
     {
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("Received Ctrl+C, shutting down...");
-                cancel_clone.cancel();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm = signal(SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received Ctrl+C, shutting down...");
+                    }
+                    _ = sigterm.recv() => {
+                        info!("Received SIGTERM, shutting down...");
+                    }
+                }
             }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                info!("Received Ctrl+C, shutting down...");
+            }
+            cancel_clone.cancel();
         });
     }
 

@@ -397,6 +397,23 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     // Shared cancellation token: when any thread exits (normally or via panic),
     // we cancel the token so all sibling threads stop accepting new connections.
     let cancel = CancellationToken::new();
+    {
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, shutting down...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down...");
+                }
+            }
+            cancel_clone.cancel();
+        });
+    }
 
     // Spawn N OS threads, each with a current_thread runtime + its own quinn::Endpoint.
     // All endpoints bind the same port via SO_REUSEPORT so the kernel distributes
