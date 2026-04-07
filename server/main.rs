@@ -380,12 +380,8 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let n_threads = config
         .server
         .threads
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get() as u32)
-                .unwrap_or(1)
-        })
-        .max(1);
+        .map(|t| t.max(1))
+        .unwrap_or_else(tunnel_lib::effective_cpu_count);
     info!(threads = n_threads, "starting QUIC endpoint-per-thread");
 
     {

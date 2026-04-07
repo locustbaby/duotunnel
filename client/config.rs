@@ -10,10 +10,12 @@ use tunnel_lib::transport::quic::QuicTransportParams;
 #[serde(default)]
 pub struct ClientQuicConfig {
     /// Number of OS threads (and independent quinn::Endpoints) to spawn.
-    /// Defaults to the number of logical CPUs. Replaces the old `connections` pool model.
+    ///
+    /// When unset the value is auto-detected:
+    ///   - In containers (K8s/Docker): derived from cgroup CPU quota so the
+    ///     thread count matches the pod's CPU limit, not the node's CPU count.
+    ///   - Bare-metal / VMs: `std::thread::available_parallelism()`.
     pub threads: Option<u32>,
-    /// Deprecated: use `threads` instead. Kept for backward-compat config files.
-    pub connections: u32,
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
     pub connection_window_mb: Option<u64>,
@@ -28,7 +30,6 @@ impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
             threads: None,
-            connections: 1,
             max_concurrent_streams: 100,
             stream_window_mb: None,
             connection_window_mb: None,
@@ -40,19 +41,16 @@ impl Default for ClientQuicConfig {
     }
 }
 impl ClientQuicConfig {
-    /// Effective thread count: `threads` takes priority over deprecated `connections`.
-    /// Falls back to logical CPU count.
+    /// Effective thread count.
+    ///
+    /// If `threads` is set in config, that value is used directly (min 1).
+    /// Otherwise the count is auto-detected: cgroup CPU quota (K8s/containers)
+    /// takes priority over `available_parallelism()` (bare-metal/VMs).
     pub fn effective_threads(&self) -> u32 {
         if let Some(t) = self.threads {
             return t.max(1);
         }
-        if self.connections > 1 {
-            return self.connections;
-        }
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        (cpus as u32).max(1)
+        tunnel_lib::effective_cpu_count()
     }
 }
 impl From<&ClientQuicConfig> for QuicTransportParams {
@@ -166,9 +164,6 @@ impl ClientConfigFile {
         }
         if self.auth_token.trim().is_empty() {
             errors.push("auth_token is required".into());
-        }
-        if self.quic.connections == 0 {
-            errors.push("quic.connections must be >= 1".into());
         }
         if self.quic.max_concurrent_streams == 0 {
             errors.push("quic.max_concurrent_streams must be >= 1".into());
