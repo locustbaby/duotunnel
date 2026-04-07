@@ -189,7 +189,11 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     use dial9_tokio_telemetry::telemetry::{
         CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
     };
-    let writer = RotatingWriter::single_file(&trace_path)?;
+    let writer = RotatingWriter::builder()
+        .base_path(&trace_path)
+        .max_file_size(512 * 1024 * 1024)
+        .max_total_size(512 * 1024 * 1024)
+        .build()?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     let trace_path_display = trace_path.display().to_string();
