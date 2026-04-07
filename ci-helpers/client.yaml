@@ -6,7 +6,6 @@ auth_token: "dt_hi8nkpxiyAjQNL3w7EBMD0Sy_-RjM8bmO47v-36Z2aE"
 http_entry_port: 8082
 metrics_port: 9092
 quic:
-  threads: 2
   keepalive_secs: 10
   idle_timeout_secs: 30
   max_concurrent_streams: 1000
