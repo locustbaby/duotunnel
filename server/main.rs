@@ -32,6 +32,7 @@ use config::{
 };
 use null_stores::{NullConfigSource, NullRuleStore};
 use registry::{new_shared_registry, SharedRegistry};
+use tokio_util::sync::CancellationToken;
 use tunnel_lib::{HttpClientParams, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
 #[derive(Parser, Debug)]
@@ -376,14 +377,95 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
             }
         });
     }
-    let quic_state = state.clone();
-    let quic_handle =
-        tokio::spawn(async move { handlers::quic::run_quic_server(quic_state, ready).await });
+    let n_threads = config
+        .server
+        .threads
+        .map(|t| t.max(1))
+        .unwrap_or_else(tunnel_lib::effective_cpu_count);
+    info!(threads = n_threads, "starting QUIC endpoint-per-thread");
+
     {
         let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
         sync_listeners(&state, &listeners);
     }
-    quic_handle.await??;
+
+    let addr: std::net::SocketAddr =
+        format!("0.0.0.0:{}", config.server.tunnel_port).parse()?;
+    let quic_params = tunnel_lib::QuicTransportParams::from(&config.server.quic);
+    let server_config = tunnel_lib::create_server_config_with(&quic_params)?;
+
+    // Shared cancellation token: when any thread exits (normally or via panic),
+    // we cancel the token so all sibling threads stop accepting new connections.
+    let cancel = CancellationToken::new();
+    {
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, shutting down...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down...");
+                }
+            }
+            cancel_clone.cancel();
+        });
+    }
+
+    // Spawn N OS threads, each with a current_thread runtime + its own quinn::Endpoint.
+    // All endpoints bind the same port via SO_REUSEPORT so the kernel distributes
+    // incoming datagrams across them — eliminating the single-endpoint bottleneck.
+    let mut thread_handles: Vec<std::thread::JoinHandle<anyhow::Result<()>>> = Vec::new();
+    for i in 0..n_threads {
+        let state = state.clone();
+        let server_config = server_config.clone();
+        let ready = ready.clone();
+        let cancel = cancel.clone();
+
+        let handle = std::thread::spawn(move || -> anyhow::Result<()> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let cancel_inner = cancel.clone();
+            let result = rt.block_on(async move {
+                let endpoint =
+                    tunnel_lib::build_reuseport_server_endpoint(server_config, addr)?;
+                if i == 0 {
+                    // Only thread 0 sets the ready flag (all others share the same port).
+                    ready.store(true, std::sync::atomic::Ordering::Release);
+                    tracing::info!(addr = %addr, "QUIC server listening");
+                }
+                handlers::quic::run_quic_server_on_endpoint(endpoint, state, cancel_inner).await
+            });
+            // Signal siblings to stop when this thread exits for any reason.
+            cancel.cancel();
+            result
+        });
+        thread_handles.push(handle);
+    }
+
+    let mut first_err: Option<anyhow::Error> = None;
+    for handle in thread_handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some(anyhow::anyhow!("QUIC endpoint thread panicked"));
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
     Ok(())
 }
 pub fn build_routing_snapshot(

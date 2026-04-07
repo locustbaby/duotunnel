@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
@@ -14,11 +16,25 @@ struct CachedAddr {
     addr: SocketAddr,
     cached_at: Instant,
 }
-pub struct LocalProxyMap {
+
+/// Snapshot of the upstream routing table, atomically swappable on ConfigPush.
+struct RoutingTable {
     upstreams: HashMap<String, UpstreamGroup>,
-    /// Pre-computed (scheme, authority) keyed by raw server address string.
-    /// Covers every server in every upstream group — preserves round-robin across all backends.
     h2_addrs: HashMap<String, (String, String)>,
+}
+
+/// Process-level shared proxy map and config hash.
+///
+/// Shared across all N endpoint threads so that:
+/// - All connections report the same config hash in their Pong replies.
+/// - A ConfigPush received on any one connection immediately updates all others.
+/// - The routing table is built once and read lock-free via ArcSwap.
+pub struct LocalProxyMap {
+    /// Atomically swappable routing table — updated on ConfigPush without locking proxy tasks.
+    routing: ArcSwap<RoutingTable>,
+    /// Hash of the config currently applied. Shared across all connections so every
+    /// thread's Pong carries the same value after the first ConfigPush is received.
+    pub config_hash: AtomicU64,
     /// DNS cache for WebSocket/TCP upstreams: connect_addr_str → SocketAddr.
     /// Populated lazily on first connection; avoids repeated DNS lookups for fixed upstreams.
     dns_cache: DashMap<String, CachedAddr>,
@@ -27,46 +43,41 @@ pub struct LocalProxyMap {
 }
 impl LocalProxyMap {
     pub fn from_config(config: &ClientConfig, http_params: &HttpClientParams) -> Self {
-        let mut upstreams = HashMap::new();
-        let mut h2_addrs = HashMap::new();
-        for upstream in &config.upstreams {
-            let servers: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
-            // Pre-parse H2 (scheme, authority) for every server address.
-            // Keyed by address string so round-robin via get_local_address() is preserved.
-            for addr in &servers {
-                if let Some(parsed) = parse_h2_addr(addr) {
-                    h2_addrs.insert(addr.clone(), parsed);
-                } else {
-                    tracing::warn!(
-                        upstream = %upstream.name, addr = %addr,
-                        "could not parse H2 upstream address — H2 traffic to this server will fail"
-                    );
-                }
-            }
-            upstreams.insert(upstream.name.clone(), UpstreamGroup::new(servers));
-        }
+        let routing = build_routing_table(config);
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
+        let hash = tunnel_lib::config_hash(config);
         Self {
-            upstreams,
-            h2_addrs,
+            routing: ArcSwap::from_pointee(routing),
+            config_hash: AtomicU64::new(hash),
             dns_cache: DashMap::new(),
             https_client,
             h2c_client,
         }
     }
+
+    /// Apply a ConfigPush from the server, hot-swapping the routing table.
+    pub fn apply_config(&self, config: &ClientConfig) {
+        let new_routing = build_routing_table(config);
+        self.routing.store(Arc::new(new_routing));
+        self.config_hash.store(tunnel_lib::config_hash(config), Ordering::Relaxed);
+    }
+
     pub fn get_local_address(&self, proxy_name: &str) -> Option<String> {
-        let group = self.upstreams.get(proxy_name)?;
+        let routing = self.routing.load();
+        let group = routing.upstreams.get(proxy_name)?;
         let server = group.next()?;
         debug!(proxy_name = %proxy_name, server = %server, "upstream selected");
         Some(server.clone())
     }
     /// Returns pre-computed (scheme, authority) for the given raw server address string.
     /// Call `get_local_address()` first (for round-robin), then pass the result here.
-    pub fn get_h2_addr_for_server(&self, addr: &str) -> Option<(&str, &str)> {
-        self.h2_addrs
+    pub fn get_h2_addr_for_server(&self, addr: &str) -> Option<(String, String)> {
+        self.routing
+            .load()
+            .h2_addrs
             .get(addr)
-            .map(|(s, a)| (s.as_str(), a.as_str()))
+            .map(|(s, a)| (s.clone(), a.clone()))
     }
     /// Resolve `connect_addr_str` to a `SocketAddr`, using a lazy DNS cache.
     /// IP addresses are parsed directly. Hostnames are looked up once and cached.
@@ -101,6 +112,26 @@ impl LocalProxyMap {
         );
         Ok(addr)
     }
+}
+
+fn build_routing_table(config: &ClientConfig) -> RoutingTable {
+    let mut upstreams = HashMap::new();
+    let mut h2_addrs = HashMap::new();
+    for upstream in &config.upstreams {
+        let servers: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
+        for addr in &servers {
+            if let Some(parsed) = parse_h2_addr(addr) {
+                h2_addrs.insert(addr.clone(), parsed);
+            } else {
+                tracing::warn!(
+                    upstream = %upstream.name, addr = %addr,
+                    "could not parse H2 upstream address — H2 traffic to this server will fail"
+                );
+            }
+        }
+        upstreams.insert(upstream.name.clone(), UpstreamGroup::from_policy(servers, &upstream.lb_policy));
+    }
+    RoutingTable { upstreams, h2_addrs }
 }
 
 /// Normalise a raw upstream address string into (scheme, authority) for H2 use.

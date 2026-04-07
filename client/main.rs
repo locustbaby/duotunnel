@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
@@ -19,7 +19,9 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
+use tunnel_lib::{
+    recv_message, recv_message_type, send_message, Login, LoginResp, MessageType, Ping, Pong,
+};
 mod app;
 mod config;
 mod connect;
@@ -29,7 +31,13 @@ mod proxy;
 use app::LocalProxyMap;
 use config::ClientConfigFile;
 use connect::ConnectError;
+use pool::{new_connection_pool, SharedConnectionPool};
 use proxy::handle_work_stream;
+
+/// Process-level shared proxy map. Initialized by the first thread that completes
+/// login; all subsequent threads reuse the same instance.
+type SharedProxyMap = Arc<OnceLock<Arc<LocalProxyMap>>>;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -92,32 +100,142 @@ async fn async_main() -> Result<()> {
     tunnel_lib::infra::observability::init_tracing(log_level);
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
-    let endpoint = build_quic_endpoint(&config)?;
+
+    let n_threads = config.quic.effective_threads();
+    info!(threads = n_threads, "starting endpoint-per-thread");
+
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("Received Ctrl+C, shutting down...");
+    {
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm = signal(SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received Ctrl+C, shutting down...");
+                    }
+                    _ = sigterm.recv() => {
+                        info!("Received SIGTERM, shutting down...");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                info!("Received Ctrl+C, shutting down...");
+            }
             cancel_clone.cancel();
-        }
-    });
+        });
+    }
+
     let ready = Arc::new(AtomicBool::new(false));
     if let Some(port) = config.metrics_port {
         tokio::spawn(run_healthz_server(port, ready.clone()));
     }
-    let run_cancel = cancel.clone();
-    let run_ready = ready.clone();
-    let run_fut = async move {
-        if config.quic.connections > 1 {
-            info!(
-                connections = % config.quic.connections, "using multi-QUIC connection pool"
-            );
-            pool::run_pool(config, endpoint, run_cancel, run_ready).await
-        } else {
-            connect::run_supervisor(config, endpoint, run_cancel, run_ready).await
+
+    // Process-level connection pool: all N threads register their connections here.
+    // The entry listener uses this pool so it isn't tied to any one connection.
+    let conn_pool = new_connection_pool();
+
+    // Process-level proxy map: initialized by the first login, shared by all threads.
+    // Avoids N redundant ConfigPush responses by keeping a single canonical hash.
+    let shared_proxy_map: SharedProxyMap = Arc::new(OnceLock::new());
+
+    // Start the entry listener once at the process level using the connection pool.
+    // It outlives any individual thread's connection.
+    if let Some(entry_port) = config.http_entry_port {
+        let pool = conn_pool.clone();
+        let cancel_entry = cancel.clone();
+        let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
+        let peek_buf_size = config.proxy_buffers.peek_buf_size;
+        let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
+        let max_entry_conns = config.quic.max_concurrent_streams;
+        let ready_flag = ready.clone();
+        tokio::spawn(async move {
+            if let Err(e) = entry::start_entry_listener(
+                pool,
+                entry_port,
+                cancel_entry,
+                max_entry_conns,
+                entry_tcp_params,
+                peek_buf_size,
+                open_stream_timeout,
+            )
+            .await
+            {
+                error!(port = entry_port, error = % e, "entry listener failed");
+            }
+            drop(ready_flag);
+        });
+    }
+
+    run_endpoint_per_thread(config, n_threads, cancel, ready, conn_pool, shared_proxy_map).await
+}
+
+async fn run_endpoint_per_thread(
+    config: ClientConfigFile,
+    n_threads: u32,
+    cancel: CancellationToken,
+    ready: Arc<AtomicBool>,
+    conn_pool: SharedConnectionPool,
+    shared_proxy_map: SharedProxyMap,
+) -> Result<()> {
+    let config = Arc::new(config);
+        let mut handles = Vec::with_capacity(n_threads as usize);
+
+        for _i in 0..n_threads {
+            let cfg = config.clone();
+            let cancel = cancel.clone();
+            let ready = ready.clone();
+            let pool = conn_pool.clone();
+            let proxy_map = shared_proxy_map.clone();
+
+            let handle = std::thread::spawn(move || -> Result<()> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let cancel_inner = cancel.clone();
+                let result = rt.block_on(async move {
+                    let endpoint = build_quic_endpoint(&cfg)?;
+                    connect::run_supervisor_with_shared(
+                        (*cfg).clone(),
+                        endpoint,
+                        cancel_inner,
+                        ready,
+                        pool,
+                        proxy_map,
+                    )
+                    .await
+                });
+                cancel.cancel();
+                result
+            });
+            handles.push(handle);
         }
-    };
-    run_fut.await
+
+        let mut first_err: Option<anyhow::Error> = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+                Err(_panic) => {
+                    if first_err.is_none() {
+                        first_err = Some(anyhow::anyhow!("endpoint thread panicked"));
+                    }
+                }
+            }
+        }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(())
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -196,11 +314,14 @@ fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }
+
 pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
     shutdown: CancellationToken,
     ready: Arc<AtomicBool>,
+    conn_pool: SharedConnectionPool,
+    shared_proxy_map: SharedProxyMap,
 ) -> std::result::Result<(), ConnectError> {
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
@@ -244,40 +365,50 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
-    let proxy_map = Arc::new(LocalProxyMap::from_config(
-        &resp.config,
-        &tunnel_lib::HttpClientParams::from(&config.http_pool),
-    ));
+
+    // Initialize the process-level proxy map on first login; subsequent logins reuse it.
+    // The OnceLock guarantees exactly one initialization even under concurrent logins.
+    let proxy_map = shared_proxy_map
+        .get_or_init(|| {
+            Arc::new(LocalProxyMap::from_config(
+                &resp.config,
+                &tunnel_lib::HttpClientParams::from(&config.http_pool),
+            ))
+        })
+        .clone();
+
+    // Register this connection in the pool so the entry listener can use it.
+    conn_pool.add(conn.clone());
+
     let session_cancel = CancellationToken::new();
     let max_streams = config.quic.max_concurrent_streams;
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = % max_streams, "Stream backpressure configured");
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
-    if let Some(entry_port) = config.http_entry_port {
-        let conn = conn.clone();
-        let token = session_cancel.clone();
-        let max_entry_conns = config.quic.max_concurrent_streams;
-        let entry_tcp_params = tcp_params.clone();
-        let peek_buf_size = config.proxy_buffers.peek_buf_size;
-        let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        let ready_flag = ready.clone();
-        tokio::spawn(async move {
-            if let Err(e) = entry::start_entry_listener(
-                conn,
-                entry_port,
-                token,
-                max_entry_conns,
-                entry_tcp_params,
-                peek_buf_size,
-                open_stream_timeout,
-            )
+
+    // Accept the server-initiated control stream (always the first accept_bi after login).
+    let ctrl_stream = tokio::time::timeout(
+        Duration::from_millis(config.reconnect.login_timeout_ms),
+        conn.accept_bi(),
+    )
+    .await
+    .map_err(|_| ConnectError::transient(anyhow!("timed out waiting for control stream")))?
+    .map_err(|e| ConnectError::transient(anyhow!("failed to accept control stream: {}", e)))?;
+
+    // Spawn control stream handler.
+    // Uses the shared proxy_map so all connections report the same config hash,
+    // eliminating redundant ConfigPush when multiple connections are active.
+    let proxy_map_for_ctrl = proxy_map.clone();
+    let session_cancel_ctrl = session_cancel.clone();
+    tokio::spawn(async move {
+        let (send, recv) = ctrl_stream;
+        if let Err(e) = handle_control_stream(send, recv, proxy_map_for_ctrl, session_cancel_ctrl)
             .await
-            {
-                error!(port = entry_port, error = % e, "entry listener failed");
-            }
-            drop(ready_flag);
-        });
-    }
+        {
+            debug!(error = %e, "control stream ended");
+        }
+    });
+
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
@@ -292,7 +423,6 @@ pub(crate) async fn run_client(
                             Ok(permit) => permit,
                             Err(_) => {
                                 warn!("Stream rejected: max concurrent streams reached");
-                                // Signal the server that we cannot accept this stream.
                                 let _ = send.reset(0u8.into());
                                 continue;
                             }
@@ -315,6 +445,9 @@ pub(crate) async fn run_client(
             }
         }
     };
+
+    // Remove this connection from the pool before returning.
+    conn_pool.remove(&conn);
     session_cancel.cancel();
     tokio::select! {
         _ = shutdown.cancelled() => {}
@@ -391,6 +524,66 @@ async fn resolve_server_addresses(
         )));
     }
     Ok(addrs)
+}
+
+/// Handles the server-initiated control stream for the lifetime of a connection.
+///
+/// Protocol (Ping/Pong carries config hash — merged liveness + config sync):
+///   Ping  { seq, timestamp_ms, config_hash } → reply Pong { seq, config_hash }
+///     server sends full ConfigPush if Pong.config_hash differs from server's hash
+///   ConfigPush { full config } → apply and update shared hash
+///
+/// The proxy_map is process-level shared, so all N connections report the same
+/// config_hash. After the first ConfigPush updates the shared hash, subsequent
+/// Pongs from sibling connections carry the new hash — no redundant pushes.
+async fn handle_control_stream(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    proxy_map: Arc<LocalProxyMap>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    loop {
+        let msg_type = tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = recv_message_type(&mut recv) => match result {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!(error = %e, "control stream closed");
+                    break;
+                }
+            }
+        };
+        match msg_type {
+            // Heartbeat + config-hash probe: reply with our current shared hash.
+            MessageType::Ping => {
+                let ping: Ping = recv_message(&mut recv).await?;
+                let current_hash = proxy_map.config_hash.load(std::sync::atomic::Ordering::Relaxed);
+                let pong = Pong { seq: ping.seq, config_hash: current_hash };
+                send_message(&mut send, MessageType::Pong, &pong).await?;
+                debug!(
+                    seq = ping.seq,
+                    server_hash = ping.config_hash,
+                    my_hash = current_hash,
+                    "replied Pong"
+                );
+            }
+            // Server determined our hash was stale and sent the full config.
+            // apply_config atomically updates both the routing table and config_hash.
+            MessageType::ConfigPush => {
+                let config: tunnel_lib::ClientConfig = recv_message(&mut recv).await?;
+                info!(
+                    upstreams = config.upstreams.len(),
+                    version = %config.config_version,
+                    "received ConfigPush, applying"
+                );
+                proxy_map.apply_config(&config);
+            }
+            other => {
+                debug!(msg_type = ?other, "unexpected message on control stream, ignoring");
+            }
+        }
+    }
+    Ok(())
 }
 fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
     if config.tls_skip_verify {
