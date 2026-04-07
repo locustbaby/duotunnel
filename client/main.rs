@@ -133,6 +133,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     let writer = RotatingWriter::single_file(&trace_path)?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
+    let trace_path_display = trace_path.display().to_string();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_trace_path(trace_path)
@@ -141,17 +142,25 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
+    info!("dial9 trace started, base path: {trace_path_display}");
     let result = runtime.block_on(async {
         let mut sigterm = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::terminate(),
         )?;
         tokio::select! {
             r = fut => r,
-            _ = sigterm.recv() => Ok(()),
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, starting graceful shutdown");
+                Ok(())
+            }
         }
     });
+    info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
-    let _ = guard.graceful_shutdown(std::time::Duration::from_secs(30));
+    match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
+        Ok(()) => info!("dial9 trace flush complete, output: {trace_path_display}.0.bin.gz"),
+        Err(e) => error!("dial9 trace flush error: {e}"),
+    }
     result
 }
 fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {

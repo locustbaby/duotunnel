@@ -1297,7 +1297,7 @@ jobs:
           run_case() {
             Q="$1"
             SUFFIX="q${Q}"
-            rm -f /tmp/bench-results.json /tmp/server-trace.bin /tmp/client-trace.bin
+            rm -f /tmp/bench-results.json /tmp/server-trace.bin /tmp/client-trace.bin /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
             ./target/release/grpc-echo-server 50051 > "/tmp/grpc-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/grpc-echo.pid
@@ -1438,8 +1438,8 @@ jobs:
 
             mkdir -p "/tmp/trace-${SUFFIX}"
             cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
-            [ -f /tmp/server-trace.bin ] && cp /tmp/server-trace.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz" || true
-            [ -f /tmp/client-trace.bin ] && cp /tmp/client-trace.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz" || true
+            find /tmp -maxdepth 1 -name "server-trace.*.bin.gz" | sort | tail -1 | xargs -I{} cp {} "/tmp/trace-${SUFFIX}/server-trace.bin.gz" || true
+            find /tmp -maxdepth 1 -name "client-trace.*.bin.gz" | sort | tail -1 | xargs -I{} cp {} "/tmp/trace-${SUFFIX}/client-trace.bin.gz" || true
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"
