@@ -1432,7 +1432,7 @@ jobs:
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            sleep 35
+            sleep 50
             kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
             echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace.0.bin /tmp/client-trace.0.bin 2>&1 || true

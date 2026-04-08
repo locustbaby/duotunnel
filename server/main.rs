@@ -218,18 +218,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         })
         .build_and_start_with_writer(builder, writer)?;
     info!("dial9 trace started, base path: {trace_path_display}");
-    let result = runtime.block_on(async {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
-        tokio::select! {
-            r = fut => r,
-            _ = sigterm.recv() => {
-                info!("SIGTERM received, starting graceful shutdown");
-                Ok(())
-            }
-        }
-    });
+    let result = runtime.block_on(fut);
     info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
@@ -420,6 +409,11 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     // incoming datagrams across them — eliminating the single-endpoint bottleneck.
     // open_bi() on any Connection is always within the same runtime, so no cross-runtime
     // park/unpark overhead. Global ClientRegistry handles routing for all ingress threads.
+    {
+        let routing = state.routing.load_full();
+        handlers::ingress::spawn_ingress_listeners(state.clone(), cancel.clone(), routing);
+    }
+
     let mut task_handles = Vec::new();
     for i in 0..n_threads {
         let state = state.clone();
@@ -433,12 +427,6 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
                 ready.store(true, std::sync::atomic::Ordering::Release);
                 tracing::info!(addr = %addr, "QUIC server listening");
             }
-            let routing = state.routing.load_full();
-            handlers::ingress::spawn_ingress_listeners(
-                state.clone(),
-                cancel.clone(),
-                routing,
-            );
             let result = handlers::quic::run_quic_server_on_endpoint(
                 endpoint,
                 state,

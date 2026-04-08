@@ -281,18 +281,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         })
         .build_and_start_with_writer(builder, writer)?;
     info!("dial9 trace started, base path: {trace_path_display}");
-    let result = runtime.block_on(async {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
-        tokio::select! {
-            r = fut => r,
-            _ = sigterm.recv() => {
-                info!("SIGTERM received, starting graceful shutdown");
-                Ok(())
-            }
-        }
-    });
+    let result = runtime.block_on(fut);
     info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
