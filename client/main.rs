@@ -30,6 +30,26 @@ use app::LocalProxyMap;
 use config::ClientConfigFile;
 use connect::ConnectError;
 use proxy::handle_work_stream;
+
+#[cfg(feature = "dial9-telemetry")]
+static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    #[cfg(feature = "dial9-telemetry")]
+    if std::env::var_os("DIAL9_TRACE_PATH").is_some()
+        && let Some(handle) = DIAL9_HANDLE.get()
+    {
+        return handle.spawn(future);
+    }
+
+    tokio::task::spawn(future)
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -61,7 +81,7 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
     loop {
         let Ok((mut stream, _)) = listener.accept().await else { continue };
         let ready = ready.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             let mut buf = [0u8; 256];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
@@ -95,7 +115,7 @@ async fn async_main() -> Result<()> {
     let endpoint = build_quic_endpoint(&config)?;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
+    crate::spawn_task(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             info!("Received Ctrl+C, shutting down...");
             cancel_clone.cancel();
@@ -103,7 +123,7 @@ async fn async_main() -> Result<()> {
     });
     let ready = Arc::new(AtomicBool::new(false));
     if let Some(port) = config.metrics_port {
-        tokio::spawn(run_healthz_server(port, ready.clone()));
+        crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
     let run_cancel = cancel.clone();
     let run_ready = ready.clone();
@@ -157,6 +177,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
+    let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
     let result = runtime.block_on(async {
         let mut sigterm = tokio::signal::unix::signal(
@@ -261,7 +282,7 @@ pub(crate) async fn run_client(
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
         let ready_flag = ready.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             if let Err(e) = entry::start_entry_listener(
                 conn,
                 entry_port,
@@ -300,7 +321,7 @@ pub(crate) async fn run_client(
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
-                        tokio::spawn(async move {
+                        crate::spawn_task(async move {
                             let _permit = permit;
                             if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 debug!(error = %e, "work stream error");

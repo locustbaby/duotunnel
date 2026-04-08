@@ -1318,7 +1318,7 @@ jobs:
             curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
               || { echo "ERROR: ctld healthz never became ready"; cat "/tmp/ci-ctld-${SUFFIX}.log"; exit 1; }
 
-            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+            TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/server-trace.bin \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/server.pid
@@ -1337,11 +1337,11 @@ jobs:
                 client rotate-token "${CLIENT_NAME}" 2>/dev/null | awk '{print $NF}' | tail -n1)
             fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$Q"
+            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 1', c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
 
             sleep 3
 
-            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+            TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/client-trace.bin \
               ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/client.pid
             for i in $(seq 1 60); do
@@ -1386,7 +1386,7 @@ jobs:
               kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
               sleep 0.5
 
-              DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/server-trace.bin \
                 ./target/release/server --config ci-helpers/server.yaml \
                 --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/server.pid
@@ -1400,7 +1400,7 @@ jobs:
                 exit 1
               fi
 
-              DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/client-trace.bin \
                 ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/client.pid
               for i in $(seq 1 60); do
@@ -1428,7 +1428,13 @@ jobs:
               fi
             fi
 
-            (cd ci-helpers/k6 && k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js)
+            (cd ci-helpers/k6 && k6 run \
+              -e GITHUB_SHA=${{ github.sha }} \
+              -e BENCH_PROFILE=8k \
+              -e K6_8K_RATE=1 \
+              -e K6_8K_PREALLOCATED_VUS=1 \
+              -e K6_8K_MAX_VUS=1 \
+              bench.js)
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true

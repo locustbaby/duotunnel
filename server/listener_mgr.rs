@@ -144,7 +144,7 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
         match mode {
             IngressMode::Http(_) => {
                 let s = state.clone();
-                tokio::spawn(async move {
+                crate::spawn_task(async move {
                     if let Err(e) =
                         crate::handlers::http::run_http_listener(s.clone(), port, cancel).await
                     {
@@ -160,7 +160,7 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
                 let s = state.clone();
                 let group_id = tcp_group.unwrap_or_default();
                 let proxy_name = tcp_proxy.unwrap_or_default();
-                tokio::spawn(async move {
+                crate::spawn_task(async move {
                     if let Err(e) = crate::handlers::tcp::run_tcp_listener(
                         s.clone(),
                         port,

@@ -14,7 +14,7 @@ pub async fn run_metrics_server(port: u16, ready: Arc<AtomicBool>) -> Result<()>
     loop {
         let (mut stream, _) = listener.accept().await?;
         let ready = ready.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             let mut buf = [0u8; 512];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = std::str::from_utf8(&buf[..n]).unwrap_or("");

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tunnel_lib::HttpClientParams;
 pub fn spawn_config_watcher(config_path: String, state: Arc<ServerState>) {
-    tokio::spawn(async move {
+    crate::spawn_task(async move {
         if let Err(e) = watch_loop(config_path, state).await {
             error!(error = %e, "hot-reload watcher exited unexpectedly");
         }

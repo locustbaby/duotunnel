@@ -128,7 +128,13 @@ impl ClientConfigFile {
             .merge(Yaml::file(&resolved))
             .merge(
                 Env::prefixed("TUNNEL_CLIENT__")
-                    .only(&["auth_token", "log_level", "server_addr", "server_port"])
+                    .only(&[
+                        "auth_token",
+                        "log_level",
+                        "server_addr",
+                        "server_port",
+                        "quic.connections",
+                    ])
                     .split("__"),
             )
             .extract()?;
