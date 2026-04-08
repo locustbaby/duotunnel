@@ -28,8 +28,9 @@ pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::addr::{normalize_host, parse_upstream, UpstreamAddr};
 pub use transport::listener::{
-    extract_host_from_http, extract_method_path_from_http, new_shared_vhost_router, peek_bytes,
-    start_tcp_listener, PortRouter, SharedVhostRouter, VhostRouter,
+    build_reuseport_listener, extract_host_from_http, extract_method_path_from_http,
+    new_shared_vhost_router, peek_bytes, start_tcp_listener, PortRouter, SharedVhostRouter,
+    VhostRouter,
 };
 pub use transport::quic::{build_transport_config, QuicTransportParams};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};

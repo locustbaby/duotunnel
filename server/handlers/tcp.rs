@@ -1,7 +1,7 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy;
@@ -13,7 +13,7 @@ pub async fn run_tcp_listener(
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
+    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
     info!(
         addr = % addr, proxy = % proxy_name, group = % group_id, "TCP listener started"
     );
