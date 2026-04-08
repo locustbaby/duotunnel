@@ -22,7 +22,6 @@ mod handlers;
 mod hot_reload;
 mod listener_mgr;
 mod local_auth;
-mod local_registry;
 mod metrics;
 mod null_stores;
 mod registry;
@@ -416,67 +415,54 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         });
     }
 
-    // Spawn N OS threads, each with a current_thread runtime + its own quinn::Endpoint.
+    // Spawn N tokio tasks, each with its own quinn::Endpoint in the shared multi_thread runtime.
     // All endpoints bind the same port via SO_REUSEPORT so the kernel distributes
     // incoming datagrams across them — eliminating the single-endpoint bottleneck.
-    let mut thread_handles: Vec<std::thread::JoinHandle<anyhow::Result<()>>> = Vec::new();
+    // open_bi() on any Connection is always within the same runtime, so no cross-runtime
+    // park/unpark overhead. Global ClientRegistry handles routing for all ingress threads.
+    let mut task_handles = Vec::new();
     for i in 0..n_threads {
         let state = state.clone();
         let server_config = server_config.clone();
         let ready = ready.clone();
         let cancel = cancel.clone();
 
-        let handle = std::thread::spawn(move || -> anyhow::Result<()> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            let cancel_inner = cancel.clone();
-            let result = rt.block_on(async move {
-                let endpoint =
-                    tunnel_lib::build_reuseport_server_endpoint(server_config, addr)?;
-                if i == 0 {
-                    // Only thread 0 sets the ready flag (all others share the same port).
-                    ready.store(true, std::sync::atomic::Ordering::Release);
-                    tracing::info!(addr = %addr, "QUIC server listening");
-                }
-                // Per-thread registry: only holds connections that arrived on this endpoint.
-                // Ingress listeners on the same thread use this to keep open_bi() same-thread.
-                let local_registry = local_registry::new_local_registry();
-                // Spawn per-thread SO_REUSEPORT ingress listeners.
-                let routing = state.routing.load_full();
-                handlers::ingress::spawn_ingress_listeners(
-                    state.clone(),
-                    local_registry.clone(),
-                    cancel_inner.clone(),
-                    routing,
-                );
-                handlers::quic::run_quic_server_on_endpoint(
-                    endpoint,
-                    state,
-                    cancel_inner,
-                    local_registry,
-                )
-                .await
-            });
-            // Signal siblings to stop when this thread exits for any reason.
+        let handle = tokio::spawn(async move {
+            let endpoint = tunnel_lib::build_reuseport_server_endpoint(server_config, addr)?;
+            if i == 0 {
+                ready.store(true, std::sync::atomic::Ordering::Release);
+                tracing::info!(addr = %addr, "QUIC server listening");
+            }
+            let routing = state.routing.load_full();
+            handlers::ingress::spawn_ingress_listeners(
+                state.clone(),
+                cancel.clone(),
+                routing,
+            );
+            let result = handlers::quic::run_quic_server_on_endpoint(
+                endpoint,
+                state,
+                cancel.clone(),
+            )
+            .await;
             cancel.cancel();
             result
         });
-        thread_handles.push(handle);
+        task_handles.push(handle);
     }
 
     let mut first_err: Option<anyhow::Error> = None;
-    for handle in thread_handles {
-        match handle.join() {
+    for handle in task_handles {
+        match handle.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 if first_err.is_none() {
-                    first_err = Some(anyhow::anyhow!("QUIC endpoint thread panicked"));
+                    first_err = Some(anyhow::anyhow!("QUIC endpoint task panicked: {e}"));
                 }
             }
         }
