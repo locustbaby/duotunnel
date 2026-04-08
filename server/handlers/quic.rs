@@ -20,6 +20,7 @@ pub async fn run_quic_server_on_endpoint(
     endpoint: quinn::Endpoint,
     state: Arc<ServerState>,
     cancel: CancellationToken,
+    thread_idx: u32,
 ) -> Result<()> {
     loop {
         let incoming = tokio::select! {
@@ -53,7 +54,7 @@ pub async fn run_quic_server_on_endpoint(
         tokio::spawn(async move {
             let _permit = permit;
             metrics::quic_connection_opened();
-            if let Err(e) = handle_quic_connection(state, incoming, cancel).await {
+            if let Err(e) = handle_quic_connection(state, incoming, cancel, thread_idx).await {
                 error!(error = % e, "QUIC connection error");
             }
             metrics::quic_connection_closed();
@@ -65,6 +66,7 @@ async fn handle_quic_connection(
     state: Arc<ServerState>,
     incoming: quinn::Incoming,
     cancel: CancellationToken,
+    thread_idx: u32,
 ) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
@@ -157,6 +159,10 @@ async fn handle_quic_connection(
         client_group.clone(),
         conn.clone(),
     );
+    // Mark this client_group as owned by the current endpoint thread so that
+    // the ingress dispatcher routes external requests to this same thread,
+    // keeping `open_bi()` and stream poll calls within one runtime.
+    state.placement.insert(client_group.clone(), thread_idx);
     metrics::client_registered(&client_group);
 
     // Spawn the control stream task: handles Ping/Pong and config sync.
@@ -234,6 +240,11 @@ async fn handle_quic_connection(
         }
     }
     state.registry.unregister(&conn_id);
+    // Only relinquish placement ownership if no sibling on the same thread
+    // happened to claim it later (compare-and-remove).
+    state
+        .placement
+        .remove_if(&client_group, |_, v| *v == thread_idx);
     metrics::client_unregistered(&client_group);
     Ok(())
 }
