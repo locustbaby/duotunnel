@@ -103,7 +103,30 @@ async fn async_main() -> Result<()> {
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
 
-    let n_threads = config.quic.effective_threads();
+    // dial9 trace mode currently profiles a single endpoint thread: the outer
+    // TracedRuntime can only instrument the runtime it owns, and the per-thread
+    // current_thread runtimes spawned below are not visible to dial9. Forcing
+    // n_threads=1 in dial9 mode means the single OS endpoint thread IS the
+    // runtime that produces the trace, so the trace is non-empty and reflects
+    // real workload. Production (non-dial9) mode keeps the configured N.
+    let n_threads = {
+        let configured = config.quic.effective_threads();
+        #[cfg(feature = "dial9-telemetry")]
+        let forced = if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
+            if configured != 1 {
+                warn!(
+                    configured,
+                    "dial9 trace mode active — forcing n_threads=1 so the traced runtime sees the workload"
+                );
+            }
+            1
+        } else {
+            configured
+        };
+        #[cfg(not(feature = "dial9-telemetry"))]
+        let forced = configured;
+        forced
+    };
     info!(threads = n_threads, "starting endpoint-per-thread");
 
     let cancel = CancellationToken::new();
@@ -138,7 +161,72 @@ async fn async_main() -> Result<()> {
     // Process-level proxy map: initialized by the first thread that completes login.
     let shared_proxy_map: SharedProxyMap = Arc::new(OnceLock::new());
 
+    // dial9 mode: run the single endpoint inline on the outer TracedRuntime so
+    // dial9 actually sees the workload (otherwise we'd spawn an OS thread that
+    // builds its own un-instrumented current_thread runtime, leaving the trace
+    // empty as observed in CI).
+    #[cfg(feature = "dial9-telemetry")]
+    if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
+        return run_endpoint_inline(config, 0, cancel, ready, shared_proxy_map).await;
+    }
+
     run_endpoint_per_thread(config, n_threads, cancel, ready, shared_proxy_map).await
+}
+
+/// Run a single endpoint worker directly on the current tokio runtime.
+/// Used by dial9 mode so the outer `TracedRuntime` instruments the actual
+/// workload (entry listener + supervisor + quinn endpoint).
+#[cfg(feature = "dial9-telemetry")]
+async fn run_endpoint_inline(
+    config: ClientConfigFile,
+    i: u32,
+    cancel: CancellationToken,
+    ready: Arc<AtomicBool>,
+    shared_proxy_map: SharedProxyMap,
+) -> Result<()> {
+    let cfg = Arc::new(config);
+    let endpoint = build_quic_endpoint(&cfg)?;
+
+    let (conn_tx, conn_rx) = watch::channel(None::<quinn::Connection>);
+
+    if i == 0 {
+        if let Some(port) = cfg.metrics_port {
+            tokio::spawn(run_healthz_server(port, ready.clone()));
+        }
+    }
+
+    if let Some(entry_port) = cfg.http_entry_port {
+        let entry_tcp_params = tunnel_lib::TcpParams::from(&cfg.tcp);
+        let peek_buf_size = cfg.proxy_buffers.peek_buf_size;
+        let open_stream_timeout = Duration::from_millis(cfg.reconnect.open_stream_timeout_ms);
+        let max_entry_conns = cfg.quic.max_concurrent_streams;
+        let cancel_entry = cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = entry::start_entry_listener_local(
+                conn_rx,
+                entry_port,
+                cancel_entry,
+                max_entry_conns,
+                entry_tcp_params,
+                peek_buf_size,
+                open_stream_timeout,
+            )
+            .await
+            {
+                error!(port = entry_port, error = %e, "entry listener failed");
+            }
+        });
+    }
+
+    connect::run_supervisor_with_shared(
+        (*cfg).clone(),
+        endpoint,
+        cancel,
+        ready,
+        conn_tx,
+        shared_proxy_map,
+    )
+    .await
 }
 
 async fn run_endpoint_per_thread(
@@ -257,7 +345,10 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .max_file_size(512 * 1024 * 1024)
         .max_total_size(512 * 1024 * 1024)
         .build()?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    // dial9 trace mode runs single-threaded so the TracedRuntime instruments
+    // the actual workload directly. The async_main() entry forces n_threads=1
+    // when DIAL9_TRACE_PATH is set, so a single-worker runtime is sufficient.
+    let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let trace_path_display = trace_path.display().to_string();
     let trace_file_display = {

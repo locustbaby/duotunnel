@@ -14,9 +14,10 @@ use std::sync::Arc;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
 use tokio::sync::Semaphore;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 mod config;
 mod control_client;
+mod dispatch;
 mod egress;
 mod handlers;
 mod hot_reload;
@@ -26,12 +27,15 @@ mod metrics;
 mod null_stores;
 mod registry;
 mod tunnel_handler;
+pub use dispatch::{DispatchJob, DispatchSender};
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
     ServerEgressUpstream, TunnelManagement,
 };
+use dashmap::DashMap;
 use null_stores::{NullConfigSource, NullRuleStore};
 use registry::{new_shared_registry, SharedRegistry};
+use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
 use tunnel_lib::{HttpClientParams, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
@@ -147,6 +151,13 @@ pub struct ServerState {
     /// Present when running in ctld-managed mode; None in standalone mode.
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
+    /// `client_group` → owner endpoint thread index. Written by the QUIC
+    /// endpoint thread that accepts the tunnel client login; read by ingress
+    /// dispatchers to decide which thread to forward the TCP socket to.
+    pub placement: DashMap<String, u32>,
+    /// One [`DispatchSender`] per endpoint thread. Installed by `run_server`
+    /// after the per-thread runtimes have been spawned.
+    pub ingress_senders: OnceLock<Arc<[dispatch::DispatchSender]>>,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
@@ -195,7 +206,11 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .max_file_size(512 * 1024 * 1024)
         .max_total_size(512 * 1024 * 1024)
         .build()?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    // dial9 trace mode runs single-threaded so the TracedRuntime instruments
+    // the actual workload. With multi_thread we'd have multiple workers polling
+    // the same runtime, recreating the cross-worker quinn::Connection Mutex
+    // contention we are trying to characterize.
+    let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let trace_path_display = trace_path.display().to_string();
     let trace_file_display = {
@@ -342,6 +357,8 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         revocation_tx,
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
+        placement: DashMap::new(),
+        ingress_senders: OnceLock::new(),
     });
     info!(
         max_quic_connections = %config.server.max_connections,
@@ -404,49 +421,183 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         });
     }
 
-    // Spawn N tokio tasks, each with its own quinn::Endpoint in the shared multi_thread runtime.
-    // All endpoints bind the same port via SO_REUSEPORT so the kernel distributes
-    // incoming datagrams across them — eliminating the single-endpoint bottleneck.
-    // open_bi() on any Connection is always within the same runtime, so no cross-runtime
-    // park/unpark overhead. Global ClientRegistry handles routing for all ingress threads.
-    let mut task_handles = Vec::new();
-    for i in 0..n_threads {
-        let state = state.clone();
-        let server_config = server_config.clone();
-        let ready = ready.clone();
-        let cancel = cancel.clone();
-
-        let handle = tokio::spawn(async move {
-            let endpoint = tunnel_lib::build_reuseport_server_endpoint(server_config, addr)?;
-            if i == 0 {
-                ready.store(true, std::sync::atomic::Ordering::Release);
-                tracing::info!(addr = %addr, "QUIC server listening");
-            }
-            let result = handlers::quic::run_quic_server_on_endpoint(
-                endpoint,
-                state,
-                cancel.clone(),
-            )
-            .await;
-            cancel.cancel();
-            result
-        });
-        task_handles.push(handle);
+    // dial9 mode: outer runtime is the single-threaded TracedRuntime; we run
+    // one inline endpoint worker on it so dial9 sees the workload. The N OS
+    // thread orchestrator below is bypassed.
+    #[cfg(feature = "dial9-telemetry")]
+    if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
+        info!("dial9 trace mode: running a single inline endpoint on the traced runtime");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<dispatch::DispatchJob>();
+        state
+            .ingress_senders
+            .set(vec![tx].into_boxed_slice().into())
+            .map_err(|_| anyhow::anyhow!("ingress_senders already initialized"))?;
+        let endpoint = tunnel_lib::build_reuseport_server_endpoint(server_config.clone(), addr)?;
+        ready.store(true, std::sync::atomic::Ordering::Release);
+        info!(addr = %addr, "QUIC server listening (dial9 inline)");
+        let dispatcher_handle = tokio::spawn(dispatch::run_dispatcher(
+            state.clone(),
+            rx,
+            cancel.clone(),
+        ));
+        let result = handlers::quic::run_quic_server_on_endpoint(
+            endpoint,
+            state.clone(),
+            cancel.clone(),
+            0,
+        )
+        .await;
+        cancel.cancel();
+        let _ = dispatcher_handle.await;
+        return result;
     }
 
-    let mut first_err: Option<anyhow::Error> = None;
-    for handle in task_handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+    // Spawn N OS threads, each running its own current_thread tokio runtime with
+    // a private quinn::Endpoint (SO_REUSEPORT) and a private ingress dispatcher.
+    //
+    // - All endpoints bind the same UDP port via SO_REUSEPORT, so the kernel
+    //   distributes incoming datagrams across them by 4-tuple hash. A given
+    //   tunnel client connection therefore always lands on (and stays on) one
+    //   thread, eliminating cross-thread polling on the quinn::Connection state
+    //   Mutex (the source of futex_wait under contention in dial9 traces).
+    //
+    // - External ingress (TCP) is accepted by listener_mgr on the outer
+    //   multi_thread runtime, then peeked + routed and dispatched via mpsc to
+    //   the owner thread for the matched tunnel client. After dispatch, the
+    //   socket is re-registered on the owner's reactor and all subsequent
+    //   open_bi / poll_read / poll_write happen entirely within that thread.
+    //
+    // The orchestrator (this function) collects shutdown completion via mpsc
+    // and joins the OS threads outside the async context via spawn_blocking
+    // (avoiding the "blocking std::thread::JoinHandle::join inside async fn"
+    // anti-pattern that the previous implementation tripped over).
+
+    #[derive(Debug)]
+    enum WorkerEvent {
+        Built { idx: u32 },
+        Stopped { idx: u32, result: Result<()> },
+    }
+
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<WorkerEvent>();
+
+    let mut worker_joins: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(n_threads as usize);
+    let mut senders: Vec<dispatch::DispatchSender> = Vec::with_capacity(n_threads as usize);
+
+    for i in 0..n_threads {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<dispatch::DispatchJob>();
+        senders.push(tx);
+
+        let state_thread = state.clone();
+        let server_config_thread = server_config.clone();
+        let ready_thread = ready.clone();
+        let cancel_thread = cancel.clone();
+        let event_tx_thread = event_tx.clone();
+
+        let join = std::thread::Builder::new()
+            .name(format!("dt-endpoint-{i}"))
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = event_tx_thread.send(WorkerEvent::Stopped {
+                            idx: i,
+                            result: Err(anyhow::anyhow!(
+                                "failed to build current_thread runtime: {e}"
+                            )),
+                        });
+                        return;
+                    }
+                };
+                let event_tx_inner = event_tx_thread.clone();
+                let result: Result<()> = rt.block_on(async move {
+                    let endpoint = tunnel_lib::build_reuseport_server_endpoint(
+                        server_config_thread,
+                        addr,
+                    )?;
+                    if i == 0 {
+                        ready_thread.store(true, std::sync::atomic::Ordering::Release);
+                        info!(addr = %addr, "QUIC server listening");
+                    }
+                    let _ = event_tx_inner.send(WorkerEvent::Built { idx: i });
+
+                    let dispatcher = tokio::task::spawn(dispatch::run_dispatcher(
+                        state_thread.clone(),
+                        rx,
+                        cancel_thread.clone(),
+                    ));
+                    let quic = tokio::task::spawn(handlers::quic::run_quic_server_on_endpoint(
+                        endpoint,
+                        state_thread.clone(),
+                        cancel_thread.clone(),
+                        i,
+                    ));
+
+                    // Either task returning means the worker is winding down.
+                    // We do NOT cancel siblings here — the orchestrator decides
+                    // whether a single worker failure should cascade.
+                    let quic_result = match quic.await {
+                        Ok(r) => r,
+                        Err(e) => Err(anyhow::anyhow!("quic task panicked: {e}")),
+                    };
+                    // Ensure the dispatcher exits too once the QUIC accept loop is gone.
+                    cancel_thread.cancel();
+                    let _ = dispatcher.await;
+                    quic_result
+                });
+                let _ = event_tx_thread.send(WorkerEvent::Stopped { idx: i, result });
+            })
+            .expect("failed to spawn endpoint OS thread");
+        worker_joins.push(join);
+    }
+
+    // Install the senders so dispatchers/listeners can find them.
+    state
+        .ingress_senders
+        .set(senders.into_boxed_slice().into())
+        .map_err(|_| anyhow::anyhow!("ingress_senders already initialized"))?;
+
+    // Drop the orchestrator's own clone of the sender so `event_rx.recv()`
+    // returns None when the last worker exits.
+    drop(event_tx);
+
+    let mut built_count: u32 = 0;
+    let mut stopped: Vec<(u32, Result<()>)> = Vec::new();
+    while let Some(ev) = event_rx.recv().await {
+        match ev {
+            WorkerEvent::Built { idx } => {
+                built_count += 1;
+                debug!(idx, built = built_count, "endpoint worker built");
             }
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(anyhow::anyhow!("QUIC endpoint task panicked: {e}"));
+            WorkerEvent::Stopped { idx, result } => {
+                if let Err(e) = &result {
+                    error!(idx, error = %e, "endpoint worker stopped with error");
+                } else {
+                    info!(idx, "endpoint worker stopped");
                 }
+                stopped.push((idx, result));
+            }
+        }
+    }
+
+    // All workers have signaled stop. Reap the OS threads via spawn_blocking so
+    // we don't block the async runtime.
+    tokio::task::spawn_blocking(move || {
+        for join in worker_joins {
+            let _ = join.join();
+        }
+    })
+    .await
+    .ok();
+
+    let mut first_err: Option<anyhow::Error> = None;
+    for (_idx, result) in stopped {
+        if let Err(e) = result {
+            if first_err.is_none() {
+                first_err = Some(e);
             }
         }
     }
