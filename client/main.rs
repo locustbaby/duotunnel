@@ -406,6 +406,9 @@ pub(crate) async fn run_client(
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
+            _ = shutdown.cancelled() => {
+                break Ok(());
+            }
             reason = conn.closed() => {
                 warn!(reason = ?reason, "Connection closed by server");
                 break Err(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
