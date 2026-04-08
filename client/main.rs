@@ -410,6 +410,9 @@ pub(crate) async fn run_client(
                 break Ok(());
             }
             reason = conn.closed() => {
+                if shutdown.is_cancelled() {
+                    break Ok(());
+                }
                 warn!(reason = ?reason, "Connection closed by server");
                 break Err(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
             }
@@ -435,6 +438,9 @@ pub(crate) async fn run_client(
                         });
                     }
                     Err(e) => {
+                        if shutdown.is_cancelled() {
+                            break Ok(());
+                        }
                         warn!(error = %e, "Connection error");
                         break Err(ConnectError::transient(anyhow!("accept_bi failed: {}", e)));
                     }

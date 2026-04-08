@@ -49,10 +49,11 @@ pub async fn run_quic_server_on_endpoint(
                 continue;
             }
         };
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             let _permit = permit;
             metrics::quic_connection_opened();
-            if let Err(e) = handle_quic_connection(state, incoming).await {
+            if let Err(e) = handle_quic_connection(state, incoming, cancel).await {
                 error!(error = % e, "QUIC connection error");
             }
             metrics::quic_connection_closed();
@@ -63,6 +64,7 @@ pub async fn run_quic_server_on_endpoint(
 async fn handle_quic_connection(
     state: Arc<ServerState>,
     incoming: quinn::Incoming,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
@@ -180,6 +182,10 @@ async fn handle_quic_connection(
     let mut revocation_rx = state.revocation_tx.subscribe();
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => {
+                conn.close(0u32.into(), b"server shutdown");
+                break;
+            }
             _ = conn.closed() => {
                 info!(conn_id = %conn_id, "connection closed");
                 break;
