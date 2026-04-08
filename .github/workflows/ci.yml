@@ -1318,7 +1318,7 @@ jobs:
             curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
               || { echo "ERROR: ctld healthz never became ready"; cat "/tmp/ci-ctld-${SUFFIX}.log"; exit 1; }
 
-            TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/server.pid
@@ -1341,7 +1341,7 @@ jobs:
 
             sleep 3
 
-            TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
               ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/client.pid
             for i in $(seq 1 60); do
@@ -1386,7 +1386,7 @@ jobs:
               kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
               sleep 0.5
 
-              TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              DIAL9_TRACE_PATH=/tmp/server-trace.bin \
                 ./target/release/server --config ci-helpers/server.yaml \
                 --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/server.pid
@@ -1400,7 +1400,7 @@ jobs:
                 exit 1
               fi
 
-              TOKIO_WORKER_THREADS=1 DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              DIAL9_TRACE_PATH=/tmp/client-trace.bin \
                 ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/client.pid
               for i in $(seq 1 60); do

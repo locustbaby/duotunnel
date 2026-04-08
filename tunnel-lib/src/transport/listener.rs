@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
-fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
+pub fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {

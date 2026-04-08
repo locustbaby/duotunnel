@@ -125,25 +125,54 @@ Change to 1000.
 
 ## Code Optimization
 
-### [TODO-56] H2 ingress src_addr 溯源修复（跨连接 sender 复用前提）
+### [TODO-56] H2 跨 ingress 连接 sender 复用（完整设计）
 
-**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`, `tunnel-lib/src/models/msg.rs`, `server/handlers/http.rs`, `tunnel-lib/src/protocol/driver/h1.rs`
+**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`, `tunnel-lib/src/models/msg.rs`, `server/handlers/http.rs`, `server/registry.rs`
 **Priority**: Medium
 
-**Background**:
-当前 `RoutingInfo`（含 `src_addr`/`src_port`）在 QUIC stream 建立时作为第一条消息一次性发送，绑定了 ingress TCP 连接的来源地址。这意味着：
-1. 同一 ingress TCP 连接的所有请求溯源正确。
-2. 但如果将来跨 ingress TCP 连接复用同一条 QUIC H2 stream（sender 提升到更高粒度），client 侧收到的所有请求的来源地址都是第一个 ingress 连接的地址，后续请求**溯源全部错误**。
+**Goal**: 把 H2Sender 从 per-ingress-TCP-connection（`OnceLock`）提升到 per-`(Connection, proxy_name)` 全局缓存，N 条 ingress TCP 连接共用同一条 QUIC H2 stream，减少 `open_bi()` 调用次数。
 
-**Root cause**:
-`send_routing_info()` 把来源信息放在 stream 建立时的握手消息里，而不是每个请求的 header 里。
+**当前状态**: sender 在同一 ingress TCP 连接内复用（已实现），跨连接未复用。
 
-**Fix**:
-将 `src_addr`/`src_port` 从 `RoutingInfo`（stream 级）移到 per-request header（如 `X-Forwarded-For` / `X-Real-IP`），使 QUIC stream 本身不携带来源信息，可以被任意 ingress 连接复用。`RoutingInfo` 只保留 `proxy_name`、`protocol`、`host` 等路由相关字段。
+**障碍全集（需全部解决）**:
 
-**Why:** 这是实现跨 ingress TCP 连接 H2 sender 复用（减少 QUIC stream 数量）的必要前提。独立来看也能修正 H2 keep-alive 场景下长连接内多次请求来自不同客户端时的溯源问题。
+**A. src_addr / src_port 溯源错误**
+`RoutingInfo` 在 QUIC stream 建立时一次性发送，绑定来源 IP:port。跨连接复用后 client 侧所有请求显示同一来源地址。
+→ 修法：将 `src_addr`/`src_port` 移到每个 H2 请求的 header（`X-Forwarded-For`/`X-Real-IP`），`RoutingInfo` 只保留 `proxy_name`、`protocol`、`host`。
 
-**How to apply:** 实现跨连接 sender 复用优化时必须先完成此项。
+**B. proxy_name 决定 QUIC stream 身份（最根本）**
+QUIC stream 建立时发送的 `RoutingInfo.proxy_name` 决定 client 路由到哪个本地 upstream。同一 group 下不同 vhost 可能有不同 `proxy_name`，不能共用同一 stream。
+→ 复用 key 必须是 `(Connection stable_id, proxy_name)`，不能只是 Connection。
+
+**C. Connection stickiness**
+`select_client_for_group()` 是 round-robin，同 group 多 client 实例时不同请求可能落到不同 Connection。
+→ sender 缓存 key 包含 Connection ID，不同 Connection 各自维护自己的 H2Sender，round-robin 在 Connection 级别自然隔离。
+
+**D. Connection 断开的 lifecycle 管理**
+Connection 死亡时需清理所有依赖它的 H2Sender 条目，否则残留 sender 会一直返回错误。
+→ 在 `ClientRegistry.unregister()` 时同步清理 SenderMap 中该 Connection 的所有条目。
+
+**E. H2Sender Mutex 初始化竞争**
+全局 SenderMap 共享后，多个 ingress 连接同时发现 cache miss 时会竞争同一把 Mutex 建连。
+→ 可用 `DashMap` 分片锁缓解，或在 miss 时用 `tokio::sync::OnceCell` 保证只有一个 task 做 handshake。
+
+**实现方案**:
+```rust
+// 存放在 ServerState 或 ClientRegistry
+type SenderKey = (quinn::Connection, Arc<str>);  // (conn, proxy_name)
+type GlobalSenderMap = DashMap<SenderKey, H2Sender>;
+```
+
+**多 vhost / 多 client / 多 group 场景验证**:
+- 同 group 不同 vhost（不同 proxy_name）→ 不同 SenderKey，各自独立 ✅
+- 同 group 多 client 实例（多 Connection）→ 不同 SenderKey，各自独立 ✅
+- 不同 group → Connection 不同，SenderKey 自然不同 ✅
+- h2_single_authority=true → 同 ingress TCP 连接只有一个 proxy_name，与现有逻辑兼容 ✅
+- h2_single_authority=false → 同 ingress TCP 连接可能有多个 host，每个 host 有自己的路由，OnceLock 失效，需要去掉 route_cache 的 OnceLock 改为每请求 lookup ⚠️
+
+**Why:** 高并发短连接场景下（N 个并发 ingress TCP 连接），每条连接都建自己的 QUIC stream；全局复用后同 proxy_name 只需 1 条 QUIC stream，open_bi() 从 O(ingress 并发数) 降到 O(proxy_name × client 数)。
+
+**How to apply:** 障碍 A 必须先解决（src_addr 移到 per-request header），其余可同步实现。
 
 
 
@@ -228,16 +257,45 @@ The generic `relay()` use `tokio::io::split()` (internal Arc+Mutex), whereas `re
 
 ### [TODO-23] server entry listener SO_REUSEPORT
 
-**Files**: `server/handlers/http.rs:13`, `server/handlers/tcp.rs:17`
+**Files**: `server/handlers/http.rs:15`, `server/handlers/tcp.rs:16`
 **Priority**: Medium
 
-The server entry uses `TcpListener::bind()` without `SO_REUSEPORT`. `tunnel-lib/src/transport/listener.rs` already has `build_reuse_listener()`, but the server handler is not using it.
+Server ingress 用的是标准 `TcpListener::bind()`，没有 SO_REUSEPORT。`tunnel-lib/src/transport/listener.rs` 已有 `build_reuseport_listener()`，直接替换即可，无副作用。Linux 上让内核按 4-tuple hash 分发新连接到多个 accept loop，减少单队列竞争；macOS graceful fallback（已有 warn）。
 
-### [TODO-24] Multiple QUIC Endpoints (Multiple UDP sockets)
+### [TODO-24] Multi-Endpoint + Thread-per-Core 架构（合并 TODO-41）
 
-**Priority**: Low
+**Priority**: Medium
+**Status**: 待调研设计
 
-A quinn `Endpoint` binds to a single UDP socket, serializing `recvmsg/sendmsg`. Even if multiple QUIC connections are opened, they all go through the same socket. Consider having the client create multiple Endpoints (bound to different ports), coupled with `SO_REUSEPORT` to distribute UDP processing.
+**Goal**:
+按 CPU 核数分配 QUIC Endpoint 数量，每个 Endpoint 绑定到独立线程，消除 Endpoint Mutex 竞争和 task 迁移的 cache miss。
+
+**Background**:
+当前架构：1 个 Endpoint（单 UDP socket）→ 所有 QUIC Connection 共享一个 Endpoint Mutex → ConnectionDriver 被 work-stealing 调度器任意跨线程迁移 → cache miss。
+`open_bi()` 每次需要 2 次 task wakeup（ingress task → ConnectionDriver → ingress task），可能跨线程。
+
+**Worker threads 现状**: `new_multi_thread()` 默认已按 CPU 核数分配，**无需改动**。
+
+**Design**:
+```
+CPU N 核 → tokio worker_threads = N（已自动，无需改动）
+         → N 个 quinn Endpoint（绑同一 QUIC 端口 + SO_REUSEPORT，内核 hash 分发）
+         → 每个 Endpoint 绑一个 tokio current_thread LocalSet（pin 到固定线程）
+         → ConnectionDriver 和 ingress handler 在同一线程，open_bi() wakeup 无跨线程
+```
+
+**Shared state 处理**:
+- `ClientRegistry`（DashMap）：跨线程共享，需评估 DashMap 在 N 线程下的锁竞争
+- `RoutingSnapshot`（ArcSwap）：读多写少，ArcSwap load 是原子操作，无问题
+- `Semaphore`：tokio Semaphore 跨线程安全
+
+**Implementation challenges**:
+1. quinn `Connection`/`SendStream` 是 `Send`，但 `Endpoint` 需要在创建它的 Runtime 上 poll
+2. `spawn_local` 要求 `!Send` future，而现有 handler 都是 `Send` task
+3. server 的 `ServerState` 需要重构为可跨 thread-local Runtime 共享的形式
+4. 与 `dial9-telemetry` 的 `TracedRuntime` 集成需要适配
+
+**Why:** 彻底解决 quinn Endpoint 单点瓶颈和 task 迁移开销，是 10 万+ QPS 场景的必要架构。
 
 ### [TODO-25] io_uring instead of epoll
 
@@ -354,8 +412,9 @@ When the server/client forwards traffic to local/remote upstreams, setting `TCP_
 **Priority**: Medium
 While `BytesMut` with `Jemalloc` handles memory decently, allocating read/write buffers per connection still hits the heap. Implement a connection-independent, thread-local Slab Allocator or an Arena pool to recycle fixed-size byte arrays instantly, completely bypassing OS heap mechanisms.
 
-### [TODO-41] Thread-per-Core & Anti-Work-Stealing (pingora-runtime)
+### [TODO-41] Thread-per-Core & Anti-Work-Stealing（已合并至 TODO-24）
 **Priority**: Low (High Complexity)
+**Status**: 合并到 TODO-24 一起设计，不单独实现。
 Transition from Tokio's default work-stealing scheduler to a Strict `Share-Nothing` Thread-per-Core architecture. Similar to Pingora's `NoStealRuntime`, manually spawn multiple single-threaded Tokio executors (`Builder::new_current_thread`) mapped to specific NUMA Nodes. Work-stealing for heavy network IO causes severe CPU L2/L3 Cache misses when tasks cross cores. By locking processing to specific cores and removing global atomic structs like `DashMap`, we can achieve linearly scalable performance and **Deterministic Latency** without switching out of the Tokio ecosystem entirely.
 
 ### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
@@ -393,20 +452,39 @@ For load balancing, Pingora flattens the Hash Ring into a contiguous 1D array to
 
 ---
 
+## Upstream Research
+
+### [TODO-57] quinn stream-level lock 调研
+
+**Priority**: Low
+**Status**: 待调研
+
+**Background**:
+当前 quinn 所有 stream 操作（write/read/finish/reset）都要 acquire `Mutex<State>`（per-Connection 粒度），多个 stream 并发读写时互相串行。quinn maintainer 提到可以做 stream 级别的锁，但实现复杂。
+
+**Research questions**:
+1. quinn-proto 的 `StreamsState` 是否可以按 stream ID shard 成多个 Mutex？
+2. flow control（connection-level window）和 congestion control 共享状态如何处理？
+3. 是否有相关 quinn issue/PR 在推进？
+4. 实际 8k-100k QPS 下 stream Mutex 竞争是否真的是瓶颈（需 flamegraph 确认）？
+
+**How to apply:** 先确认 TODO-24（multi-endpoint + thread-per-core）无法满足需求时再评估此项。
+
+---
+
 ## Upstream Bug / Patch
 
 ### [TODO-55] quinn ConnectionDriver debug_span! per-poll overhead
 
 **Files**: `quinn/quinn/src/connection.rs:252`
-**Priority**: High
+**Priority**: ~~High~~ → **Deprioritized（不确定是真实问题）**
+**Status**: 暂缓，需要在实际 flamegraph 中确认是否真实存在后再决定是否 patch。
 
 `ConnectionDriver::poll` creates a `debug_span!("drive", id=...)` on **every single poll call** with no `#[cfg]` guard. Since quinn does not set `release_max_level_warn`, the span is constructed and subscriber-queried at runtime on every poll even when tracing is disabled. This shows up as ~36% CPU in flamegraphs under 8k QPS load.
 
 **Root cause**: Code leak — `debug_span!` at line 252 is unconditional, no feature flag or cfg gate.
 
 **Fix**: Patch quinn locally (pinned to tag `quinn-0.11.9`) via `[patch.crates-io]`. Wrap the span creation with `if tracing::enabled!(tracing::Level::DEBUG)` or gate with `#[cfg(feature = "tracing")]`. Also consider upstreaming a PR to quinn-rs.
-
-**Status**: Patching locally, tracking for upstream PR.
 
 ---
 

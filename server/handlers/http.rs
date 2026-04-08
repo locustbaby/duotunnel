@@ -1,7 +1,7 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
@@ -12,7 +12,7 @@ pub async fn run_http_listener(
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
+    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
     info!(addr = %addr, "http listener started");
     loop {
         let (stream, peer_addr) = tokio::select! {
