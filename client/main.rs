@@ -257,8 +257,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .max_file_size(512 * 1024 * 1024)
         .max_total_size(512 * 1024 * 1024)
         .build()?;
-    // Same rationale as run_with_tokio: outer runtime only does signal + joins.
-    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     let trace_path_display = trace_path.display().to_string();
     let trace_file_display = {
