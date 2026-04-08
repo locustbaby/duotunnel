@@ -45,10 +45,10 @@ where
     F::Output: Send + 'static,
 {
     #[cfg(feature = "dial9-telemetry")]
-    if std::env::var_os("DIAL9_TRACE_PATH").is_some()
-        && let Some(handle) = DIAL9_HANDLE.get()
-    {
-        return handle.spawn(future);
+    if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
+        if let Some(handle) = DIAL9_HANDLE.get() {
+            return handle.spawn(future);
+        }
     }
 
     tokio::task::spawn(future)
