@@ -1431,9 +1431,6 @@ jobs:
             (cd ci-helpers/k6 && k6 run \
               -e GITHUB_SHA=${{ github.sha }} \
               -e BENCH_PROFILE=8k \
-              -e K6_8K_RATE=1 \
-              -e K6_8K_PREALLOCATED_VUS=1 \
-              -e K6_8K_MAX_VUS=1 \
               bench.js)
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
