@@ -124,27 +124,18 @@ async fn handle_tls_connection(
     let target_host = host.clone();
     let src_addr = peer_addr.ip().to_string();
     let src_port = peer_addr.port();
+    let client_conn = state
+        .registry
+        .select_client_for_group(&group_id)
+        .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+    let sender_cache = tunnel_lib::new_h2_sender();
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let client_conn = state.registry.select_client_for_group(&group_id);
+        let client_conn = client_conn.clone();
+        let sender_cache = sender_cache.clone();
         let proxy_name = proxy_name.clone();
         let target_host = target_host.clone();
         let src_addr = src_addr.clone();
         async move {
-            let client_conn = match client_conn {
-                Some(c) => c,
-                None => {
-                    return Ok::<_, hyper::Error>(
-                        Response::builder()
-                            .status(503)
-                            .body(
-                                Full::new(bytes::Bytes::from("No client available"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap(),
-                    );
-                }
-            };
             let (mut parts, body) = req.into_parts();
             let mut uri_parts = parts.uri.clone().into_parts();
             if let Ok(authority) = target_host.parse() {
@@ -167,7 +158,7 @@ async fn handle_tls_connection(
             };
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
-            match proxy::forward_h2_request(&client_conn, routing_info, upstream_req).await {
+            match tunnel_lib::forward_h2_request(&client_conn, &sender_cache, routing_info, upstream_req).await {
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
                 Err(e) => {
                     tracing::error!("L7 Proxy upstream error: {}", e);
@@ -209,10 +200,13 @@ async fn handle_plaintext_h2_connection(
     let first_authority: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
     #[allow(clippy::type_complexity)]
     let route_cache: Arc<OnceLock<Option<(Arc<str>, Arc<str>)>>> = Arc::new(OnceLock::new());
+    let sender_cache: Arc<OnceLock<(quinn::Connection, tunnel_lib::H2Sender)>> =
+        Arc::new(OnceLock::new());
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();
         let first_authority = first_authority.clone();
         let route_cache = route_cache.clone();
+        let sender_cache = sender_cache.clone();
         let src_addr = src_addr.clone();
         async move {
             let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
@@ -266,19 +260,13 @@ async fn handle_plaintext_h2_connection(
                     );
                 }
             };
-            let client_conn = match state.registry.select_client_for_group(&group_id) {
-                Some(c) => c,
-                None => {
-                    return Ok(Response::builder()
-                        .status(503)
-                        .body(
-                            Full::new(bytes::Bytes::from("No client"))
-                                .map_err(|_| unreachable!())
-                                .boxed_unsync(),
-                        )
-                        .unwrap());
-                }
-            };
+            let (client_conn, h2_sender) = sender_cache.get_or_init(|| {
+                let conn = state
+                    .registry
+                    .select_client_for_group(&group_id)
+                    .expect("no client for group");
+                (conn, tunnel_lib::new_h2_sender())
+            });
             let (parts, body) = req.into_parts();
             debug!(
                 "L7 Proxy (plaintext H2): {} {} -> {}",
@@ -293,7 +281,7 @@ async fn handle_plaintext_h2_connection(
             };
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
-            match proxy::forward_h2_request(&client_conn, routing_info, upstream_req).await {
+            match tunnel_lib::forward_h2_request(client_conn, h2_sender, routing_info, upstream_req).await {
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
                 Err(e) => {
                     tracing::error!("L7 Proxy upstream error: {}", e);

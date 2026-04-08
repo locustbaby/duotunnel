@@ -23,6 +23,7 @@ pub use models::msg::{
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::rewrite::Rewriter;
+pub use proxy::h2_proxy::{new_h2_sender, forward_h2_request, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::addr::{normalize_host, parse_upstream, UpstreamAddr};

@@ -2,45 +2,79 @@ use crate::{send_routing_info, QuinnStream, RoutingInfo};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::client::conn::http2::handshake;
+use hyper::client::conn::http2::{handshake, SendRequest};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use quinn::Connection;
-use tracing::{debug, info};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::debug;
+
+type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>;
+
+pub type H2Sender = Arc<Mutex<Option<SendRequest<BoxBody>>>>;
+
+pub fn new_h2_sender() -> H2Sender {
+    Arc::new(Mutex::new(None))
+}
+
 pub async fn forward_h2_request<B>(
     client_conn: &Connection,
+    sender_cache: &H2Sender,
     routing_info: RoutingInfo,
     request: Request<B>,
-) -> Result<Response<http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>>
+) -> Result<Response<BoxBody>>
 where
     B: hyper::body::Body + Send + 'static,
-    B::Data: Send,
+    B::Data: Into<Bytes> + Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    info!(proxy_name = % routing_info.proxy_name, "forwarding H2 request via QUIC");
-    let (mut send, recv) = client_conn.open_bi().await?;
-    send_routing_info(&mut send, &routing_info).await?;
-    debug!("routing info sent, establishing H2 connection to client");
-    let quic_stream = QuinnStream { send, recv };
-    let io = TokioIo::new(quic_stream);
-    let (mut sender, conn) = handshake(hyper_util::rt::TokioExecutor::new(), io).await?;
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::error!("H2 connection to client failed: {}", e);
+    let mut guard = sender_cache.lock().await;
+
+    let mut sender = match guard.as_mut() {
+        Some(s) if s.is_ready() => s.clone(),
+        Some(_) => unreachable!(),
+        _ => {
+            debug!("H2 sender miss, establishing new connection");
+            *guard = None;
+
+            let (send, recv) = client_conn.open_bi().await?;
+            let mut routing_send = send;
+            send_routing_info(&mut routing_send, &routing_info).await?;
+
+            let quic_stream = QuinnStream {
+                send: routing_send,
+                recv,
+            };
+            let io = TokioIo::new(quic_stream);
+            let (sender, conn) = handshake(hyper_util::rt::TokioExecutor::new(), io).await?;
+
+            let cache = sender_cache.clone();
+            tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    debug!(error = %e, "H2 connection driver exited");
+                }
+                *cache.lock().await = None;
+            });
+
+            *guard = Some(sender.clone());
+            sender
         }
-    });
+    };
+
+    drop(guard);
+
     let (parts, body) = request.into_parts();
     let boxed_body = body
+        .map_frame(|f| f.map_data(Into::into))
         .map_err(|e| std::io::Error::other(e.into()))
         .boxed_unsync();
     let req = Request::from_parts(parts, boxed_body);
-    debug!(
-        "sending H2 request to client: {} {}",
-        req.method(),
-        req.uri()
-    );
+    debug!("H2 forwarding request: {} {}", req.method(), req.uri());
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
-    let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
-    Ok(Response::from_parts(parts, boxed_body))
+    Ok(Response::from_parts(
+        parts,
+        body.map_err(std::io::Error::other).boxed_unsync(),
+    ))
 }
