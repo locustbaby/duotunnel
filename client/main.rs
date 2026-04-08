@@ -280,14 +280,14 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
-    info!("dial9 trace started, base path: {trace_path_display}");
+    eprintln!("[dial9] trace started: {trace_path_display}");
     let result = runtime.block_on(fut);
-    info!("block_on returned, result ok={}", result.is_ok());
+    eprintln!("[dial9] block_on returned, ok={}", result.is_ok());
     drop(runtime);
-    info!("runtime dropped, calling graceful_shutdown(30s)");
+    eprintln!("[dial9] runtime dropped, calling graceful_shutdown");
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {
-        Ok(()) => info!("dial9 trace flush complete, output: {trace_file_display}"),
-        Err(e) => error!("dial9 trace flush error: {e}"),
+        Ok(()) => eprintln!("[dial9] flush complete: {trace_file_display}"),
+        Err(e) => eprintln!("[dial9] flush error: {e}"),
     }
     result
 }
