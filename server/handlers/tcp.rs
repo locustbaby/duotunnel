@@ -38,7 +38,7 @@ pub async fn run_tcp_listener(
         let state = state.clone();
         let proxy_name = proxy_name.clone();
         let group_id = group_id.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;

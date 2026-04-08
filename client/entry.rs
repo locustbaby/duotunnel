@@ -45,7 +45,7 @@ pub async fn start_entry_listener(
                 debug!(peer_addr = %peer_addr, "new entry connection");
                 let conn = conn.clone();
                 let tcp_params = tcp_params.clone();
-                tokio::spawn(async move {
+                crate::spawn_task(async move {
                     let _permit = permit;
                     if let Err(e) = handle_entry_connection(conn, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
                         debug!(error = %e, "entry connection error");

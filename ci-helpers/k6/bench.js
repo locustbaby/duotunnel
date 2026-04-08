@@ -26,6 +26,29 @@ function filterCases(cases, profile) {
   return cases;
 }
 
+function parseEnvPositiveInt(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number.parseInt(String(v), 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
+function apply8kScenarioOverrides(cases) {
+  const rate = parseEnvPositiveInt(__ENV.K6_8K_RATE);
+  const preAllocatedVUs = parseEnvPositiveInt(__ENV.K6_8K_PREALLOCATED_VUS);
+  const maxVUs = parseEnvPositiveInt(__ENV.K6_8K_MAX_VUS);
+  if (rate === null && preAllocatedVUs === null && maxVUs === null) return cases;
+
+  return cases.map((c) => {
+    if (!c.name.includes('_8000qps')) return c;
+    const scenario = { ...(c.scenario || {}) };
+    if (rate !== null) scenario.rate = rate;
+    if (preAllocatedVUs !== null) scenario.preAllocatedVUs = preAllocatedVUs;
+    if (maxVUs !== null) scenario.maxVUs = maxVUs;
+    return { ...c, scenario };
+  });
+}
+
 function parseSeconds(v) {
   if (v === undefined || v === null) return 0;
   if (typeof v === 'number') return v;
@@ -58,7 +81,7 @@ function filterPhases(phases, activeCases) {
 }
 
 const BENCH_PROFILE = activeProfile();
-const FILTERED_CASES = filterCases(DUOTUNNEL_CASES, BENCH_PROFILE);
+const FILTERED_CASES = apply8kScenarioOverrides(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE));
 const { cases: ACTIVE_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
 const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
   ...p,
