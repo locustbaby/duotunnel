@@ -3,53 +3,59 @@
 log_level: "debug"
 trace_enabled: false
 
+# ── TLS ────────────────────────────────────────────────────────────────────────
 # Skip TLS verification for self-signed certs (development only)
 tls_skip_verify: true
-# Optional: override SNI/server-name used in TLS handshake (defaults to server_addr)
-# tls_server_name: "example.com"
-# If system roots are missing, only fallback to insecure mode when explicitly enabled.
-allow_insecure_fallback: false
+# tls_server_name: "example.com"  # Override SNI (defaults to server_addr)
+# tls_ca_cert: "/path/to/ca.pem"  # Custom CA certificate
+allow_insecure_fallback: false     # Fallback to insecure if system roots missing
 
-# Connection to server address and port
+# ── Server connection ──────────────────────────────────────────────────────────
 server_addr: "127.0.0.1"
 server_port: 10086
-
 auth_token: "dt_NCFxXxGafTN-N1crgLnb_miaKjzJkwQIPjCkBA9Lb1Y"
 
-# Optional: Set to enable HTTP listener
+# Optional: enable local HTTP entry listener (forward proxy entry point)
 http_entry_port: 8003
+# metrics_port: 9090  # Expose Prometheus metrics (default: disabled)
 
-# QUIC connection pool tuning
+# ── QUIC transport ─────────────────────────────────────────────────────────────
 quic:
-  connections: 1          # Number of parallel QUIC connections to server (default: 1)
-  max_concurrent_streams: 100  # Max concurrent bidirectional streams (default: 100)
-  # keepalive_secs: 20    # default: 20
-  # idle_timeout_secs: 60 # default: 60
-  # congestion: "bbr"     # default: NewReno
-  # stream_window_mb: 1   # default: 1 MB
-  # connection_window_mb: 8 # default: 8 MB
+  connections: 1                  # Parallel QUIC connections to server (default: 1)
+  max_concurrent_streams: 1000    # Max concurrent bidi streams / semaphore size (default: 100)
+  keepalive_secs: 20              # QUIC keepalive ping interval in seconds (default: 20)
+  idle_timeout_secs: 60           # Close idle QUIC connections after N seconds (default: 60)
+  congestion: "bbr"               # Congestion controller: "bbr" or "new_reno" (default: "bbr")
+  # stream_window_mb: 4           # Per-stream receive window in MB (default: 4)
+  # connection_window_mb: 32      # Per-connection receive window in MB (default: 32)
+  # send_window_mb: 8             # Send window override in MB (default: connection_window_mb)
 
-# TCP socket options applied to upstream connections
+# ── TCP socket options (applied to upstream connections) ──────────────────────
 tcp:
   nodelay: true
-  # recv_buf_size: 262144  # default: null (OS default)
-  # send_buf_size: 262144  # default: null (OS default)
+  # recv_buf_size: 262144  # Socket receive buffer in bytes (default: OS default)
+  # send_buf_size: 262144  # Socket send buffer in bytes (default: OS default)
+  # keepalive: false       # Enable TCP keepalive (default: false)
+  # user_timeout_ms: 0     # TCP user timeout in ms, 0 = disabled (default: 0)
 
-# Outbound HTTP connection pool
+# ── Outbound HTTP connection pool ──────────────────────────────────────────────
 http_pool:
-  idle_timeout_secs: 90
-  max_idle_per_host: 10
+  idle_timeout_secs: 90   # Keep idle connections alive for N seconds (default: 90)
+  max_idle_per_host: 10   # Max idle connections per upstream host (default: 10)
 
-# Protocol detection peek buffer
+# ── Protocol detection buffer ──────────────────────────────────────────────────
 proxy_buffers:
-  peek_buf_size: 16384
+  peek_buf_size: 16384          # Peek buffer for protocol detection in bytes (default: 16384)
+  # http_header_buf_size: 8192  # Max HTTP header buffer size in bytes (default: 8192)
+  # http_body_chunk_size: 8192  # HTTP body read chunk size in bytes (default: 8192)
 
-# Reconnect backoff (milliseconds)
+# ── Reconnect backoff ──────────────────────────────────────────────────────────
 reconnect:
-  initial_delay_ms: 1000  # default: 1000
-  max_delay_ms: 60000     # default: 60000
-  grace_ms: 100           # wait after cancel before reconnect (default: 100)
-  connect_timeout_ms: 10000
-  resolve_timeout_ms: 5000
-  login_timeout_ms: 5000
-  startup_jitter_ms: 300
+  initial_delay_ms: 1000         # Initial reconnect delay in ms (default: 1000)
+  max_delay_ms: 60000            # Max reconnect delay in ms (default: 60000)
+  grace_ms: 100                  # Wait after cancel before reconnect (default: 100)
+  connect_timeout_ms: 10000      # QUIC connect timeout in ms (default: 10000)
+  resolve_timeout_ms: 5000       # DNS resolve timeout in ms (default: 5000)
+  login_timeout_ms: 5000         # Login handshake timeout in ms (default: 5000)
+  startup_jitter_ms: 300         # Random jitter on startup to avoid thundering herd (default: 300)
+  # open_stream_timeout_ms: 3000 # Timeout waiting for a QUIC stream slot (default: 3000)

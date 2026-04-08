@@ -16,23 +16,44 @@ server:
   trace_enabled: false
   database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone mode only
 
+  # ── Connection limits ───────────────────────────────────────────────────────
+  # max_connections: 10000        # Max concurrent tunnel client (QUIC) connections (default: 10000)
+  # max_tcp_connections: 10000    # Max concurrent ingress TCP connections from external clients (default: 10000)
+
+  # ── TCP socket options (applied to ingress TCP connections) ─────────────────
   tcp:
     nodelay: true
+    # recv_buf_size: 262144   # Socket receive buffer in bytes (default: OS default)
+    # send_buf_size: 262144   # Socket send buffer in bytes (default: OS default)
+    # keepalive: false        # Enable TCP keepalive (default: false)
+    # user_timeout_ms: 0      # TCP user timeout in ms, 0 = disabled (default: 0)
 
+  # ── QUIC transport (tunnel channel between server and client) ───────────────
   quic:
-    max_concurrent_streams: 1000
-    keepalive_secs: 20
-    idle_timeout_secs: 60
+    max_concurrent_streams: 1000  # Max concurrent bidi QUIC streams per connection (default: 1000)
+    keepalive_secs: 20            # QUIC keepalive ping interval in seconds (default: 20)
+    idle_timeout_secs: 60         # Close idle QUIC connections after N seconds (default: 60)
+    # congestion: "bbr"           # Congestion controller: "bbr" or "new_reno" (default: "bbr")
+    # stream_window_mb: 4         # Per-stream receive window in MB (default: 4)
+    # connection_window_mb: 32    # Per-connection receive window in MB (default: 32)
 
+  # ── Outbound HTTP connection pool (egress forward proxy) ───────────────────
   http_pool:
-    idle_timeout_secs: 90
-    max_idle_per_host: 10
+    idle_timeout_secs: 90   # Keep idle connections alive for N seconds (default: 90)
+    max_idle_per_host: 10   # Max idle connections per upstream host (default: 10)
 
+  # ── Protocol detection buffer ───────────────────────────────────────────────
   proxy_buffers:
-    peek_buf_size: 16384
+    peek_buf_size: 16384          # Peek buffer for protocol detection in bytes (default: 16384)
+    # http_header_buf_size: 8192  # Max HTTP header buffer size in bytes (default: 8192)
+    # http_body_chunk_size: 8192  # HTTP body read chunk size in bytes (default: 8192)
 
+  # ── TLS / PKI ───────────────────────────────────────────────────────────────
   pki:
-    cert_cache_ttl_secs: 3600
+    cert_cache_ttl_secs: 3600  # How long to cache generated TLS certs (default: 3600)
+
+  # ── Misc ────────────────────────────────────────────────────────────────────
+  # login_timeout_secs: 10  # Timeout for tunnel client login handshake (default: 10)
 
 # ── Routing config ─────────────────────────────────────────────────────────────
 # In ctld-managed mode: read by ctld on first boot via server_config field

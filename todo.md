@@ -125,6 +125,28 @@ Change to 1000.
 
 ## Code Optimization
 
+### [TODO-56] H2 ingress src_addr 溯源修复（跨连接 sender 复用前提）
+
+**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`, `tunnel-lib/src/models/msg.rs`, `server/handlers/http.rs`, `tunnel-lib/src/protocol/driver/h1.rs`
+**Priority**: Medium
+
+**Background**:
+当前 `RoutingInfo`（含 `src_addr`/`src_port`）在 QUIC stream 建立时作为第一条消息一次性发送，绑定了 ingress TCP 连接的来源地址。这意味着：
+1. 同一 ingress TCP 连接的所有请求溯源正确。
+2. 但如果将来跨 ingress TCP 连接复用同一条 QUIC H2 stream（sender 提升到更高粒度），client 侧收到的所有请求的来源地址都是第一个 ingress 连接的地址，后续请求**溯源全部错误**。
+
+**Root cause**:
+`send_routing_info()` 把来源信息放在 stream 建立时的握手消息里，而不是每个请求的 header 里。
+
+**Fix**:
+将 `src_addr`/`src_port` 从 `RoutingInfo`（stream 级）移到 per-request header（如 `X-Forwarded-For` / `X-Real-IP`），使 QUIC stream 本身不携带来源信息，可以被任意 ingress 连接复用。`RoutingInfo` 只保留 `proxy_name`、`protocol`、`host` 等路由相关字段。
+
+**Why:** 这是实现跨 ingress TCP 连接 H2 sender 复用（减少 QUIC stream 数量）的必要前提。独立来看也能修正 H2 keep-alive 场景下长连接内多次请求来自不同客户端时的溯源问题。
+
+**How to apply:** 实现跨连接 sender 复用优化时必须先完成此项。
+
+
+
 ### [TODO-14] Change discard buffer to stack allocation
 
 **Files**: `server/handlers/http.rs`

@@ -7,9 +7,9 @@ http_entry_port: 8082
 metrics_port: 9092
 quic:
   connections: 1
+  max_concurrent_streams: 1000
   keepalive_secs: 10
   idle_timeout_secs: 30
-  max_concurrent_streams: 1000
 reconnect:
   initial_delay_ms: 500
   max_delay_ms: 5000
