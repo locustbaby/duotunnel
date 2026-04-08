@@ -409,11 +409,6 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     // incoming datagrams across them — eliminating the single-endpoint bottleneck.
     // open_bi() on any Connection is always within the same runtime, so no cross-runtime
     // park/unpark overhead. Global ClientRegistry handles routing for all ingress threads.
-    {
-        let routing = state.routing.load_full();
-        handlers::ingress::spawn_ingress_listeners(state.clone(), cancel.clone(), routing);
-    }
-
     let mut task_handles = Vec::new();
     for i in 0..n_threads {
         let state = state.clone();

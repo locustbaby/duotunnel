@@ -1,5 +1,4 @@
 pub mod http;
-pub mod ingress;
 pub mod metrics;
 pub mod quic;
 pub mod tcp;
