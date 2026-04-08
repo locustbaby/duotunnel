@@ -1,68 +1,43 @@
-use parking_lot::Mutex;
-use std::sync::Arc;
-use tracing::debug;
-use tunnel_lib::{Balancer, BalancerExt, RoundRobin};
-
-/// Process-level pool of active QUIC connections to the server.
-///
-/// Each endpoint thread registers its connection here on login and removes it
-/// on disconnect. Callers use `next()` to pick a healthy connection according
-/// to the active balancing policy (default: round-robin).
-pub struct ConnectionPool {
-    conns: Mutex<Vec<quinn::Connection>>,
-    balancer: Arc<dyn Balancer>,
-}
-
-impl ConnectionPool {
-    pub fn new() -> Self {
-        Self::with_balancer(Arc::new(RoundRobin::new()))
+use crate::config::ClientConfigFile;
+use anyhow::Result;
+use std::sync::{atomic::AtomicBool, Arc};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
+pub async fn run_pool(
+    config: ClientConfigFile,
+    endpoint: quinn::Endpoint,
+    cancel: CancellationToken,
+    ready: Arc<AtomicBool>,
+) -> Result<()> {
+    let n = config.quic.connections.max(1) as usize;
+    info!(connections = n, "starting QUIC connection pool");
+    let mut slots = JoinSet::new();
+    for _i in 0..n {
+        let slot_config = config.clone();
+        let endpoint = endpoint.clone();
+        let slot_cancel = cancel.clone();
+        let slot_ready = ready.clone();
+        slots.spawn(async move {
+            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel, slot_ready).await
+        });
     }
-
-    pub fn with_balancer(balancer: Arc<dyn Balancer>) -> Self {
-        Self {
-            conns: Mutex::new(Vec::new()),
-            balancer,
+    while let Some(join_result) = slots.join_next().await {
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = % e, "pool slot failed; stopping all slots");
+                cancel.cancel();
+                while slots.join_next().await.is_some() {}
+                return Err(e);
+            }
+            Err(e) => {
+                error!(error = % e, "pool slot task panicked; stopping all slots");
+                cancel.cancel();
+                while slots.join_next().await.is_some() {}
+                return Err(anyhow::anyhow!("pool slot task join error: {}", e));
+            }
         }
     }
-
-    /// Register a connection. Called by each thread after successful login.
-    pub fn add(&self, conn: quinn::Connection) {
-        let mut guard = self.conns.lock();
-        guard.push(conn);
-        debug!(total = guard.len(), "connection pool: added connection");
-    }
-
-    /// Remove a connection by stable_id. Called when a connection closes.
-    pub fn remove(&self, conn: &quinn::Connection) {
-        let mut guard = self.conns.lock();
-        let before = guard.len();
-        guard.retain(|c: &quinn::Connection| c.stable_id() != conn.stable_id());
-        debug!(
-            removed = before - guard.len(),
-            total = guard.len(),
-            "connection pool: removed connection"
-        );
-    }
-
-    /// Pick the next healthy connection via the active balancing policy.
-    ///
-    /// Closed connections are filtered out before the balancer sees them, so
-    /// the policy operates only on live connections.
-    pub fn next(&self) -> Option<quinn::Connection> {
-        let guard = self.conns.lock();
-        let healthy: Vec<&quinn::Connection> =
-            guard.iter().filter(|c| c.close_reason().is_none()).collect();
-        self.balancer.pick(&healthy).map(|c| (*c).clone())
-    }
-
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.conns.lock().len()
-    }
-}
-
-pub type SharedConnectionPool = Arc<ConnectionPool>;
-
-pub fn new_connection_pool() -> SharedConnectionPool {
-    Arc::new(ConnectionPool::new())
+    Ok(())
 }

@@ -1,4 +1,3 @@
-use crate::dispatch::{self, DispatchJob};
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
@@ -37,135 +36,16 @@ pub async fn run_http_listener(
         tokio::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
-            // Peek host header / SNI here on the outer runtime, look up which
-            // OS endpoint thread owns the matching tunnel client, and forward
-            // the raw socket to that thread via the dispatch mpsc. The receiver
-            // thread re-registers the socket on its local reactor and runs the
-            // existing protocol handler with all open_bi/poll calls staying
-            // local to that thread (no cross-runtime, no quinn Mutex contention).
-            //
-            // If we cannot determine the owner (no host, no route, or no client
-            // currently registered) we fall back to handling on the outer
-            // runtime — semantically equivalent to the previous behavior.
-            match dispatch_to_owner(state.clone(), stream, peer_addr, port).await {
-                Ok(DispatchOutcome::Forwarded) => {
-                    // Owner thread will report metrics when it finishes.
-                    metrics::request_completed("http", "success");
-                }
-                Ok(DispatchOutcome::HandledLocally(result)) => {
-                    if let Err(e) = result {
-                        debug!(error = %e, "entry connection error (local fallback)");
-                        metrics::request_completed("http", "error");
-                    } else {
-                        metrics::request_completed("http", "success");
-                    }
-                }
-                Err(e) => {
-                    debug!(error = %e, "dispatch_to_owner error");
-                    metrics::request_completed("http", "error");
-                }
+            let result = handle_http_connection(state, stream, port).await;
+            if let Err(e) = &result {
+                debug!(error = %e, "entry connection error");
+                metrics::request_completed("http", "error");
+            } else {
+                metrics::request_completed("http", "success");
             }
             metrics::tcp_connection_closed();
         });
     }
-}
-
-enum DispatchOutcome {
-    Forwarded,
-    HandledLocally(Result<()>),
-}
-
-/// Try to forward an accepted TCP stream to the owner endpoint thread.
-///
-/// 1. Async-peek the first up-to-`peek_buf_size` bytes (registers the socket on
-///    the outer runtime's reactor — unavoidable for the peek itself).
-/// 2. Extract the routable host (SNI for TLS, Host header for plaintext H1/WS).
-///    Plaintext H2 cannot be routed at peek time (no Host header in SETTINGS) —
-///    fall back to local handling.
-/// 3. Look up the routing snapshot → group_id → placement → owner thread idx.
-/// 4. Detach the socket from the outer reactor (`into_std`), wrap in
-///    `DispatchJob::Http`, send via `state.ingress_senders[owner]`.
-async fn dispatch_to_owner(
-    state: Arc<ServerState>,
-    stream: TcpStream,
-    peer_addr: std::net::SocketAddr,
-    port: u16,
-) -> Result<DispatchOutcome> {
-    use tunnel_lib::protocol::detect::extract_tls_sni;
-    let pool = &state.peek_buf_pool;
-    let mut buf = pool.take();
-    let peek_result = stream.peek(&mut buf).await;
-    let n = match peek_result {
-        Ok(n) => n,
-        Err(e) => {
-            pool.put(buf);
-            return Err(e.into());
-        }
-    };
-    let host_for_route = if n > 0 && buf[0] == 0x16 {
-        extract_tls_sni(&buf[..n])
-    } else {
-        // detect_protocol_and_host returns None for the host slot on H2
-        // (no Host in SETTINGS frame). For H1 we explicitly try
-        // extract_host_from_http to be sure we cover the common case.
-        let (proto, detected) = tunnel_lib::detect_protocol_and_host(&buf[..n]);
-        if proto == "h2" {
-            None
-        } else {
-            detected.or_else(|| extract_host_from_http(&buf[..n]))
-        }
-    };
-    pool.put(buf);
-
-    let owner_idx = host_for_route
-        .as_deref()
-        .and_then(|h| dispatch::locate_owner(&state, port, h));
-    let Some(owner_idx) = owner_idx else {
-        // No host or no placement yet — handle locally.
-        return Ok(DispatchOutcome::HandledLocally(
-            handle_http_connection(state, stream, port).await,
-        ));
-    };
-    let senders = match state.ingress_senders.get() {
-        Some(s) => s,
-        None => {
-            return Ok(DispatchOutcome::HandledLocally(
-                handle_http_connection(state, stream, port).await,
-            ));
-        }
-    };
-    let std_stream = stream.into_std()?;
-    let job = DispatchJob::Http {
-        stream: std_stream,
-        peer_addr,
-        port,
-    };
-    if let Err(_e) = senders[owner_idx as usize].send(job) {
-        warn!(owner_idx, "ingress dispatch send failed (channel closed)");
-        return Err(anyhow::anyhow!("ingress dispatch send failed"));
-    }
-    Ok(DispatchOutcome::Forwarded)
-}
-
-/// Entry point invoked by the per-thread dispatcher after the socket has been
-/// re-registered on the owner thread's reactor. From here on, every poll on
-/// `stream` (and on the resulting QUIC streams) happens entirely within the
-/// owner thread's `current_thread` runtime.
-pub async fn handle_dispatched_http(
-    state: Arc<ServerState>,
-    stream: TcpStream,
-    _peer_addr: std::net::SocketAddr,
-    port: u16,
-) {
-    metrics::tcp_connection_opened();
-    let result = handle_http_connection(state, stream, port).await;
-    if let Err(e) = &result {
-        debug!(error = %e, "entry connection error (dispatched)");
-        metrics::request_completed("http", "error");
-    } else {
-        metrics::request_completed("http", "success");
-    }
-    metrics::tcp_connection_closed();
 }
 async fn handle_http_connection(
     state: Arc<ServerState>,

@@ -29,7 +29,7 @@ impl ServerEgressMap {
                 .iter()
                 .map(|s| s.address.clone())
                 .collect();
-            upstreams.insert(name.clone(), UpstreamGroup::from_policy(servers, &upstream_def.lb_policy));
+            upstreams.insert(name.clone(), UpstreamGroup::new(servers));
         }
         for rule in &egress.rules.vhost {
             // Strip port at insert time so lookup needs no split per request.

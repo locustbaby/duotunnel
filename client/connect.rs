@@ -44,13 +44,11 @@ impl std::error::Error for ConnectError {
         self.inner.source()
     }
 }
-pub async fn run_supervisor_with_shared(
+pub async fn run_supervisor(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
     ready: Arc<AtomicBool>,
-    conn_tx: crate::ConnWatch,
-    shared_proxy_map: crate::SharedProxyMap,
 ) -> Result<()> {
     let initial_delay = Duration::from_millis(config.reconnect.initial_delay_ms);
     let max_delay = Duration::from_millis(config.reconnect.max_delay_ms);
@@ -60,44 +58,29 @@ pub async fn run_supervisor_with_shared(
         let wait = random_delay_up_to(startup_jitter);
         if !wait.is_zero() {
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(wait) => {
-                    info!(server = %config.server_address(), startup_jitter_ms = wait.as_millis(), "startup jitter elapsed");
-                }
+                _ = cancel.cancelled() => return Ok(()), _ = tokio::time::sleep(wait) =>
+                { info!(server = % config.server_address(), startup_jitter_ms = wait
+                .as_millis(), "startup jitter elapsed"); }
             }
         }
     }
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
-                info!(server = %config.server_address(), "shutdown signal received");
-                return Ok(());
-            }
-            result = crate::run_client(&config, &endpoint, cancel.clone(), ready.clone(), &conn_tx, shared_proxy_map.clone()) => {
-                match result {
-                    Ok(_) => {
-                        backoff.reset();
-                        info!(server = %config.server_address(), "connection ended, restarting loop");
-                    }
-                    Err(e) => {
-                        if e.class() == FailureClass::Fatal {
-                            error!(server = %config.server_address(), error = %e, "fatal connect error");
-                            return Err(e.into_anyhow());
-                        }
-                        let retry_delay = backoff.next_delay();
-                        warn!(server = %config.server_address(), error = %e, retry_in_ms = retry_delay.as_millis(), "transient connect error, scheduling retry");
-                        tokio::select! {
-                            _ = cancel.cancelled() => return Ok(()),
-                            _ = tokio::time::sleep(retry_delay) => {}
-                        }
-                    }
-                }
-            }
+            _ = cancel.cancelled() => { info!(server = % config.server_address(),
+            "shutdown signal received"); return Ok(()); } result = crate::run_client(&
+            config, &endpoint, cancel.clone(), ready.clone()) => { match result { Ok(_) => { backoff.reset();
+            info!(server = % config.server_address(),
+            "connection ended, restarting loop"); } Err(e) => { if e.class() ==
+            FailureClass::Fatal { error!(server = % config.server_address(), error = % e,
+            "fatal connect error"); return Err(e.into_anyhow()); } let retry_delay =
+            backoff.next_delay(); warn!(server = % config.server_address(), error = % e,
+            retry_in_ms = retry_delay.as_millis(),
+            "transient connect error, scheduling retry"); tokio::select! { _ = cancel
+            .cancelled() => return Ok(()), _ = tokio::time::sleep(retry_delay) => {} } }
+            } }
         }
     }
 }
-
-
 struct JitterBackoff {
     initial: Duration,
     max: Duration,

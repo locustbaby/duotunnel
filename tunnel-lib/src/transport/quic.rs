@@ -62,22 +62,3 @@ pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::Transp
     apply_transport_params(&mut tc, params);
     Arc::new(tc)
 }
-
-/// Build a `quinn::Endpoint` bound to `addr` with SO_REUSEPORT, so multiple threads can
-/// each bind their own endpoint to the same UDP port.
-///
-/// The `server_config` must already be constructed (call `create_server_config_with` first).
-/// `server_config` is `Clone`, so the caller can clone it for each thread.
-pub fn build_reuseport_server_endpoint(
-    server_config: ServerConfig,
-    addr: std::net::SocketAddr,
-) -> Result<quinn::Endpoint> {
-    let udp_socket = crate::transport::listener::build_reuseport_udp_socket(addr)?;
-    let endpoint = quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        Some(server_config),
-        udp_socket,
-        Arc::new(quinn::TokioRuntime),
-    )?;
-    Ok(endpoint)
-}

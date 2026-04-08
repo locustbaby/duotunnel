@@ -32,7 +32,7 @@ on:
         type: boolean
         default: true
       run_q1:
-        description: 'Also run the q1 (1-thread) dial9 trace case'
+        description: 'Also run the q1 (1-connection) dial9 trace case'
         type: boolean
         default: false
 
@@ -1337,7 +1337,7 @@ jobs:
                 client rotate-token "${CLIENT_NAME}" 2>/dev/null | awk '{print $NF}' | tail -n1)
             fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; q=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+q, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$Q"
 
             sleep 3
 
@@ -1430,17 +1430,12 @@ jobs:
 
             (cd ci-helpers/k6 && k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=8k bench.js)
 
-            CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null)"
-            kill -TERM "$CLIENT_PID" 2>/dev/null || true
-            for i in $(seq 1 90); do
-              kill -0 "$CLIENT_PID" 2>/dev/null || break
-              sleep 1
-            done
-            kill -9 "$CLIENT_PID" 2>/dev/null || true
+            kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            sleep 5
+            sleep 35
+            kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace* /tmp/client-trace* 2>&1 || true
+            echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace.0.bin /tmp/client-trace.0.bin 2>&1 || true
 
             mkdir -p "/tmp/trace-${SUFFIX}"
             cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"

@@ -9,30 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
-/// Build a UDP socket with SO_REUSEPORT so multiple endpoints can bind the same port.
-/// On non-Linux platforms SO_REUSEPORT may be unavailable; falls back gracefully.
-pub fn build_reuseport_udp_socket(addr: SocketAddr) -> Result<std::net::UdpSocket> {
-    let domain = if addr.is_ipv6() {
-        Domain::IPV6
-    } else {
-        Domain::IPV4
-    };
-    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    #[cfg(unix)]
-    if let Err(e) = socket.set_reuse_port(true) {
-        warn!("SO_REUSEPORT unavailable for UDP ({}), continuing without it", e);
-    }
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    Ok(socket.into())
-}
-/// Build a TCP listener with SO_REUSEPORT so multiple threads can bind the same port.
-/// Each thread gets its own fd; the kernel load-balances incoming connections.
-pub fn build_reuseport_tcp_listener(addr: SocketAddr) -> Result<TcpListener> {
-    build_reuseport_listener(addr)
-}
-
 fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
@@ -71,7 +47,6 @@ where
         });
     }
 }
-
 pub async fn peek_bytes(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
     stream.peek(buf).await
 }

@@ -1,4 +1,3 @@
-pub mod balancer;
 pub mod base;
 pub mod buffer_params;
 pub mod core;
@@ -8,7 +7,6 @@ pub mod http;
 pub mod peers;
 pub mod tcp;
 pub mod upstream;
-pub use balancer::{Balancer, BalancerExt, RoundRobin};
 pub use base::{forward_to_client, forward_with_initial_data};
 pub use buffer_params::ProxyBufferParams;
 pub use h2_proxy::forward_h2_request;

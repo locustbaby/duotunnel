@@ -89,17 +89,15 @@ impl ClientRegistry {
         }
     }
 
-    fn replace_or_register(
-        &self,
-        client_id: String,
-        group_id: String,
-        conn: Connection,
-    ) {
+    fn replace_or_register(&self, client_id: String, group_id: String, conn: Connection) {
         use dashmap::mapref::entry::Entry;
         match self.clients.entry(client_id.clone()) {
             Entry::Occupied(mut occ) => {
                 let old_group_id = occ.get().group_id.clone();
-                occ.insert(ClientInfo { group_id: group_id.clone(), conn: conn.clone() });
+                occ.insert(ClientInfo {
+                    group_id: group_id.clone(),
+                    conn: conn.clone(),
+                });
                 if let Some(grp) = self.groups.get(&old_group_id) {
                     grp.remove(&client_id);
                     if grp.is_empty() {
@@ -110,7 +108,10 @@ impl ClientRegistry {
                 }
             }
             Entry::Vacant(vac) => {
-                vac.insert(ClientInfo { group_id: group_id.clone(), conn: conn.clone() });
+                vac.insert(ClientInfo {
+                    group_id: group_id.clone(),
+                    conn: conn.clone(),
+                });
             }
         }
         self.groups
@@ -119,12 +120,7 @@ impl ClientRegistry {
             .set(client_id, conn);
     }
 
-    pub fn register(
-        &self,
-        client_id: String,
-        group_id: String,
-        conn: Connection,
-    ) {
+    pub fn register(&self, client_id: String, group_id: String, conn: Connection) {
         info!(client_id = %client_id, group_id = %group_id, "registering client");
         self.replace_or_register(client_id, group_id, conn);
     }
