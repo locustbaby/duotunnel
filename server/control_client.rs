@@ -27,7 +27,7 @@ use crate::{build_routing_snapshot, ServerState};
 
 /// Spawn the control client watch loop as a background task.
 pub fn spawn_control_client(ctld_addr: SocketAddr, state: Arc<ServerState>) {
-    tokio::spawn(async move {
+    crate::spawn_task(async move {
         let mut backoff = Duration::from_secs(1);
         let mut last_version: u64 = 0;
         loop {

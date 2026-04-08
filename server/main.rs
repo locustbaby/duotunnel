@@ -34,6 +34,26 @@ use null_stores::{NullConfigSource, NullRuleStore};
 use registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
+
+#[cfg(feature = "dial9-telemetry")]
+static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    #[cfg(feature = "dial9-telemetry")]
+    if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
+        if let Some(handle) = DIAL9_HANDLE.get() {
+            return handle.spawn(future);
+        }
+    }
+
+    tokio::task::spawn(future)
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -216,6 +236,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
             include_kernel: true,
         })
         .build_and_start_with_writer(builder, writer)?;
+    let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
     let result = runtime.block_on(async {
         let mut sigterm = tokio::signal::unix::signal(
@@ -370,7 +391,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(metrics_port) = config.server.metrics_port {
         let ready2 = ready.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             if let Err(e) = handlers::metrics::run_metrics_server(metrics_port, ready2).await {
                 error!(port = %metrics_port, error = %e, "Metrics server failed");
             }
@@ -378,7 +399,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     }
     let quic_state = state.clone();
     let quic_handle =
-        tokio::spawn(async move { handlers::quic::run_quic_server(quic_state, ready).await });
+        crate::spawn_task(async move { handlers::quic::run_quic_server(quic_state, ready).await });
     {
         let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
         sync_listeners(&state, &listeners);

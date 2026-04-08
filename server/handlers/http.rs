@@ -33,7 +33,7 @@ pub async fn run_http_listener(
             }
         };
         let state = state.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_http_connection(state, stream, port).await;
