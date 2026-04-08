@@ -5,7 +5,6 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
-use tunnel_lib::proxy;
 pub async fn run_http_listener(
     state: Arc<ServerState>,
     port: u16,
@@ -313,27 +312,99 @@ async fn handle_plaintext_h1_connection(
     initial_data: &[u8],
     port: u16,
 ) -> Result<()> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
     use tokio::io::AsyncReadExt;
-    debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
+
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
     let client_conn = state
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-    let mut discard = vec![0u8; initial_data.len()];
-    stream.read_exact(&mut discard).await?;
-    proxy::forward_with_initial_data(
-        &client_conn,
-        tunnel_lib::RoutingInfo {
-            proxy_name: proxy_name.to_string(),
-            src_addr: peer_addr.ip().to_string(),
-            src_port: peer_addr.port(),
-            protocol,
-            host: Some(host),
-        },
-        stream,
-        initial_data,
-    )
-    .await
+
+    // Non-HTTP protocols (raw TCP, TLS passthrough etc.) cannot be parsed by hyper —
+    // fall back to raw byte relay. websocket is handled by http1 with_upgrades below.
+    if protocol == "tcp" {
+        debug!(host = %host, "plaintext TCP, using raw relay");
+        let mut discard = vec![0u8; initial_data.len()];
+        stream.read_exact(&mut discard).await?;
+        return tunnel_lib::proxy::forward_with_initial_data(
+            &client_conn,
+            tunnel_lib::RoutingInfo {
+                proxy_name: proxy_name.to_string(),
+                src_addr: peer_addr.ip().to_string(),
+                src_port: peer_addr.port(),
+                protocol,
+                host: Some(host),
+            },
+            stream,
+            initial_data,
+        )
+        .await;
+    }
+
+    // HTTP/1.1 and WebSocket: parse with hyper, forward via shared H2Sender.
+    // WebSocket upgrades are handled transparently by with_upgrades().
+    debug!(host = %host, protocol = %protocol, "plaintext H1, using H2Sender forwarding");
+    let sender_cache = tunnel_lib::new_h2_sender();
+    let target_host = host.clone();
+    let src_addr = peer_addr.ip().to_string();
+    let src_port = peer_addr.port();
+    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+        let client_conn = client_conn.clone();
+        let sender_cache = sender_cache.clone();
+        let proxy_name = proxy_name.clone();
+        let target_host = target_host.clone();
+        let src_addr = src_addr.clone();
+        async move {
+            let (mut parts, body) = req.into_parts();
+            let mut uri_parts = parts.uri.clone().into_parts();
+            if uri_parts.authority.is_none() {
+                if let Ok(authority) = target_host.parse() {
+                    uri_parts.authority = Some(authority);
+                }
+            }
+            if uri_parts.scheme.is_none() {
+                uri_parts.scheme = Some(hyper::http::uri::Scheme::HTTP);
+            }
+            parts.uri = hyper::Uri::from_parts(uri_parts).unwrap_or(parts.uri);
+            if let Ok(host_value) = target_host.parse() {
+                parts.headers.insert(hyper::header::HOST, host_value);
+            }
+            let routing_info = tunnel_lib::RoutingInfo {
+                proxy_name: proxy_name.to_string(),
+                src_addr,
+                src_port,
+                protocol: "h2".to_string(),
+                host: Some(target_host),
+            };
+            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+            let upstream_req = Request::from_parts(parts, boxed_body);
+            match tunnel_lib::forward_h2_request(&client_conn, &sender_cache, routing_info, upstream_req).await {
+                Ok(resp) => Ok::<_, hyper::Error>(resp),
+                Err(e) => {
+                    debug!(error = %e, "H1 upstream error");
+                    Ok(Response::builder()
+                        .status(502)
+                        .body(
+                            Full::new(bytes::Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
+                        .unwrap())
+                }
+            }
+        }
+    });
+    let io = TokioIo::new(stream);
+    http1::Builder::new()
+        .serve_connection(io, service)
+        .with_upgrades()
+        .await
+        .map_err(|e| anyhow::anyhow!("H1 connection error: {}", e))?;
+    Ok(())
 }
