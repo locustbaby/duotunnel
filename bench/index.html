@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
 <script src="data.js"></script>
+<script>window.BENCH_DETAIL = window.BENCH_DETAIL || {};</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -128,9 +129,10 @@ const PHASE_COLORS = [
 ];
 const FALLBACK_PHASES = [
   {name:'Basic',start:0,end:29},{name:'Body/Payload',start:35,end:59},
-  {name:'Ingress 3K',start:65,end:85},{name:'Ingress no-KL',start:90,end:110},
-  {name:'Egress 3K',start:115,end:135},{name:'Egress no-KL',start:140,end:160},
+  {name:'Ingress 3K',start:65,end:85},{name:'Egress 3K',start:90,end:110},
+  {name:'Ingress multihost 3K',start:115,end:135},{name:'Egress multihost 3K',start:140,end:160},
   {name:'Ingress 8K',start:165,end:185},{name:'Egress 8K',start:190,end:210},
+  {name:'Ingress multihost 8K',start:215,end:235},{name:'Egress multihost 8K',start:240,end:260},
 ];
 
 function phaseAnnotations(entry) {
@@ -237,7 +239,11 @@ function mkChart(id, cfg) {
 }
 
 function findEntry(sha) { return entries.find(e => shaFull(e) === sha || sha7(e) === sha); }
-function prevOf(entry) { const idx = entries.indexOf(entry); return idx > 0 ? entries[idx - 1] : null; }
+function prevOf(entry) {
+  const s = sha7(entry);
+  const idx = entries.findIndex(e => sha7(e) === s);
+  return idx > 0 ? entries[idx - 1] : null;
+}
 
 const DEFAULT_CATEGORY_DEFS = [
   {
@@ -313,12 +319,30 @@ function trendCanvasId(categoryId) {
   return 'trend_' + String(categoryId).replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
+async function loadDetail(entry) {
+  const s7 = sha7(entry);
+  if (window.BENCH_DETAIL[s7]) return window.BENCH_DETAIL[s7];
+  try {
+    const res = await fetch(`data/${s7}.js`);
+    if (!res.ok) return entry;
+    const text = await res.text();
+    const fn = new Function('window', text);
+    const fakeWin = {BENCH_DETAIL: window.BENCH_DETAIL};
+    fn(fakeWin);
+    return window.BENCH_DETAIL[s7] || entry;
+  } catch(_) { return entry; }
+}
+
 function navigate() {
   const hash = location.hash.replace('#','');
   destroyCharts();
   if (hash && hash !== 'overview') {
     const entry = findEntry(hash);
-    if (entry) { renderDetail(entry); return; }
+    if (entry) {
+      root.innerHTML = '<div class="empty" style="padding:60px 0"><p style="color:var(--text2)">Loading…</p></div>';
+      loadDetail(entry).then(full => { destroyCharts(); renderDetail(full); });
+      return;
+    }
   }
   renderOverview();
 }
@@ -360,9 +384,10 @@ function renderOverview() {
     const lbl = entries.map(sha7);
     const catScenarios = {};
     for (const cat of categoryDefs) catScenarios[cat.id] = [];
+    const OVERVIEW_EXCLUDE = new Set(['ws_ingress','ws_multi_msg']);
     const seen = {};
     entries.forEach(e => (e.scenarios||[]).forEach(s => {
-      if (!seen[s.name] && s.category && catScenarios[s.category]) {
+      if (!seen[s.name] && s.category && catScenarios[s.category] && !OVERVIEW_EXCLUDE.has(s.name)) {
         catScenarios[s.category].push(s.name);
         seen[s.name] = true;
       }
@@ -441,20 +466,18 @@ function renderDetail(entry) {
   const res = entry.resources || null;
   const traceServer = entry.artifacts && entry.artifacts.trace_server ? entry.artifacts.trace_server : '';
   const traceClient = entry.artifacts && entry.artifacts.trace_client ? entry.artifacts.trace_client : '';
-  const traceQ1Server = entry.artifacts && entry.artifacts.trace_q1_server ? entry.artifacts.trace_q1_server : '';
-  const traceQ1Client = entry.artifacts && entry.artifacts.trace_q1_client ? entry.artifacts.trace_q1_client : '';
+  const runUrl = entry.run_url || '';
   const dial9Viewer = 'https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/?trace=';
   const traceServerViewer = traceServer ? dial9Viewer + encodeURIComponent(traceServer) : '';
   const traceClientViewer = traceClient ? dial9Viewer + encodeURIComponent(traceClient) : '';
-  const traceQ1ServerViewer = traceQ1Server ? dial9Viewer + encodeURIComponent(traceQ1Server) : '';
-  const traceQ1ClientViewer = traceQ1Client ? dial9Viewer + encodeURIComponent(traceQ1Client) : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
   const categoryDefById = categoryMap(categoryDefs);
 
   const ghLink = url ? `<a href="${url}" target="_blank">${s7}</a>` : s7;
-  metaEl.innerHTML = `${ghLink} ${esc(commitMsg(entry))} · ${new Date(entry.timestamp).toLocaleString()}`;
+  const runLink = runUrl ? ` <a href="${esc(runUrl)}" target="_blank" style="font-size:11px;color:var(--text2)">[CI run]</a>` : '';
+  metaEl.innerHTML = `${ghLink}${runLink} ${esc(commitMsg(entry))} · ${new Date(entry.timestamp).toLocaleString()}`;
 
   const prevScMap = {};
   if (prev) (prev.scenarios||[]).forEach(s => { prevScMap[(s.tunnel||'duotunnel')+':'+s.name] = s; });
@@ -469,19 +492,16 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(traceServerViewer || traceClientViewer || traceQ1ServerViewer || traceQ1ClientViewer) ? `
+  ${(traceServerViewer || traceClientViewer || runUrl) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Dial9 Traces (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
-        ${traceServerViewer ? `<a href="${esc(traceServerViewer)}" target="_blank">q4 Server</a>` : ''}
-        ${traceClientViewer ? `<a href="${esc(traceClientViewer)}" target="_blank">q4 Client</a>` : ''}
-        ${traceQ1ServerViewer ? `<a href="${esc(traceQ1ServerViewer)}" target="_blank">q1 Server</a>` : ''}
-        ${traceQ1ClientViewer ? `<a href="${esc(traceQ1ClientViewer)}" target="_blank">q1 Client</a>` : ''}
-        ${traceServer ? `<a href="${esc(traceServer)}" download>q4 Server (.bin.gz)</a>` : ''}
-        ${traceClient ? `<a href="${esc(traceClient)}" download>q4 Client (.bin.gz)</a>` : ''}
-        ${traceQ1Server ? `<a href="${esc(traceQ1Server)}" download>q1 Server (.bin.gz)</a>` : ''}
-        ${traceQ1Client ? `<a href="${esc(traceQ1Client)}" download>q1 Client (.bin.gz)</a>` : ''}
+        ${traceServerViewer ? `<a href="${esc(traceServerViewer)}" target="_blank">Server (dial9 viewer)</a>` : ''}
+        ${traceClientViewer ? `<a href="${esc(traceClientViewer)}" target="_blank">Client (dial9 viewer)</a>` : ''}
+        ${traceServer ? `<a href="${esc(traceServer)}" download>Server (.bin.gz)</a>` : ''}
+        ${traceClient ? `<a href="${esc(traceClient)}" download>Client (.bin.gz)</a>` : ''}
+        ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>
     </div>
   </div>` : ''}
@@ -580,7 +600,7 @@ function renderDetail(entry) {
                       hasPaging && {id:'pagingChart', title:'Page Faults / s'}].filter(Boolean));
   }
 
-  const idx = entries.indexOf(entry);
+  const idx = entries.findIndex(e => sha7(e) === sha7(entry));
   const prevEntry = idx > 0 ? entries[idx - 1] : null;
   const nextEntry = idx < entries.length - 1 ? entries[idx + 1] : null;
   html += `<div style="display:flex;justify-content:space-between;margin-top:24px">`;

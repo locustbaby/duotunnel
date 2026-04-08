@@ -10,13 +10,12 @@ def main():
     p.add_argument("--sha", required=True)
     p.add_argument("--msg", default="")
     p.add_argument("--url", default="")
+    p.add_argument("--run-url", default="")
     p.add_argument("--resources", default="")
     p.add_argument("--frp-result", default="")
     p.add_argument("--frp-k6-offset", type=int, default=0)
     p.add_argument("--trace-server", default="")
     p.add_argument("--trace-client", default="")
-    p.add_argument("--trace-q1-server", default="")
-    p.add_argument("--trace-q1-client", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -24,6 +23,8 @@ def main():
         entry = json.load(f)
 
     entry["commit"] = {"id": args.sha, "message": args.msg, "url": args.url}
+    if args.run_url:
+        entry["run_url"] = args.run_url
 
     if args.resources and os.path.exists(args.resources):
         with open(args.resources) as f:
@@ -32,10 +33,6 @@ def main():
         entry.setdefault("artifacts", {})["trace_server"] = args.trace_server
     if args.trace_client:
         entry.setdefault("artifacts", {})["trace_client"] = args.trace_client
-    if args.trace_q1_server:
-        entry.setdefault("artifacts", {})["trace_q1_server"] = args.trace_q1_server
-    if args.trace_q1_client:
-        entry.setdefault("artifacts", {})["trace_q1_client"] = args.trace_q1_client
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -79,15 +76,34 @@ def main():
             except json.JSONDecodeError:
                 entries = []
 
-    entries.append(entry)
+    sha7 = args.sha[:7]
+    bench_dir = os.path.dirname(args.data)
+    detail_dir = os.path.join(bench_dir, "data")
+    os.makedirs(detail_dir, exist_ok=True)
+    detail_path = os.path.join(detail_dir, f"{sha7}.js")
+    with open(detail_path, "w") as f:
+        f.write(f"window.BENCH_DETAIL['{sha7}'] = " + json.dumps(entry, indent=2) + ";\n")
+
+    index_entry = {
+        "commit": entry["commit"],
+        "timestamp": entry.get("timestamp", ""),
+        "summary": entry.get("summary"),
+        "artifacts": entry.get("artifacts"),
+        "run_url": entry.get("run_url", ""),
+        "scenarios": [
+            {k: s[k] for k in ("name", "category", "p50", "p95", "rps", "requests", "err", "protocol", "direction", "tunnel", "includeInTotalRps") if k in s}
+            for s in entry.get("scenarios", [])
+        ],
+    }
+
+    entries.append(index_entry)
     entries = entries[-args.max_entries:]
 
     with open(args.data, "w") as f:
         f.write(PREFIX + json.dumps({"entries": entries}, indent=2) + SUFFIX + "\n")
 
-    bench_dir = os.path.dirname(args.data)
     for subdir, keys in [
-        ("traces", ("trace_server", "trace_client", "trace_q1_server", "trace_q1_client")),
+        ("traces", ("trace_server", "trace_client")),
     ]:
         d = os.path.join(bench_dir, subdir)
         if not os.path.isdir(d):
@@ -105,7 +121,19 @@ def main():
             if os.path.isfile(fp) and name not in keep:
                 os.remove(fp)
 
-    print(f"Published entry {args.sha[:7]}, total entries: {len(entries)}")
+    kept_shas = set()
+    for e in entries:
+        c = e.get("commit")
+        sid = (c.get("id") if isinstance(c, dict) else c) or ""
+        if sid:
+            kept_shas.add(sid[:7])
+    for name in os.listdir(detail_dir):
+        if name.endswith(".js"):
+            file_sha = name[:-3]
+            if file_sha not in kept_shas:
+                os.remove(os.path.join(detail_dir, file_sha + ".js"))
+
+    print(f"Published entry {sha7}, total entries: {len(entries)}")
 
 if __name__ == "__main__":
     main()

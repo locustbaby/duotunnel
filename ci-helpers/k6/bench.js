@@ -112,43 +112,52 @@ function track(ok) {
 
 export function ingressHttpGet() {
   const sn = exec.scenario.name;
-  const withBody = !(sn.includes('_3000qps') || sn.includes('_8000qps'));
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://echo.local:8080/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
-    responseType: withBody ? 'text' : 'none',
+    responseType: 'none',
   });
-  const checks = { 'ingress GET 200': (r) => r.status === 200 };
-  if (withBody) checks['ingress GET echo'] = (r) => r.body && r.body.includes(id);
-  const ok = check(res, checks);
+  const ok = check(res, { 'ingress GET 200': (r) => r.status === 200 });
   track(ok);
 }
 
-export function ingressHttpGetNoKeepalive() {
+
+const MULTIHOST_COUNT = 50;
+
+export function ingressMultihost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://echo.local:8080/?id=${id}`, {
+  const n = (__VU % MULTIHOST_COUNT) + 1;
+  const host = `echo-${String(n).padStart(2, '0')}.local`;
+  const res = http.get(`http://${host}:8080/?id=${id}&host=${host}`, {
     timeout: '10s',
-    headers: { Connection: 'close' },
     tags: { name: sn },
+    responseType: 'text',
   });
   const ok = check(res, {
-    'ingress GET nokl 200': (r) => r.status === 200,
+    'ingress multihost 200': (r) => r.status === 200,
+    'ingress multihost host echo': (r) => r.body && r.body.includes(host),
+    'ingress multihost id echo': (r) => r.body && r.body.includes(id),
   });
   track(ok);
 }
 
-export function egressHttpGetNoKeepalive() {
+export function egressMultihost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://127.0.0.1:8082/?id=${id}`, {
-    headers: { Host: 'echo.local', Connection: 'close' },
+  const n = (__VU % MULTIHOST_COUNT) + 1;
+  const host = `echo-${String(n).padStart(2, '0')}.local`;
+  const res = http.get(`http://127.0.0.1:8082/?id=${id}&host=${host}`, {
+    headers: { Host: host },
     timeout: '10s',
     tags: { name: sn },
+    responseType: 'text',
   });
   const ok = check(res, {
-    'egress GET nokl 200': (r) => r.status === 200,
+    'egress multihost 200': (r) => r.status === 200,
+    'egress multihost host echo': (r) => r.body && r.body.includes(host),
+    'egress multihost id echo': (r) => r.body && r.body.includes(id),
   });
   track(ok);
 }
@@ -170,17 +179,14 @@ export function ingressHttpPost() {
 
 export function egressHttpGet() {
   const sn = exec.scenario.name;
-  const withBody = !(sn.includes('_3000qps') || sn.includes('_8000qps'));
   const id = `${__VU}-${__ITER}`;
   const res = http.get(`http://127.0.0.1:8082/?id=${id}`, {
     headers: { Host: 'echo.local' },
     timeout: '10s',
     tags: { name: sn },
-    responseType: withBody ? 'text' : 'none',
+    responseType: 'none',
   });
-  const checks = { 'egress GET 200': (r) => r.status === 200 };
-  if (withBody) checks['egress GET echo'] = (r) => r.body && r.body.includes(id);
-  const ok = check(res, checks);
+  const ok = check(res, { 'egress GET 200': (r) => r.status === 200 });
   track(ok);
 }
 

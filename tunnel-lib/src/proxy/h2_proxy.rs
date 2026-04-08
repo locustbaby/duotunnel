@@ -2,7 +2,7 @@ use crate::{send_routing_info, QuinnStream, RoutingInfo};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::client::conn::http2::{handshake, SendRequest};
+use hyper::client::conn::http2::{Builder as H2ClientBuilder, SendRequest};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use quinn::Connection;
@@ -33,7 +33,6 @@ where
 
     let mut sender = match guard.as_mut() {
         Some(s) if s.is_ready() => s.clone(),
-        Some(_) => unreachable!(),
         _ => {
             debug!("H2 sender miss, establishing new connection");
             *guard = None;
@@ -47,7 +46,10 @@ where
                 recv,
             };
             let io = TokioIo::new(quic_stream);
-            let (sender, conn) = handshake(hyper_util::rt::TokioExecutor::new(), io).await?;
+            let (sender, conn) = H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
+                .initial_max_send_streams(usize::MAX)
+                .handshake(io)
+                .await?;
 
             let cache = sender_cache.clone();
             tokio::spawn(async move {

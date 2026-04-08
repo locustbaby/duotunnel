@@ -490,6 +490,84 @@ For load balancing, Pingora flattens the Hash Ring into a contiguous 1D array to
 
 ## Bench Fixes
 
+### [TODO-58] ingress_multihost 全部 100% err
+
+**Files**: `.github/workflows/ci.yml`, `ci-helpers/server.yaml`
+**Priority**: High
+**Status**: TODO
+
+**Symptom**: `ingress_multihost` / `ingress_multihost_8000qps` 在 CI 中全部 100% err，rps 只有 433/740（远低于目标 3K/8K）。`egress_multihost` 正常（走 8082 + Host header），说明 client 侧 H2SenderMap 逻辑没问题，问题在 server 侧 ingress 路由。
+
+**Baseline vs current** (`1bb79bf` → `96d0918`): 新增 case，之前不存在。
+
+**排查方向**:
+1. CI runner 的 `/etc/hosts` 是否真正写入了 50 条 `echo-NN.local` 条目
+2. `server.yaml` `tunnel_management.server_ingress_routing.listeners[port=8080].vhost` 是否包含全部 50 个 `echo-NN.local` 条目
+3. k6 发 `http://echo-01.local:8080/` 时 server 是否能 resolve 域名并路由到 `ci-group`
+
+---
+
+### [TODO-59] ingress_http_get / bidir_mixed p95 长尾恶化
+
+**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`, `server/handlers/http.rs`
+**Priority**: Medium
+**Status**: TODO
+
+**Baseline vs current** (`1bb79bf` → `96d0918`):
+- `ingress_http_get` p95: 1.05ms → 15.98ms (**+14.93ms**)
+- `bidir_mixed` p95: 0.58ms → 25.06ms (**+24.48ms**)
+- p50 正常（0.52→0.72ms），说明是偶发慢请求，不是整体变慢
+
+**Root cause**: H2Sender 复用后，所有请求共享同一条 QUIC H2 stream。`basic` phase 和 `body_size` phase 时间窗口有重叠（startTime 差 35s，basic 持续 25s），大 body 请求（100K）占满 H2 connection window，后续小请求排队等 WINDOW_UPDATE → 长尾。
+
+**排查/修法方向**:
+1. 确认 basic/body_size phase 时间窗口是否真正重叠
+2. 考虑给 `bidir_mixed` 独立 H2Sender（不与 ingress_http_get 共用）
+3. 或者在调度上拉开 basic 和 body_size 的时间间隔，避免并发
+
+---
+
+### [TODO-60] ingress_post_100k p95 大幅上涨
+
+**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`
+**Priority**: Medium
+**Status**: TODO
+
+**Baseline vs current** (`1bb79bf` → `96d0918`):
+- `ingress_post_100k` p95: **3.96ms → 34.30ms (+30.34ms)**
+- p50: 2.71ms → 2.83ms（基本正常）
+
+H2 window 已扩大（4MB stream / 16MB conn / 1MB frame），但 p95 未改善。
+
+**排查方向**:
+1. 100K body 走 `k6 → server:8080(H1 recv) → forward_h2_request(H2 over QUIC) → client entry(H1) → echo:9999`，server 侧是 H1 streaming 转 H2，body 是 chunk by chunk 转发
+2. 可能是 BBR 在 loopback（RTT≈0）上行为异常，导致发送速率被人为限制
+3. 可能是 `max_frame_size=1MB` 过大，hyper H2 实现在大帧时有额外延迟
+4. 可能是 `ingress_post_100k` 与 `ingress_3000qps`（startTime=65s）在时间上不重叠，但与 `ingress_post_1k/10k` 并发，共享 H2 connection window 被 10k body 部分占用
+
+---
+
+### [TODO-61] 全局基线延迟轻微上涨（relay → H2Sender 协议栈开销）
+
+**Priority**: Medium
+**Status**: TODO
+
+**Baseline vs current** (`1bb79bf` → `96d0918`，普遍轻微上涨):
+- `ingress_http_get` p50: 0.52 → 0.72ms (+0.20ms)
+- `egress_http_get` p50: 0.48 → 0.65ms (+0.17ms)
+- `ingress_post_1k` p50: 0.59 → 0.90ms (+0.31ms)
+- `ingress_post_10k` p50: 1.03 → 1.22ms (+0.19ms)
+- `egress_post_10k` p50: 0.93 → 1.08ms (+0.15ms)
+
+**Root cause**: `fb776a8` 把 ingress/egress 从 per-request `open_bi()` raw relay 改为复用 H2Sender（H2 over QUIC），引入了额外的 H2 framing/deframing 协议栈开销（约 +0.15~0.3ms per hop）。这是复用换来的固定代价，不可完全消除，但可以优化。
+
+**优化方向**:
+1. **减少 H2 framing 层数**：当前 ingress 路径是 H1→H2→QUIC→H2→H1，中间有两次 H2 framing。考虑 server 侧直接透传 H2（client 发 H2 到 server，server 不解包直接转发到 QUIC H2 stream）
+2. **H2 frame size 调优**：当前 `max_frame_size=1MB` 可能对小请求反而有负面影响（padding/alignment），小请求考虑用默认 16KB
+3. **减少锁竞争**：`H2Sender` 的 `Arc<Mutex<Option<SendRequest>>>` 每次请求都 lock，高并发下有竞争，考虑用 `tokio::sync::RwLock` 或无锁结构
+
+---
+
 ### [TODO-15] egress_http_post Overflow Phase Boundary
 
 **Files**: `ci-helpers/k6/bench.js`, `bench/index.html`

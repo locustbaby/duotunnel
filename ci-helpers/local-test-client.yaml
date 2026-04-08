@@ -1,8 +1,8 @@
-log_level: "info"
+log_level: "debug"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
-auth_token: "dt_hi8nkpxiyAjQNL3w7EBMD0Sy_-RjM8bmO47v-36Z2aE"
+auth_token: "dt_ugLl_Bgr0n-XSeuldZz4_lIj0-MmWns2IljvM3duKUU"
 http_entry_port: 8082
 metrics_port: 9092
 quic:
@@ -10,11 +10,10 @@ quic:
   max_concurrent_streams: 1000
   keepalive_secs: 10
   idle_timeout_secs: 30
-  congestion: "cubic"
 reconnect:
   initial_delay_ms: 500
   max_delay_ms: 5000
   connect_timeout_ms: 3000
   resolve_timeout_ms: 2000
   login_timeout_ms: 3000
-  startup_jitter_ms: 50
+  startup_jitter_ms: 0

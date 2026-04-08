@@ -56,6 +56,21 @@ export function ingressHttpGetNokl() {
   track(ok);
 }
 
+export function ingressMultihost() {
+  const sn = exec.scenario.name;
+  const id = `${__VU}-${__ITER}`;
+  const n = (__VU % 50) + 1;
+  const host = `echo-${String(n).padStart(2, '0')}.local`;
+  const res = http.get(`http://${host}:18090/?id=${id}`, {
+    timeout: '10s',
+    tags: { name: sn },
+  });
+  const ok = check(res, {
+    'frp ingress multihost 200': (r) => r.status === 200,
+  });
+  track(ok);
+}
+
 export function handleSummary(data) {
   const output = buildSummaryOutput(data, FRP_CASES, FRP_PHASES, { tunnel: 'frp' });
 

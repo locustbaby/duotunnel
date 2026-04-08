@@ -73,6 +73,7 @@ where
         }
     });
     H2Builder::new(TokioExecutor::new())
+        .max_concurrent_streams(None::<u32>)
         .serve_connection(TokioIo::new(io), service)
         .await
         .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;

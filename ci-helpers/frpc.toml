@@ -7,3 +7,353 @@ type = "http"
 localIP = "127.0.0.1"
 localPort = 9999
 customDomains = ["echo.local"]
+
+[[proxies]]
+name = "echo-01"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-01.local"]
+
+[[proxies]]
+name = "echo-02"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-02.local"]
+
+[[proxies]]
+name = "echo-03"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-03.local"]
+
+[[proxies]]
+name = "echo-04"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-04.local"]
+
+[[proxies]]
+name = "echo-05"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-05.local"]
+
+[[proxies]]
+name = "echo-06"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-06.local"]
+
+[[proxies]]
+name = "echo-07"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-07.local"]
+
+[[proxies]]
+name = "echo-08"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-08.local"]
+
+[[proxies]]
+name = "echo-09"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-09.local"]
+
+[[proxies]]
+name = "echo-10"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-10.local"]
+
+[[proxies]]
+name = "echo-11"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-11.local"]
+
+[[proxies]]
+name = "echo-12"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-12.local"]
+
+[[proxies]]
+name = "echo-13"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-13.local"]
+
+[[proxies]]
+name = "echo-14"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-14.local"]
+
+[[proxies]]
+name = "echo-15"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-15.local"]
+
+[[proxies]]
+name = "echo-16"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-16.local"]
+
+[[proxies]]
+name = "echo-17"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-17.local"]
+
+[[proxies]]
+name = "echo-18"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-18.local"]
+
+[[proxies]]
+name = "echo-19"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-19.local"]
+
+[[proxies]]
+name = "echo-20"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-20.local"]
+
+[[proxies]]
+name = "echo-21"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-21.local"]
+
+[[proxies]]
+name = "echo-22"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-22.local"]
+
+[[proxies]]
+name = "echo-23"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-23.local"]
+
+[[proxies]]
+name = "echo-24"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-24.local"]
+
+[[proxies]]
+name = "echo-25"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-25.local"]
+
+[[proxies]]
+name = "echo-26"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-26.local"]
+
+[[proxies]]
+name = "echo-27"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-27.local"]
+
+[[proxies]]
+name = "echo-28"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-28.local"]
+
+[[proxies]]
+name = "echo-29"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-29.local"]
+
+[[proxies]]
+name = "echo-30"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-30.local"]
+
+[[proxies]]
+name = "echo-31"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-31.local"]
+
+[[proxies]]
+name = "echo-32"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-32.local"]
+
+[[proxies]]
+name = "echo-33"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-33.local"]
+
+[[proxies]]
+name = "echo-34"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-34.local"]
+
+[[proxies]]
+name = "echo-35"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-35.local"]
+
+[[proxies]]
+name = "echo-36"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-36.local"]
+
+[[proxies]]
+name = "echo-37"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-37.local"]
+
+[[proxies]]
+name = "echo-38"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-38.local"]
+
+[[proxies]]
+name = "echo-39"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-39.local"]
+
+[[proxies]]
+name = "echo-40"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-40.local"]
+
+[[proxies]]
+name = "echo-41"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-41.local"]
+
+[[proxies]]
+name = "echo-42"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-42.local"]
+
+[[proxies]]
+name = "echo-43"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-43.local"]
+
+[[proxies]]
+name = "echo-44"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-44.local"]
+
+[[proxies]]
+name = "echo-45"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-45.local"]
+
+[[proxies]]
+name = "echo-46"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-46.local"]
+
+[[proxies]]
+name = "echo-47"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-47.local"]
+
+[[proxies]]
+name = "echo-48"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-48.local"]
+
+[[proxies]]
+name = "echo-49"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-49.local"]
+
+[[proxies]]
+name = "echo-50"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 9999
+customDomains = ["echo-50.local"]

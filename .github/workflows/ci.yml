@@ -27,12 +27,73 @@ on:
       - ".github/workflows/ci.yml"
   workflow_dispatch:
     inputs:
-      tune_kernel:
-        description: 'Apply kernel tuning (tune-os.sh) before stress test'
+      # ── Build ─────────────────────────────────────────────────────────────────
+      build_profile:
+        description: 'Build profile: release | dial9 | both'
+        type: choice
+        options: [both, release, dial9]
+        default: both
+      # ── Test ──────────────────────────────────────────────────────────────────
+      run_unit:
+        description: 'Run unit tests + clippy'
         type: boolean
         default: true
-      run_q1:
-        description: 'Also run the q1 (1-connection) dial9 trace case'
+      run_integration:
+        description: 'Run integration tests (all protocols)'
+        type: boolean
+        default: true
+      run_stress:
+        description: 'Run k6 stress test (core profile)'
+        type: boolean
+        default: true
+      run_stress_trace:
+        description: 'Run 8k stress trace (dial9 profiling)'
+        type: boolean
+        default: true
+      run_frp:
+        description: 'Run frp baseline benchmark alongside stress test'
+        type: boolean
+        default: true
+      worker_threads:
+        description: 'Tokio worker threads for server/client in stress-trace (0 = CPU count)'
+        type: number
+        default: 0
+      # ── Monitor ───────────────────────────────────────────────────────────────
+      monitor_cpu:
+        description: 'Collect CPU metrics (mpstat + /proc per-process)'
+        type: boolean
+        default: true
+      monitor_io:
+        description: 'Collect disk I/O metrics (pidstat -d)'
+        type: boolean
+        default: true
+      monitor_ctxsw:
+        description: 'Collect context-switch metrics (pidstat -w)'
+        type: boolean
+        default: true
+      monitor_net:
+        description: 'Collect network metrics (sar -n DEV)'
+        type: boolean
+        default: true
+      monitor_tcp:
+        description: 'Collect TCP connection state metrics (ss snapshot)'
+        type: boolean
+        default: true
+      monitor_psi:
+        description: 'Collect pressure-stall metrics (PSI avg10)'
+        type: boolean
+        default: true
+      monitor_paging:
+        description: 'Collect paging metrics (sar -B)'
+        type: boolean
+        default: true
+      # ── Publish ───────────────────────────────────────────────────────────────
+      tune_kernel:
+        description: 'Apply kernel tuning (tune-os.sh) before stress tests'
+        type: boolean
+        default: true
+      publish_pages:
+        description: 'Publish benchmark results to gh-pages (auto-enabled on main push)'
         type: boolean
         default: false
 
@@ -53,6 +114,7 @@ jobs:
   unit-tests:
     name: Unit Tests & Lint
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.run_unit != false
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -86,6 +148,7 @@ jobs:
   build:
     name: Build (release)
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.build_profile == 'release' || inputs.build_profile == 'both'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -128,6 +191,7 @@ jobs:
   build-dial9:
     name: Build (dial9 + symbols)
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -205,6 +269,7 @@ jobs:
     name: Integration Test (all protocols)
     runs-on: ubuntu-latest
     needs: [build]
+    if: always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.run_integration != false)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -227,6 +292,56 @@ jobs:
           127.0.0.1  echo.beeceptor.test
           127.0.0.1  ws.ext.test
           127.0.0.1  grpc.ext.test
+          127.0.0.1  echo-01.local
+          127.0.0.1  echo-02.local
+          127.0.0.1  echo-03.local
+          127.0.0.1  echo-04.local
+          127.0.0.1  echo-05.local
+          127.0.0.1  echo-06.local
+          127.0.0.1  echo-07.local
+          127.0.0.1  echo-08.local
+          127.0.0.1  echo-09.local
+          127.0.0.1  echo-10.local
+          127.0.0.1  echo-11.local
+          127.0.0.1  echo-12.local
+          127.0.0.1  echo-13.local
+          127.0.0.1  echo-14.local
+          127.0.0.1  echo-15.local
+          127.0.0.1  echo-16.local
+          127.0.0.1  echo-17.local
+          127.0.0.1  echo-18.local
+          127.0.0.1  echo-19.local
+          127.0.0.1  echo-20.local
+          127.0.0.1  echo-21.local
+          127.0.0.1  echo-22.local
+          127.0.0.1  echo-23.local
+          127.0.0.1  echo-24.local
+          127.0.0.1  echo-25.local
+          127.0.0.1  echo-26.local
+          127.0.0.1  echo-27.local
+          127.0.0.1  echo-28.local
+          127.0.0.1  echo-29.local
+          127.0.0.1  echo-30.local
+          127.0.0.1  echo-31.local
+          127.0.0.1  echo-32.local
+          127.0.0.1  echo-33.local
+          127.0.0.1  echo-34.local
+          127.0.0.1  echo-35.local
+          127.0.0.1  echo-36.local
+          127.0.0.1  echo-37.local
+          127.0.0.1  echo-38.local
+          127.0.0.1  echo-39.local
+          127.0.0.1  echo-40.local
+          127.0.0.1  echo-41.local
+          127.0.0.1  echo-42.local
+          127.0.0.1  echo-43.local
+          127.0.0.1  echo-44.local
+          127.0.0.1  echo-45.local
+          127.0.0.1  echo-46.local
+          127.0.0.1  echo-47.local
+          127.0.0.1  echo-48.local
+          127.0.0.1  echo-49.local
+          127.0.0.1  echo-50.local
           EOF
 
       # ─── Start all backend servers in parallel ────────────────────────────────
@@ -838,6 +953,7 @@ jobs:
     name: Stress Test (k6 multi-protocol)
     runs-on: ubuntu-latest
     needs: [build]
+    if: always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.run_stress != false)
     permissions:
       contents: write
     steps:
@@ -867,6 +983,56 @@ jobs:
           127.0.0.1  echo.local
           127.0.0.1  ws.local
           127.0.0.1  grpc.local
+          127.0.0.1  echo-01.local
+          127.0.0.1  echo-02.local
+          127.0.0.1  echo-03.local
+          127.0.0.1  echo-04.local
+          127.0.0.1  echo-05.local
+          127.0.0.1  echo-06.local
+          127.0.0.1  echo-07.local
+          127.0.0.1  echo-08.local
+          127.0.0.1  echo-09.local
+          127.0.0.1  echo-10.local
+          127.0.0.1  echo-11.local
+          127.0.0.1  echo-12.local
+          127.0.0.1  echo-13.local
+          127.0.0.1  echo-14.local
+          127.0.0.1  echo-15.local
+          127.0.0.1  echo-16.local
+          127.0.0.1  echo-17.local
+          127.0.0.1  echo-18.local
+          127.0.0.1  echo-19.local
+          127.0.0.1  echo-20.local
+          127.0.0.1  echo-21.local
+          127.0.0.1  echo-22.local
+          127.0.0.1  echo-23.local
+          127.0.0.1  echo-24.local
+          127.0.0.1  echo-25.local
+          127.0.0.1  echo-26.local
+          127.0.0.1  echo-27.local
+          127.0.0.1  echo-28.local
+          127.0.0.1  echo-29.local
+          127.0.0.1  echo-30.local
+          127.0.0.1  echo-31.local
+          127.0.0.1  echo-32.local
+          127.0.0.1  echo-33.local
+          127.0.0.1  echo-34.local
+          127.0.0.1  echo-35.local
+          127.0.0.1  echo-36.local
+          127.0.0.1  echo-37.local
+          127.0.0.1  echo-38.local
+          127.0.0.1  echo-39.local
+          127.0.0.1  echo-40.local
+          127.0.0.1  echo-41.local
+          127.0.0.1  echo-42.local
+          127.0.0.1  echo-43.local
+          127.0.0.1  echo-44.local
+          127.0.0.1  echo-45.local
+          127.0.0.1  echo-46.local
+          127.0.0.1  echo-47.local
+          127.0.0.1  echo-48.local
+          127.0.0.1  echo-49.local
+          127.0.0.1  echo-50.local
           EOF
 
       - name: Start all backends + tunnel (ctld → server → client)
@@ -1019,46 +1185,66 @@ jobs:
 
       - name: Start resource sampling
         run: |
-          mpstat 2 > /tmp/mpstat.log 2>&1 &
-          echo $! > /tmp/mpstat.pid
-          (
-            echo "CLK_TCK=$(getconf CLK_TCK)"
-            while true; do
-              TS=$(date +%s.%N)
-              for d in /proc/[0-9]*/; do
-                pid=${d#/proc/}; pid=${pid%/}
-                read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
-                comm=$(echo "$stat" | sed 's/.*(\(.*\)).*/\1/')
-                utime=$(echo "$stat" | awk '{print $14}')
-                stime=$(echo "$stat" | awk '{print $15}')
-                rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
-                echo "$TS $pid $comm $utime $stime ${rss:-0}"
+          DO_CPU="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_cpu != false }}"
+          DO_IO="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_io != false }}"
+          DO_CTXSW="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_ctxsw != false }}"
+          DO_NET="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_net != false }}"
+          DO_TCP="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_tcp != false }}"
+          DO_PSI="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_psi != false }}"
+          DO_PAGING="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_paging != false }}"
+
+          if [ "$DO_CPU" = "true" ]; then
+            mpstat 2 > /tmp/mpstat.log 2>&1 &
+            echo $! > /tmp/mpstat.pid
+            (
+              echo "CLK_TCK=$(getconf CLK_TCK)"
+              while true; do
+                TS=$(date +%s.%N)
+                for d in /proc/[0-9]*/; do
+                  pid=${d#/proc/}; pid=${pid%/}
+                  read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
+                  comm=$(echo "$stat" | sed 's/.*(\(.*\)).*/\1/')
+                  utime=$(echo "$stat" | awk '{print $14}')
+                  stime=$(echo "$stat" | awk '{print $15}')
+                  rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+                  echo "$TS $pid $comm $utime $stime ${rss:-0}"
+                done
+                echo "---"
+                sleep 2
               done
-              echo "---"
+            ) > /tmp/proc-cpu.log 2>&1 &
+            echo $! > /tmp/proc-cpu.pid
+          fi
+
+          if [ "$DO_IO" = "true" ]; then
+            pidstat -p ALL -d 2 > /tmp/pidstat-io.log 2>&1 &
+            echo $! > /tmp/pidstat-io.pid
+          fi
+
+          if [ "$DO_CTXSW" = "true" ]; then
+            pidstat -p ALL -w 2 > /tmp/pidstat-ctxsw.log 2>&1 &
+            echo $! > /tmp/pidstat-ctxsw.pid
+          fi
+
+          if [ "$DO_NET" = "true" ]; then
+            sar -n DEV 2 > /tmp/sar-net.log 2>&1 &
+            echo $! > /tmp/sar-net.pid
+          fi
+
+          if [ "$DO_PAGING" = "true" ]; then
+            sar -B 2 > /tmp/sar-paging.log 2>&1 &
+            echo $! > /tmp/sar-paging.pid
+          fi
+
+          if [ "$DO_TCP" = "true" ]; then
+            (while true; do
+              echo "$(date +%s) $(ss -s 2>/dev/null | grep -E 'estab|timewait|closed' | tr '\n' '|')"
               sleep 2
-            done
-          ) > /tmp/proc-cpu.log 2>&1 &
-          echo $! > /tmp/proc-cpu.pid
-          pidstat -p ALL -d 2 > /tmp/pidstat-io.log 2>&1 &
-          echo $! > /tmp/pidstat-io.pid
-          # context switches (voluntary + involuntary) per process
-          pidstat -p ALL -w 2 > /tmp/pidstat-ctxsw.log 2>&1 &
-          echo $! > /tmp/pidstat-ctxsw.pid
-          vmstat 2 > /tmp/vmstat.log 2>&1 &
-          echo $! > /tmp/vmstat.pid
-          sar -n DEV 2 > /tmp/sar-net.log 2>&1 &
-          echo $! > /tmp/sar-net.pid
-          # page faults
-          sar -B 2 > /tmp/sar-paging.log 2>&1 &
-          echo $! > /tmp/sar-paging.pid
-          # TCP connection state counts every 2s (ss -s snapshot loop)
-          (while true; do
-            echo "$(date +%s) $(ss -s 2>/dev/null | grep -E 'estab|timewait|closed' | tr '\n' '|')"
-            sleep 2
-          done) > /tmp/ss-timeseries.log 2>&1 &
-          echo $! > /tmp/ss-loop.pid
-          # PSI (pressure stall info) — available on kernel >= 4.20
-          if [ -f /proc/pressure/cpu ]; then
+            done) > /tmp/ss-timeseries.log 2>&1 &
+            echo $! > /tmp/ss-loop.pid
+          fi
+
+          if [ "$DO_PSI" = "true" ] && [ -f /proc/pressure/cpu ]; then
             (while true; do
               TS=$(date +%s)
               CPU=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/^avg10=/)print substr($i,7)}' /proc/pressure/cpu 2>/dev/null)
@@ -1071,11 +1257,13 @@ jobs:
           else
             echo "PSI not available" > /tmp/psi-timeseries.log
           fi
+
           nproc > /tmp/nproc
           date +%s > /tmp/sampling_start_epoch
-          echo "Sampling started (mpstat + /proc-cpu + pidstat -d/-w + sar-net + sar-B + ss + PSI)"
+          echo "Sampling: cpu=$DO_CPU io=$DO_IO ctxsw=$DO_CTXSW net=$DO_NET tcp=$DO_TCP psi=$DO_PSI paging=$DO_PAGING"
 
       - name: Install frp
+        if: github.event_name != 'workflow_dispatch' || inputs.run_frp != false
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -1084,6 +1272,7 @@ jobs:
           sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
 
       - name: Start frp and run frp benchmark
+        if: github.event_name != 'workflow_dispatch' || inputs.run_frp != false
         run: |
           frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
           echo $! > /tmp/frps.pid
@@ -1107,7 +1296,7 @@ jobs:
           k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js || true
 
       - name: Stop frp
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.run_frp != false)
         run: |
           kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
@@ -1255,16 +1444,25 @@ jobs:
   stress-trace-8k:
     name: Stress Trace 8K (dial9)
     runs-on: ubuntu-latest
-    needs: [build-dial9]
+    needs: [build, build-dial9]
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false)
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download dial9 binaries
+        if: github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both'
         uses: actions/download-artifact@v4
         with:
           name: release-bins-dial9-${{ github.run_id }}
+          path: target/release
+
+      - name: Download release binaries
+        if: github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bins-${{ github.run_id }}
           path: target/release
 
       - name: Mark binaries executable
@@ -1289,6 +1487,56 @@ jobs:
           127.0.0.1  echo.local
           127.0.0.1  ws.local
           127.0.0.1  grpc.local
+          127.0.0.1  echo-01.local
+          127.0.0.1  echo-02.local
+          127.0.0.1  echo-03.local
+          127.0.0.1  echo-04.local
+          127.0.0.1  echo-05.local
+          127.0.0.1  echo-06.local
+          127.0.0.1  echo-07.local
+          127.0.0.1  echo-08.local
+          127.0.0.1  echo-09.local
+          127.0.0.1  echo-10.local
+          127.0.0.1  echo-11.local
+          127.0.0.1  echo-12.local
+          127.0.0.1  echo-13.local
+          127.0.0.1  echo-14.local
+          127.0.0.1  echo-15.local
+          127.0.0.1  echo-16.local
+          127.0.0.1  echo-17.local
+          127.0.0.1  echo-18.local
+          127.0.0.1  echo-19.local
+          127.0.0.1  echo-20.local
+          127.0.0.1  echo-21.local
+          127.0.0.1  echo-22.local
+          127.0.0.1  echo-23.local
+          127.0.0.1  echo-24.local
+          127.0.0.1  echo-25.local
+          127.0.0.1  echo-26.local
+          127.0.0.1  echo-27.local
+          127.0.0.1  echo-28.local
+          127.0.0.1  echo-29.local
+          127.0.0.1  echo-30.local
+          127.0.0.1  echo-31.local
+          127.0.0.1  echo-32.local
+          127.0.0.1  echo-33.local
+          127.0.0.1  echo-34.local
+          127.0.0.1  echo-35.local
+          127.0.0.1  echo-36.local
+          127.0.0.1  echo-37.local
+          127.0.0.1  echo-38.local
+          127.0.0.1  echo-39.local
+          127.0.0.1  echo-40.local
+          127.0.0.1  echo-41.local
+          127.0.0.1  echo-42.local
+          127.0.0.1  echo-43.local
+          127.0.0.1  echo-44.local
+          127.0.0.1  echo-45.local
+          127.0.0.1  echo-46.local
+          127.0.0.1  echo-47.local
+          127.0.0.1  echo-48.local
+          127.0.0.1  echo-49.local
+          127.0.0.1  echo-50.local
           EOF
 
       - name: Run dial9 trace sequence
@@ -1318,7 +1566,13 @@ jobs:
             curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
               || { echo "ERROR: ctld healthz never became ready"; cat "/tmp/ci-ctld-${SUFFIX}.log"; exit 1; }
 
-            DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+            WORKER_THREADS="${{ inputs.worker_threads }}"
+            TOKIO_ENV=""
+            if [ -n "$WORKER_THREADS" ] && [ "$WORKER_THREADS" != "0" ]; then
+              TOKIO_ENV="TOKIO_WORKER_THREADS=${WORKER_THREADS}"
+            fi
+
+            env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/server-trace.bin \
               ./target/release/server --config ci-helpers/server.yaml \
               --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/server.pid
@@ -1341,7 +1595,7 @@ jobs:
 
             sleep 3
 
-            DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+            env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/client-trace.bin \
               ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             echo $! > /tmp/client.pid
             for i in $(seq 1 60); do
@@ -1386,7 +1640,7 @@ jobs:
               kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
               sleep 0.5
 
-              DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/server-trace.bin \
                 ./target/release/server --config ci-helpers/server.yaml \
                 --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/server.pid
@@ -1400,7 +1654,7 @@ jobs:
                 exit 1
               fi
 
-              DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/client-trace.bin \
                 ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
               echo $! > /tmp/client.pid
               for i in $(seq 1 60); do
@@ -1442,13 +1696,15 @@ jobs:
 
             mkdir -p "/tmp/trace-${SUFFIX}"
             cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
-            if [ ! -s /tmp/server-trace.0.bin ] || [ ! -s /tmp/client-trace.0.bin ]; then
-              echo "ERROR: expected dial9 trace segment files not found"
-              ls -lh /tmp/server-trace* /tmp/client-trace* 2>&1 || true
-              exit 1
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release' }}" != "true" ]; then
+              if [ ! -s /tmp/server-trace.0.bin ] || [ ! -s /tmp/client-trace.0.bin ]; then
+                echo "ERROR: expected dial9 trace segment files not found"
+                ls -lh /tmp/server-trace* /tmp/client-trace* 2>&1 || true
+                exit 1
+              fi
+              cp /tmp/server-trace.0.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
+              cp /tmp/client-trace.0.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
             fi
-            cp /tmp/server-trace.0.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
-            cp /tmp/client-trace.0.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"
@@ -1465,13 +1721,9 @@ jobs:
             kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
           }
 
-          if [ "${{ inputs.run_q1 }}" = "true" ]; then
-            run_case 1
-            sleep 10
-          fi
           run_case 4
 
-      - name: Upload benchmark outputs (8k, q4)
+      - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
@@ -1480,18 +1732,8 @@ jobs:
           path: |
             /tmp/trace-q4/bench-results.json
 
-      - name: Upload benchmark outputs (8k, q1)
-        if: ${{ inputs.run_q1 == true }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: stress-profile-8k-results-q1-${{ github.run_id }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            /tmp/trace-q1/bench-results.json
-
-      - name: Upload dial9 traces (8k, q4)
-        if: always()
+      - name: Upload dial9 traces (8k)
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dial9-traces-8k-${{ github.run_id }}
@@ -1500,17 +1742,6 @@ jobs:
           path: |
             /tmp/trace-q4/server-trace.bin.gz
             /tmp/trace-q4/client-trace.bin.gz
-
-      - name: Upload dial9 traces (8k, q1)
-        if: always() && inputs.run_q1 == true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dial9-traces-8k-q1-${{ github.run_id }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            /tmp/trace-q1/server-trace.bin.gz
-            /tmp/trace-q1/client-trace.bin.gz
 
       - name: Upload logs
         if: always()
@@ -1526,13 +1757,6 @@ jobs:
             /tmp/trace-q4/ws-echo.log
             /tmp/trace-q4/grpc-echo.log
             /tmp/trace-q4/bench-results.json
-            /tmp/trace-q1/ci-server.log
-            /tmp/trace-q1/ci-client.log
-            /tmp/trace-q1/ci-ctld.log
-            /tmp/trace-q1/http-echo.log
-            /tmp/trace-q1/ws-echo.log
-            /tmp/trace-q1/grpc-echo.log
-            /tmp/trace-q1/bench-results.json
 
       - name: Cleanup
         if: always()
@@ -1546,7 +1770,12 @@ jobs:
 
   publish-bench:
     name: Publish Benchmark (merged)
-    if: github.ref == 'refs/heads/main'
+    if: |
+      always() &&
+      (needs.stress-test.result == 'success' || needs.stress-test.result == 'skipped') &&
+      (needs.stress-trace-8k.result == 'success' || needs.stress-trace-8k.result == 'skipped') &&
+      (needs.stress-test.result == 'success' || needs.stress-trace-8k.result == 'success') &&
+      (github.ref == 'refs/heads/main' || inputs.publish_pages == true)
     runs-on: ubuntu-latest
     needs: [stress-test, stress-trace-8k]
     permissions:
@@ -1567,26 +1796,12 @@ jobs:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
 
-      - name: Download 8k benchmark outputs (q1)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: stress-profile-8k-results-q1-${{ github.run_id }}
-          path: /tmp/profile8k-q1
-
       - name: Download dial9 traces (q4)
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: dial9-traces-8k-${{ github.run_id }}
           path: /tmp/dial9-traces-q4
-
-      - name: Download dial9 traces (q1)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: dial9-traces-8k-q1-${{ github.run_id }}
-          path: /tmp/dial9-traces-q1
 
       - name: Merge benchmark outputs
         run: |
@@ -1601,7 +1816,6 @@ jobs:
           import os
 
           core_path = "/tmp/core/bench-results.json"
-          extra_q1_path = "/tmp/profile8k-q1/bench-results.json" if os.path.isfile("/tmp/profile8k-q1/bench-results.json") else None
           extra_q4_path = "/tmp/profile8k/bench-results.json" if os.path.isfile("/tmp/profile8k/bench-results.json") else None
           out_path = "/tmp/bench-results-merged.json"
 
@@ -1686,7 +1900,6 @@ jobs:
               core_catalog["categories"] = categories
               merged["catalog"] = core_catalog
 
-          merge_extra(extra_q1_path, "8k-q1", False)
           merge_extra(extra_q4_path, "8k-q4", True)
 
           merged["scenarios"] = list(sc_by_name.values())
@@ -1719,10 +1932,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd /tmp
-          git clone --branch gh-pages --single-branch --depth 1 \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" gh-pages-repo \
-            || { mkdir gh-pages-repo && cd gh-pages-repo && git init && git checkout --orphan gh-pages && cd /tmp; }
-          cd gh-pages-repo
+          GH_REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          if git clone --branch gh-pages --single-branch --depth 1 --filter=blob:none --no-checkout "$GH_REPO_URL" gh-pages-repo 2>/dev/null; then
+            cd gh-pages-repo
+            git sparse-checkout init --cone
+            git sparse-checkout set bench
+            git checkout
+          else
+            mkdir gh-pages-repo && cd gh-pages-repo && git init && git checkout --orphan gh-pages
+          fi
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           FRP_ARG=""
@@ -1741,13 +1959,10 @@ jobs:
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
           mkdir -p bench/traces
           TRACE_SERVER_ARG=""; TRACE_CLIENT_ARG=""
-          TRACE_Q1_SERVER_ARG=""; TRACE_Q1_CLIENT_ARG=""
           REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
           BASE_URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
           Q4_SERVER=$(find /tmp/dial9-traces-q4 -name "server-trace.bin.gz" 2>/dev/null | head -1)
           Q4_CLIENT=$(find /tmp/dial9-traces-q4 -name "client-trace.bin.gz" 2>/dev/null | head -1)
-          Q1_SERVER=$(find /tmp/dial9-traces-q1 -name "server-trace.bin.gz" 2>/dev/null | head -1)
-          Q1_CLIENT=$(find /tmp/dial9-traces-q1 -name "client-trace.bin.gz" 2>/dev/null | head -1)
           if [ -n "$Q4_SERVER" ] && [ -s "$Q4_SERVER" ]; then
             cp "$Q4_SERVER" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
             TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
@@ -1756,22 +1971,15 @@ jobs:
             cp "$Q4_CLIENT" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
             TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
           fi
-          if [ -n "$Q1_SERVER" ] && [ -s "$Q1_SERVER" ]; then
-            cp "$Q1_SERVER" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
-            TRACE_Q1_SERVER_ARG="--trace-q1-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-server.bin.gz"
-          fi
-          if [ -n "$Q1_CLIENT" ] && [ -s "$Q1_CLIENT" ]; then
-            cp "$Q1_CLIENT" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
-            TRACE_Q1_CLIENT_ARG="--trace-q1-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-q1-client.bin.gz"
-          fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
-            --result /tmp/bench-results-merged.json \
-            --data   bench/data.js \
-            --sha    "${{ github.sha }}" \
-            --msg    "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
-            --url    "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
+            --result  /tmp/bench-results-merged.json \
+            --data    bench/data.js \
+            --sha     "${{ github.sha }}" \
+            --msg     "$(git -C "${{ github.workspace }}" log -1 --pretty=%s)" \
+            --url     "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
-            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG $TRACE_Q1_SERVER_ARG $TRACE_Q1_CLIENT_ARG
+            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
