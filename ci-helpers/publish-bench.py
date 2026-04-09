@@ -74,7 +74,7 @@ def main():
                 entries = []
 
     sha7 = args.sha[:7]
-    bench_dir = os.path.dirname(args.data)
+    bench_dir = os.path.dirname(os.path.abspath(args.data))
     detail_dir = os.path.join(bench_dir, "data")
     os.makedirs(detail_dir, exist_ok=True)
     detail_path = os.path.join(detail_dir, f"{sha7}.json")
