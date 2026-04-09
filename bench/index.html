@@ -470,6 +470,7 @@ function renderDetail(entry) {
   const traceArtifactUrl = entry.artifacts && entry.artifacts.trace_artifact_url ? entry.artifacts.trace_artifact_url : '';
   const traceServer = entry.artifacts && entry.artifacts.trace_server ? entry.artifacts.trace_server : '';
   const traceClient = entry.artifacts && entry.artifacts.trace_client ? entry.artifacts.trace_client : '';
+  const traceCases = (entry.artifacts && Array.isArray(entry.artifacts.trace_cases)) ? entry.artifacts.trace_cases : [];
   const runUrl = entry.run_url || '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
@@ -493,13 +494,14 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(traceServer || traceClient || traceArtifactUrl || runUrl) ? `
+  ${(traceServer || traceClient || traceCases.length || traceArtifactUrl || runUrl) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Dial9 Traces (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
         ${traceServer ? `<a href="${esc(traceServer)}" target="_blank">Server trace (dial9 viewer)</a>` : ''}
         ${traceClient ? `<a href="${esc(traceClient)}" target="_blank">Client trace (dial9 viewer)</a>` : ''}
+        ${traceCases.map(tc => `<span style="white-space:nowrap">${esc(tc.case)}: <a href="viewer/?trace=${encodeURIComponent(tc.server)}" target="_blank">server</a> / <a href="viewer/?trace=${encodeURIComponent(tc.client)}" target="_blank">client</a></span>`).join('')}
         ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank" style="color:var(--text2)">Download .bin.gz ↗</a>` : ''}
         ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>
