@@ -200,6 +200,7 @@ async fn async_main() -> Result<()> {
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
+    tunnel_lib::apply_worker_threads(&mut builder);
     builder.enable_all();
     let runtime = builder.build()?;
     runtime.block_on(fut)
