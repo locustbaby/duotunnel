@@ -464,12 +464,8 @@ function renderDetail(entry) {
   const sum = entry.summary || {};
   const prevSum = prev ? (prev.summary || {}) : {};
   const res = entry.resources || null;
-  const traceServer = entry.artifacts && entry.artifacts.trace_server ? entry.artifacts.trace_server : '';
-  const traceClient = entry.artifacts && entry.artifacts.trace_client ? entry.artifacts.trace_client : '';
+  const traceArtifactUrl = entry.artifacts && entry.artifacts.trace_artifact_url ? entry.artifacts.trace_artifact_url : '';
   const runUrl = entry.run_url || '';
-  const dial9Viewer = 'https://dial9-tokio-telemetry.russell-r-cohen.workers.dev/?trace=';
-  const traceServerViewer = traceServer ? dial9Viewer + encodeURIComponent(traceServer) : '';
-  const traceClientViewer = traceClient ? dial9Viewer + encodeURIComponent(traceClient) : '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
   const categoryDefs = categoryDefsFromEntry(entry);
@@ -492,15 +488,12 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(traceServerViewer || traceClientViewer || runUrl) ? `
+  ${(traceArtifactUrl || runUrl) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Dial9 Traces (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
-        ${traceServerViewer ? `<a href="${esc(traceServerViewer)}" target="_blank">Server (dial9 viewer)</a>` : ''}
-        ${traceClientViewer ? `<a href="${esc(traceClientViewer)}" target="_blank">Client (dial9 viewer)</a>` : ''}
-        ${traceServer ? `<a href="${esc(traceServer)}" download>Server (.bin.gz)</a>` : ''}
-        ${traceClient ? `<a href="${esc(traceClient)}" download>Client (.bin.gz)</a>` : ''}
+        ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank">Download traces (server + client .bin.gz)</a>` : ''}
         ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>
     </div>
