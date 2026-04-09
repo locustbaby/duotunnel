@@ -7,7 +7,6 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
 <script src="data.js"></script>
-<script>window.BENCH_DETAIL = window.BENCH_DETAIL || {};</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -319,17 +318,16 @@ function trendCanvasId(categoryId) {
   return 'trend_' + String(categoryId).replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
+const detailCache = new Map();
 async function loadDetail(entry) {
   const s7 = sha7(entry);
-  if (window.BENCH_DETAIL[s7]) return window.BENCH_DETAIL[s7];
+  if (detailCache.has(s7)) return detailCache.get(s7);
   try {
-    const res = await fetch(`data/${s7}.js`);
+    const res = await fetch(`data/${s7}.json`);
     if (!res.ok) return entry;
-    const text = await res.text();
-    const fn = new Function('window', text);
-    const fakeWin = {BENCH_DETAIL: window.BENCH_DETAIL};
-    fn(fakeWin);
-    return window.BENCH_DETAIL[s7] || entry;
+    const detail = await res.json();
+    detailCache.set(s7, detail);
+    return detail;
   } catch(_) { return entry; }
 }
 
