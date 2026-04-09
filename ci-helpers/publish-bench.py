@@ -106,10 +106,9 @@ def main():
         if sid:
             kept_shas.add(sid[:7])
     for name in os.listdir(detail_dir):
-        if name.endswith(".json"):
-            file_sha = name[:-5]
-            if file_sha not in kept_shas:
-                os.remove(os.path.join(detail_dir, file_sha + ".json"))
+        stem, ext = os.path.splitext(name)
+        if ext == ".json" and stem not in kept_shas:
+            os.remove(os.path.join(detail_dir, name))
 
     print(f"Published entry {sha7}, total entries: {len(entries)}")
 

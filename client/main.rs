@@ -157,14 +157,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .build()?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    match std::env::var("TOKIO_WORKER_THREADS") {
-        Ok(s) => match s.parse::<usize>() {
-            Ok(n) if n > 0 => { builder.worker_threads(n); }
-            Ok(_) => tracing::warn!("TOKIO_WORKER_THREADS=0, using default"),
-            Err(_) => tracing::warn!("TOKIO_WORKER_THREADS={:?} is not a valid integer, using default", s),
-        },
-        Err(_) => {}
-    }
+    tunnel_lib::apply_worker_threads(&mut builder);
     let trace_path_display = trace_path.display().to_string();
     let trace_file_display = {
         let stem = trace_path

@@ -52,15 +52,13 @@ where
         };
         let io = TokioIo::new(quic_stream);
         let (new_sender, conn) = H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
-            .initial_max_send_streams(u32::MAX as usize)
+            .initial_max_send_streams(usize::MAX)
             .handshake(io)
             .await?;
 
         let mut guard = sender_cache.lock().await;
         match guard.as_ref() {
-            Some(s) if s.is_ready() => {
-                s.clone()
-            }
+            Some(s) if s.is_ready() => s.clone(),
             _ => {
                 let cache = sender_cache.clone();
                 tokio::spawn(async move {
@@ -69,8 +67,9 @@ where
                     }
                     *cache.lock().await = None;
                 });
-                *guard = Some(new_sender.clone());
-                new_sender
+                let sender = new_sender.clone();
+                *guard = Some(new_sender);
+                sender
             }
         }
     };
