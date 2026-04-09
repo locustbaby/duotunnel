@@ -1,6 +1,7 @@
+use crate::proxy::buffer_params::DEFAULT_RELAY_BUF_SIZE;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::{debug, trace};
-const RELAY_BUF: usize = 65536;
+use DEFAULT_RELAY_BUF_SIZE as RELAY_BUF;
 pub async fn relay<A, B>(stream_a: A, stream_b: B) -> std::io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,

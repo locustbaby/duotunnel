@@ -765,15 +765,48 @@
                 };
             `], { type: 'application/javascript' });
             const _workerUrl = URL.createObjectURL(_workerBlob);
+            const _jsonWorker = new Worker(_workerUrl);
+            let _jsonReqId = 0;
+            const _jsonPending = new Map();
 
-            function fetchJsonOffThread(url) {
+            _jsonWorker.onmessage = ({ data }) => {
+                const pending = _jsonPending.get(data.id);
+                if (!pending) return;
+                _jsonPending.delete(data.id);
+                data.ok ? pending.resolve(data.data) : pending.reject(new Error(data.error));
+            };
+
+            _jsonWorker.onerror = (e) => {
+                for (const pending of _jsonPending.values()) {
+                    pending.reject(new Error(e.message || 'worker error'));
+                }
+                _jsonPending.clear();
+            };
+
+            function makeAbortError() {
+                try {
+                    return new DOMException('Aborted', 'AbortError');
+                } catch {
+                    const err = new Error('Aborted');
+                    err.name = 'AbortError';
+                    return err;
+                }
+            }
+
+            function fetchJsonOffThread(url, signal) {
+                if (signal?.aborted) return Promise.reject(makeAbortError());
                 return new Promise((resolve, reject) => {
-                    const w = new Worker(_workerUrl);
-                    w.onmessage = ({ data }) => {
-                        w.terminate();
-                        data.ok ? resolve(data.data) : reject(new Error(data.error));
-                    };
-                    w.postMessage({ url, id: 1 });
+                    const id = ++_jsonReqId;
+                    _jsonPending.set(id, { resolve, reject });
+                    if (signal) {
+                        signal.addEventListener('abort', () => {
+                            const pending = _jsonPending.get(id);
+                            if (!pending) return;
+                            _jsonPending.delete(id);
+                            pending.reject(makeAbortError());
+                        }, { once: true });
+                    }
+                    _jsonWorker.postMessage({ url, id });
                 });
             }
 
@@ -783,7 +816,7 @@
                 try {
                     // Step 1: fetch meta (small, ~1 MB, not gzipped) — off main thread
                     showLoadingState('Loading trace metadata…');
-                    const meta = await fetchJsonOffThread(baseUrl + '-meta.json');
+                    const meta = await fetchJsonOffThread(baseUrl + '-meta.json', loadAbortController?.signal);
 
                     // Restore Maps from [key,value] arrays
                     trace = {
@@ -807,7 +840,7 @@
 
                     // Step 2: fetch + gunzip + JSON.parse events off main thread
                     showLoadingState(`Loading ${meta.eventCount.toLocaleString()} events…`);
-                    trace.events = await fetchJsonOffThread(baseUrl + '-events.json.gz');
+                    trace.events = await fetchJsonOffThread(baseUrl + '-events.json.gz', loadAbortController?.signal);
 
                     loadAbortController = null;
                     processTrace();
@@ -826,21 +859,7 @@
                 try {
                     const samples = await fetchJsonOffThread(trace._cpuUrl);
                     trace.cpuSamples = samples;
-                    // Attach cpu samples to existing workerSpans polls
-                    for (const w of workerIds) {
-                        const spans = workerSpans[w];
-                        if (!spans) continue;
-                        for (const sample of samples) {
-                            if (sample.workerId !== w) continue;
-                            const ts = sample.timestamp;
-                            for (const poll of spans.polls) {
-                                if (ts >= poll.start && ts < poll.end) {
-                                    (poll.cpuSamples ??= []).push(sample);
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    attachSamplesToPolls(samples);
                 } catch (err) {
                     console.warn('Failed to load cpu samples:', err.message);
                     trace._cpuLoaded = false;
@@ -872,6 +891,32 @@
                 loadTraceFromUrl("demo-trace.bin");
             }
             document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+
+            function attachSamplesToPolls(samples) {
+                for (const sample of samples) {
+                    const spans = workerSpans[sample.workerId];
+                    if (!spans) { sample.spawnLoc = null; continue; }
+                    if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
+                    const polls = spans.polls;
+                    const ts = sample.timestamp;
+                    let lo = 0, hi = polls.length - 1, found = false;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (polls[mid].start <= ts) { lo = mid + 1; } else { hi = mid - 1; }
+                    }
+                    if (hi >= 0 && ts <= polls[hi].end) {
+                        const poll = polls[hi];
+                        if (sample.source === 1) {
+                            (poll.schedSamples ??= []).push(sample);
+                        } else {
+                            (poll.cpuSamples ??= []).push(sample);
+                        }
+                        sample.spawnLoc = poll.spawnLoc;
+                        found = true;
+                    }
+                    if (!found) sample.spawnLoc = null;
+                }
+            }
 
             function processTrace() {
                 const evts = trace.events;
@@ -996,31 +1041,7 @@
                 // Attach CPU samples to poll spans they fall within
                 // Use binary search: polls are sorted by start time per worker
                 if (trace.cpuSamples.length > 0) {
-                    for (const sample of trace.cpuSamples) {
-                        const spans = workerSpans[sample.workerId];
-                        if (!spans) { sample.spawnLoc = null; continue; }
-                        if (sample.source !== 1) spans.cpuSampleTimes.push(sample.timestamp);
-                        const polls = spans.polls;
-                        const ts = sample.timestamp;
-                        // Binary search for rightmost poll with start <= ts
-                        let lo = 0, hi = polls.length - 1, found = false;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (polls[mid].start <= ts) { lo = mid + 1; } else { hi = mid - 1; }
-                        }
-                        // hi is now the index of the last poll with start <= ts
-                        if (hi >= 0 && ts <= polls[hi].end) {
-                            const poll = polls[hi];
-                            if (sample.source === 1) {
-                                (poll.schedSamples ??= []).push(sample);
-                            } else {
-                                (poll.cpuSamples ??= []).push(sample);
-                            }
-                            sample.spawnLoc = poll.spawnLoc;
-                            found = true;
-                        }
-                        if (!found) sample.spawnLoc = null;
-                    }
+                    attachSamplesToPolls(trace.cpuSamples);
                     let pollsWithSamples = 0;
                     let pollsWithSched = 0;
                     for (const w of workerIds) {

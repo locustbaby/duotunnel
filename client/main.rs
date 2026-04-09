@@ -22,11 +22,13 @@ use tracing::{debug, error, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 mod app;
 mod config;
+mod conn_pool;
 mod connect;
 mod entry;
 mod pool;
 mod proxy;
 use app::LocalProxyMap;
+use conn_pool::EntryConnPool;
 use config::ClientConfigFile;
 use connect::ConnectError;
 use proxy::handle_work_stream;
@@ -125,6 +127,33 @@ async fn async_main() -> Result<()> {
     if let Some(port) = config.metrics_port {
         crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
+
+    let entry_pool = EntryConnPool::new();
+
+    if let Some(entry_port) = config.http_entry_port {
+        let pool = entry_pool.clone();
+        let token = cancel.clone();
+        let max_entry_conns = config.quic.max_concurrent_streams;
+        let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
+        let peek_buf_size = config.proxy_buffers.peek_buf_size;
+        let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
+        crate::spawn_task(async move {
+            if let Err(e) = entry::start_entry_listener(
+                pool,
+                entry_port,
+                token,
+                max_entry_conns,
+                entry_tcp_params,
+                peek_buf_size,
+                open_stream_timeout,
+            )
+            .await
+            {
+                error!(port = entry_port, error = % e, "entry listener failed");
+            }
+        });
+    }
+
     let run_cancel = cancel.clone();
     let run_ready = ready.clone();
     let run_fut = async move {
@@ -132,15 +161,16 @@ async fn async_main() -> Result<()> {
             info!(
                 connections = % config.quic.connections, "using multi-QUIC connection pool"
             );
-            pool::run_pool(config, endpoint, run_cancel, run_ready).await
+            pool::run_pool(config, endpoint, run_cancel, run_ready, entry_pool).await
         } else {
-            connect::run_supervisor(config, endpoint, run_cancel, run_ready).await
+            connect::run_supervisor(config, endpoint, run_cancel, run_ready, entry_pool).await
         }
     };
     run_fut.await
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
+    tunnel_lib::apply_worker_threads(&mut builder);
     builder.enable_all();
     let runtime = builder.build()?;
     runtime.block_on(fut)
@@ -223,6 +253,7 @@ pub(crate) async fn run_client(
     endpoint: &quinn::Endpoint,
     shutdown: CancellationToken,
     ready: Arc<AtomicBool>,
+    entry_pool: Arc<EntryConnPool>,
 ) -> std::result::Result<(), ConnectError> {
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
@@ -275,31 +306,8 @@ pub(crate) async fn run_client(
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = % max_streams, "Stream backpressure configured");
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
-    if let Some(entry_port) = config.http_entry_port {
-        let conn = conn.clone();
-        let token = session_cancel.clone();
-        let max_entry_conns = config.quic.max_concurrent_streams;
-        let entry_tcp_params = tcp_params.clone();
-        let peek_buf_size = config.proxy_buffers.peek_buf_size;
-        let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        let ready_flag = ready.clone();
-        crate::spawn_task(async move {
-            if let Err(e) = entry::start_entry_listener(
-                conn,
-                entry_port,
-                token,
-                max_entry_conns,
-                entry_tcp_params,
-                peek_buf_size,
-                open_stream_timeout,
-            )
-            .await
-            {
-                error!(port = entry_port, error = % e, "entry listener failed");
-            }
-            drop(ready_flag);
-        });
-    }
+
+    entry_pool.push(conn.clone());
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
@@ -338,6 +346,7 @@ pub(crate) async fn run_client(
         }
     };
     session_cancel.cancel();
+    entry_pool.remove(&conn);
     tokio::select! {
         _ = shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}

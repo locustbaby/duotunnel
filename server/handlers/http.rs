@@ -1,6 +1,7 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -124,10 +125,11 @@ async fn handle_tls_connection(
     let target_host = host.clone();
     let src_addr = peer_addr.ip().to_string();
     let src_port = peer_addr.port();
-    let client_conn = state
+    let selected = state
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+    let client_conn = selected.conn;
     let sender_cache = tunnel_lib::new_h2_sender();
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let client_conn = client_conn.clone();
@@ -261,11 +263,11 @@ async fn handle_plaintext_h2_connection(
                 }
             };
             let (client_conn, h2_sender) = sender_cache.get_or_init(|| {
-                let conn = state
+                let selected = state
                     .registry
                     .select_client_for_group(&group_id)
                     .expect("no client for group");
-                (conn, tunnel_lib::new_h2_sender())
+                (selected.conn, tunnel_lib::new_h2_sender())
             });
             let (parts, body) = req.into_parts();
             debug!(
@@ -317,23 +319,44 @@ async fn handle_plaintext_h1_connection(
     debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
-    let client_conn = state
+    let selected = state
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
     let mut discard = vec![0u8; initial_data.len()];
     stream.read_exact(&mut discard).await?;
+    let routing_info = tunnel_lib::RoutingInfo {
+        proxy_name: proxy_name.to_string(),
+        src_addr: peer_addr.ip().to_string(),
+        src_port: peer_addr.port(),
+        protocol,
+        host: Some(host),
+    };
+    let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
+    let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
+    let wait_started = Instant::now();
+    let (mut send, recv) = match tokio::time::timeout(open_timeout, selected.conn.open_bi()).await {
+        Ok(Ok(streams)) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            streams
+        }
+        Ok(Err(e)) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            return Err(e.into());
+        }
+        Err(_) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            metrics::open_bi_timeout();
+            return Err(anyhow::anyhow!("open_bi timed out after {:?}", open_timeout));
+        }
+    };
+    tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
     proxy::forward_with_initial_data(
-        &client_conn,
-        tunnel_lib::RoutingInfo {
-            proxy_name: proxy_name.to_string(),
-            src_addr: peer_addr.ip().to_string(),
-            src_port: peer_addr.port(),
-            protocol,
-            host: Some(host),
-        },
+        send,
+        recv,
         stream,
         initial_data,
+        state.proxy_buffer_params.relay_buf_size,
     )
     .await
 }

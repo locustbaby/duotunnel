@@ -12,9 +12,15 @@ struct ClientInfo {
     conn: Connection,
 }
 
+#[derive(Clone)]
+pub struct SelectedConnection {
+    pub conn_id: Arc<str>,
+    pub conn: Connection,
+}
+
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
 ///
-/// `snapshot` is an `ArcSwap<Vec<Connection>>` — readers call `.load()` which is
+/// `snapshot` is an `ArcSwap<Vec<SelectedConnection>>` — readers call `.load()` which is
 /// a single atomic pointer load with no allocation.  Writers hold a `Mutex` to
 /// serialize mutations, rebuild the Vec, and swap atomically.
 ///
@@ -24,7 +30,7 @@ pub struct ClientGroup {
     /// Mutable index: client_id → Connection.  Only touched by writers.
     index: Mutex<std::collections::HashMap<String, Connection>>,
     /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
-    snapshot: ArcSwap<Vec<Connection>>,
+    snapshot: ArcSwap<Vec<SelectedConnection>>,
     counter: CachePadded<AtomicUsize>,
 }
 
@@ -40,7 +46,13 @@ impl ClientGroup {
     pub fn set(&self, client_id: String, conn: Connection) {
         let mut idx = self.index.lock();
         idx.insert(client_id, conn);
-        let snap: Vec<Connection> = idx.values().cloned().collect();
+        let snap: Vec<SelectedConnection> = idx
+            .iter()
+            .map(|(client_id, conn)| SelectedConnection {
+                conn_id: Arc::<str>::from(client_id.as_str()),
+                conn: conn.clone(),
+            })
+            .collect();
         self.snapshot.store(Arc::new(snap));
     }
 
@@ -48,7 +60,13 @@ impl ClientGroup {
         let mut idx = self.index.lock();
         let removed = idx.remove(client_id).is_some();
         if removed {
-            let snap: Vec<Connection> = idx.values().cloned().collect();
+            let snap: Vec<SelectedConnection> = idx
+                .iter()
+                .map(|(cid, conn)| SelectedConnection {
+                    conn_id: Arc::<str>::from(cid.as_str()),
+                    conn: conn.clone(),
+                })
+                .collect();
             self.snapshot.store(Arc::new(snap));
         }
         removed
@@ -59,7 +77,7 @@ impl ClientGroup {
     }
 
     /// O(1) allocation-free routing read via RCU snapshot.
-    pub fn select_healthy(&self) -> Option<Connection> {
+    pub fn select_healthy(&self) -> Option<SelectedConnection> {
         let conns = self.snapshot.load();
         let len = conns.len();
         if len == 0 {
@@ -68,7 +86,7 @@ impl ClientGroup {
         let start = self.counter.fetch_add(1, Ordering::Relaxed);
         for i in 0..len {
             let conn = &conns[(start + i) % len];
-            if conn.close_reason().is_none() {
+            if conn.conn.close_reason().is_none() {
                 return Some(conn.clone());
             }
         }
@@ -146,7 +164,7 @@ impl ClientRegistry {
         }
     }
 
-    pub fn select_client_for_group(&self, group_id: &str) -> Option<Connection> {
+    pub fn select_client_for_group(&self, group_id: &str) -> Option<SelectedConnection> {
         let group = self.groups.get(group_id)?;
         let conn = group.select_healthy();
         if conn.is_none() {
