@@ -468,6 +468,8 @@ function renderDetail(entry) {
   const prevSum = prev ? (prev.summary || {}) : {};
   const res = entry.resources || null;
   const traceArtifactUrl = entry.artifacts && entry.artifacts.trace_artifact_url ? entry.artifacts.trace_artifact_url : '';
+  const traceServer = entry.artifacts && entry.artifacts.trace_server ? entry.artifacts.trace_server : '';
+  const traceClient = entry.artifacts && entry.artifacts.trace_client ? entry.artifacts.trace_client : '';
   const runUrl = entry.run_url || '';
   const s7 = sha7(entry);
   const url = commitUrl(entry);
@@ -491,12 +493,14 @@ function renderDetail(entry) {
     <div class="card"><div class="lb">Scenarios</div><div class="val">${sc.length}</div><span class="d d-flat">${prev ? 'vs ' + sha7(prev) : 'first run'}</span></div>
   </div>
 
-  ${(traceArtifactUrl || runUrl) ? `
+  ${(traceServer || traceClient || traceArtifactUrl || runUrl) ? `
   <div class="row full">
     <div class="panel auto">
       <h3>Dial9 Traces (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
-        ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank">Download traces (server + client .bin.gz)</a>` : ''}
+        ${traceServer ? `<a href="./viewer/?trace=${encodeURIComponent(traceServer)}" target="_blank">Server trace (dial9 viewer)</a>` : ''}
+        ${traceClient ? `<a href="./viewer/?trace=${encodeURIComponent(traceClient)}" target="_blank">Client trace (dial9 viewer)</a>` : ''}
+        ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank" style="color:var(--text2)">Download .bin.gz ↗</a>` : ''}
         ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>
     </div>
