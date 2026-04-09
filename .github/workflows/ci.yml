@@ -1448,6 +1448,8 @@ jobs:
     if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false)
     permissions:
       contents: read
+    outputs:
+      trace_artifact_url: ${{ steps.upload-traces.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -1733,15 +1735,17 @@ jobs:
             /tmp/trace-q4/bench-results.json
 
       - name: Upload dial9 traces (8k)
+        id: upload-traces
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dial9-traces-8k-${{ github.run_id }}
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: warn
           path: |
             /tmp/trace-q4/server-trace.bin.gz
             /tmp/trace-q4/client-trace.bin.gz
+
 
       - name: Upload logs
         if: always()
@@ -1795,13 +1799,6 @@ jobs:
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
-
-      - name: Download dial9 traces (q4)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: dial9-traces-8k-${{ github.run_id }}
-          path: /tmp/dial9-traces-q4
 
       - name: Merge benchmark outputs
         run: |
@@ -1956,20 +1953,10 @@ jobs:
           if [ -s /tmp/core/resource-data.json ]; then
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
-          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
-          mkdir -p bench/traces
-          TRACE_SERVER_ARG=""; TRACE_CLIENT_ARG=""
-          REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
-          BASE_URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
-          Q4_SERVER=$(find /tmp/dial9-traces-q4 -name "server-trace.bin.gz" 2>/dev/null | head -1)
-          Q4_CLIENT=$(find /tmp/dial9-traces-q4 -name "client-trace.bin.gz" 2>/dev/null | head -1)
-          if [ -n "$Q4_SERVER" ] && [ -s "$Q4_SERVER" ]; then
-            cp "$Q4_SERVER" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
-            TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-server.bin.gz"
-          fi
-          if [ -n "$Q4_CLIENT" ] && [ -s "$Q4_CLIENT" ]; then
-            cp "$Q4_CLIENT" "bench/traces/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
-            TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-${{ github.run_id }}-client.bin.gz"
+          TRACE_ARTIFACT_URL_ARG=""
+          TRACE_ARTIFACT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_url }}"
+          if [ -n "$TRACE_ARTIFACT_URL" ]; then
+            TRACE_ARTIFACT_URL_ARG="--trace-artifact-url $TRACE_ARTIFACT_URL"
           fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result  /tmp/bench-results-merged.json \
@@ -1979,7 +1966,7 @@ jobs:
             --url     "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
-            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG
+            $TRACE_ARTIFACT_URL_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/

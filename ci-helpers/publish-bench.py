@@ -14,8 +14,7 @@ def main():
     p.add_argument("--resources", default="")
     p.add_argument("--frp-result", default="")
     p.add_argument("--frp-k6-offset", type=int, default=0)
-    p.add_argument("--trace-server", default="")
-    p.add_argument("--trace-client", default="")
+    p.add_argument("--trace-artifact-url", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -29,10 +28,8 @@ def main():
     if args.resources and os.path.exists(args.resources):
         with open(args.resources) as f:
             entry["resources"] = json.load(f)
-    if args.trace_server:
-        entry.setdefault("artifacts", {})["trace_server"] = args.trace_server
-    if args.trace_client:
-        entry.setdefault("artifacts", {})["trace_client"] = args.trace_client
+    if args.trace_artifact_url:
+        entry.setdefault("artifacts", {})["trace_artifact_url"] = args.trace_artifact_url
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -101,25 +98,6 @@ def main():
 
     with open(args.data, "w") as f:
         f.write(PREFIX + json.dumps({"entries": entries}, indent=2) + SUFFIX + "\n")
-
-    for subdir, keys in [
-        ("traces", ("trace_server", "trace_client")),
-    ]:
-        d = os.path.join(bench_dir, subdir)
-        if not os.path.isdir(d):
-            continue
-        keep = set()
-        marker = f"/{subdir}/"
-        for e in entries:
-            arts = e.get("artifacts") or {}
-            for key in keys:
-                pth = arts.get(key)
-                if isinstance(pth, str) and marker in pth:
-                    keep.add(pth.split(marker, 1)[1])
-        for name in os.listdir(d):
-            fp = os.path.join(d, name)
-            if os.path.isfile(fp) and name not in keep:
-                os.remove(fp)
 
     kept_shas = set()
     for e in entries:
