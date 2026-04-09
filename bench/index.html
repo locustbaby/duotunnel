@@ -498,8 +498,8 @@ function renderDetail(entry) {
     <div class="panel auto">
       <h3>Dial9 Traces (8k scenario)</h3>
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
-        ${traceServer ? `<a href="./viewer/?trace=${encodeURIComponent(traceServer)}" target="_blank">Server trace (dial9 viewer)</a>` : ''}
-        ${traceClient ? `<a href="./viewer/?trace=${encodeURIComponent(traceClient)}" target="_blank">Client trace (dial9 viewer)</a>` : ''}
+        ${traceServer ? `<a href="${esc(traceServer)}" target="_blank">Server trace (dial9 viewer)</a>` : ''}
+        ${traceClient ? `<a href="${esc(traceClient)}" target="_blank">Client trace (dial9 viewer)</a>` : ''}
         ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank" style="color:var(--text2)">Download .bin.gz ↗</a>` : ''}
         ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>

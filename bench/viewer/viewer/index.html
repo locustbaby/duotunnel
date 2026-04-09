@@ -348,7 +348,7 @@
         </style>
     </head>
     <body>
-        <div id="drop-zone">
+        <div id="drop-zone" style="display:none">
             <div>
                 <div style="font-size: 2em; margin-bottom: 12px">📊</div>
                 <div>
@@ -848,16 +848,20 @@
             }
 
             // Check for URL parameter on load
-            const urlParams = new URLSearchParams(window.location.search);
-            const traceUrl = urlParams.get('trace');
-            if (traceUrl) {
-                showLoadingState('Loading trace…');
-                // Shard mode: ?trace=<base> where base has no file extension
-                const isShard = !traceUrl.match(/\.(bin|gz|bin\.gz)(\?|$)/);
-                if (isShard) {
-                    loadTraceFromShards(traceUrl);
+            {
+                const urlParams = new URLSearchParams(window.location.search);
+                const traceUrl = urlParams.get('trace');
+                if (traceUrl) {
+                    showLoadingState('Loading trace…');
+                    const isShard = !traceUrl.match(/\.(bin|gz|bin\.gz)(\?|$)/);
+                    if (isShard) {
+                        loadTraceFromShards(traceUrl);
+                    } else {
+                        loadTraceFromUrl(traceUrl);
+                    }
                 } else {
-                    loadTraceFromUrl(traceUrl);
+                    // No URL param — show drop zone for manual file load
+                    dropZone.style.display = 'flex';
                 }
             }
 
