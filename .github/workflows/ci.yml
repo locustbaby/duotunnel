@@ -1751,6 +1751,13 @@ jobs:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
 
+      - name: Download dial9 traces (q4)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-traces-8k-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4
+
       - name: Merge benchmark outputs
         run: |
           if [ ! -s /tmp/core/bench-results.json ]; then
@@ -1891,6 +1898,7 @@ jobs:
           fi
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
+          cp -r "${{ github.workspace }}/bench/viewer" bench/viewer
           FRP_ARG=""
           FRP_OFFSET_ARG=""
           if [ -s /tmp/core/bench-results-frp.json ]; then
@@ -1904,7 +1912,28 @@ jobs:
           if [ -s /tmp/core/resource-data.json ]; then
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
+          TRACE_SERVER_ARG=""
+          TRACE_CLIENT_ARG=""
           TRACE_ARTIFACT_URL_ARG=""
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
+          BASE_URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
+          Q4_SERVER=$(find /tmp/dial9-traces-q4 -name "server-trace.bin.gz" 2>/dev/null | head -1)
+          Q4_CLIENT=$(find /tmp/dial9-traces-q4 -name "client-trace.bin.gz" 2>/dev/null | head -1)
+          if [ -n "$Q4_SERVER" ] && [ -s "$Q4_SERVER" ]; then
+            mkdir -p bench/traces
+            node "${{ github.workspace }}/bench/viewer/bin2json.js" \
+              "$Q4_SERVER" \
+              "bench/traces/${SHORT_SHA}-server"
+            TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-server"
+          fi
+          if [ -n "$Q4_CLIENT" ] && [ -s "$Q4_CLIENT" ]; then
+            mkdir -p bench/traces
+            node "${{ github.workspace }}/bench/viewer/bin2json.js" \
+              "$Q4_CLIENT" \
+              "bench/traces/${SHORT_SHA}-client"
+            TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-client"
+          fi
           TRACE_ARTIFACT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_url }}"
           if [ -n "$TRACE_ARTIFACT_URL" ]; then
             TRACE_ARTIFACT_URL_ARG="--trace-artifact-url $TRACE_ARTIFACT_URL"
@@ -1917,7 +1946,7 @@ jobs:
             --url     "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
-            $TRACE_ARTIFACT_URL_ARG
+            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG $TRACE_ARTIFACT_URL_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
