@@ -1,5 +1,9 @@
-/// Default relay read-buffer size. Matches `ProxyBufferConfig::relay_buf_size` default.
 pub const DEFAULT_RELAY_BUF_SIZE: usize = 65536;
+pub const MIN_RELAY_BUF_SIZE: usize = 4096;
+
+pub fn normalize_relay_buf_size(value: usize) -> usize {
+    value.max(MIN_RELAY_BUF_SIZE)
+}
 
 #[derive(Debug, Clone)]
 pub struct ProxyBufferParams {

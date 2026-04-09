@@ -1,22 +1,14 @@
-use crate::{send_routing_info, RoutingInfo};
 use anyhow::Result;
-use quinn::Connection;
+use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tracing::info;
 
 pub async fn forward_to_client(
-    client_conn: &Connection,
-    routing_info: RoutingInfo,
+    mut send: SendStream,
+    recv: RecvStream,
     external_stream: TcpStream,
     relay_buf_size: usize,
 ) -> Result<()> {
-    info!(
-        proxy_name = % routing_info.proxy_name, src_addr = % routing_info.src_addr,
-        "forwarding to client via QUIC"
-    );
-    let (mut send, recv) = client_conn.open_bi().await?;
-    send_routing_info(&mut send, &routing_info).await?;
     let (tcp_read, mut tcp_write) = external_stream.into_split();
     let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);
     let mut tcp_read = BufReader::with_capacity(relay_buf_size, tcp_read);
@@ -38,20 +30,12 @@ pub async fn forward_to_client(
 }
 
 pub async fn forward_with_initial_data(
-    client_conn: &Connection,
-    routing_info: RoutingInfo,
+    mut send: SendStream,
+    recv: RecvStream,
     external_stream: TcpStream,
     initial_data: &[u8],
     relay_buf_size: usize,
 ) -> Result<()> {
-    info!(
-        proxy_name = % routing_info.proxy_name, initial_bytes = initial_data.len(),
-        "forwarding to client with initial data"
-    );
-    let (mut send, recv) = client_conn.open_bi().await?;
-    send_routing_info(&mut send, &routing_info).await?;
-    // initial_data is the peeked bytes from the TCP stream; send them to the
-    // QUIC client first, then relay both directions with configurable buffering.
     send.write_all(initial_data).await?;
     let (tcp_read, mut tcp_write) = external_stream.into_split();
     let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);

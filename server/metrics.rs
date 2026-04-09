@@ -1,7 +1,9 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
+use std::sync::Arc;
 lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
     pub static ref ACTIVE_QUIC_CONNECTIONS: IntGauge = IntGauge::new(
@@ -52,6 +54,40 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref OPEN_BI_WAIT_MS: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "duotunnel_open_bi_wait_ms",
+            "open_bi wait time in milliseconds"
+        )
+        .buckets(vec![
+            0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
+            1024.0,
+        ]),
+    )
+    .unwrap();
+    pub static ref OPEN_BI_TOTAL: IntCounter = IntCounter::new(
+        "duotunnel_open_bi_total",
+        "Total open_bi attempts"
+    )
+    .unwrap();
+    pub static ref OPEN_BI_TIMEOUT_TOTAL: IntCounter = IntCounter::new(
+        "duotunnel_open_bi_timeout_total",
+        "Total open_bi timeout events"
+    )
+    .unwrap();
+    pub static ref OPEN_BI_TIMEOUT_RATIO: Gauge = Gauge::new(
+        "duotunnel_open_bi_timeout_ratio",
+        "open_bi timeout ratio = timeout_total / open_bi_total"
+    )
+    .unwrap();
+    pub static ref OPEN_BI_INFLIGHT_PER_CONN: IntGaugeVec = IntGaugeVec::new(
+        Opts::new(
+            "duotunnel_open_bi_inflight_per_conn",
+            "In-flight streams per selected client connection"
+        ),
+        &["conn_id"]
+    )
+    .unwrap();
 }
 pub fn init() {
     REGISTRY
@@ -72,6 +108,13 @@ pub fn init() {
     REGISTRY.register(Box::new(REQUESTS_TOTAL.clone())).ok();
     REGISTRY
         .register(Box::new(CONNECTIONS_REJECTED.clone()))
+        .ok();
+    REGISTRY.register(Box::new(OPEN_BI_WAIT_MS.clone())).ok();
+    REGISTRY.register(Box::new(OPEN_BI_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(OPEN_BI_TIMEOUT_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(OPEN_BI_TIMEOUT_RATIO.clone())).ok();
+    REGISTRY
+        .register(Box::new(OPEN_BI_INFLIGHT_PER_CONN.clone()))
         .ok();
 }
 pub fn encode() -> String {
@@ -112,4 +155,43 @@ pub fn request_completed(protocol: &str, status: &str) {
 }
 pub fn connection_rejected(conn_type: &str) {
     CONNECTIONS_REJECTED.with_label_values(&[conn_type]).inc();
+}
+
+fn refresh_open_bi_timeout_ratio() {
+    let total = OPEN_BI_TOTAL.get() as f64;
+    let timeout = OPEN_BI_TIMEOUT_TOTAL.get() as f64;
+    let ratio = if total > 0.0 { timeout / total } else { 0.0 };
+    OPEN_BI_TIMEOUT_RATIO.set(ratio);
+}
+
+pub struct OpenBiInflightGuard {
+    conn_id: Arc<str>,
+}
+
+impl Drop for OpenBiInflightGuard {
+    fn drop(&mut self) {
+        OPEN_BI_INFLIGHT_PER_CONN
+            .with_label_values(&[self.conn_id.as_ref()])
+            .dec();
+    }
+}
+
+pub fn open_bi_begin(conn_id: &Arc<str>) -> OpenBiInflightGuard {
+    OPEN_BI_TOTAL.inc();
+    OPEN_BI_INFLIGHT_PER_CONN
+        .with_label_values(&[conn_id.as_ref()])
+        .inc();
+    refresh_open_bi_timeout_ratio();
+    OpenBiInflightGuard {
+        conn_id: Arc::clone(conn_id),
+    }
+}
+
+pub fn open_bi_observe_wait_ms(wait_ms: f64) {
+    OPEN_BI_WAIT_MS.observe(wait_ms);
+}
+
+pub fn open_bi_timeout() {
+    OPEN_BI_TIMEOUT_TOTAL.inc();
+    refresh_open_bi_timeout_ratio();
 }

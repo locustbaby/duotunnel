@@ -176,6 +176,13 @@ impl ClientConfigFile {
         if self.reconnect.open_stream_timeout_ms == 0 {
             errors.push("reconnect.open_stream_timeout_ms must be >= 1".into());
         }
+        if self.proxy_buffers.relay_buf_size < tunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE {
+            errors.push(format!(
+                "proxy_buffers.relay_buf_size ({}) must be >= {}",
+                self.proxy_buffers.relay_buf_size,
+                tunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE
+            ));
+        }
         if let Some(name) = self.tls_server_name.as_ref() {
             if name.trim().is_empty() {
                 errors.push("tls_server_name must not be empty when set".into());

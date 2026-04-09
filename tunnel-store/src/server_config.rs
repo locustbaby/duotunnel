@@ -59,6 +59,8 @@ pub struct ServerBasicConfig {
     pub pki: PkiParams,
     #[serde(default = "default_login_timeout_secs")]
     pub login_timeout_secs: u64,
+    #[serde(default = "default_open_stream_timeout_ms")]
+    pub open_stream_timeout_ms: u64,
     #[serde(default = "default_h2_single_authority")]
     pub h2_single_authority: bool,
 }
@@ -68,6 +70,9 @@ fn default_max_connections() -> usize {
 }
 fn default_login_timeout_secs() -> u64 {
     10
+}
+fn default_open_stream_timeout_ms() -> u64 {
+    2000
 }
 fn default_h2_single_authority() -> bool {
     true

@@ -1,4 +1,4 @@
-use crate::proxy::buffer_params::ProxyBufferParams;
+use crate::proxy::buffer_params::{normalize_relay_buf_size, ProxyBufferParams};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,7 +27,7 @@ impl From<&ProxyBufferConfig> for ProxyBufferParams {
             peek_buf_size: c.peek_buf_size,
             http_header_buf_size: c.http_header_buf_size,
             http_body_chunk_size: c.http_body_chunk_size,
-            relay_buf_size: c.relay_buf_size,
+            relay_buf_size: normalize_relay_buf_size(c.relay_buf_size),
         }
     }
 }
