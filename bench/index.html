@@ -338,7 +338,12 @@ function navigate() {
     const entry = findEntry(hash);
     if (entry) {
       root.innerHTML = '<div class="empty" style="padding:60px 0"><p style="color:var(--text2)">Loading…</p></div>';
-      loadDetail(entry).then(full => { destroyCharts(); renderDetail(full); });
+      const navigatedHash = hash;
+      loadDetail(entry).then(full => {
+        if (location.hash.replace('#','') !== navigatedHash) return;
+        destroyCharts();
+        renderDetail(full);
+      });
       return;
     }
   }
