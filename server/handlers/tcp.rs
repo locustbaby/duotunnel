@@ -79,6 +79,7 @@ async fn handle_tcp_connection(
             host,
         },
         stream,
+        state.proxy_buffer_params.relay_buf_size,
     )
     .await;
     pool.put(buf);

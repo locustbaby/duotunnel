@@ -334,6 +334,7 @@ async fn handle_plaintext_h1_connection(
         },
         stream,
         initial_data,
+        state.proxy_buffer_params.relay_buf_size,
     )
     .await
 }

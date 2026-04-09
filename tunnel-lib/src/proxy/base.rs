@@ -5,12 +5,11 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tracing::info;
 
-const RELAY_BUF: usize = 65536;
-
 pub async fn forward_to_client(
     client_conn: &Connection,
     routing_info: RoutingInfo,
     external_stream: TcpStream,
+    relay_buf_size: usize,
 ) -> Result<()> {
     info!(
         proxy_name = % routing_info.proxy_name, src_addr = % routing_info.src_addr,
@@ -19,8 +18,8 @@ pub async fn forward_to_client(
     let (mut send, recv) = client_conn.open_bi().await?;
     send_routing_info(&mut send, &routing_info).await?;
     let (tcp_read, mut tcp_write) = external_stream.into_split();
-    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, recv);
-    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
+    let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);
+    let mut tcp_read = BufReader::with_capacity(relay_buf_size, tcp_read);
     let quic_to_tcp = async {
         let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
         let _ = tcp_write.shutdown().await;
@@ -43,6 +42,7 @@ pub async fn forward_with_initial_data(
     routing_info: RoutingInfo,
     external_stream: TcpStream,
     initial_data: &[u8],
+    relay_buf_size: usize,
 ) -> Result<()> {
     info!(
         proxy_name = % routing_info.proxy_name, initial_bytes = initial_data.len(),
@@ -51,11 +51,11 @@ pub async fn forward_with_initial_data(
     let (mut send, recv) = client_conn.open_bi().await?;
     send_routing_info(&mut send, &routing_info).await?;
     // initial_data is the peeked bytes from the TCP stream; send them to the
-    // QUIC client first, then relay both directions with 64 KiB buffering.
+    // QUIC client first, then relay both directions with configurable buffering.
     send.write_all(initial_data).await?;
     let (tcp_read, mut tcp_write) = external_stream.into_split();
-    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, recv);
-    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
+    let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);
+    let mut tcp_read = BufReader::with_capacity(relay_buf_size, tcp_read);
     let quic_to_tcp = async {
         let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
         let _ = tcp_write.shutdown().await;
