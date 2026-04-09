@@ -348,7 +348,7 @@
         </style>
     </head>
     <body>
-        <div id="drop-zone">
+        <div id="drop-zone" style="display:none">
             <div>
                 <div style="font-size: 2em; margin-bottom: 12px">📊</div>
                 <div>
@@ -747,15 +747,43 @@
                 }
             }
 
+            // ── Inline Web Worker: fetch + gunzip + JSON.parse off main thread ──
+            const _workerBlob = new Blob([`
+                self.onmessage = async ({ data: { url, id } }) => {
+                    try {
+                        const resp = await fetch(url);
+                        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                        const isGz = url.endsWith('.gz');
+                        const text = isGz
+                            ? await new Response(resp.body.pipeThrough(new DecompressionStream('gzip'))).text()
+                            : await resp.text();
+                        const parsed = JSON.parse(text);
+                        self.postMessage({ id, ok: true, data: parsed });
+                    } catch (e) {
+                        self.postMessage({ id, ok: false, error: e.message });
+                    }
+                };
+            `], { type: 'application/javascript' });
+            const _workerUrl = URL.createObjectURL(_workerBlob);
+
+            function fetchJsonOffThread(url) {
+                return new Promise((resolve, reject) => {
+                    const w = new Worker(_workerUrl);
+                    w.onmessage = ({ data }) => {
+                        w.terminate();
+                        data.ok ? resolve(data.data) : reject(new Error(data.error));
+                    };
+                    w.postMessage({ url, id: 1 });
+                });
+            }
+
             // ── Shard-based loader (bin2json.js output) ──
             // Base URL points to <base>-meta.json / <base>-events.json.gz / <base>-cpu.json.gz
             async function loadTraceFromShards(baseUrl) {
                 try {
-                    // Step 1: fetch meta (small, ~1 MB, not gzipped)
+                    // Step 1: fetch meta (small, ~1 MB, not gzipped) — off main thread
                     showLoadingState('Loading trace metadata…');
-                    const metaResp = await fetch(baseUrl + '-meta.json', { signal: loadAbortController?.signal });
-                    if (!metaResp.ok) throw new Error(`meta HTTP ${metaResp.status}`);
-                    const meta = await metaResp.json();
+                    const meta = await fetchJsonOffThread(baseUrl + '-meta.json');
 
                     // Restore Maps from [key,value] arrays
                     trace = {
@@ -773,18 +801,13 @@
                         taskSpawnTimes:   new Map(meta.taskSpawnTimes),
                         taskTerminateTimes: new Map(meta.taskTerminateTimes),
                         runtimeWorkers:   new Map(meta.runtimeWorkers),
-                        _cpuUrl: baseUrl + '-cpu.json.gz',   // for lazy load
+                        _cpuUrl: baseUrl + '-cpu.json.gz',
                         _cpuLoaded: false,
                     };
 
-                    // Step 2: fetch events (gzipped JSON, browser decompresses via DecompressionStream)
+                    // Step 2: fetch + gunzip + JSON.parse events off main thread
                     showLoadingState(`Loading ${meta.eventCount.toLocaleString()} events…`);
-                    const evResp = await fetch(baseUrl + '-events.json.gz', { signal: loadAbortController?.signal });
-                    if (!evResp.ok) throw new Error(`events HTTP ${evResp.status}`);
-                    const evText = await new Response(
-                        evResp.body.pipeThrough(new DecompressionStream('gzip'))
-                    ).text();
-                    trace.events = JSON.parse(evText);
+                    trace.events = await fetchJsonOffThread(baseUrl + '-events.json.gz');
 
                     loadAbortController = null;
                     processTrace();
@@ -799,28 +822,21 @@
             // ── CPU samples lazy loader ──
             async function ensureCpuSamples() {
                 if (!trace || trace._cpuLoaded || !trace._cpuUrl) return;
-                trace._cpuLoaded = true; // prevent double-fetch
+                trace._cpuLoaded = true;
                 try {
-                    const resp = await fetch(trace._cpuUrl);
-                    if (!resp.ok) throw new Error(`cpu HTTP ${resp.status}`);
-                    const text = await new Response(
-                        resp.body.pipeThrough(new DecompressionStream('gzip'))
-                    ).text();
-                    const samples = JSON.parse(text);
+                    const samples = await fetchJsonOffThread(trace._cpuUrl);
                     trace.cpuSamples = samples;
                     // Attach cpu samples to existing workerSpans polls
-                    if (samples.length > 0) {
-                        for (const w of workerIds) {
-                            const spans = workerSpans[w];
-                            if (!spans) continue;
-                            for (const sample of samples) {
-                                if (sample.workerId !== w) continue;
-                                const ts = sample.timestamp;
-                                for (const poll of spans.polls) {
-                                    if (ts >= poll.start && ts < poll.end) {
-                                        (poll.cpuSamples ??= []).push(sample);
-                                        break;
-                                    }
+                    for (const w of workerIds) {
+                        const spans = workerSpans[w];
+                        if (!spans) continue;
+                        for (const sample of samples) {
+                            if (sample.workerId !== w) continue;
+                            const ts = sample.timestamp;
+                            for (const poll of spans.polls) {
+                                if (ts >= poll.start && ts < poll.end) {
+                                    (poll.cpuSamples ??= []).push(sample);
+                                    break;
                                 }
                             }
                         }
@@ -832,16 +848,20 @@
             }
 
             // Check for URL parameter on load
-            const urlParams = new URLSearchParams(window.location.search);
-            const traceUrl = urlParams.get('trace');
-            if (traceUrl) {
-                showLoadingState('Loading trace…');
-                // Shard mode: ?trace=<base> where base has no file extension
-                const isShard = !traceUrl.match(/\.(bin|gz|bin\.gz)(\?|$)/);
-                if (isShard) {
-                    loadTraceFromShards(traceUrl);
+            {
+                const urlParams = new URLSearchParams(window.location.search);
+                const traceUrl = urlParams.get('trace');
+                if (traceUrl) {
+                    showLoadingState('Loading trace…');
+                    const isShard = !traceUrl.match(/\.(bin|gz|bin\.gz)(\?|$)/);
+                    if (isShard) {
+                        loadTraceFromShards(traceUrl);
+                    } else {
+                        loadTraceFromUrl(traceUrl);
+                    }
                 } else {
-                    loadTraceFromUrl(traceUrl);
+                    // No URL param — show drop zone for manual file load
+                    dropZone.style.display = 'flex';
                 }
             }
 

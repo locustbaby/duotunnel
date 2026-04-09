@@ -17,6 +17,8 @@ def main():
     p.add_argument("--trace-server", default="")
     p.add_argument("--trace-client", default="")
     p.add_argument("--trace-artifact-url", default="")
+    # Per-case traces: path to JSON file with list of {"case": "...", "server": "url", "client": "url"}
+    p.add_argument("--trace-cases-file", default="")
     p.add_argument("--max-entries", type=int, default=50)
     args = p.parse_args()
 
@@ -36,6 +38,11 @@ def main():
         entry.setdefault("artifacts", {})["trace_client"] = args.trace_client
     if args.trace_artifact_url:
         entry.setdefault("artifacts", {})["trace_artifact_url"] = args.trace_artifact_url
+    if args.trace_cases_file and os.path.exists(args.trace_cases_file):
+        with open(args.trace_cases_file) as f:
+            cases_list = json.load(f)
+        if isinstance(cases_list, list) and cases_list:
+            entry.setdefault("artifacts", {})["trace_cases"] = cases_list
 
     if args.frp_result and os.path.exists(args.frp_result):
         with open(args.frp_result) as f:
@@ -123,12 +130,23 @@ def main():
         for e in entries:
             arts = e.get("artifacts") or {}
             for key in ("trace_server", "trace_client"):
-                base = arts.get(key)
-                if isinstance(base, str) and marker in base:
-                    stem = base.split(marker, 1)[1]
-                    # each shard base produces three files
-                    for suffix in ("-meta.json", "-events.json.gz", "-cpu.json.gz"):
-                        keep_traces.add(stem + suffix)
+                pth = arts.get(key)
+                if isinstance(pth, str) and marker in pth:
+                    base = pth.split(marker, 1)[1]
+                    # Could be a shard base or a plain filename; keep all variants
+                    keep_traces.add(base)
+                    keep_traces.add(base + "-meta.json")
+                    keep_traces.add(base + "-events.json.gz")
+                    keep_traces.add(base + "-cpu.json.gz")
+            for tc in arts.get("trace_cases") or []:
+                for key in ("server", "client"):
+                    pth = tc.get(key) if isinstance(tc, dict) else None
+                    if isinstance(pth, str) and marker in pth:
+                        base = pth.split(marker, 1)[1]
+                        # Keep all 3 shards for this base
+                        keep_traces.add(base + "-meta.json")
+                        keep_traces.add(base + "-events.json.gz")
+                        keep_traces.add(base + "-cpu.json.gz")
         for name in os.listdir(traces_dir):
             fp = os.path.join(traces_dir, name)
             if os.path.isfile(fp) and name not in keep_traces:

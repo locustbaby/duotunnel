@@ -26,6 +26,12 @@ function filterCases(cases, profile) {
   return cases;
 }
 
+function filterByCase(cases) {
+  const name = (__ENV.BENCH_CASE || '').trim();
+  if (!name) return cases;
+  return cases.filter((c) => c.name === name);
+}
+
 function parseEnvPositiveInt(v) {
   if (v === undefined || v === null || v === '') return null;
   const n = Number.parseInt(String(v), 10);
@@ -81,7 +87,7 @@ function filterPhases(phases, activeCases) {
 }
 
 const BENCH_PROFILE = activeProfile();
-const FILTERED_CASES = apply8kScenarioOverrides(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE));
+const FILTERED_CASES = apply8kScenarioOverrides(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)));
 const { cases: ACTIVE_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
 const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
   ...p,

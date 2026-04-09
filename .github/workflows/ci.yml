@@ -1496,8 +1496,8 @@ jobs:
         timeout-minutes: 25
         run: |
           run_case() {
-            Q="$1"
-            SUFFIX="q${Q}"
+            CASE_NAME="$1"
+            SUFFIX="${CASE_NAME}"
             rm -f /tmp/bench-results.json /tmp/server-trace.*.bin /tmp/client-trace.*.bin /tmp/server-trace.*.bin.active /tmp/client-trace.*.bin.active /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
@@ -1638,6 +1638,7 @@ jobs:
             (cd ci-helpers/k6 && k6 run \
               -e GITHUB_SHA=${{ github.sha }} \
               -e BENCH_PROFILE=8k \
+              -e BENCH_CASE="${CASE_NAME}" \
               bench.js)
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
@@ -1664,6 +1665,7 @@ jobs:
             cp "/tmp/http-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/http-echo.log"
             cp "/tmp/ws-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ws-echo.log"
             cp "/tmp/grpc-echo-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/grpc-echo.log"
+            echo "=== case ${CASE_NAME} done, trace dir: /tmp/trace-${SUFFIX} ===" && ls -lh "/tmp/trace-${SUFFIX}/"
 
             CTLD_PID="$(cat /tmp/ctld.pid 2>/dev/null || true)"
             [ -n "$CTLD_PID" ] && kill -TERM "$CTLD_PID" 2>/dev/null || true
@@ -1674,7 +1676,58 @@ jobs:
             kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
           }
 
-          run_case 4
+          run_case ingress_8000qps
+          run_case egress_8000qps
+          run_case ingress_multihost_8000qps
+          run_case egress_multihost_8000qps
+
+          # Merge all 4 per-case bench-results.json into one combined file
+          python3 - << 'PY'
+          import json, os
+          from copy import deepcopy
+
+          cases = ["ingress_8000qps", "egress_8000qps", "ingress_multihost_8000qps", "egress_multihost_8000qps"]
+          merged = None
+          sc_by_name = {}
+          for case in cases:
+              p = f"/tmp/trace-{case}/bench-results.json"
+              if not os.path.isfile(p):
+                  continue
+              with open(p) as f:
+                  data = json.load(f)
+              if merged is None:
+                  merged = deepcopy(data)
+                  merged["scenarios"] = []
+                  merged["phases"] = []
+                  sc_by_name = {}
+              cur_max = max((float(ph.get("end", 0)) for ph in merged.get("phases", []) if isinstance(ph, dict)), default=0)
+              offset = cur_max + 5 if cur_max > 0 else 0
+              for s in data.get("scenarios", []):
+                  if isinstance(s, dict) and s.get("name"):
+                      sc_by_name[s["name"]] = s
+              for ph in data.get("phases", []):
+                  if not isinstance(ph, dict):
+                      continue
+                  np = deepcopy(ph)
+                  np["start"] = round(float(np.get("start", 0)) + offset, 2)
+                  np["end"] = round(float(np.get("end", 0)) + offset, 2)
+                  merged["phases"].append(np)
+          if merged:
+              merged["scenarios"] = list(sc_by_name.values())
+              total_req = sum(float(s.get("requests", 0) or 0) for s in merged["scenarios"])
+              total_err = sum(float(s.get("requests", 0) or 0) * float(s.get("err", 0) or 0) / 100.0 for s in merged["scenarios"])
+              total_rps = sum(float(s.get("rps", 0) or 0) for s in merged["scenarios"] if s.get("includeInTotalRps"))
+              merged["summary"] = {
+                  "totalRPS": round(total_rps, 2),
+                  "totalErr": round(0.0 if total_req <= 0 else total_err / total_req * 100.0, 2),
+                  "totalRequests": int(round(total_req)),
+              }
+              with open("/tmp/bench-results-8k-combined.json", "w") as f:
+                  json.dump(merged, f, indent=2)
+              print("Combined bench-results written.")
+          else:
+              print("WARNING: no bench-results found for any 8k case")
+          PY
 
       - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1683,7 +1736,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
-            /tmp/trace-q4/bench-results.json
+            /tmp/bench-results-8k-combined.json
 
       - name: Upload dial9 traces (8k)
         id: upload-traces
@@ -1694,8 +1747,14 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
           path: |
-            /tmp/trace-q4/server-trace.bin.gz
-            /tmp/trace-q4/client-trace.bin.gz
+            /tmp/trace-ingress_8000qps/server-trace.bin.gz
+            /tmp/trace-ingress_8000qps/client-trace.bin.gz
+            /tmp/trace-egress_8000qps/server-trace.bin.gz
+            /tmp/trace-egress_8000qps/client-trace.bin.gz
+            /tmp/trace-ingress_multihost_8000qps/server-trace.bin.gz
+            /tmp/trace-ingress_multihost_8000qps/client-trace.bin.gz
+            /tmp/trace-egress_multihost_8000qps/server-trace.bin.gz
+            /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
 
 
       - name: Upload logs
@@ -1705,13 +1764,10 @@ jobs:
           name: stress-trace-8k-logs-${{ github.run_id }}
           retention-days: 7
           path: |
-            /tmp/trace-q4/ci-server.log
-            /tmp/trace-q4/ci-client.log
-            /tmp/trace-q4/ci-ctld.log
-            /tmp/trace-q4/http-echo.log
-            /tmp/trace-q4/ws-echo.log
-            /tmp/trace-q4/grpc-echo.log
-            /tmp/trace-q4/bench-results.json
+            /tmp/trace-ingress_8000qps/
+            /tmp/trace-egress_8000qps/
+            /tmp/trace-ingress_multihost_8000qps/
+            /tmp/trace-egress_multihost_8000qps/
 
       - name: Cleanup
         if: always()
@@ -1771,7 +1827,7 @@ jobs:
           import os
 
           core_path = "/tmp/core/bench-results.json"
-          extra_q4_path = "/tmp/profile8k/bench-results.json" if os.path.isfile("/tmp/profile8k/bench-results.json") else None
+          extra_q4_path = "/tmp/profile8k/bench-results-8k-combined.json" if os.path.isfile("/tmp/profile8k/bench-results-8k-combined.json") else None
           out_path = "/tmp/bench-results-merged.json"
 
           def r2(v):
@@ -1899,6 +1955,8 @@ jobs:
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           cp -r "${{ github.workspace }}/bench/viewer" bench/viewer
+          # Remove legacy inline HTML viewer files (replaced by shard mode)
+          find bench/traces -name "*.html" -delete 2>/dev/null || true
           FRP_ARG=""
           FRP_OFFSET_ARG=""
           if [ -s /tmp/core/bench-results-frp.json ]; then
@@ -1912,28 +1970,43 @@ jobs:
           if [ -s /tmp/core/resource-data.json ]; then
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
-          TRACE_SERVER_ARG=""
-          TRACE_CLIENT_ARG=""
           TRACE_ARTIFACT_URL_ARG=""
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
           REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
           BASE_URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
-          Q4_SERVER=$(find /tmp/dial9-traces-q4 -name "server-trace.bin.gz" 2>/dev/null | head -1)
-          Q4_CLIENT=$(find /tmp/dial9-traces-q4 -name "client-trace.bin.gz" 2>/dev/null | head -1)
-          if [ -n "$Q4_SERVER" ] && [ -s "$Q4_SERVER" ]; then
-            mkdir -p bench/traces
-            node "${{ github.workspace }}/bench/viewer/bin2json.js" \
-              "$Q4_SERVER" \
-              "bench/traces/${SHORT_SHA}-server"
-            TRACE_SERVER_ARG="--trace-server ${BASE_URL}/${SHORT_SHA}-server"
+          mkdir -p bench/traces
+          # For each per-case trace: decode to 3 JSON shards (meta + events.gz + cpu.gz).
+          # Shards are ~1-15 MB each — no single file near the 100 MB push limit.
+          # The viewer fetches shards via ?trace=<base-url> and parses them in the browser.
+          TRACE_CASES_JSON='['
+          FIRST=1
+          for CASE_NAME in ingress_8000qps egress_8000qps ingress_multihost_8000qps egress_multihost_8000qps; do
+            SRV="/tmp/dial9-traces-q4/trace-${CASE_NAME}/server-trace.bin.gz"
+            CLI="/tmp/dial9-traces-q4/trace-${CASE_NAME}/client-trace.bin.gz"
+            SRV_URL=""
+            CLI_URL=""
+            if [ -s "$SRV" ]; then
+              node "${{ github.workspace }}/bench/viewer/bin2json.js" \
+                "$SRV" "bench/traces/${SHORT_SHA}-${CASE_NAME}-server"
+              SRV_URL="${BASE_URL}/${SHORT_SHA}-${CASE_NAME}-server"
+            fi
+            if [ -s "$CLI" ]; then
+              node "${{ github.workspace }}/bench/viewer/bin2json.js" \
+                "$CLI" "bench/traces/${SHORT_SHA}-${CASE_NAME}-client"
+              CLI_URL="${BASE_URL}/${SHORT_SHA}-${CASE_NAME}-client"
+            fi
+            if [ -n "$SRV_URL" ] || [ -n "$CLI_URL" ]; then
+              [ "$FIRST" = "1" ] && FIRST=0 || TRACE_CASES_JSON="${TRACE_CASES_JSON},"
+              TRACE_CASES_JSON="${TRACE_CASES_JSON}{\"case\":\"${CASE_NAME}\",\"server\":\"${SRV_URL}\",\"client\":\"${CLI_URL}\"}"
+            fi
+          done
+          TRACE_CASES_JSON="${TRACE_CASES_JSON}]"
+          TRACE_CASES_ARG=""
+          if [ "$TRACE_CASES_JSON" != "[]" ]; then
+            echo "$TRACE_CASES_JSON" > /tmp/trace-cases.json
+            TRACE_CASES_ARG="--trace-cases-file /tmp/trace-cases.json"
           fi
-          if [ -n "$Q4_CLIENT" ] && [ -s "$Q4_CLIENT" ]; then
-            mkdir -p bench/traces
-            node "${{ github.workspace }}/bench/viewer/bin2json.js" \
-              "$Q4_CLIENT" \
-              "bench/traces/${SHORT_SHA}-client"
-            TRACE_CLIENT_ARG="--trace-client ${BASE_URL}/${SHORT_SHA}-client"
-          fi
+          echo "Trace shards in bench/traces/:" && ls -lh bench/traces/ || true
           TRACE_ARTIFACT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_url }}"
           if [ -n "$TRACE_ARTIFACT_URL" ]; then
             TRACE_ARTIFACT_URL_ARG="--trace-artifact-url $TRACE_ARTIFACT_URL"
@@ -1946,7 +2019,7 @@ jobs:
             --url     "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
-            $TRACE_SERVER_ARG $TRACE_CLIENT_ARG $TRACE_ARTIFACT_URL_ARG
+            $TRACE_CASES_ARG $TRACE_ARTIFACT_URL_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
