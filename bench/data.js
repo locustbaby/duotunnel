@@ -3722,6 +3722,362 @@ window.BENCHMARK_DATA = {
           "includeInTotalRps": true
         }
       ]
+    },
+    {
+      "commit": {
+        "id": "04f64910e3e8398a568ce9156ecf763318151aeb",
+        "message": "tune/comm layer (#21)",
+        "url": "https://github.com/locustbaby/duotunnel/commit/04f64910e3e8398a568ce9156ecf763318151aeb"
+      },
+      "timestamp": "2026-04-09T15:29:54.082Z",
+      "summary": {
+        "totalRPS": 41426.0,
+        "totalErr": 0.0,
+        "totalRequests": 835447
+      },
+      "artifacts": {
+        "trace_artifact_url": "https://github.com/locustbaby/duotunnel/actions/runs/24198270418/artifacts/6353226212",
+        "trace_cases": [
+          {
+            "case": "ingress_8000qps",
+            "server": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-ingress_8000qps-server",
+            "client": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-ingress_8000qps-client"
+          },
+          {
+            "case": "egress_8000qps",
+            "server": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-egress_8000qps-server",
+            "client": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-egress_8000qps-client"
+          },
+          {
+            "case": "ingress_multihost_8000qps",
+            "server": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-ingress_multihost_8000qps-server",
+            "client": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-ingress_multihost_8000qps-client"
+          },
+          {
+            "case": "egress_multihost_8000qps",
+            "server": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-egress_multihost_8000qps-server",
+            "client": "https://locustbaby.github.io/duotunnel/bench/traces/04f6491-egress_multihost_8000qps-client"
+          }
+        ]
+      },
+      "run_url": "https://github.com/locustbaby/duotunnel/actions/runs/24198270418",
+      "scenarios": [
+        {
+          "name": "ingress_http_get",
+          "category": "basic",
+          "p50": 0.7,
+          "p95": 1.32,
+          "rps": 37,
+          "requests": 925,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ingress_http_post",
+          "category": "basic",
+          "p50": 0.68,
+          "p95": 1.36,
+          "rps": 22.96,
+          "requests": 574,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "egress_http_get",
+          "category": "basic",
+          "p50": 0.61,
+          "p95": 1.2,
+          "rps": 45.96,
+          "requests": 1149,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "egress_http_post",
+          "category": "basic",
+          "p50": 0.63,
+          "p95": 0.84,
+          "rps": 36.48,
+          "requests": 912,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ws_ingress",
+          "category": "basic",
+          "p50": 2.15,
+          "p95": 2.85,
+          "rps": 10.05,
+          "requests": 201,
+          "err": 0,
+          "protocol": "WS",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "grpc_health_ingress",
+          "category": "basic",
+          "p50": 1.36,
+          "p95": 2.12,
+          "rps": 20.05,
+          "requests": 401,
+          "err": 0,
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "grpc_echo_ingress",
+          "category": "basic",
+          "p50": 1.19,
+          "p95": 1.93,
+          "rps": 20,
+          "requests": 400,
+          "err": 0,
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "bidir_mixed",
+          "category": "basic",
+          "p50": 0.52,
+          "p95": 0.8,
+          "rps": 18.1,
+          "requests": 362,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "bidir",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ingress_post_1k",
+          "category": "body_size",
+          "p50": 0.8,
+          "p95": 2.27,
+          "rps": 30.05,
+          "requests": 601,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ingress_post_10k",
+          "category": "body_size",
+          "p50": 1.2,
+          "p95": 2.58,
+          "rps": 20.05,
+          "requests": 401,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ingress_post_100k",
+          "category": "body_size",
+          "p50": 2.58,
+          "p95": 3.89,
+          "rps": 10,
+          "requests": 200,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "egress_post_10k",
+          "category": "body_size",
+          "p50": 1.29,
+          "p95": 2.56,
+          "rps": 20,
+          "requests": 400,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "ws_multi_msg",
+          "category": "basic",
+          "p50": 44.66,
+          "p95": 46.27,
+          "rps": 5.05,
+          "requests": 101,
+          "err": 0,
+          "protocol": "WS",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "grpc_large_payload",
+          "category": "body_size",
+          "p50": 1.27,
+          "p95": 3.23,
+          "rps": 15,
+          "requests": 300,
+          "err": 0,
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "includeInTotalRps": false
+        },
+        {
+          "name": "grpc_high_qps",
+          "category": "stress",
+          "p50": 1.09,
+          "p95": 1.95,
+          "rps": 90,
+          "requests": 1800,
+          "err": 0,
+          "protocol": "gRPC",
+          "direction": "ingress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_3000qps",
+          "category": "stress",
+          "p50": 0.55,
+          "p95": 2.08,
+          "rps": 3000.15,
+          "requests": 60003,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "egress_3000qps",
+          "category": "stress",
+          "p50": 0.55,
+          "p95": 1.97,
+          "rps": 3000.05,
+          "requests": 60001,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_multihost",
+          "category": "stress",
+          "p50": 0.6,
+          "p95": 2.79,
+          "rps": 3000.05,
+          "requests": 60001,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "egress_multihost",
+          "category": "stress",
+          "p50": 0.58,
+          "p95": 2.37,
+          "rps": 3000.05,
+          "requests": 60001,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_8000qps (8k-q4)",
+          "category": "stress",
+          "p50": 31.06,
+          "p95": 96.2,
+          "rps": 7273.3,
+          "requests": 145466,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "egress_8000qps (8k-q4)",
+          "category": "stress",
+          "p50": 23.25,
+          "p95": 91.73,
+          "rps": 7469.1,
+          "requests": 149382,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_multihost_8000qps (8k-q4)",
+          "category": "stress",
+          "p50": 32,
+          "p95": 113.02,
+          "rps": 7360.6,
+          "requests": 147212,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "egress_multihost_8000qps (8k-q4)",
+          "category": "stress",
+          "p50": 34.05,
+          "p95": 110.35,
+          "rps": 7232.7,
+          "requests": 144654,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "egress",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_3000qps",
+          "category": "stress",
+          "p50": 15.8,
+          "p95": 79.67,
+          "rps": 2877.35,
+          "requests": 57547,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "tunnel": "frp",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_multihost",
+          "category": "stress",
+          "p50": 0.75,
+          "p95": 3.86,
+          "rps": 2997.8,
+          "requests": 59956,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "tunnel": "frp",
+          "includeInTotalRps": true
+        },
+        {
+          "name": "ingress_multihost_8000qps",
+          "category": "stress",
+          "p50": 51.64,
+          "p95": 126.12,
+          "rps": 5153.95,
+          "requests": 103079,
+          "err": 0,
+          "protocol": "HTTP",
+          "direction": "ingress",
+          "tunnel": "frp",
+          "includeInTotalRps": true
+        }
+      ]
     }
   ]
 };
