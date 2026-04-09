@@ -285,64 +285,15 @@ jobs:
       # /etc/hosts — map test domains to 127.0.0.1
       - name: Configure /etc/hosts for test domains
         run: |
-          sudo tee -a /etc/hosts << 'EOF'
-          127.0.0.1  echo.local
-          127.0.0.1  ws.local
-          127.0.0.1  grpc.local
-          127.0.0.1  echo.beeceptor.test
-          127.0.0.1  ws.ext.test
-          127.0.0.1  grpc.ext.test
-          127.0.0.1  echo-01.local
-          127.0.0.1  echo-02.local
-          127.0.0.1  echo-03.local
-          127.0.0.1  echo-04.local
-          127.0.0.1  echo-05.local
-          127.0.0.1  echo-06.local
-          127.0.0.1  echo-07.local
-          127.0.0.1  echo-08.local
-          127.0.0.1  echo-09.local
-          127.0.0.1  echo-10.local
-          127.0.0.1  echo-11.local
-          127.0.0.1  echo-12.local
-          127.0.0.1  echo-13.local
-          127.0.0.1  echo-14.local
-          127.0.0.1  echo-15.local
-          127.0.0.1  echo-16.local
-          127.0.0.1  echo-17.local
-          127.0.0.1  echo-18.local
-          127.0.0.1  echo-19.local
-          127.0.0.1  echo-20.local
-          127.0.0.1  echo-21.local
-          127.0.0.1  echo-22.local
-          127.0.0.1  echo-23.local
-          127.0.0.1  echo-24.local
-          127.0.0.1  echo-25.local
-          127.0.0.1  echo-26.local
-          127.0.0.1  echo-27.local
-          127.0.0.1  echo-28.local
-          127.0.0.1  echo-29.local
-          127.0.0.1  echo-30.local
-          127.0.0.1  echo-31.local
-          127.0.0.1  echo-32.local
-          127.0.0.1  echo-33.local
-          127.0.0.1  echo-34.local
-          127.0.0.1  echo-35.local
-          127.0.0.1  echo-36.local
-          127.0.0.1  echo-37.local
-          127.0.0.1  echo-38.local
-          127.0.0.1  echo-39.local
-          127.0.0.1  echo-40.local
-          127.0.0.1  echo-41.local
-          127.0.0.1  echo-42.local
-          127.0.0.1  echo-43.local
-          127.0.0.1  echo-44.local
-          127.0.0.1  echo-45.local
-          127.0.0.1  echo-46.local
-          127.0.0.1  echo-47.local
-          127.0.0.1  echo-48.local
-          127.0.0.1  echo-49.local
-          127.0.0.1  echo-50.local
-          EOF
+          {
+            echo "127.0.0.1  echo.local"
+            echo "127.0.0.1  ws.local"
+            echo "127.0.0.1  grpc.local"
+            echo "127.0.0.1  echo.beeceptor.test"
+            echo "127.0.0.1  ws.ext.test"
+            echo "127.0.0.1  grpc.ext.test"
+            for i in $(seq -w 1 50); do echo "127.0.0.1  echo-${i}.local"; done
+          } | sudo tee -a /etc/hosts
 
       # ─── Start all backend servers in parallel ────────────────────────────────
       - name: Start backend servers (http-echo, ws-echo, grpc-echo)

@@ -128,7 +128,7 @@ const MULTIHOST_COUNT = 50;
 export function ingressMultihost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const n = (__VU % MULTIHOST_COUNT) + 1;
+  const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
   const res = http.get(`http://${host}:8080/?id=${id}&host=${host}`, {
     timeout: '10s',
@@ -146,7 +146,7 @@ export function ingressMultihost() {
 export function egressMultihost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const n = (__VU % MULTIHOST_COUNT) + 1;
+  const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
   const res = http.get(`http://127.0.0.1:8082/?id=${id}&host=${host}`, {
     headers: { Host: host },

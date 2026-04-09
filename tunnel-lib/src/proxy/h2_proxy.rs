@@ -29,42 +29,51 @@ where
     B::Data: Into<Bytes> + Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let mut guard = sender_cache.lock().await;
-
-    let mut sender = match guard.as_mut() {
-        Some(s) if s.is_ready() => s.clone(),
-        _ => {
-            debug!("H2 sender miss, establishing new connection");
-            *guard = None;
-
-            let (send, recv) = client_conn.open_bi().await?;
-            let mut routing_send = send;
-            send_routing_info(&mut routing_send, &routing_info).await?;
-
-            let quic_stream = QuinnStream {
-                send: routing_send,
-                recv,
-            };
-            let io = TokioIo::new(quic_stream);
-            let (sender, conn) = H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
-                .initial_max_send_streams(usize::MAX)
-                .handshake(io)
-                .await?;
-
-            let cache = sender_cache.clone();
-            tokio::spawn(async move {
-                if let Err(e) = conn.await {
-                    debug!(error = %e, "H2 connection driver exited");
-                }
-                *cache.lock().await = None;
-            });
-
-            *guard = Some(sender.clone());
-            sender
+    let existing = {
+        let guard = sender_cache.lock().await;
+        match guard.as_ref() {
+            Some(s) if s.is_ready() => Some(s.clone()),
+            _ => None,
         }
     };
 
-    drop(guard);
+    let mut sender = if let Some(s) = existing {
+        s
+    } else {
+        debug!("H2 sender miss, establishing new connection");
+
+        let (send, recv) = client_conn.open_bi().await?;
+        let mut routing_send = send;
+        send_routing_info(&mut routing_send, &routing_info).await?;
+
+        let quic_stream = QuinnStream {
+            send: routing_send,
+            recv,
+        };
+        let io = TokioIo::new(quic_stream);
+        let (new_sender, conn) = H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
+            .initial_max_send_streams(u32::MAX as usize)
+            .handshake(io)
+            .await?;
+
+        let mut guard = sender_cache.lock().await;
+        match guard.as_ref() {
+            Some(s) if s.is_ready() => {
+                s.clone()
+            }
+            _ => {
+                let cache = sender_cache.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = conn.await {
+                        debug!(error = %e, "H2 connection driver exited");
+                    }
+                    *cache.lock().await = None;
+                });
+                *guard = Some(new_sender.clone());
+                new_sender
+            }
+        }
+    };
 
     let (parts, body) = request.into_parts();
     let boxed_body = body

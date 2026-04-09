@@ -77,9 +77,9 @@ def main():
     bench_dir = os.path.dirname(args.data)
     detail_dir = os.path.join(bench_dir, "data")
     os.makedirs(detail_dir, exist_ok=True)
-    detail_path = os.path.join(detail_dir, f"{sha7}.js")
+    detail_path = os.path.join(detail_dir, f"{sha7}.json")
     with open(detail_path, "w") as f:
-        f.write(f"window.BENCH_DETAIL['{sha7}'] = " + json.dumps(entry, indent=2) + ";\n")
+        f.write(json.dumps(entry, indent=2) + "\n")
 
     index_entry = {
         "commit": entry["commit"],
@@ -106,10 +106,10 @@ def main():
         if sid:
             kept_shas.add(sid[:7])
     for name in os.listdir(detail_dir):
-        if name.endswith(".js"):
-            file_sha = name[:-3]
+        if name.endswith(".json"):
+            file_sha = name[:-5]
             if file_sha not in kept_shas:
-                os.remove(os.path.join(detail_dir, file_sha + ".js"))
+                os.remove(os.path.join(detail_dir, file_sha + ".json"))
 
     print(f"Published entry {sha7}, total entries: {len(entries)}")
 
