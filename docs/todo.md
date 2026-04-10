@@ -15,113 +15,10 @@ After `dial9-tokio-telemetry` publishes a crate version that includes commit `64
 
 ## Auth & Config Source Plan
 
-### [TODO-48] Token-only Client Registration/Login ✅
-**Priority**: High | **Status**: Done
-
-**Goal**:
-Client side no longer submits identity fields for authentication decisions. Client only sends `token`; server identifies `name`/tenant/group from token and then pushes routing rules.
-
-**Why it matters**:
-Avoids client-side identity spoofing risk and simplifies bootstrap flow.
-
-**Implementation notes**:
-1. Keep `Login.token` as the only auth input used by server.
-2. Server ignores/does not trust client-provided identity metadata for auth.
-3. After token verification, server binds connection to the resolved unique `name`.
-
-### [TODO-49] Server-issued Long Unique Tokens ✅
-**Priority**: High | **Status**: Done
-
-**Goal**:
-Server provides token generation API/CLI: generate long, unique, high-entropy tokens per unique `name`.
-
-**Why it matters**:
-Eliminates weak/manual token creation and ensures uniqueness + entropy baseline.
-
-**Implementation notes**:
-1. Token generation: at least 32 random bytes (base64url/hex encoded).
-2. Enforce uniqueness with DB unique index.
-3. Support rotate/revoke lifecycle (`active`, `revoked_at`).
-4. Store only token hash in DB; never persist plaintext token.
-
-### [TODO-50] Auth Data Persistence via DB (Default: SQLite in Dev) ✅
-**Priority**: High | **Status**: Done
-
-**Goal**:
-Move auth and client identity mapping from static config to DB-backed source. Dev default is local SQLite.
-
-**Why it matters**:
-Removes manual YAML token distribution; enables dynamic updates and auditability.
-
-**Implementation notes**:
-1. Add `AuthStore`/`ConfigStore` abstraction.
-2. Default provider for development: `sqlite://./data/duotunnel.db`.
-3. Suggested schema:
-   - `clients(id, name UNIQUE, token_hash, status, created_at, updated_at)`
-   - `client_tokens(id, client_id, token_hash, status, created_at, revoked_at)`
-4. Add migration files and startup auto-migrate (dev mode).
-
-### [TODO-51] Server Auth Path: Resolve Name by Token, Then Push Rules ✅
-**Priority**: High | **Status**: Done
-
-**Goal**:
-On login, server validates token via DB and resolves owning `name`, then fetches effective routing rules and returns `LoginResp`.
-
-**Why it matters**:
-Makes auth and authorization deterministic and centrally managed.
-
-**Implementation notes**:
-1. Login flow: `token -> client(name) -> rule set -> LoginResp`.
-2. Reject missing/revoked token with explicit error code.
-3. Keep auth comparison timing-safe where applicable.
-4. Emit metrics split by result (`auth_success`, `auth_failure_invalid`, `auth_failure_revoked`).
-
-### [TODO-52] Rules from DB + Multi-source Provider ✅
-**Priority**: High
-
-**Goal**:
-Rules can be loaded from DB, while preserving previously discussed multi-source model (file/db/hybrid).
-
-**Why it matters**:
-Supports dynamic control-plane updates without giving up local-file fallback.
-
-**Implementation notes**:
-1. Introduce `ConfigSource` trait:
-   - `FileSource` (existing YAML)
-   - `DbSource` (SQLite/Postgres in future)
-   - `MergedSource` (override/priority rules)
-2. Keep current file mode as compatibility path.
-3. Add source priority semantics and conflict resolution policy.
-
 ### [TODO-53] Delivery Plan (Incremental)
 **Priority**: High
 
-1. Milestone A: schema + token generation + DB lookup (auth only). ✅
-2. Milestone B: server login uses DB name resolution; client remains token-only. ✅
-3. Milestone C: rules read from DB (with file fallback). ✅
-4. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
-
-## Config Tuning (No Code Changes)
-
-### [TODO-16] QUIC connections: 1 → 4 ✅
-
-**Files**: `ci-helpers/client.yaml`
-**Priority**: High
-
-`quic.connections` is not configured in `client.yaml`, defaulting to 1. All traffic is squeezed into a single QUIC connection, creating a bottleneck for single UDP socket serial encryption/decryption and single-connection flow control.
-
-Change to `connections: 4` to distribute the load across 4 QUIC connections.
-
-### [TODO-17] max_concurrent_streams: 200 → 1000 ✅
-
-**Files**: `ci-helpers/client.yaml`, `ci-helpers/server.yaml`
-**Priority**: High
-
-Both server and client are set to 200 in the CI config. In 3K QPS no-keepalive scenarios, the number of in-flight streams can easily exceed 200, causing `try_acquire_owned` to drop connections directly.
-
-Change to 1000.
-
----
+1. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
 
 ## Code Optimization
 
@@ -183,36 +80,12 @@ type GlobalSenderMap = DashMap<SenderKey, H2Sender>;
 
 When draining the socket, `vec![0u8; len]` is still used (heap allocation). Since len ≤ 8192, this can be changed to a stack buffer.
 
-### [TODO-18] H1 body read: BytesMut::zeroed → unsafe set_len
-
-**Files**: `tunnel-lib/src/protocol/driver/h1.rs:276`
-**Priority**: Medium
-
-Saves one `memset` (8KB) for every body chunk read. Large body request path CPU reduced by ~30%.
-
-### [TODO-19] H1 double header parse → single parse
-
-**Files**: `tunnel-lib/src/protocol/driver/h1.rs:104-140`
-**Priority**: Medium
-
-Current flow: Loop parse until `Complete` (discard result), then parse again to extract fields.
-Change: Record `header_end` when `Complete` is reached within the loop, and use the results from that same parse.
-
 ### [TODO-20] Bytes::copy_from_slice → split_to().freeze() Zero-copy
 
-**Files**: `tunnel-lib/src/protocol/driver/h1.rs:201,283,287`
+**Files**: `tunnel-lib/src/protocol/driver/h1.rs:236`
 **Priority**: Medium
 
-Found 5 instances where `Bytes::copy_from_slice` copies from `BytesMut` to a new `Bytes`. These can be replaced with `split_to().freeze()` to achieve zero-copy (sharing underlying memory).
-
-### [TODO-21] tokio::io::copy 8KB → 64KB buffer
-
-**Files**: `tunnel-lib/src/engine/bridge.rs`
-**Priority**: Medium
-
-`tokio::io::copy()` defaults to an 8KB internal buffer. Given the QUIC stream window is 4MB and the TCP socket buffer is 4MB, 8KB leads to a syscall overhead for every 8KB.
-
-Wrap the reader with `BufReader::with_capacity(65536)` before passing it to `tokio::io::copy_buf()`.
+Remaining copy path still uses `Bytes::copy_from_slice` from scratch buffer. Replace with a zero-copy path when ownership/lifetime safety allows.
 
 ### [TODO-22] relay() split → into_split
 
@@ -254,13 +127,6 @@ The generic `relay()` use `tokio::io::split()` (internal Arc+Mutex), whereas `re
 ---
 
 ## Architecture Level Optimization
-
-### [TODO-23] server entry listener SO_REUSEPORT
-
-**Files**: `server/handlers/http.rs:15`, `server/handlers/tcp.rs:16`
-**Priority**: Medium
-
-Server ingress 用的是标准 `TcpListener::bind()`，没有 SO_REUSEPORT。`tunnel-lib/src/transport/listener.rs` 已有 `build_reuseport_listener()`，直接替换即可，无副作用。Linux 上让内核按 4-tuple hash 分发新连接到多个 accept loop，减少单队列竞争；macOS graceful fallback（已有 warn）。
 
 ### [TODO-24] Multi-Endpoint + Thread-per-Core 架构（合并 TODO-41）
 
@@ -412,11 +278,6 @@ When the server/client forwards traffic to local/remote upstreams, setting `TCP_
 **Priority**: Medium
 While `BytesMut` with `Jemalloc` handles memory decently, allocating read/write buffers per connection still hits the heap. Implement a connection-independent, thread-local Slab Allocator or an Arena pool to recycle fixed-size byte arrays instantly, completely bypassing OS heap mechanisms.
 
-### [TODO-41] Thread-per-Core & Anti-Work-Stealing（已合并至 TODO-24）
-**Priority**: Low (High Complexity)
-**Status**: 合并到 TODO-24 一起设计，不单独实现。
-Transition from Tokio's default work-stealing scheduler to a Strict `Share-Nothing` Thread-per-Core architecture. Similar to Pingora's `NoStealRuntime`, manually spawn multiple single-threaded Tokio executors (`Builder::new_current_thread`) mapped to specific NUMA Nodes. Work-stealing for heavy network IO causes severe CPU L2/L3 Cache misses when tasks cross cores. By locking processing to specific cores and removing global atomic structs like `DashMap`, we can achieve linearly scalable performance and **Deterministic Latency** without switching out of the Tokio ecosystem entirely.
-
 ### [TODO-42] Kernel Bypass (AF_XDP / eBPF) for QUIC
 **Priority**: Low (Experimental)
 Since QUIC relies entirely on UDP packets, the Linux kernel networking stack (sk_buff allocations, iptables, netfilter) introduces major latency. Using `AF_XDP` sockets allows reading the UDP datagrams directly from the NIC driver rings into user space, circumventing the kernel entirely.
@@ -436,19 +297,6 @@ Expose advanced sys_socket options for egress connections. Similar to Pingora, d
 ### [TODO-47] Memory-efficient Load Balancing Ring (Ring V2)
 **Priority**: Low
 If DuoTunnel evolves to support multi-replica upstream selection for high-availability subdomains, implement a contiguous 1D array-based Hash Ring (Ketama Ring V2). Use binary search over memory-contiguous points to ensure 99%+ CPU L1 cache hits during selection, rather than traversing complex tree or map structures.
-
----
-
-## Non-Applicable / Reference Architectures 
-
-### [Reference] Case-insensitive Trie for Header Matching (pingora-http)
-Pingora uses a highly compact static dictionary/Trie (e.g., matching `HeaderName::Host` without String allocation) to sniff HTTP headers. *Why it's not applicable*: DuoTunnel's HTTP parsing primarily extracts the `Host` or `Upgrade` header for initial protocol detection and then switches to hyper/h2 or raw TCP relay. We don't act as a full Layer 7 reverse proxy that modifies complex headers natively, so a full Trie is overkill.
-
-### [Reference] TinyLFU Memory Caching (pingora-lru / tinyufo)
-Pingora implements an advanced LFU + Bloom Filter (TinyUFO) with sharded locks for memory caching to prevent cache pollution from single-hit cold traffic. *Why it's not applicable*: DuoTunnel is a transparent Tunnel/Proxy without static content caching or heavy LRU caching semantics. Our only "cache" is the connection pool.
-
-### [Reference] Memory-Contiguous Ketama Hash Ring (pingora-ketama)
-For load balancing, Pingora flattens the Hash Ring into a contiguous 1D array to achieve 99%+ CPU L1 Cache hits during binary search for upstream routing. *Why it's not applicable*: DuoTunnel routes traffic to specific user machines based on exact subdomain mapping (`ClientRegistry`), it does not perform typical weight-based or predictable-hash load balancing across a replica set.
 
 ---
 
@@ -565,6 +413,42 @@ H2 window 已扩大（4MB stream / 16MB conn / 1MB frame），但 p95 未改善�
 1. **减少 H2 framing 层数**：当前 ingress 路径是 H1→H2→QUIC→H2→H1，中间有两次 H2 framing。考虑 server 侧直接透传 H2（client 发 H2 到 server，server 不解包直接转发到 QUIC H2 stream）
 2. **H2 frame size 调优**：当前 `max_frame_size=1MB` 可能对小请求反而有负面影响（padding/alignment），小请求考虑用默认 16KB
 3. **减少锁竞争**：`H2Sender` 的 `Arc<Mutex<Option<SendRequest>>>` 每次请求都 lock，高并发下有竞争，考虑用 `tokio::sync::RwLock` 或无锁结构
+
+---
+
+## Tmp Tune Pending (Migrated from `docs/tmp-tune/todo.md`)
+
+### P1
+
+- [ ] **把 `UnsyncBoxBody` 全链路换成 `BoxBody`（Send 版本）**
+  涉及文件：`tunnel-lib/src/proxy/h2_proxy.rs`、`tunnel-lib/src/egress/http.rs`、`tunnel-lib/src/proxy/h2.rs`、`tunnel-lib/src/proxy/http.rs`、`tunnel-lib/src/protocol/driver/mod.rs`、`tunnel-lib/src/protocol/driver/h1.rs`、`server/egress.rs`、`server/handlers/http.rs`。
+  操作：`.boxed_unsync()` → `.boxed()`，`UnsyncBoxBody<B,E>` → `BoxBody<B,E>`。
+  **验证**：链路上所有 body 类型（`Incoming`、`MapErr`、`MapFrame`、`Full`）均已确认是 `Sync`，改动安全。
+  **收益**：`SendRequest<BoxBody>` 变成 `Send + Sync`，`h2_proxy.rs` fast path 可换 `ArcSwap` 彻底去锁。
+
+- [ ] **H2 sender fast path 换 ArcSwap（依赖上一项）**
+  上一项完成后，`H2SenderCache.sender` 从 `std::sync::Mutex<Option<SendRequest>>` 换成 `ArcSwap<Option<SendRequest>>`，fast path 降为单个原子 load，并发 H2 请求不再有任何锁竞争。
+
+### P2
+
+- [ ] **server 选路改 least-inflight**
+  `registry.rs` `ClientGroup::select_healthy` 目前只做 RR + close_reason 检查，不感知 inflight stream 数。
+  改为在 `ClientGroup` 里维护每连接 `AtomicUsize` inflight 计数，`open_bi` 前后 +1/-1，选路取 min-inflight。
+
+- [ ] **CI 加连接矩阵**
+  核心基准覆盖 `connections=1/2/4`，验证多连接是否真正突破单连接吞吐天花板。
+
+### P3
+
+- [ ] **viewer "No CPU samples" 报错排查**
+  CI run 24198270418 所有 job 通过，`cpu.json.gz` 有实际数据（837 KB–1.1 MB），但 viewer 页面操作时仍报 "No CPU samples"。
+  待查：meta.json 的 `cpuSampleCount` 字段值；viewer lazy loader（~line 855）是否因 CORS 或解压失败静默跳过；触发条件 `trace.cpuSamples.length === 0 && !trace._cpuUrl`（~line 2314）是否因 `_cpuUrl` 未设置而提前报错。
+  参考 run：https://github.com/locustbaby/duotunnel/actions/runs/24198270418
+
+- [ ] **`EntryConnPool` 去掉冗余的 `mu` Vec**
+  当前 `mu: Mutex<Vec<Connection>>` 和 `snapshot: ArcSwap<Vec<Connection>>` 存两份数据，写时 O(n) clone。
+  可改为只用 `ArcSwap` + `Mutex<()>` 序列化写操作，消除冗余存储。
+  连接数 N ≤ 4，当前方案功能正确，属于可选清理。
 
 ---
 

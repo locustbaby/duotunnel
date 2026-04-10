@@ -588,7 +588,7 @@ def parse_collect_jsonl(path):
     ALL_GROUPS = ["server", "client", "http_echo", "ws_echo", "grpc_echo",
                   "k6", "frps", "frpc", "other"]
     proc_groups = {g: {"cpu": [], "rss": [], "vms": [], "read_kbs": [], "write_kbs": [],
-                       "cswch": [], "nvcswch": []} for g in ALL_GROUPS}
+                       "cswch": [], "nvcswch": [], "fds": []} for g in ALL_GROUPS}
     sys_keys = ("cpu", "cpu_usr", "cpu_sys", "cpu_irq", "cpu_soft", "cpu_iowait", "cpu_steal",
                 "loadavg_1", "loadavg_5", "loadavg_15",
                 "ctx_switches", "interrupts",
@@ -668,7 +668,13 @@ def parse_collect_jsonl(path):
     if cpu_per_core_series:
         mpstat_data["cpu_per_core"] = cpu_per_core_series
 
-    return proc_groups, mpstat_data, top_cpu_by_name, top_rss_by_name
+    # Keep only top 10 by total accumulated value to avoid chart explosion
+    def _top10(series_by_name):
+        scored = {name: sum(p["v"] for p in pts) for name, pts in series_by_name.items()}
+        top = sorted(scored, key=lambda n: scored[n], reverse=True)[:10]
+        return {name: series_by_name[name] for name in top}
+
+    return proc_groups, mpstat_data, _top10(top_cpu_by_name), _top10(top_rss_by_name)
 
 
 # ---------------------------------------------------------------------------

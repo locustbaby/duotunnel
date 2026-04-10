@@ -390,6 +390,55 @@ Key settings applied:
 
 ---
 
+## CI & Benchmark Dashboard
+
+Live results: **https://locustbaby.github.io/duotunnel/bench/**
+
+Every push to `main` runs the full benchmark suite and publishes results to the dashboard automatically.
+
+### Pipeline overview
+
+| Job | What it does |
+|-----|-------------|
+| `stress-test` | k6 multi-protocol benchmark (13 cases: HTTP/WS/gRPC/bidir, ramp + fixed-rate) |
+| `stress-trace-8k` | High-QPS (8000 RPS) dial9 trace capture for ingress/egress/multihost |
+| `publish-bench` | Merges results, publishes to gh-pages |
+
+### Dashboard panels
+
+Each benchmark entry shows a latency/throughput table followed by resource panels (populated when `monitor_cpu=true`):
+
+| Row | Left panel | Right panel |
+|-----|-----------|------------|
+| 1 | CPU Usage (% of machine) | Per-core CPU (%) |
+| 2 | Memory RSS (MB) | Load Avg + Swap (MB) |
+| 3 | Network Throughput (KB/s) | Network Packets/s + Drops |
+| 4 | Context Switches / s | TCP Connections |
+| 5 | Virtual Memory Size (MB) | Disk I/O (KB/s) |
+| 6 | Interrupts / s | UDP Errors / s |
+| 7 | Top 10 CPU (% of machine) | Top 10 RSS (MB) |
+
+Rows 3–7 are hidden when the underlying data is absent (e.g. no network activity recorded).
+
+### Key files
+
+```
+ci-helpers/
+  collect-resources.py   # psutil-based sampler — 1 s interval, outputs JSONL
+  parse-resources.py     # converts JSONL → per-case resource JSON for the dashboard
+  publish-bench.py       # merges core + 8k results, writes bench/data.js + per-SHA JSON
+bench/
+  index.html             # self-contained dashboard (loaded from gh-pages)
+```
+
+### Known gotchas
+
+- `parse-resources.py` crashes → `resource-data.json` not written → `RES_ARG` empty → all resource panels missing from dashboard. Check the **"Parse resource data"** step log in the CI run for tracebacks.
+- `bench/index.html` is copied from `main` on every publish, so dashboard UI changes only show after the next successful CI run that pushes to gh-pages.
+- Stale browser cache can show an old dashboard; hard-refresh (`Cmd+Shift+R`) if the page looks outdated.
+
+---
+
 ## References
 
 - [frp](https://github.com/fatedier/frp) — original inspiration
