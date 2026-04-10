@@ -553,65 +553,54 @@ function renderDetail(entry) {
   html += `</tbody></table></div></div></div>`;
 
   {
-    function row(...panels) {
-      panels = panels.filter(Boolean);
-      let h = '';
-      for (let i = 0; i < panels.length; i += 2) {
-        h += `<div class="row">`;
-        for (let j = i; j < Math.min(i+2, panels.length); j++) {
-          const {id, title} = panels[j];
-          h += `<div class="panel"><h3>${title}</h3><div class="chart-area"><canvas id="${id}"></canvas></div><div id="${id}-leg" class="leg-wrap"></div></div>`;
-        }
-        if (panels.length - i === 1) h += `<div></div>`;
-        h += `</div>`;
-      }
-      return h;
+    function row1(panel) {
+      if (!panel) return '';
+      const {id, title} = panel;
+      return `<div class="row full"><div class="panel"><h3>${title}</h3><div class="chart-area"><canvas id="${id}"></canvas></div><div id="${id}-leg" class="leg-wrap"></div></div></div>`;
     }
 
-    const rpc = entry.resources_per_case || {};
+    // Merge core resources (entry.resources) into rpcEntries as "core" key
+    const rpc = Object.assign({}, entry.resources_per_case || {});
+    if (entry.resources && !rpc['core']) rpc['core'] = entry.resources;
     const rpcKeys = Object.keys(rpc);
     if (rpcKeys.length) {
       const anyCtxsw   = rpcKeys.some(k => Object.values(rpc[k].processes||{}).some(p => p.cswch?.length));
       const anyTCP     = rpcKeys.some(k => rpc[k].tcp_conns && (rpc[k].tcp_conns.estab?.length || rpc[k].tcp_conns.timewait?.length));
-      const firstCase  = rpc[rpcKeys[0]] || {};
-      const fSys       = firstCase.system || {};
+      // Prefer machine info from core if available, else first case
+      const machineSource = rpc['core'] || rpc[rpcKeys[0]] || {};
+      const fSys       = machineSource.system || {};
       const machineSpec = (() => {
-        const m = firstCase.machine;
+        const m = machineSource.machine;
         if (!m) return '';
         const ram = m.mem_total_mb >= 1024 ? `${Math.round(m.mem_total_mb/1024)} GB` : `${m.mem_total_mb} MB`;
         return ` <span style="color:var(--text2);font-weight:400;font-size:11px">· ${m.cpu_cores} vCPU · ${ram} RAM</span>`;
       })();
-      const has8kTopCPU    = rpcKeys.some(k => rpc[k].top_cpu && Object.keys(rpc[k].top_cpu).length > 0);
-      const has8kTopRSS    = rpcKeys.some(k => rpc[k].top_rss && Object.keys(rpc[k].top_rss).length > 0);
-      const has8kPerCore   = Array.isArray(fSys.cpu_per_core) && fSys.cpu_per_core.length > 0;
-      const has8kLoad      = rpcKeys.some(k => rpc[k].system?.loadavg_1?.length > 0);
-      const has8kNet       = rpcKeys.some(k => rpc[k].system?.net_rx_kbs?.length > 0 || rpc[k].system?.net_tx_kbs?.length > 0);
-      const has8kNetPkts   = rpcKeys.some(k => rpc[k].system?.net_rx_pkts?.length > 0);
-      const has8kDisk      = rpcKeys.some(k => rpc[k].system?.disk_read_kbs?.length > 0 || rpc[k].system?.disk_write_kbs?.length > 0);
-      const has8kIntr      = rpcKeys.some(k => rpc[k].system?.interrupts?.length > 0);
-      const has8kSysTcp    = rpcKeys.some(k => rpc[k].system?.tcp_estab?.length > 0);
-      const has8kUdp       = rpcKeys.some(k => rpc[k].system?.udp_rx_err?.length > 0);
-      const has8kVms       = rpcKeys.some(k => Object.values(rpc[k].processes||{}).some(p => p.vms?.length));
+      const hasTopCPU    = rpcKeys.some(k => rpc[k].top_cpu && Object.keys(rpc[k].top_cpu).length > 0);
+      const hasTopRSS    = rpcKeys.some(k => rpc[k].top_rss && Object.keys(rpc[k].top_rss).length > 0);
+      const hasPerCore   = rpcKeys.some(k => Array.isArray(rpc[k].system?.cpu_per_core) && rpc[k].system.cpu_per_core.length > 0);
+      const hasLoad      = rpcKeys.some(k => rpc[k].system?.loadavg_1?.length > 0);
+      const hasNet       = rpcKeys.some(k => rpc[k].system?.net_rx_kbs?.length > 0 || rpc[k].system?.net_tx_kbs?.length > 0);
+      const hasNetPkts   = rpcKeys.some(k => rpc[k].system?.net_rx_pkts?.length > 0);
+      const hasDisk      = rpcKeys.some(k => rpc[k].system?.disk_read_kbs?.length > 0 || rpc[k].system?.disk_write_kbs?.length > 0);
+      const hasIntr      = rpcKeys.some(k => rpc[k].system?.interrupts?.length > 0);
+      const hasSysTcp    = rpcKeys.some(k => rpc[k].system?.tcp_estab?.length > 0);
+      const hasUdp       = rpcKeys.some(k => rpc[k].system?.udp_rx_err?.length > 0);
+      const hasVms       = rpcKeys.some(k => Object.values(rpc[k].processes||{}).some(p => p.vms?.length));
       html += `<div class="sec">Resources${machineSpec}</div>`;
-      html += row({id:'cpu8k', title:'CPU Usage (% of machine)'},
-                  has8kPerCore ? {id:'perCore8k', title:'Per-core CPU (%)'} : null);
-      html += row({id:'mem8k', title:'Memory RSS (MB)'},
-                  has8kLoad ? {id:'load8k', title:'Load Avg + Swap (MB)'} : null);
-      if (has8kNet || has8kNetPkts)
-        html += row(...[has8kNet     && {id:'netKbs8k',  title:'Network Throughput (KB/s)'},
-                        has8kNetPkts && {id:'netPkts8k', title:'Network Packets/s + Drops'}].filter(Boolean));
-      if (anyCtxsw || anyTCP || has8kSysTcp)
-        html += row(...[anyCtxsw && {id:'ctxsw8k', title:'Context Switches / s'},
-                        (anyTCP||has8kSysTcp) && {id:'tcp8k', title:'TCP Connections'}].filter(Boolean));
-      if (has8kVms || has8kDisk)
-        html += row(...[has8kVms  && {id:'vms8k',  title:'Virtual Memory Size (MB)'},
-                        has8kDisk && {id:'disk8k', title:'Disk I/O (KB/s)'}].filter(Boolean));
-      if (has8kIntr || has8kUdp)
-        html += row(...[has8kIntr && {id:'intr8k', title:'Interrupts / s'},
-                        has8kUdp  && {id:'udp8k',  title:'UDP Errors / s'}].filter(Boolean));
-      if (has8kTopCPU || has8kTopRSS)
-        html += row(...[has8kTopCPU && {id:'top8kCpuChart', title:'Top 10 CPU (% of machine)'},
-                        has8kTopRSS && {id:'top8kRssChart', title:'Top 10 RSS (MB)'}].filter(Boolean));
+      html += row1({id:'cpu8k',    title:'CPU Usage (% of machine)'});
+      if (hasPerCore) html += row1({id:'perCore8k', title:'Per-core CPU (%)'});
+      html += row1({id:'mem8k',    title:'Memory RSS (MB)'});
+      if (hasLoad)     html += row1({id:'load8k',   title:'Load Avg + Swap (MB)'});
+      if (hasNet)      html += row1({id:'netKbs8k',  title:'Network Throughput (KB/s)'});
+      if (hasNetPkts)  html += row1({id:'netPkts8k', title:'Network Packets/s + Drops'});
+      if (anyCtxsw)    html += row1({id:'ctxsw8k',   title:'Context Switches / s'});
+      if (anyTCP || hasSysTcp) html += row1({id:'tcp8k', title:'TCP Connections'});
+      if (hasVms)      html += row1({id:'vms8k',     title:'Virtual Memory Size (MB)'});
+      if (hasDisk)     html += row1({id:'disk8k',    title:'Disk I/O (KB/s)'});
+      if (hasIntr)     html += row1({id:'intr8k',    title:'Interrupts / s'});
+      if (hasUdp)      html += row1({id:'udp8k',     title:'UDP Errors / s'});
+      if (hasTopCPU)   html += row1({id:'top8kCpuChart', title:'Top 10 CPU (% of machine)'});
+      if (hasTopRSS)   html += row1({id:'top8kRssChart', title:'Top 10 RSS (MB)'});
     }
   }
 
@@ -650,7 +639,10 @@ function renderDetail(entry) {
       '#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa',
       '#f472b6','#38bdf8','#fbbf24','#818cf8','#fb923c',
     ];
-    const rpcEntries = Object.entries(entry.resources_per_case || {});
+    // Build rpcEntries: core first (from entry.resources), then per-case
+    const rpcEntries = [];
+    if (entry.resources) rpcEntries.push(['core', entry.resources]);
+    for (const [k, v] of Object.entries(entry.resources_per_case || {})) rpcEntries.push([k, v]);
     if (rpcEntries.length) {
       // Compute per-case time offsets so all cases are serialised on one x-axis.
       // Offset for case[i] = sum of maxT of cases[0..i-1], with a small gap.
@@ -669,12 +661,25 @@ function renderDetail(entry) {
       const totalXMax = runningOffset - CASE_GAP + 5;
 
       // Build merged phase annotations: each case's phases shifted by its offset.
+      // core: phases without a .case field; times are relative to k6 start, so add k6OffsetSeconds.
+      // 8k cases: match by .case (strip label suffix); times are already 0-based per case.
       const mergedPhases = [];
-      rpcEntries.forEach(([caseName,], idx) => {
-        const baseName = caseName.replace(/ \(8k-q4\)$/, '');
-        const casePhaseDefs = (entry?.phases || [])
-          .filter(p => p.case === caseName || p.case === baseName)
-          .map(p => ({...p, start: (p.start||0) + caseOffsets[idx], end: (p.end||0) + caseOffsets[idx]}));
+      rpcEntries.forEach(([caseName, caseRes], idx) => {
+        let casePhaseDefs;
+        if (caseName === 'core') {
+          const k6off = caseRes.k6OffsetSeconds || 0;
+          casePhaseDefs = (entry?.phases || [])
+            .filter(p => !p.case && !p.tunnel)
+            .map(p => ({...p,
+              start: (p.start||0) + k6off + caseOffsets[idx],
+              end:   (p.end||0)   + k6off + caseOffsets[idx],
+            }));
+        } else {
+          const baseName = caseName.replace(/ \(.*?\)$/, '');
+          casePhaseDefs = (entry?.phases || [])
+            .filter(p => p.case === caseName || p.case === baseName)
+            .map(p => ({...p, start: (p.start||0) + caseOffsets[idx], end: (p.end||0) + caseOffsets[idx]}));
+        }
         mergedPhases.push(...casePhaseDefs);
       });
       // Case background bands + name labels
@@ -691,22 +696,25 @@ function renderDetail(entry) {
       rpcEntries.forEach(([caseName,], idx) => {
         const xStart = caseOffsets[idx];
         const xEnd   = xStart + caseMaxTs[idx];
-        const shortName = caseName.replace(/ \(8k-q4\)$/, '').replace(/_/g, ' ');
-        const bgColor = CASE_BG_COLORS[idx % CASE_BG_COLORS.length];
-        boundaryAnnotations[`caseBg${idx}`] = {
-          type: 'box',
-          xMin: xStart, xMax: xEnd,
-          backgroundColor: bgColor,
-          borderWidth: 0,
-          label: {
-            display: true,
-            content: shortName,
-            color: 'rgba(180,200,220,0.55)',
-            font: {size: 11, weight: 'bold'},
-            position: {x: 'center', y: 'start'},
-            yAdjust: 4,
-          },
-        };
+        // core: phases already shown via phaseAnnotations — only add separator line, no big box
+        if (caseName !== 'core') {
+          const shortName = caseName.replace(/ \(.*?\)$/, '').replace(/_8000qps$/, ' 8k').replace(/_multihost/, ' mh').replace(/_/g, ' ');
+          const bgColor = CASE_BG_COLORS[idx % CASE_BG_COLORS.length];
+          boundaryAnnotations[`caseBg${idx}`] = {
+            type: 'box',
+            xMin: xStart, xMax: xEnd,
+            backgroundColor: bgColor,
+            borderWidth: 0,
+            label: {
+              display: true,
+              content: shortName,
+              color: 'rgba(180,200,220,0.55)',
+              font: {size: 11, weight: 'bold'},
+              position: {x: 'center', y: 'start'},
+              yAdjust: 4,
+            },
+          };
+        }
         if (idx > 0) {
           boundaryAnnotations[`caseSep${idx}`] = {
             type:'line', xMin:xStart, xMax:xStart,
