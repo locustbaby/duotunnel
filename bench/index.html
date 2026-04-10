@@ -501,7 +501,14 @@ function renderDetail(entry) {
       <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
         ${traceServer ? `<a href="${esc(traceServer)}" target="_blank">Server trace (dial9 viewer)</a>` : ''}
         ${traceClient ? `<a href="${esc(traceClient)}" target="_blank">Client trace (dial9 viewer)</a>` : ''}
-        ${traceCases.map(tc => `<span style="white-space:nowrap">${esc(tc.case)}: <a href="viewer/?trace=${encodeURIComponent(tc.server)}" target="_blank">server</a> / <a href="viewer/?trace=${encodeURIComponent(tc.client)}" target="_blank">client</a></span>`).join('')}
+        ${traceCases.map(tc => {
+          const links = [];
+          if (tc.server) links.push(`<a href="viewer/?trace=${encodeURIComponent(tc.server)}" target="_blank">server</a>`);
+          if (tc.client) links.push(`<a href="viewer/?trace=${encodeURIComponent(tc.client)}" target="_blank">client</a>`);
+          if (tc.server_download) links.push(`<a href="${esc(tc.server_download)}" target="_blank" style="color:var(--text2)">server_download</a>`);
+          if (tc.client_download) links.push(`<a href="${esc(tc.client_download)}" target="_blank" style="color:var(--text2)">client_download</a>`);
+          return `<span style="white-space:nowrap">${esc(tc.case)}: ${links.join(' / ')}</span>`;
+        }).join('')}
         ${traceArtifactUrl ? `<a href="${esc(traceArtifactUrl)}" target="_blank" style="color:var(--text2)">Download .bin.gz ↗</a>` : ''}
         ${runUrl ? `<a href="${esc(runUrl)}/artifacts" target="_blank" style="color:var(--text2)">All artifacts ↗</a>` : ''}
       </div>

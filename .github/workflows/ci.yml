@@ -1416,7 +1416,14 @@ jobs:
     permissions:
       contents: read
     outputs:
-      trace_artifact_url: ${{ steps.upload-traces.outputs.artifact-url }}
+      trace_artifact_ingress_8000qps_server_url: ${{ steps.upload-trace-ingress-8000qps-server.outputs.artifact-url }}
+      trace_artifact_ingress_8000qps_client_url: ${{ steps.upload-trace-ingress-8000qps-client.outputs.artifact-url }}
+      trace_artifact_egress_8000qps_server_url: ${{ steps.upload-trace-egress-8000qps-server.outputs.artifact-url }}
+      trace_artifact_egress_8000qps_client_url: ${{ steps.upload-trace-egress-8000qps-client.outputs.artifact-url }}
+      trace_artifact_ingress_multihost_8000qps_server_url: ${{ steps.upload-trace-ingress-multihost-8000qps-server.outputs.artifact-url }}
+      trace_artifact_ingress_multihost_8000qps_client_url: ${{ steps.upload-trace-ingress-multihost-8000qps-client.outputs.artifact-url }}
+      trace_artifact_egress_multihost_8000qps_server_url: ${{ steps.upload-trace-egress-multihost-8000qps-server.outputs.artifact-url }}
+      trace_artifact_egress_multihost_8000qps_client_url: ${{ steps.upload-trace-egress-multihost-8000qps-client.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -1766,23 +1773,85 @@ jobs:
           path: |
             /tmp/bench-results-8k-combined.json
 
-      - name: Upload dial9 traces (8k)
-        id: upload-traces
+      - name: Upload dial9 trace (8k ingress server)
+        id: upload-trace-ingress-8000qps-server
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dial9-traces-8k-${{ github.run_id }}
+          name: dial9-trace-8k-ingress_8000qps-server-${{ github.run_id }}
           retention-days: 30
           if-no-files-found: warn
-          path: |
-            /tmp/trace-ingress_8000qps/server-trace.bin.gz
-            /tmp/trace-ingress_8000qps/client-trace.bin.gz
-            /tmp/trace-egress_8000qps/server-trace.bin.gz
-            /tmp/trace-egress_8000qps/client-trace.bin.gz
-            /tmp/trace-ingress_multihost_8000qps/server-trace.bin.gz
-            /tmp/trace-ingress_multihost_8000qps/client-trace.bin.gz
-            /tmp/trace-egress_multihost_8000qps/server-trace.bin.gz
-            /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
+          path: /tmp/trace-ingress_8000qps/server-trace.bin.gz
+
+      - name: Upload dial9 trace (8k ingress client)
+        id: upload-trace-ingress-8000qps-client
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-ingress_8000qps-client-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-ingress_8000qps/client-trace.bin.gz
+
+      - name: Upload dial9 trace (8k egress server)
+        id: upload-trace-egress-8000qps-server
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-egress_8000qps-server-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-egress_8000qps/server-trace.bin.gz
+
+      - name: Upload dial9 trace (8k egress client)
+        id: upload-trace-egress-8000qps-client
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-egress_8000qps-client-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-egress_8000qps/client-trace.bin.gz
+
+      - name: Upload dial9 trace (8k ingress multihost server)
+        id: upload-trace-ingress-multihost-8000qps-server
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-ingress_multihost_8000qps-server-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-ingress_multihost_8000qps/server-trace.bin.gz
+
+      - name: Upload dial9 trace (8k ingress multihost client)
+        id: upload-trace-ingress-multihost-8000qps-client
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-ingress_multihost_8000qps-client-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-ingress_multihost_8000qps/client-trace.bin.gz
+
+      - name: Upload dial9 trace (8k egress multihost server)
+        id: upload-trace-egress-multihost-8000qps-server
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-egress_multihost_8000qps-server-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-egress_multihost_8000qps/server-trace.bin.gz
+
+      - name: Upload dial9 trace (8k egress multihost client)
+        id: upload-trace-egress-multihost-8000qps-client
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.build_profile == 'dial9' || inputs.build_profile == 'both')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dial9-trace-8k-egress_multihost_8000qps-client-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
 
 
       - name: Upload logs
@@ -1835,12 +1904,61 @@ jobs:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
 
-      - name: Download dial9 traces (q4)
+      - name: Download dial9 trace (8k ingress server)
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: dial9-traces-8k-${{ github.run_id }}
-          path: /tmp/dial9-traces-q4
+          name: dial9-trace-8k-ingress_8000qps-server-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-ingress_8000qps
+
+      - name: Download dial9 trace (8k ingress client)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-ingress_8000qps-client-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-ingress_8000qps
+
+      - name: Download dial9 trace (8k egress server)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-egress_8000qps-server-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-egress_8000qps
+
+      - name: Download dial9 trace (8k egress client)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-egress_8000qps-client-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-egress_8000qps
+
+      - name: Download dial9 trace (8k ingress multihost server)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-ingress_multihost_8000qps-server-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-ingress_multihost_8000qps
+
+      - name: Download dial9 trace (8k ingress multihost client)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-ingress_multihost_8000qps-client-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-ingress_multihost_8000qps
+
+      - name: Download dial9 trace (8k egress multihost server)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-egress_multihost_8000qps-server-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-egress_multihost_8000qps
+
+      - name: Download dial9 trace (8k egress multihost client)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dial9-trace-8k-egress_multihost_8000qps-client-${{ github.run_id }}
+          path: /tmp/dial9-traces-q4/trace-egress_multihost_8000qps
 
       - name: Merge benchmark outputs
         run: |
@@ -1982,7 +2100,7 @@ jobs:
           fi
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
-          cp -r "${{ github.workspace }}/bench/viewer" bench/viewer
+          rm -rf bench/viewer && cp -r "${{ github.workspace }}/bench/viewer" bench/viewer
           # Remove legacy inline HTML viewer files (replaced by shard mode)
           find bench/traces -name "*.html" -delete 2>/dev/null || true
           FRP_ARG=""
@@ -1998,7 +2116,14 @@ jobs:
           if [ -s /tmp/core/resource-data.json ]; then
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
-          TRACE_ARTIFACT_URL_ARG=""
+          TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"
+          TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_8000qps_client_url }}"
+          TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_egress_8000qps_server_url }}"
+          TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_egress_8000qps_client_url }}"
+          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_multihost_8000qps_server_url }}"
+          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_multihost_8000qps_client_url }}"
+          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_egress_multihost_8000qps_server_url }}"
+          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_egress_multihost_8000qps_client_url }}"
           SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
           REPO_NAME="$(echo '${{ github.repository }}' | cut -d/ -f2)"
           BASE_URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/bench/traces"
@@ -2013,6 +2138,26 @@ jobs:
             CLI="/tmp/dial9-traces-q4/trace-${CASE_NAME}/client-trace.bin.gz"
             SRV_URL=""
             CLI_URL=""
+            SRV_ARTIFACT_URL=""
+            CLI_ARTIFACT_URL=""
+            case "$CASE_NAME" in
+              ingress_8000qps)
+                SRV_ARTIFACT_URL="$TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL"
+                CLI_ARTIFACT_URL="$TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL"
+                ;;
+              egress_8000qps)
+                SRV_ARTIFACT_URL="$TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL"
+                CLI_ARTIFACT_URL="$TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL"
+                ;;
+              ingress_multihost_8000qps)
+                SRV_ARTIFACT_URL="$TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL"
+                CLI_ARTIFACT_URL="$TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL"
+                ;;
+              egress_multihost_8000qps)
+                SRV_ARTIFACT_URL="$TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL"
+                CLI_ARTIFACT_URL="$TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL"
+                ;;
+            esac
             if [ -s "$SRV" ]; then
               node "${{ github.workspace }}/bench/viewer/bin2json.js" \
                 "$SRV" "bench/traces/${SHORT_SHA}-${CASE_NAME}-server"
@@ -2023,9 +2168,9 @@ jobs:
                 "$CLI" "bench/traces/${SHORT_SHA}-${CASE_NAME}-client"
               CLI_URL="${BASE_URL}/${SHORT_SHA}-${CASE_NAME}-client"
             fi
-            if [ -n "$SRV_URL" ] || [ -n "$CLI_URL" ]; then
+            if [ -n "$SRV_URL" ] || [ -n "$CLI_URL" ] || [ -n "$SRV_ARTIFACT_URL" ] || [ -n "$CLI_ARTIFACT_URL" ]; then
               [ "$FIRST" = "1" ] && FIRST=0 || TRACE_CASES_JSON="${TRACE_CASES_JSON},"
-              TRACE_CASES_JSON="${TRACE_CASES_JSON}{\"case\":\"${CASE_NAME}\",\"server\":\"${SRV_URL}\",\"client\":\"${CLI_URL}\"}"
+              TRACE_CASES_JSON="${TRACE_CASES_JSON}{\"case\":\"${CASE_NAME}\",\"server\":\"${SRV_URL}\",\"client\":\"${CLI_URL}\",\"server_download\":\"${SRV_ARTIFACT_URL}\",\"client_download\":\"${CLI_ARTIFACT_URL}\"}"
             fi
           done
           TRACE_CASES_JSON="${TRACE_CASES_JSON}]"
@@ -2035,10 +2180,6 @@ jobs:
             TRACE_CASES_ARG="--trace-cases-file /tmp/trace-cases.json"
           fi
           echo "Trace shards in bench/traces/:" && ls -lh bench/traces/ || true
-          TRACE_ARTIFACT_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_url }}"
-          if [ -n "$TRACE_ARTIFACT_URL" ]; then
-            TRACE_ARTIFACT_URL_ARG="--trace-artifact-url $TRACE_ARTIFACT_URL"
-          fi
           python3 "${{ github.workspace }}/ci-helpers/publish-bench.py" \
             --result  /tmp/bench-results-merged.json \
             --data    bench/data.js \
@@ -2047,7 +2188,7 @@ jobs:
             --url     "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             $RES_ARG $FRP_ARG $FRP_OFFSET_ARG \
-            $TRACE_CASES_ARG $TRACE_ARTIFACT_URL_ARG
+            $TRACE_CASES_ARG
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bench/
