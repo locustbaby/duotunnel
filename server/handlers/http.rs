@@ -337,13 +337,14 @@ async fn handle_plaintext_h2_connection(
 }
 async fn handle_plaintext_h1_connection(
     state: Arc<ServerState>,
-    stream: TcpStream,
+    mut stream: TcpStream,
     host: String,
     protocol: String,
     peer_addr: std::net::SocketAddr,
     initial_data: &[u8],
     port: u16,
 ) -> Result<()> {
+    use tokio::io::AsyncReadExt;
     debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
@@ -351,6 +352,8 @@ async fn handle_plaintext_h1_connection(
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+    let mut discard = vec![0u8; initial_data.len()];
+    stream.read_exact(&mut discard).await?;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name: proxy_name.to_string(),
         src_addr: peer_addr.ip().to_string(),
@@ -377,11 +380,11 @@ async fn handle_plaintext_h1_connection(
         }
     };
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-    let prefixed = tunnel_lib::PrefixedReadWrite::new(stream, bytes::Bytes::copy_from_slice(initial_data));
-    proxy::forward_prefixed(
+    proxy::forward_with_initial_data(
         send,
         recv,
-        prefixed,
+        stream,
+        initial_data,
         state.proxy_buffer_params.relay_buf_size,
     )
     .await
