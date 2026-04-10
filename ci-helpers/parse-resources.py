@@ -571,15 +571,118 @@ def parse_psi(path, sampling_epoch=None):
 
 
 # ---------------------------------------------------------------------------
+# collect-resources.py JSON Lines parser
+# ---------------------------------------------------------------------------
+
+def parse_collect_jsonl(path):
+    """Parse output of collect-resources.py (one JSON object per line).
+
+    Each line: {"t": <float>, "sys": {...}, "procs": {<group>: {...}},
+                "top_cpu": [...], "top_rss": [...]}
+
+    Returns (proc_groups, mpstat_data, top_cpu_series, top_rss_series).
+
+    top_cpu_series / top_rss_series: dict of name -> [{t, v}] for the top-10
+    processes seen across all samples (union of names that ever appeared in top10).
+    """
+    ALL_GROUPS = ["server", "client", "http_echo", "ws_echo", "grpc_echo",
+                  "k6", "frps", "frpc", "other"]
+    proc_groups = {g: {"cpu": [], "rss": [], "vms": [], "read_kbs": [], "write_kbs": [],
+                       "cswch": [], "nvcswch": []} for g in ALL_GROUPS}
+    sys_keys = ("cpu", "cpu_usr", "cpu_sys", "cpu_irq", "cpu_soft", "cpu_iowait", "cpu_steal",
+                "loadavg_1", "loadavg_5", "loadavg_15",
+                "ctx_switches", "interrupts",
+                "mem_pct", "mem_used_mb", "swap_used_mb",
+                "disk_read_kbs", "disk_write_kbs", "disk_read_iops", "disk_write_iops",
+                "net_rx_kbs", "net_tx_kbs", "net_rx_pkts", "net_tx_pkts",
+                "net_drop_in", "net_drop_out", "net_err_in", "net_err_out",
+                "tcp_estab", "tcp_timewait",
+                "udp_rx_err", "udp_buf_err")
+    mpstat_data = {k: [] for k in sys_keys}
+    # cpu_per_core: list of series, one per core index
+    cpu_per_core_series: list = []  # will be set from first sample
+
+    # top-10 series: name -> {t -> value}  (last seen value per name per t)
+    top_cpu_by_name: dict = {}
+    top_rss_by_name: dict = {}
+
+    if not os.path.exists(path):
+        return proc_groups, mpstat_data, {}, {}
+
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = row.get("t")
+            if t is None:
+                continue
+
+            # system scalar metrics
+            sys_d = row.get("sys") or {}
+            for k in sys_keys:
+                v = sys_d.get(k)
+                if v is not None:
+                    mpstat_data[k].append({"t": t, "v": v})
+
+            # per-core CPU (variable length list)
+            cores = sys_d.get("cpu_per_core")
+            if isinstance(cores, list):
+                # extend series list if more cores than seen before
+                while len(cpu_per_core_series) < len(cores):
+                    cpu_per_core_series.append([])
+                for i, v in enumerate(cores):
+                    cpu_per_core_series[i].append({"t": t, "v": v})
+
+            # per-process groups
+            procs_d = row.get("procs") or {}
+            for g in ALL_GROUPS:
+                gd = procs_d.get(g)
+                if not gd:
+                    continue
+                for field in ("cpu", "rss", "vms", "read_kbs", "write_kbs", "cswch", "nvcswch", "fds"):
+                    v = gd.get(field)
+                    if v is not None and v != 0:
+                        proc_groups[g][field].append({"t": t, "v": v})
+
+            # top-10 CPU
+            for entry in (row.get("top_cpu") or []):
+                name = entry.get("name") or f"pid{entry.get('pid','?')}"
+                v = entry.get("cpu", 0)
+                if name not in top_cpu_by_name:
+                    top_cpu_by_name[name] = []
+                top_cpu_by_name[name].append({"t": t, "v": round(v, 2)})
+
+            # top-10 RSS
+            for entry in (row.get("top_rss") or []):
+                name = entry.get("name") or f"pid{entry.get('pid','?')}"
+                v = entry.get("rss", 0)
+                if name not in top_rss_by_name:
+                    top_rss_by_name[name] = []
+                top_rss_by_name[name].append({"t": t, "v": round(v, 1)})
+
+    if cpu_per_core_series:
+        mpstat_data["cpu_per_core"] = cpu_per_core_series
+
+    return proc_groups, mpstat_data, top_cpu_by_name, top_rss_by_name
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser()
-    # --pidstat-ur supersedes --proc-cpu; --proc-cpu kept for backwards compat
+    # --collect supersedes all individual tool outputs
+    p.add_argument("--collect",       default="")   # collect-resources.py jsonl
+    # legacy individual-tool inputs (used when --collect not provided)
     p.add_argument("--pidstat-ur",    default="")
     p.add_argument("--proc-cpu",      default="")
-    p.add_argument("--mpstat",        required=True)
+    p.add_argument("--mpstat",        default="")
     p.add_argument("--pidstat-io",    default="")
     p.add_argument("--pidstat-ctxsw", default="")
     p.add_argument("--sar-net",       default="")
@@ -593,21 +696,36 @@ def main():
     args = p.parse_args()
 
     nproc = _read_nproc(args.nproc)
-    # Prefer pidstat -u -r output; fall back to legacy /proc loop log
-    if args.pidstat_ur and os.path.exists(args.pidstat_ur):
-        proc_groups = parse_pidstat_ur(args.pidstat_ur, nproc)
-    else:
-        proc_groups = parse_proc_cpu(args.proc_cpu, nproc) if args.proc_cpu else \
-                      {g: {"cpu": [], "rss": []} for g in ["server","client","http_echo","ws_echo","grpc_echo","k6","frps","frpc","other"]}
-    mpstat_data  = parse_mpstat(args.mpstat)
-    io_groups    = parse_pidstat_io(args.pidstat_io)       if args.pidstat_io   else {}
-    ctxsw_groups = parse_pidstat_ctxsw(args.pidstat_ctxsw) if args.pidstat_ctxsw else {}
-    net          = parse_sar_net(args.sar_net)             if args.sar_net      else {}
-    paging       = parse_sar_paging(args.sar_paging)       if args.sar_paging   else {}
-    tcp          = parse_ss_timeseries(args.ss)            if args.ss           else {}
-    psi          = parse_psi(args.psi)                     if args.psi          else {}
 
-    # Merge CPU/RSS + IO + ctxsw into per-process entries; only emit groups with data
+    top_cpu_series: dict = {}
+    top_rss_series: dict = {}
+
+    if args.collect and os.path.exists(args.collect):
+        # New unified path: one jsonl file replaces mpstat + pidstat-ur + pidstat-ctxsw + pidstat-io
+        proc_groups, mpstat_data, top_cpu_series, top_rss_series = parse_collect_jsonl(args.collect)
+        io_groups    = {}
+        ctxsw_groups = {}
+    else:
+        # Legacy path
+        if args.pidstat_ur and os.path.exists(args.pidstat_ur):
+            proc_groups = parse_pidstat_ur(args.pidstat_ur, nproc)
+        elif args.proc_cpu and os.path.exists(args.proc_cpu):
+            proc_groups = parse_proc_cpu(args.proc_cpu, nproc)
+        else:
+            proc_groups = {g: {"cpu": [], "rss": []}
+                           for g in ["server","client","http_echo","ws_echo",
+                                     "grpc_echo","k6","frps","frpc","other"]}
+        mpstat_data  = parse_mpstat(args.mpstat) if args.mpstat else \
+                       {k: [] for k in ("cpu","cpu_usr","cpu_sys","cpu_irq","cpu_soft","cpu_iowait","cpu_steal")}
+        io_groups    = parse_pidstat_io(args.pidstat_io)       if args.pidstat_io   else {}
+        ctxsw_groups = parse_pidstat_ctxsw(args.pidstat_ctxsw) if args.pidstat_ctxsw else {}
+
+    net    = parse_sar_net(args.sar_net)     if args.sar_net    else {}
+    paging = parse_sar_paging(args.sar_paging) if args.sar_paging else {}
+    tcp    = parse_ss_timeseries(args.ss)    if args.ss         else {}
+    psi    = parse_psi(args.psi)             if args.psi        else {}
+
+    # Merge per-process fields; only emit groups with data
     processes = {}
     for g in ["server", "client", "http_echo", "ws_echo", "grpc_echo", "k6", "frps", "frpc", "other"]:
         entry = {**proc_groups.get(g, {})}
@@ -637,6 +755,10 @@ def main():
         result["tcp_conns"] = tcp
     if psi and any(psi.values()):
         result["psi"] = psi
+    if top_cpu_series:
+        result["top_cpu"] = top_cpu_series
+    if top_rss_series:
+        result["top_rss"] = top_rss_series
 
     with open(args.output, "w") as f:
         json.dump(result, f, indent=2)

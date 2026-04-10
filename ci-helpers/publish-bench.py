@@ -31,7 +31,7 @@ def main():
 
     if args.resources and os.path.exists(args.resources):
         with open(args.resources) as f:
-            entry["resources"] = json.load(f)
+            entry.setdefault("resources_per_case", {})["core"] = json.load(f)
     if args.trace_server:
         entry.setdefault("artifacts", {})["trace_server"] = args.trace_server
     if args.trace_client:

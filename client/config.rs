@@ -84,7 +84,7 @@ impl Default for ReconnectConfig {
             resolve_timeout_ms: 5_000,
             login_timeout_ms: 5_000,
             startup_jitter_ms: 300,
-            open_stream_timeout_ms: 3_000,
+            open_stream_timeout_ms: 5_000,
         }
     }
 }

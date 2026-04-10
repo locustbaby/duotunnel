@@ -64,7 +64,7 @@ on:
         default: 4
       # ── Monitor ───────────────────────────────────────────────────────────────
       monitor_cpu:
-        description: 'Collect CPU metrics (mpstat + /proc per-process)'
+        description: 'Collect CPU/memory/IO/ctxsw metrics (collect-resources.py via psutil)'
         type: boolean
         default: true
       monitor_io:
@@ -1160,21 +1160,11 @@ jobs:
           DO_PSI="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_psi != false }}"
           DO_PAGING="${{ github.event_name != 'workflow_dispatch' || inputs.monitor_paging != false }}"
 
+          pip install -q psutil 2>/dev/null || true
           if [ "$DO_CPU" = "true" ]; then
-            mpstat 1 > /tmp/mpstat.log 2>&1 &
-            echo $! > /tmp/mpstat.pid
-            pidstat -p ALL -u -r 1 > /tmp/pidstat-ur.log 2>&1 &
-            echo $! > /tmp/pidstat-ur.pid
-          fi
-
-          if [ "$DO_IO" = "true" ]; then
-            pidstat -p ALL -d 1 > /tmp/pidstat-io.log 2>&1 &
-            echo $! > /tmp/pidstat-io.pid
-          fi
-
-          if [ "$DO_CTXSW" = "true" ]; then
-            pidstat -p ALL -w 1 > /tmp/pidstat-ctxsw.log 2>&1 &
-            echo $! > /tmp/pidstat-ctxsw.pid
+            python3 "${{ github.workspace }}/ci-helpers/collect-resources.py" 1 \
+              > /tmp/collect.jsonl 2>/tmp/collect-resources-err.log &
+            echo $! > /tmp/collect-resources.pid
           fi
 
           if [ "$DO_NET" = "true" ]; then
@@ -1285,34 +1275,23 @@ jobs:
       - name: Stop resource sampling
         if: always()
         run: |
-          kill -9 "$(cat /tmp/mpstat.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/pidstat-ur.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/pidstat-io.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/pidstat-ctxsw.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/vmstat.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/sar-net.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/sar-paging.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/ss-loop.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/psi-loop.pid 2>/dev/null)" 2>/dev/null || true
-          pkill -9 -f "mpstat" 2>/dev/null || true
-          pkill -9 -f "pidstat" 2>/dev/null || true
+          pkill -9 -f "collect-resources.py" 2>/dev/null || true
           pkill -9 -f "sar -n" 2>/dev/null || true
           pkill -9 -f "sar -B" 2>/dev/null || true
           sleep 0.5
 
-      - name: Resource report — CPU (mpstat)
+      - name: Resource report — collect-resources
         if: always()
         run: |
-          echo "── CPU utilization during k6 (mpstat 2s interval) ──"
-          cat /tmp/mpstat.log || echo "(no data)"
-
-      - name: Resource report — per-process (pidstat)
-        if: always()
-        run: |
-          echo "── I/O stats per process (pidstat -d) ──"
-          cat /tmp/pidstat-io.log || echo "(no data)"
-          echo "── Context switches per process (pidstat -w) ──"
-          cat /tmp/pidstat-ctxsw.log || echo "(no data)"
+          echo "── collect-resources.py errors (if any) ──"
+          cat /tmp/collect-resources-err.log || echo "(no data)"
+          echo "── sample lines from collect.jsonl ──"
+          head -5 /tmp/collect.jsonl || echo "(no data)"
 
       - name: Resource report — system (vmstat)
         if: always()
@@ -1336,10 +1315,7 @@ jobs:
             K6_OFFSET=$(( K - S ))
           fi
           python3 "${{ github.workspace }}/ci-helpers/parse-resources.py" \
-            --pidstat-ur   /tmp/pidstat-ur.log \
-            --mpstat       /tmp/mpstat.log \
-            --pidstat-io   /tmp/pidstat-io.log \
-            --pidstat-ctxsw /tmp/pidstat-ctxsw.log \
+            --collect      /tmp/collect.jsonl \
             --sar-net      /tmp/sar-net.log \
             --sar-paging   /tmp/sar-paging.log \
             --ss           /tmp/ss-timeseries.log \
@@ -1518,7 +1494,7 @@ jobs:
             CASE_NAME="$1"
             SUFFIX="${CASE_NAME}"
             rm -f /tmp/bench-results.json /tmp/server-trace.*.bin /tmp/client-trace.*.bin /tmp/server-trace.*.bin.active /tmp/client-trace.*.bin.active /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
-            rm -f /tmp/mpstat.log /tmp/pidstat-ur.log /tmp/pidstat-ctxsw.log /tmp/ss-timeseries.log /tmp/mpstat.pid /tmp/pidstat-ur.pid /tmp/pidstat-ctxsw.pid /tmp/ss-loop.pid
+            rm -f /tmp/collect.jsonl /tmp/collect-resources-err.log /tmp/collect-resources.pid /tmp/ss-timeseries.log /tmp/ss-loop.pid
             ./target/release/http-echo-server 9999  > "/tmp/http-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/http-echo.pid
             ./target/release/ws-echo-server   8765  > "/tmp/ws-echo-${SUFFIX}.log"    2>&1 & echo $! > /tmp/ws-echo.pid
             ./target/release/grpc-echo-server 50051 > "/tmp/grpc-echo-${SUFFIX}.log"  2>&1 & echo $! > /tmp/grpc-echo.pid
@@ -1658,12 +1634,9 @@ jobs:
             # Start resource sampling for this case
             nproc > /tmp/nproc
             echo "$(nproc) $(grep MemTotal /proc/meminfo | awk '{print $2}')" > /tmp/machine-info
-            mpstat 1 > /tmp/mpstat.log 2>&1 &
-            echo $! > /tmp/mpstat.pid
-            pidstat -p ALL -u -r 1 > /tmp/pidstat-ur.log 2>&1 &
-            echo $! > /tmp/pidstat-ur.pid
-            pidstat -p ALL -w 1 > /tmp/pidstat-ctxsw.log 2>&1 &
-            echo $! > /tmp/pidstat-ctxsw.pid
+            python3 "${{ github.workspace }}/ci-helpers/collect-resources.py" 1 \
+              > /tmp/collect.jsonl 2>/tmp/collect-resources-err.log &
+            echo $! > /tmp/collect-resources.pid
             (while true; do
               echo "$(date +%s) $(ss -s 2>/dev/null | grep -E 'estab|timewait|closed' | tr '\n' '|')"
               sleep 1
@@ -1678,18 +1651,13 @@ jobs:
               bench.js)
 
             # Stop resource sampling
-            kill -9 "$(cat /tmp/mpstat.pid 2>/dev/null)" 2>/dev/null || true
-            kill -9 "$(cat /tmp/pidstat-ur.pid 2>/dev/null)" 2>/dev/null || true
-            kill -9 "$(cat /tmp/pidstat-ctxsw.pid 2>/dev/null)" 2>/dev/null || true
+            kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/ss-loop.pid 2>/dev/null)" 2>/dev/null || true
-            pkill -9 -f "mpstat" 2>/dev/null || true
-            pkill -9 -f "pidstat" 2>/dev/null || true
+            pkill -9 -f "collect-resources.py" 2>/dev/null || true
             sleep 0.5
             # Parse resource data (k6 offset = 0: sampling started right before k6)
             python3 "${{ github.workspace }}/ci-helpers/parse-resources.py" \
-              --pidstat-ur   /tmp/pidstat-ur.log \
-              --mpstat       /tmp/mpstat.log \
-              --pidstat-ctxsw /tmp/pidstat-ctxsw.log \
+              --collect      /tmp/collect.jsonl \
               --ss           /tmp/ss-timeseries.log \
               --k6-offset    0 \
               --nproc        /tmp/nproc \

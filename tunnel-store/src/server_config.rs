@@ -72,7 +72,7 @@ fn default_login_timeout_secs() -> u64 {
     10
 }
 fn default_open_stream_timeout_ms() -> u64 {
-    2000
+    5000
 }
 fn default_h2_single_authority() -> bool {
     true
