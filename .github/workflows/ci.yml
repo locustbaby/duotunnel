@@ -2101,8 +2101,19 @@ jobs:
           mkdir -p bench
           cp "${{ github.workspace }}/bench/index.html" bench/index.html
           rm -rf bench/viewer && cp -r "${{ github.workspace }}/bench/viewer" bench/viewer
-          # Remove legacy inline HTML viewer files (replaced by shard mode)
-          find bench/traces -name "*.html" -delete 2>/dev/null || true
+          # Keep only the 3 most recent trace sets, delete older shards
+          # Each trace set is a directory named <sha>-<case>-<role>
+          if [ -d bench/traces ]; then
+            find bench/traces -name "*.html" -delete 2>/dev/null || true
+            SHAS=$(ls -1d bench/traces/*/ 2>/dev/null | sed 's|bench/traces/||;s|-.*||' | sort -u)
+            SHA_COUNT=$(echo "$SHAS" | grep -c . || true)
+            if [ "$SHA_COUNT" -gt 3 ]; then
+              OLD_SHAS=$(echo "$SHAS" | head -n $(( SHA_COUNT - 3 )))
+              for OLD in $OLD_SHAS; do
+                find bench/traces -maxdepth 1 -name "${OLD}-*" | xargs rm -rf
+              done
+            fi
+          fi
           FRP_ARG=""
           FRP_OFFSET_ARG=""
           if [ -s /tmp/core/bench-results-frp.json ]; then
