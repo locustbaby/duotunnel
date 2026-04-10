@@ -701,8 +701,13 @@
                 loadAbortController = new AbortController();
                 dropZone.innerHTML = '';
                 const wrap = document.createElement("div");
-                wrap.style.textAlign = "center";
-                wrap.innerHTML = `<div style="margin-bottom:12px">${esc(label)}</div>`;
+                wrap.style.cssText = "text-align:center;min-width:320px";
+                wrap.innerHTML = `
+                    <div id="loading-label" style="margin-bottom:12px">${esc(label)}</div>
+                    <div id="loading-bar-wrap" style="display:none;margin-bottom:12px;background:#1a1a2e;border-radius:4px;height:6px;overflow:hidden;width:100%">
+                        <div id="loading-bar" style="height:100%;width:0%;background:#6c63ff;border-radius:4px;transition:width 0.1s"></div>
+                    </div>
+                `;
                 const btn = document.createElement("button");
                 btn.textContent = "← Back";
                 btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em";
@@ -710,6 +715,17 @@
                 wrap.appendChild(btn);
                 wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
                 dropZone.appendChild(wrap);
+            }
+
+            function updateLoadingProgress(label, pct) {
+                const lbl = document.getElementById("loading-label");
+                const bar = document.getElementById("loading-bar");
+                const barWrap = document.getElementById("loading-bar-wrap");
+                if (lbl) lbl.textContent = label;
+                if (bar && barWrap) {
+                    barWrap.style.display = "block";
+                    bar.style.width = pct + "%";
+                }
             }
 
             function cancelLoad() {
@@ -753,10 +769,24 @@
                     try {
                         const resp = await fetch(url);
                         if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                        const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
+                        let received = 0;
+                        const chunks = [];
+                        const reader = resp.body.getReader();
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            chunks.push(value);
+                            received += value.length;
+                            if (total > 0) {
+                                self.postMessage({ id, progress: Math.min(99, Math.round(received / total * 100)) });
+                            }
+                        }
+                        const blob = new Blob(chunks);
                         const isGz = url.endsWith('.gz');
                         const text = isGz
-                            ? await new Response(resp.body.pipeThrough(new DecompressionStream('gzip'))).text()
-                            : await resp.text();
+                            ? await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text()
+                            : await blob.text();
                         const parsed = JSON.parse(text);
                         self.postMessage({ id, ok: true, data: parsed });
                     } catch (e) {
@@ -772,6 +802,10 @@
             _jsonWorker.onmessage = ({ data }) => {
                 const pending = _jsonPending.get(data.id);
                 if (!pending) return;
+                if (data.progress !== undefined) {
+                    pending.onProgress?.(data.progress);
+                    return;
+                }
                 _jsonPending.delete(data.id);
                 data.ok ? pending.resolve(data.data) : pending.reject(new Error(data.error));
             };
@@ -793,11 +827,11 @@
                 }
             }
 
-            function fetchJsonOffThread(url, signal) {
+            function fetchJsonOffThread(url, signal, onProgress) {
                 if (signal?.aborted) return Promise.reject(makeAbortError());
                 return new Promise((resolve, reject) => {
                     const id = ++_jsonReqId;
-                    _jsonPending.set(id, { resolve, reject });
+                    _jsonPending.set(id, { resolve, reject, onProgress });
                     if (signal) {
                         signal.addEventListener('abort', () => {
                             const pending = _jsonPending.get(id);
@@ -837,9 +871,11 @@
                     };
 
                     // Step 2: fetch events and CPU samples in parallel
-                    showLoadingState(`Loading ${meta.eventCount.toLocaleString()} events…`);
+                    const evtLabel = `Loading ${meta.eventCount.toLocaleString()} events + ${meta.cpuSampleCount.toLocaleString()} CPU samples…`;
+                    showLoadingState(evtLabel);
                     const [events, cpuSamples] = await Promise.all([
-                        fetchJsonOffThread(baseUrl + '-events.json.gz', loadAbortController?.signal),
+                        fetchJsonOffThread(baseUrl + '-events.json.gz', loadAbortController?.signal,
+                            pct => updateLoadingProgress(`${evtLabel} ${pct}%`, pct)),
                         fetchJsonOffThread(baseUrl + '-cpu.json.gz', loadAbortController?.signal).catch(() => []),
                     ]);
                     trace.events = events;
