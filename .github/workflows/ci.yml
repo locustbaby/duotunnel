@@ -58,6 +58,10 @@ on:
         description: 'Tokio worker threads for server/client in stress-trace (0 = CPU count)'
         type: number
         default: 0
+      stress_quic_connections:
+        description: 'QUIC client connection count for stress jobs'
+        type: number
+        default: 4
       # ── Monitor ───────────────────────────────────────────────────────────────
       monitor_cpu:
         description: 'Collect CPU metrics (mpstat + /proc per-process)'
@@ -989,6 +993,18 @@ jobs:
       - name: Start all backends + tunnel (ctld → server → client)
         timeout-minutes: 2
         run: |
+          CLIENT_QUIC_CONNECTIONS="${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          case "$CLIENT_QUIC_CONNECTIONS" in
+            ''|*[!0-9]*)
+              echo "ERROR: stress_quic_connections must be a positive integer, got: $CLIENT_QUIC_CONNECTIONS"
+              exit 1
+              ;;
+          esac
+          if [ "$CLIENT_QUIC_CONNECTIONS" -lt 1 ]; then
+            echo "ERROR: stress_quic_connections must be >= 1, got: $CLIENT_QUIC_CONNECTIONS"
+            exit 1
+          fi
+
           ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
           ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
           ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log  2>&1 & echo $! > /tmp/grpc-echo.pid
@@ -1023,7 +1039,7 @@ jobs:
             || ./target/release/tunnel-ctld --config ci-helpers/ctld.yaml \
             client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
           if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+          python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$CLIENT_QUIC_CONNECTIONS"
           # Wait for ctld poll to push new token to server (~1500ms poll interval)
           sleep 3
           ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
@@ -1495,6 +1511,18 @@ jobs:
       - name: Run dial9 trace sequence
         timeout-minutes: 25
         run: |
+          CLIENT_QUIC_CONNECTIONS="${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          case "$CLIENT_QUIC_CONNECTIONS" in
+            ''|*[!0-9]*)
+              echo "ERROR: stress_quic_connections must be a positive integer, got: $CLIENT_QUIC_CONNECTIONS"
+              exit 1
+              ;;
+          esac
+          if [ "$CLIENT_QUIC_CONNECTIONS" -lt 1 ]; then
+            echo "ERROR: stress_quic_connections must be >= 1, got: $CLIENT_QUIC_CONNECTIONS"
+            exit 1
+          fi
+
           run_case() {
             CASE_NAME="$1"
             SUFFIX="${CASE_NAME}"
@@ -1544,7 +1572,7 @@ jobs:
                 client rotate-token "${CLIENT_NAME}" 2>/dev/null | awk '{print $NF}' | tail -n1)
             fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
-            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 1', c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+            python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$CLIENT_QUIC_CONNECTIONS"
 
             sleep 3
 
