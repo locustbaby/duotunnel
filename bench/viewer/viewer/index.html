@@ -826,21 +826,24 @@
                         hasCpuTime: meta.hasCpuTime,
                         hasSchedWait: meta.hasSchedWait,
                         hasTaskTracking: meta.hasTaskTracking,
-                        events: [],          // filled by step 2
-                        cpuSamples: [],      // filled lazily in step 3
+                        events: [],
+                        cpuSamples: [],
                         callframeSymbols: new Map(meta.callframeSymbols),
                         spawnLocations:   new Map(meta.spawnLocations),
                         taskSpawnLocs:    new Map(meta.taskSpawnLocs),
                         taskSpawnTimes:   new Map(meta.taskSpawnTimes),
                         taskTerminateTimes: new Map(meta.taskTerminateTimes),
                         runtimeWorkers:   new Map(meta.runtimeWorkers),
-                        _cpuUrl: baseUrl + '-cpu.json.gz',
-                        _cpuLoaded: false,
                     };
 
-                    // Step 2: fetch + gunzip + JSON.parse events off main thread
+                    // Step 2: fetch events and CPU samples in parallel
                     showLoadingState(`Loading ${meta.eventCount.toLocaleString()} events…`);
-                    trace.events = await fetchJsonOffThread(baseUrl + '-events.json.gz', loadAbortController?.signal);
+                    const [events, cpuSamples] = await Promise.all([
+                        fetchJsonOffThread(baseUrl + '-events.json.gz', loadAbortController?.signal),
+                        fetchJsonOffThread(baseUrl + '-cpu.json.gz', loadAbortController?.signal).catch(() => []),
+                    ]);
+                    trace.events = events;
+                    trace.cpuSamples = cpuSamples;
 
                     loadAbortController = null;
                     processTrace();
@@ -849,20 +852,6 @@
                     if (err.name === 'AbortError') return;
                     alert('Error loading trace shards: ' + err.message);
                     resetDropZone();
-                }
-            }
-
-            // ── CPU samples lazy loader ──
-            async function ensureCpuSamples() {
-                if (!trace || trace._cpuLoaded || !trace._cpuUrl) return;
-                trace._cpuLoaded = true;
-                try {
-                    const samples = await fetchJsonOffThread(trace._cpuUrl);
-                    trace.cpuSamples = samples;
-                    attachSamplesToPolls(samples);
-                } catch (err) {
-                    console.warn('Failed to load cpu samples:', err.message);
-                    trace._cpuLoaded = false;
                 }
             }
 
@@ -2311,7 +2300,7 @@
                 .getElementById("main-area")
                 .addEventListener("mousedown", (e) => {
                     if (kbSelecting) cancelKbSelection();
-                    if (e.shiftKey && !e.altKey && trace && trace.cpuSamples.length === 0 && !trace._cpuUrl) {
+                    if (e.shiftKey && !e.altKey && trace && trace.cpuSamples.length === 0) {
                         showToast("no-cpu-samples", "No CPU samples in trace — enable cpu-profiling for flamegraphs", "error", 4000);
                         return;
                     }
@@ -3238,14 +3227,7 @@
                 document.getElementById("pick-flamegraph").focus();
             }
 
-            async function showFlamegraph(selStart, selEnd) {
-                // Lazy-load cpu samples if using shard mode
-                if (trace && trace._cpuUrl && !trace._cpuLoaded) {
-                    showToast("loading-cpu", "Loading CPU samples…", "info", 0);
-                    await ensureCpuSamples();
-                    document.getElementById("toast-loading-cpu")?.remove();
-                }
-
+            function showFlamegraph(selStart, selEnd) {
                 const allSamples = trace.cpuSamples.filter(s =>
                     s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                 );
