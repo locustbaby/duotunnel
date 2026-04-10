@@ -586,18 +586,17 @@ function renderDetail(entry) {
       html += row(...[hasCtxsw && {id:'ctxswChart', title:'Context Switches / s'},
                       hasTCP   && {id:'tcpChart',   title:'TCP Connections'}].filter(Boolean));
 
-    // per-case 8k resource charts
+    // merged 8k resource charts (all cases on one x-axis)
     const rpc = entry.resources_per_case || {};
-    for (const caseName of Object.keys(rpc)) {
-      const caseRes = rpc[caseName];
-      const caseHasCtxsw = Object.values(caseRes.processes||{}).some(p => p.cswch?.length);
-      const caseHasTCP = caseRes.tcp_conns && (caseRes.tcp_conns.estab?.length || caseRes.tcp_conns.timewait?.length);
-      const cId = caseName.replace(/[^a-z0-9]/gi,'_');
-      html += `<div class="sec">Resources — ${esc(caseName)}</div>`;
-      html += row({id:`cpu_${cId}`, title:'CPU Usage (% of machine)'}, {id:`mem_${cId}`, title:'Memory RSS (MB)'});
-      if (caseHasCtxsw || caseHasTCP)
-        html += row(...[caseHasCtxsw && {id:`ctxsw_${cId}`, title:'Context Switches / s'},
-                        caseHasTCP   && {id:`tcp_${cId}`,   title:'TCP Connections'}].filter(Boolean));
+    const rpcKeys = Object.keys(rpc);
+    if (rpcKeys.length) {
+      const anyCtxsw = rpcKeys.some(k => Object.values(rpc[k].processes||{}).some(p => p.cswch?.length));
+      const anyTCP   = rpcKeys.some(k => rpc[k].tcp_conns && (rpc[k].tcp_conns.estab?.length || rpc[k].tcp_conns.timewait?.length));
+      html += `<div class="sec">Resources (8k cases)</div>`;
+      html += row({id:'cpu8k', title:'CPU Usage (% of machine)'}, {id:'mem8k', title:'Memory RSS (MB)'});
+      if (anyCtxsw || anyTCP)
+        html += row(...[anyCtxsw && {id:'ctxsw8k', title:'Context Switches / s'},
+                        anyTCP   && {id:'tcp8k',   title:'TCP Connections'}].filter(Boolean));
     }
   }
 
@@ -744,85 +743,190 @@ function renderDetail(entry) {
         options:{...TSO,...yTitle('connections')}});
     }
 
-    // ── Per-case 8k resource charts ───────────────────────────────────────
-    function renderCaseResources(caseName, caseRes) {
-      const cId = caseName.replace(/[^a-z0-9]/gi,'_');
-      const caseOffset = caseRes.k6OffsetSeconds || 0;
-
-      // phases for this specific case (matched by case field)
-      const casePhaseDefs = (entry?.phases || [])
-        .filter(p => p.case === caseName || p.case === caseName.replace(/ \(8k-q4\)$/,''))
-        .map(p => ({...p, start: (p.start||0) + caseOffset, end: (p.end||0) + caseOffset}));
-
-      const caseResMaxT = (() => {
+    // ── Per-case 8k resource charts (merged into one set of charts) ──────────
+    const rpcEntries = Object.entries(entry.resources_per_case || {});
+    if (rpcEntries.length) {
+      // Compute per-case time offsets so all cases are serialised on one x-axis.
+      // Offset for case[i] = sum of maxT of cases[0..i-1], with a small gap.
+      const CASE_GAP = 5; // seconds between cases
+      const caseOffsets = [];
+      let runningOffset = 0;
+      const caseMaxTs = rpcEntries.map(([, caseRes]) => {
         const pr = caseRes.processes || {};
         const pts = [...(caseRes.system?.cpu||[]), ...Object.values(pr).flatMap(p=>[...(p.cpu||[]),...(p.rss||[])])];
         return pts.length ? Math.max(...pts.map(p=>p.t??0)) : 0;
-      })();
-      const clipped = caseResMaxT > 0 ? casePhaseDefs.filter(p=>(p.start||0)<=caseResMaxT+30) : casePhaseDefs;
-      const caseLastEnd = clipped.length ? Math.max(...clipped.map(p=>p.end||0)) : 0;
-      const caseXMax = isFinite(caseLastEnd) && caseLastEnd > 0 ? caseLastEnd + 5 : undefined;
+      });
+      for (let i = 0; i < rpcEntries.length; i++) {
+        caseOffsets.push(runningOffset);
+        runningOffset += caseMaxTs[i] + CASE_GAP;
+      }
+      const totalXMax = runningOffset - CASE_GAP + 5;
+
+      // Build merged phase annotations: each case's phases shifted by its offset.
+      const mergedPhases = [];
+      rpcEntries.forEach(([caseName,], idx) => {
+        const baseName = caseName.replace(/ \(8k-q4\)$/, '');
+        const casePhaseDefs = (entry?.phases || [])
+          .filter(p => p.case === caseName || p.case === baseName)
+          .map(p => ({...p, start: (p.start||0) + caseOffsets[idx], end: (p.end||0) + caseOffsets[idx]}));
+        mergedPhases.push(...casePhaseDefs);
+      });
+      // Case background bands + name labels
+      const CASE_BG_COLORS = [
+        'rgba(77,166,255,.06)', 'rgba(52,211,153,.06)',
+        'rgba(245,166,35,.06)', 'rgba(167,139,250,.06)',
+      ];
+      const boundaryAnnotations = {};
+      rpcEntries.forEach(([caseName,], idx) => {
+        const xStart = caseOffsets[idx];
+        const xEnd   = xStart + caseMaxTs[idx];
+        const shortName = caseName.replace(/ \(8k-q4\)$/, '').replace(/_/g, ' ');
+        const bgColor = CASE_BG_COLORS[idx % CASE_BG_COLORS.length];
+        boundaryAnnotations[`caseBg${idx}`] = {
+          type: 'box',
+          xMin: xStart, xMax: xEnd,
+          backgroundColor: bgColor,
+          borderWidth: 0,
+          label: {
+            display: true,
+            content: shortName,
+            color: 'rgba(180,200,220,0.55)',
+            font: {size: 11, weight: 'bold'},
+            position: {x: 'center', y: 'start'},
+            yAdjust: 4,
+          },
+        };
+        if (idx > 0) {
+          boundaryAnnotations[`caseSep${idx}`] = {
+            type:'line', xMin:xStart, xMax:xStart,
+            borderColor:'rgba(255,255,255,0.2)', borderWidth:1.5, borderDash:[5,3],
+          };
+        }
+      });
+      const allAnnotations = {...phaseAnnotations(mergedPhases), ...boundaryAnnotations};
+
+      function shiftPts(pts, offset) { return pts.map(p=>({x:(p.t??0)+offset, y:p.v})); }
 
       const cTSO = {
         ...CO, showLine:true,
-        plugins:{...CO.plugins, annotation:{annotations:phaseAnnotations(clipped)}, tooltip:{mode:'index',intersect:false}},
+        plugins:{...CO.plugins, annotation:{annotations:allAnnotations}, tooltip:{mode:'index',intersect:false}},
         scales:{
-          x:{...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}, ...(caseXMax?{max:caseXMax}:{})},
+          x:{...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}, max:totalXMax},
           y:{...CO.scales.y},
         },
       };
       function cYTitle(text){return{scales:{...cTSO.scales,y:{...cTSO.scales.y,title:{display:true,text,color:'#6b7d93'}}}};}
-      function cLinePts(pts,color,label,extra={}){return{label,data:pts.map(p=>({x:p.t,y:p.v})),borderColor:color,backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1.5,...extra};}
+      function cLinePts(pts,color,label,extra={}){return{label,data:pts,borderColor:color,backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1.5,...extra};}
 
-      const cProc = caseRes.processes || {};
-      // CPU
-      const cCpuTimes = [...new Set(PSERIES.flatMap(s=>(cProc[s.key]?.cpu||[]).map(p=>p.t)))].sort((a,b)=>a-b);
-      const cCpuDS = [];
-      if (cCpuTimes.length) {
+      // Merge datasets: one series per process key, concatenated across all cases.
+      // Use null gap between cases to avoid connecting lines.
+      const cpuByKey = {};   // key -> [{x,y}]
+      const memByKey = {};
+      const csVolByKey = {};
+      const csInvolByKey = {};
+      const tcpEstab = [], tcpTimewait = [], tcpClosed = [];
+      let hasCpu = false, hasMem = false, hasCs = false, hasTcpMerged = false;
+      // System total and CPU breakdown (merge across cases)
+      const sysCpuMerged = [];
+      const sysBdMerged = {}; // breakdown key -> [{x,y}]
+
+      rpcEntries.forEach(([, caseRes], idx) => {
+        const off = caseOffsets[idx];
+        const maxT = caseMaxTs[idx];
+        const cProc = caseRes.processes || {};
+
+        // null gap marker
+        const gap = [{x: off + maxT + 0.01, y: null}];
+
         for (const s of PSERIES) {
-          const pts = cProc[s.key]?.cpu||[];
-          if (!pts.length) continue;
-          const byT = Object.fromEntries(pts.map(p=>[p.t,p.v]));
-          cCpuDS.push({label:s.label,data:cCpuTimes.map(t=>({x:t,y:byT[t]??null})),
-            borderColor:s.color,backgroundColor:s.color+'28',fill:true,tension:.3,pointRadius:0,borderWidth:1.5});
+          const p = cProc[s.key];
+          if (!cpuByKey[s.key]) cpuByKey[s.key] = [];
+          if (!memByKey[s.key]) memByKey[s.key] = [];
+          if (!csVolByKey[s.key]) csVolByKey[s.key] = [];
+          if (!csInvolByKey[s.key]) csInvolByKey[s.key] = [];
+
+          if (p?.cpu?.length) {
+            cpuByKey[s.key].push(...shiftPts(p.cpu, off), ...gap);
+            hasCpu = true;
+          }
+          if (p?.rss?.length) {
+            memByKey[s.key].push(...shiftPts(p.rss, off), ...gap);
+            hasMem = true;
+          }
+          if (p?.cswch?.length)   { csVolByKey[s.key].push(...shiftPts(p.cswch, off), ...gap); hasCs = true; }
+          if (p?.nvcswch?.length) { csInvolByKey[s.key].push(...shiftPts(p.nvcswch, off), ...gap); hasCs = true; }
         }
-      }
-      if (caseRes.system?.cpu?.length)
-        cCpuDS.push({label:'System total',data:caseRes.system.cpu.map(p=>({x:p.t,y:p.v})),
-          borderColor:'#ffffff',backgroundColor:'transparent',fill:false,tension:.3,pointRadius:0,borderWidth:1,borderDash:[4,3]});
-      if (cCpuDS.length) mkChart(`cpu_${cId}`,{type:'line',data:{datasets:cCpuDS},options:{
-        ...cTSO,
-        scales:{...cTSO.scales,y:{...cTSO.scales.y,stacked:false,min:0,max:100,title:{display:true,text:'% of machine',color:'#6b7d93'}}},
-        plugins:{...cTSO.plugins,tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
-      }});
 
-      // Memory
-      const cMemDS = PSERIES.flatMap(s=>{const pts=cProc[s.key]?.rss||[];return pts.length?[cLinePts(pts,s.color,s.label)]:[];});
-      if (cMemDS.length) mkChart(`mem_${cId}`,{type:'line',data:{datasets:cMemDS},options:{...cTSO,...cYTitle('MB')}});
+        if (caseRes.system?.cpu?.length)
+          sysCpuMerged.push(...shiftPts(caseRes.system.cpu, off), ...gap);
 
-      // Context switches
-      const cCsDS = [];
-      for (const s of PSERIES) {
-        const p = cProc[s.key];
-        if (!p) continue;
-        if (p.cswch?.length)   cCsDS.push(cLinePts(p.cswch,  s.color,`${s.label} vol`));
-        if (p.nvcswch?.length) cCsDS.push(cLinePts(p.nvcswch,s.color,`${s.label} invol`,{borderDash:[3,2],borderWidth:1}));
-      }
-      if (cCsDS.length) mkChart(`ctxsw_${cId}`,{type:'line',data:{datasets:cCsDS},options:{...cTSO,...cYTitle('/s')}});
+        for (const bd of CPU_BREAKDOWN) {
+          const pts = caseRes.system?.[bd.key];
+          if (pts?.length) {
+            if (!sysBdMerged[bd.key]) sysBdMerged[bd.key] = [];
+            sysBdMerged[bd.key].push(...shiftPts(pts, off), ...gap);
+          }
+        }
 
-      // TCP
-      if (caseRes.tcp_conns) {
-        const cTcpDS = [];
         const tc = caseRes.tcp_conns;
-        if (tc.estab?.length)    cTcpDS.push(cLinePts(tc.estab,   '#4da6ff','Established'));
-        if (tc.timewait?.length) cTcpDS.push(cLinePts(tc.timewait,'#f5a623','TIME_WAIT'));
-        if (tc.closed?.length)   cTcpDS.push(cLinePts(tc.closed,  '#4a5a6d','Closed'));
-        if (cTcpDS.length) mkChart(`tcp_${cId}`,{type:'line',data:{datasets:cTcpDS},options:{...cTSO,...cYTitle('connections')}});
-      }
-    }
+        if (tc) {
+          if (tc.estab?.length)    { tcpEstab.push(...shiftPts(tc.estab, off), ...gap); hasTcpMerged = true; }
+          if (tc.timewait?.length) { tcpTimewait.push(...shiftPts(tc.timewait, off), ...gap); hasTcpMerged = true; }
+          if (tc.closed?.length)   { tcpClosed.push(...shiftPts(tc.closed, off), ...gap); hasTcpMerged = true; }
+        }
+      });
 
-    for (const [caseName, caseRes] of Object.entries(entry.resources_per_case || {})) {
-      renderCaseResources(caseName, caseRes);
+      // CPU chart
+      if (hasCpu) {
+        const cCpuDS = [];
+        for (const s of PSERIES) {
+          if (!cpuByKey[s.key]?.length) continue;
+          cCpuDS.push({label:s.label, data:cpuByKey[s.key], borderColor:s.color, backgroundColor:s.color+'28',
+            fill:true, tension:.3, pointRadius:0, borderWidth:1.5});
+        }
+        for (const bd of CPU_BREAKDOWN) {
+          if (sysBdMerged[bd.key]?.length)
+            cCpuDS.push({label:bd.label, data:sysBdMerged[bd.key], borderColor:bd.color, backgroundColor:'transparent',
+              fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,2], hidden:true});
+        }
+        if (sysCpuMerged.length)
+          cCpuDS.push({label:'System total', data:sysCpuMerged, borderColor:'#ffffff', backgroundColor:'transparent',
+            fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
+        mkChart('cpu8k', {type:'line', data:{datasets:cCpuDS}, options:{
+          ...cTSO,
+          scales:{...cTSO.scales, y:{...cTSO.scales.y, stacked:false, min:0, max:100, title:{display:true,text:'% of machine',color:'#6b7d93'}}},
+          plugins:{...cTSO.plugins, tooltip:{mode:'index',intersect:false, callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
+        }});
+      }
+
+      // Memory chart
+      if (hasMem) {
+        const cMemDS = [];
+        for (const s of PSERIES) {
+          if (!memByKey[s.key]?.length) continue;
+          cMemDS.push(cLinePts(memByKey[s.key], s.color, s.label));
+        }
+        mkChart('mem8k', {type:'line', data:{datasets:cMemDS}, options:{...cTSO, ...cYTitle('MB')}});
+      }
+
+      // Context switch chart
+      if (hasCs) {
+        const cCsDS = [];
+        for (const s of PSERIES) {
+          if (csVolByKey[s.key]?.length)   cCsDS.push(cLinePts(csVolByKey[s.key],   s.color, `${s.label} vol`));
+          if (csInvolByKey[s.key]?.length) cCsDS.push(cLinePts(csInvolByKey[s.key], s.color, `${s.label} invol`, {borderDash:[3,2],borderWidth:1}));
+        }
+        mkChart('ctxsw8k', {type:'line', data:{datasets:cCsDS}, options:{...cTSO, ...cYTitle('/s')}});
+      }
+
+      // TCP chart
+      if (hasTcpMerged) {
+        const cTcpDS = [];
+        if (tcpEstab.length)    cTcpDS.push(cLinePts(tcpEstab,    '#4da6ff', 'Established'));
+        if (tcpTimewait.length) cTcpDS.push(cLinePts(tcpTimewait, '#f5a623', 'TIME_WAIT'));
+        if (tcpClosed.length)   cTcpDS.push(cLinePts(tcpClosed,   '#4a5a6d', 'Closed'));
+        mkChart('tcp8k', {type:'line', data:{datasets:cTcpDS}, options:{...cTSO, ...cYTitle('connections')}});
+      }
     }
 
   }
