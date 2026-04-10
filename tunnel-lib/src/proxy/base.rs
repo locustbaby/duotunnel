@@ -1,6 +1,6 @@
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 pub async fn forward_to_client(
@@ -23,6 +23,35 @@ pub async fn forward_to_client(
         Ok::<_, std::io::Error>(bytes)
     };
     let (r1, r2) = tokio::join!(quic_to_tcp, tcp_to_quic);
+    match (r1, r2) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+    }
+}
+
+pub async fn forward_prefixed<S>(
+    mut send: SendStream,
+    recv: RecvStream,
+    external_stream: S,
+    relay_buf_size: usize,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (ext_read, mut ext_write) = tokio::io::split(external_stream);
+    let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);
+    let mut ext_read = BufReader::with_capacity(relay_buf_size, ext_read);
+    let quic_to_ext = async {
+        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut ext_write).await?;
+        let _ = ext_write.shutdown().await;
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let ext_to_quic = async {
+        let bytes = tokio::io::copy_buf(&mut ext_read, &mut send).await?;
+        let _ = send.finish();
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let (r1, r2) = tokio::join!(quic_to_ext, ext_to_quic);
     match (r1, r2) {
         (Ok(_), Ok(_)) => Ok(()),
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
