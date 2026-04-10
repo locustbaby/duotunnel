@@ -130,30 +130,18 @@ const FALLBACK_PHASES = [
   {name:'Basic',start:0,end:29},{name:'Body/Payload',start:35,end:59},
   {name:'Ingress 3K',start:65,end:85},{name:'Egress 3K',start:90,end:110},
   {name:'Ingress multihost 3K',start:115,end:135},{name:'Egress multihost 3K',start:140,end:160},
-  {name:'Ingress 8K',start:165,end:185},{name:'Egress 8K',start:190,end:210},
-  {name:'Ingress multihost 8K',start:215,end:235},{name:'Egress multihost 8K',start:240,end:260},
 ];
 
-function phaseAnnotations(entry) {
+// Build phase annotations for a resource chart.
+// phases: array of phase objects with start/end already in chart x-axis seconds.
+function phaseAnnotations(phases) {
   const a = {};
-  const offset = entry?.resources?.k6OffsetSeconds || 0;
-  const phaseDefs = (entry?.phases || FALLBACK_PHASES).slice().sort((x, y) => {
-    const xs = Number.isFinite(x?.start) ? x.start : 0;
-    const ys = Number.isFinite(y?.start) ? y.start : 0;
-    if (xs !== ys) return xs - ys;
-    const xe = Number.isFinite(x?.end) ? x.end : 0;
-    const ye = Number.isFinite(y?.end) ? y.end : 0;
-    if (xe !== ye) return xe - ye;
-    return (x?.name || '').localeCompare(y?.name || '');
-  });
-  phaseDefs.forEach((p, i) => {
-    const isFrp = p.tunnel === 'frp';
-    const s = p.start + (isFrp ? 0 : offset);
-    const e = p.end + (isFrp ? 0 : offset);
+  phases.forEach((p, i) => {
+    const s = p.start || 0;
+    const e = p.end || 0;
     const col = PHASE_COLORS[i % PHASE_COLORS.length];
     const nsc = (p.scenarios||[]).length;
-    const prefix = isFrp ? 'frp: ' : '';
-    const label = nsc ? `${prefix}${p.name} (${nsc})` : `${prefix}${p.name}`;
+    const label = nsc ? `${p.name} (${nsc})` : p.name;
     const yAdj = (i % 2 === 0) ? 10 : 24;
     a['phase'+i] = {
       type: 'box', xMin: s, xMax: e, backgroundColor: col, borderWidth: 0,
@@ -567,12 +555,8 @@ function renderDetail(entry) {
 
   if (res) {
     const proc = res.processes || {};
-    const hasNet    = res.network   && (res.network.rx_kbs?.length   || res.network.tx_kbs?.length);
-    const hasIO     = Object.values(proc).some(p => p.read_kbs?.length || p.write_kbs?.length);
     const hasCtxsw  = Object.values(proc).some(p => p.cswch?.length);
     const hasTCP    = res.tcp_conns && (res.tcp_conns.estab?.length   || res.tcp_conns.timewait?.length);
-    const hasPSI    = res.psi       && (res.psi.cpu?.length);
-    const hasPaging = res.paging    && (res.paging.majflt?.length     || res.paging.minflt?.length);
 
     function row(...panels) {
       // panels: [{id, title, extra?}] — renders up to 2 per row
@@ -595,69 +579,24 @@ function renderDetail(entry) {
       const ram = m.mem_total_mb >= 1024 ? `${Math.round(m.mem_total_mb/1024)} GB` : `${m.mem_total_mb} MB`;
       return ` <span style="color:var(--text2);font-weight:400;font-size:11px">· ${m.cpu_cores} vCPU · ${ram} RAM</span>`;
     })();
-    html += `<div class="sec">Resources${machineSpec}</div>`;
+    html += `<div class="sec">Resources (core)${machineSpec}</div>`;
     html += row({id:'cpuChart',  title:'CPU Usage (% of machine)'},
                 {id:'memChart',  title:'Memory RSS (MB)'});
-    if (hasNet || hasIO)
-      html += row(...[hasNet && {id:'netChart', title:'Network Throughput (KB/s)'},
-                      hasIO  && {id:'ioChart',  title:'Disk IO (KB/s)'}].filter(Boolean));
     if (hasCtxsw || hasTCP)
       html += row(...[hasCtxsw && {id:'ctxswChart', title:'Context Switches / s'},
                       hasTCP   && {id:'tcpChart',   title:'TCP Connections'}].filter(Boolean));
-    if (hasPSI || hasPaging)
-      html += row(...[hasPSI    && {id:'psiChart',    title:'PSI — Pressure Stall (% full)'},
-                      hasPaging && {id:'pagingChart', title:'Page Faults / s'}].filter(Boolean));
 
-    const pm = res.prom_metrics || {};
-    const hasProm = Object.keys(pm).length > 0;
-    if (hasProm) {
-      const pmHas = k => pm[k]?.length > 0;
-
-      html += `<div class="sec">QUIC — Server</div>`;
-      html += row(
-        {id:'sQuicRttChart',   title:'RTT (µs)'},
-        {id:'sQuicCwndChart',  title:'Congestion Window (bytes)'},
-      );
-      html += row(
-        {id:'sQuicLostChart',  title:'Lost + Congestion Events (cumulative)'},
-        {id:'sQuicBytesChart', title:'UDP Bytes TX / RX (cumulative)'},
-      );
-
-      html += `<div class="sec">QUIC — Client</div>`;
-      html += row(
-        {id:'cQuicRttChart',   title:'RTT (µs)'},
-        {id:'cQuicCwndChart',  title:'Congestion Window (bytes)'},
-      );
-      html += row(
-        {id:'cQuicLostChart',  title:'Lost + Congestion Events (cumulative)'},
-        {id:'cQuicBytesChart', title:'UDP Bytes TX / RX (cumulative)'},
-      );
-
-      html += `<div class="sec">Tokio Runtime — Server</div>`;
-      html += row(
-        {id:'sTokioTasksChart',  title:'Tasks (alive / global queue / overflow)'},
-        {id:'sTokioPollChart',   title:'Mean Poll Time (µs)'},
-      );
-      html += row(
-        {id:'sTokioBusyChart',   title:'Busy Duration (µs cumulative)'},
-        {id:'sTokioStealChart',  title:'Steal + Park Count (cumulative)'},
-      );
-
-      html += `<div class="sec">Tokio Runtime — Client</div>`;
-      html += row(
-        {id:'cTokioTasksChart',  title:'Tasks (alive / global queue / overflow)'},
-        {id:'cTokioPollChart',   title:'Mean Poll Time (µs)'},
-      );
-      html += row(
-        {id:'cTokioBusyChart',   title:'Busy Duration (µs cumulative)'},
-        {id:'cTokioStealChart',  title:'Steal + Park Count (cumulative)'},
-      );
-
-      html += `<div class="sec">Server — Connections &amp; Streams</div>`;
-      html += row(
-        {id:'sConnChart',    title:'Active QUIC / TCP Connections'},
-        {id:'sOpenBiChart',  title:'open_bi Inflight / Wait (ms p50)'},
-      );
+    // merged 8k resource charts (all cases on one x-axis)
+    const rpc = entry.resources_per_case || {};
+    const rpcKeys = Object.keys(rpc);
+    if (rpcKeys.length) {
+      const anyCtxsw = rpcKeys.some(k => Object.values(rpc[k].processes||{}).some(p => p.cswch?.length));
+      const anyTCP   = rpcKeys.some(k => rpc[k].tcp_conns && (rpc[k].tcp_conns.estab?.length || rpc[k].tcp_conns.timewait?.length));
+      html += `<div class="sec">Resources (8k cases)</div>`;
+      html += row({id:'cpu8k', title:'CPU Usage (% of machine)'}, {id:'mem8k', title:'Memory RSS (MB)'});
+      if (anyCtxsw || anyTCP)
+        html += row(...[anyCtxsw && {id:'ctxsw8k', title:'Context Switches / s'},
+                        anyTCP   && {id:'tcp8k',   title:'TCP Connections'}].filter(Boolean));
     }
   }
 
@@ -673,39 +612,30 @@ function renderDetail(entry) {
 
   if (res) {
     const offset = entry?.resources?.k6OffsetSeconds || 0;
-    const allPhases = entry?.phases || FALLBACK_PHASES;
 
-    // Compute max timestamp present in resource data so we can clip the
-    // time axis and phase annotations to what the resource charts actually
-    // cover.  The merged entry includes q1/q4 profiling phases that run
-    // *after* the core monitoring window, so we must not extend xMax to
-    // those extra phases.
+    // core phases: only phases without tunnel/case, shifted by k6OffsetSeconds
+    // so they align with the resource chart x-axis (seconds since sampling start).
+    const corePhases = (entry?.phases || FALLBACK_PHASES)
+      .filter(p => !p.tunnel && !p.case)
+      .map(p => ({...p, start: (p.start||0) + offset, end: (p.end||0) + offset}));
+
+    // Clip to what the resource data actually covers.
     const resMaxT = (() => {
       const proc = res.processes || {};
       const allPts = [
         ...(res.system?.cpu || []),
-        ...(res.network?.rx_kbs || []),
-        ...(res.network?.tx_kbs || []),
         ...Object.values(proc).flatMap(p => [...(p.cpu||[]), ...(p.rss||[])]),
       ];
       if (!allPts.length) return 0;
       return Math.max(...allPts.map(p => p.t ?? 0));
     })();
+    const clippedPhases = resMaxT > 0 ? corePhases.filter(p => (p.start||0) <= resMaxT + 30) : corePhases;
 
-    // For the resource charts only include phases whose start falls within
-    // the resource data window (core phases).  q1/q4 profiling phases are
-    // offset far beyond the resource data and would produce a blank tail.
-    const corePhases = allPhases.filter(p => {
-      const isFrp = p.tunnel === 'frp';
-      const s = (p.start || 0) + (isFrp ? 0 : offset);
-      return resMaxT <= 0 || s <= resMaxT + 30;
-    });
-    const annotations = phaseAnnotations({...entry, phases: corePhases});
+    const annotations = phaseAnnotations(clippedPhases);
 
-    const lastPhaseEnd = Math.max(...corePhases.map(p => {
-      const isFrp = p.tunnel === 'frp';
-      return (p.end || 0) + (isFrp ? 0 : offset);
-    }));
+    const lastPhaseEnd = clippedPhases.length
+      ? Math.max(...clippedPhases.map(p => p.end || 0))
+      : 0;
     const xMax = isFinite(lastPhaseEnd) && lastPhaseEnd > 0 ? lastPhaseEnd + 5 : undefined;
     const TSO = {  // base time-scale options
       ...CO,
@@ -790,26 +720,6 @@ function renderDetail(entry) {
     if (memDS.length) mkChart('memChart',{type:'line',data:{datasets:memDS},
       options:{...TSO,...yTitle('MB')}});
 
-    // ── Network ───────────────────────────────────────────────────────────
-    if (res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length)) {
-      const netDS = [];
-      if (res.network.rx_kbs?.length) netDS.push(linePts(res.network.rx_kbs,'#4da6ff','RX'));
-      if (res.network.tx_kbs?.length) netDS.push(linePts(res.network.tx_kbs,'#34d399','TX'));
-      mkChart('netChart',{type:'line',data:{datasets:netDS},options:{...TSO,...yTitle('KB/s')}});
-    }
-
-    // ── Disk IO — per process (fixed: uses res.processes.*.read_kbs) ──────
-    const ioDS = [];
-    for (const s of PSERIES) {
-      const p = proc[s.key];
-      if (!p) continue;
-      if (p.read_kbs?.length)  ioDS.push(linePts(p.read_kbs,  s.color, `${s.label} R`));
-      if (p.write_kbs?.length) ioDS.push(linePts(p.write_kbs, s.color, `${s.label} W`,
-        {borderDash:[4,2], borderWidth:1}));
-    }
-    if (ioDS.length) mkChart('ioChart',{type:'line',data:{datasets:ioDS},
-      options:{...TSO,...yTitle('KB/s')}});
-
     // ── Context switches — voluntary (solid) + involuntary (dashed) ───────
     const csDS = [];
     for (const s of PSERIES) {
@@ -833,104 +743,192 @@ function renderDetail(entry) {
         options:{...TSO,...yTitle('connections')}});
     }
 
-    // ── PSI (pressure stall) ──────────────────────────────────────────────
-    if (res.psi?.cpu?.length) {
-      const psiDS = [
-        linePts(res.psi.cpu, '#4da6ff', 'CPU'),
-        ...(res.psi.mem?.length ? [linePts(res.psi.mem,'#34d399','Memory')] : []),
-        ...(res.psi.io?.length  ? [linePts(res.psi.io, '#f5a623','IO')]     : []),
+    // ── Per-case 8k resource charts (merged into one set of charts) ──────────
+    const rpcEntries = Object.entries(entry.resources_per_case || {});
+    if (rpcEntries.length) {
+      // Compute per-case time offsets so all cases are serialised on one x-axis.
+      // Offset for case[i] = sum of maxT of cases[0..i-1], with a small gap.
+      const CASE_GAP = 5; // seconds between cases
+      const caseOffsets = [];
+      let runningOffset = 0;
+      const caseMaxTs = rpcEntries.map(([, caseRes]) => {
+        const pr = caseRes.processes || {};
+        const pts = [...(caseRes.system?.cpu||[]), ...Object.values(pr).flatMap(p=>[...(p.cpu||[]),...(p.rss||[])])];
+        return pts.length ? Math.max(...pts.map(p=>p.t??0)) : 0;
+      });
+      for (let i = 0; i < rpcEntries.length; i++) {
+        caseOffsets.push(runningOffset);
+        runningOffset += caseMaxTs[i] + CASE_GAP;
+      }
+      const totalXMax = runningOffset - CASE_GAP + 5;
+
+      // Build merged phase annotations: each case's phases shifted by its offset.
+      const mergedPhases = [];
+      rpcEntries.forEach(([caseName,], idx) => {
+        const baseName = caseName.replace(/ \(8k-q4\)$/, '');
+        const casePhaseDefs = (entry?.phases || [])
+          .filter(p => p.case === caseName || p.case === baseName)
+          .map(p => ({...p, start: (p.start||0) + caseOffsets[idx], end: (p.end||0) + caseOffsets[idx]}));
+        mergedPhases.push(...casePhaseDefs);
+      });
+      // Case background bands + name labels
+      const CASE_BG_COLORS = [
+        'rgba(77,166,255,.06)', 'rgba(52,211,153,.06)',
+        'rgba(245,166,35,.06)', 'rgba(167,139,250,.06)',
       ];
-      mkChart('psiChart',{type:'line',data:{datasets:psiDS},
-        options:{...TSO,scales:{...TSO.scales,y:{...TSO.scales.y,min:0,
-          title:{display:true,text:'% stall (full)',color:'#6b7d93'}}}}});
-    }
+      const boundaryAnnotations = {};
+      rpcEntries.forEach(([caseName,], idx) => {
+        const xStart = caseOffsets[idx];
+        const xEnd   = xStart + caseMaxTs[idx];
+        const shortName = caseName.replace(/ \(8k-q4\)$/, '').replace(/_/g, ' ');
+        const bgColor = CASE_BG_COLORS[idx % CASE_BG_COLORS.length];
+        boundaryAnnotations[`caseBg${idx}`] = {
+          type: 'box',
+          xMin: xStart, xMax: xEnd,
+          backgroundColor: bgColor,
+          borderWidth: 0,
+          label: {
+            display: true,
+            content: shortName,
+            color: 'rgba(180,200,220,0.55)',
+            font: {size: 11, weight: 'bold'},
+            position: {x: 'center', y: 'start'},
+            yAdjust: 4,
+          },
+        };
+        if (idx > 0) {
+          boundaryAnnotations[`caseSep${idx}`] = {
+            type:'line', xMin:xStart, xMax:xStart,
+            borderColor:'rgba(255,255,255,0.2)', borderWidth:1.5, borderDash:[5,3],
+          };
+        }
+      });
+      const allAnnotations = {...phaseAnnotations(mergedPhases), ...boundaryAnnotations};
 
-    // ── Page faults ───────────────────────────────────────────────────────
-    if (res.paging) {
-      const pgDS = [];
-      if (res.paging.majflt?.length) pgDS.push(linePts(res.paging.majflt,'#ef5350','Major'));
-      if (res.paging.minflt?.length) pgDS.push(linePts(res.paging.minflt,'#4da6ff','Minor (fault/s)'));
-      if (pgDS.length) mkChart('pagingChart',{type:'line',data:{datasets:pgDS},
-        options:{...TSO,...yTitle('/s')}});
-    }
+      function shiftPts(pts, offset) { return pts.map(p=>({x:(p.t??0)+offset, y:p.v})); }
 
-    // ── Prometheus metrics ────────────────────────────────────────────────
-    const pm = res.prom_metrics || {};
-    if (Object.keys(pm).length) {
-      function pmPts(key) { return (pm[key]||[]).map(p=>({x:p.t,y:p.v})); }
-      function pmLine(key, label, color, extra={}) {
-        const data = pmPts(key);
-        if (!data.length) return null;
-        return {label, data, borderColor:color, backgroundColor:'transparent',
-          tension:.3, pointRadius:0, borderWidth:1.5, ...extra};
+      const cTSO = {
+        ...CO, showLine:true,
+        plugins:{...CO.plugins, annotation:{annotations:allAnnotations}, tooltip:{mode:'index',intersect:false}},
+        scales:{
+          x:{...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}, max:totalXMax},
+          y:{...CO.scales.y},
+        },
+      };
+      function cYTitle(text){return{scales:{...cTSO.scales,y:{...cTSO.scales.y,title:{display:true,text,color:'#6b7d93'}}}};}
+      function cLinePts(pts,color,label,extra={}){return{label,data:pts,borderColor:color,backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1.5,...extra};}
+
+      // Merge datasets: one series per process key, concatenated across all cases.
+      // Use null gap between cases to avoid connecting lines.
+      const cpuByKey = {};   // key -> [{x,y}]
+      const memByKey = {};
+      const csVolByKey = {};
+      const csInvolByKey = {};
+      const tcpEstab = [], tcpTimewait = [], tcpClosed = [];
+      let hasCpu = false, hasMem = false, hasCs = false, hasTcpMerged = false;
+      // System total and CPU breakdown (merge across cases)
+      const sysCpuMerged = [];
+      const sysBdMerged = {}; // breakdown key -> [{x,y}]
+
+      rpcEntries.forEach(([, caseRes], idx) => {
+        const off = caseOffsets[idx];
+        const maxT = caseMaxTs[idx];
+        const cProc = caseRes.processes || {};
+
+        // null gap marker
+        const gap = [{x: off + maxT + 0.01, y: null}];
+
+        for (const s of PSERIES) {
+          const p = cProc[s.key];
+          if (!cpuByKey[s.key]) cpuByKey[s.key] = [];
+          if (!memByKey[s.key]) memByKey[s.key] = [];
+          if (!csVolByKey[s.key]) csVolByKey[s.key] = [];
+          if (!csInvolByKey[s.key]) csInvolByKey[s.key] = [];
+
+          if (p?.cpu?.length) {
+            cpuByKey[s.key].push(...shiftPts(p.cpu, off), ...gap);
+            hasCpu = true;
+          }
+          if (p?.rss?.length) {
+            memByKey[s.key].push(...shiftPts(p.rss, off), ...gap);
+            hasMem = true;
+          }
+          if (p?.cswch?.length)   { csVolByKey[s.key].push(...shiftPts(p.cswch, off), ...gap); hasCs = true; }
+          if (p?.nvcswch?.length) { csInvolByKey[s.key].push(...shiftPts(p.nvcswch, off), ...gap); hasCs = true; }
+        }
+
+        if (caseRes.system?.cpu?.length)
+          sysCpuMerged.push(...shiftPts(caseRes.system.cpu, off), ...gap);
+
+        for (const bd of CPU_BREAKDOWN) {
+          const pts = caseRes.system?.[bd.key];
+          if (pts?.length) {
+            if (!sysBdMerged[bd.key]) sysBdMerged[bd.key] = [];
+            sysBdMerged[bd.key].push(...shiftPts(pts, off), ...gap);
+          }
+        }
+
+        const tc = caseRes.tcp_conns;
+        if (tc) {
+          if (tc.estab?.length)    { tcpEstab.push(...shiftPts(tc.estab, off), ...gap); hasTcpMerged = true; }
+          if (tc.timewait?.length) { tcpTimewait.push(...shiftPts(tc.timewait, off), ...gap); hasTcpMerged = true; }
+          if (tc.closed?.length)   { tcpClosed.push(...shiftPts(tc.closed, off), ...gap); hasTcpMerged = true; }
+        }
+      });
+
+      // CPU chart
+      if (hasCpu) {
+        const cCpuDS = [];
+        for (const s of PSERIES) {
+          if (!cpuByKey[s.key]?.length) continue;
+          cCpuDS.push({label:s.label, data:cpuByKey[s.key], borderColor:s.color, backgroundColor:s.color+'28',
+            fill:true, tension:.3, pointRadius:0, borderWidth:1.5});
+        }
+        for (const bd of CPU_BREAKDOWN) {
+          if (sysBdMerged[bd.key]?.length)
+            cCpuDS.push({label:bd.label, data:sysBdMerged[bd.key], borderColor:bd.color, backgroundColor:'transparent',
+              fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,2], hidden:true});
+        }
+        if (sysCpuMerged.length)
+          cCpuDS.push({label:'System total', data:sysCpuMerged, borderColor:'#ffffff', backgroundColor:'transparent',
+            fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
+        mkChart('cpu8k', {type:'line', data:{datasets:cCpuDS}, options:{
+          ...cTSO,
+          scales:{...cTSO.scales, y:{...cTSO.scales.y, stacked:false, min:0, max:100, title:{display:true,text:'% of machine',color:'#6b7d93'}}},
+          plugins:{...cTSO.plugins, tooltip:{mode:'index',intersect:false, callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
+        }});
       }
-      function pmChart(id, datasets, ytitle) {
-        const ds = datasets.filter(Boolean);
-        if (!ds.length) return;
-        mkChart(id,{type:'line',data:{datasets:ds},
-          options:{...TSO,...yTitle(ytitle)}});
+
+      // Memory chart
+      if (hasMem) {
+        const cMemDS = [];
+        for (const s of PSERIES) {
+          if (!memByKey[s.key]?.length) continue;
+          cMemDS.push(cLinePts(memByKey[s.key], s.color, s.label));
+        }
+        mkChart('mem8k', {type:'line', data:{datasets:cMemDS}, options:{...cTSO, ...cYTitle('MB')}});
       }
 
-      // QUIC server
-      pmChart('sQuicRttChart',  [pmLine('duotunnel_quic_rtt_us','RTT','#4da6ff')], 'µs');
-      pmChart('sQuicCwndChart', [pmLine('duotunnel_quic_cwnd_bytes','cwnd','#34d399')], 'bytes');
-      pmChart('sQuicLostChart', [
-        pmLine('duotunnel_quic_lost_packets_total','Lost packets','#ef5350'),
-        pmLine('duotunnel_quic_congestion_events_total','Congestion events','#f5a623'),
-      ], 'cumulative');
-      pmChart('sQuicBytesChart', [
-        pmLine('duotunnel_quic_tx_bytes_total','TX','#4da6ff'),
-        pmLine('duotunnel_quic_rx_bytes_total','RX','#34d399'),
-      ], 'bytes');
+      // Context switch chart
+      if (hasCs) {
+        const cCsDS = [];
+        for (const s of PSERIES) {
+          if (csVolByKey[s.key]?.length)   cCsDS.push(cLinePts(csVolByKey[s.key],   s.color, `${s.label} vol`));
+          if (csInvolByKey[s.key]?.length) cCsDS.push(cLinePts(csInvolByKey[s.key], s.color, `${s.label} invol`, {borderDash:[3,2],borderWidth:1}));
+        }
+        mkChart('ctxsw8k', {type:'line', data:{datasets:cCsDS}, options:{...cTSO, ...cYTitle('/s')}});
+      }
 
-      // QUIC client
-      pmChart('cQuicRttChart',  [pmLine('duotunnel_client_quic_rtt_us','RTT','#4da6ff')], 'µs');
-      pmChart('cQuicCwndChart', [pmLine('duotunnel_client_quic_cwnd_bytes','cwnd','#34d399')], 'bytes');
-      pmChart('cQuicLostChart', [
-        pmLine('duotunnel_client_quic_lost_packets_total','Lost packets','#ef5350'),
-        pmLine('duotunnel_client_quic_congestion_events_total','Congestion events','#f5a623'),
-      ], 'cumulative');
-      pmChart('cQuicBytesChart', [
-        pmLine('duotunnel_client_quic_tx_bytes_total','TX','#4da6ff'),
-        pmLine('duotunnel_client_quic_rx_bytes_total','RX','#34d399'),
-      ], 'bytes');
-
-      // Tokio server
-      pmChart('sTokioTasksChart', [
-        pmLine('duotunnel_tokio_alive_tasks','Alive tasks','#4da6ff'),
-        pmLine('duotunnel_tokio_global_queue_depth','Global queue','#f5a623'),
-        pmLine('duotunnel_tokio_overflow_count_total','Overflow (cumul)','#ef5350',{borderDash:[3,2]}),
-      ], 'count');
-      pmChart('sTokioPollChart', [pmLine('duotunnel_tokio_mean_poll_time_us','Mean poll time','#a78bfa')], 'µs');
-      pmChart('sTokioBusyChart', [pmLine('duotunnel_tokio_busy_duration_us_total','Busy duration','#34d399')], 'µs');
-      pmChart('sTokioStealChart', [
-        pmLine('duotunnel_tokio_steal_count_total','Steal','#4da6ff'),
-        pmLine('duotunnel_tokio_park_count_total','Park','#6b7d93',{borderDash:[3,2]}),
-      ], 'cumulative');
-
-      // Tokio client
-      pmChart('cTokioTasksChart', [
-        pmLine('duotunnel_client_tokio_alive_tasks','Alive tasks','#4da6ff'),
-        pmLine('duotunnel_client_tokio_global_queue_depth','Global queue','#f5a623'),
-        pmLine('duotunnel_client_tokio_overflow_count_total','Overflow (cumul)','#ef5350',{borderDash:[3,2]}),
-      ], 'count');
-      pmChart('cTokioPollChart', [pmLine('duotunnel_client_tokio_mean_poll_time_us','Mean poll time','#a78bfa')], 'µs');
-      pmChart('cTokioBusyChart', [pmLine('duotunnel_client_tokio_busy_duration_us_total','Busy duration','#34d399')], 'µs');
-      pmChart('cTokioStealChart', [
-        pmLine('duotunnel_client_tokio_steal_count_total','Steal','#4da6ff'),
-        pmLine('duotunnel_client_tokio_park_count_total','Park','#6b7d93',{borderDash:[3,2]}),
-      ], 'cumulative');
-
-      // Server connections & streams
-      pmChart('sConnChart', [
-        pmLine('duotunnel_active_quic_connections','QUIC conns','#4da6ff'),
-        pmLine('duotunnel_active_tcp_connections','TCP conns','#34d399'),
-        pmLine('duotunnel_open_bi_inflight','open_bi inflight','#f5a623'),
-      ], 'count');
-      pmChart('sOpenBiChart', [
-        pmLine('duotunnel_open_bi_timeout_ratio','Timeout ratio','#ef5350'),
-      ], 'ratio');
+      // TCP chart
+      if (hasTcpMerged) {
+        const cTcpDS = [];
+        if (tcpEstab.length)    cTcpDS.push(cLinePts(tcpEstab,    '#4da6ff', 'Established'));
+        if (tcpTimewait.length) cTcpDS.push(cLinePts(tcpTimewait, '#f5a623', 'TIME_WAIT'));
+        if (tcpClosed.length)   cTcpDS.push(cLinePts(tcpClosed,   '#4a5a6d', 'Closed'));
+        mkChart('tcp8k', {type:'line', data:{datasets:cTcpDS}, options:{...cTSO, ...cYTitle('connections')}});
+      }
     }
+
   }
 }
 

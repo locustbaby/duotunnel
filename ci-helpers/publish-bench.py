@@ -50,21 +50,9 @@ def main():
         for sc in frp.get("scenarios", []):
             sc["tunnel"] = "frp"
             entry["scenarios"].append(sc)
-        frp_offset = args.frp_k6_offset
         for ph in frp.get("phases", []):
             ph["tunnel"] = "frp"
-            ph["start"] += frp_offset
-            ph["end"] += frp_offset
             entry.setdefault("phases", []).append(ph)
-    if isinstance(entry.get("phases"), list):
-        entry["phases"] = sorted(
-            entry["phases"],
-            key=lambda p: (
-                p.get("start", 0) if isinstance(p, dict) else 0,
-                p.get("end", 0) if isinstance(p, dict) else 0,
-                p.get("name", "") if isinstance(p, dict) else "",
-            ),
-        )
 
     PREFIX = "window.BENCHMARK_DATA = "
     SUFFIX = ";"

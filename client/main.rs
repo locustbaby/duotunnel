@@ -25,7 +25,6 @@ mod config;
 mod conn_pool;
 mod connect;
 mod entry;
-mod metrics;
 mod pool;
 mod proxy;
 use app::LocalProxyMap;
@@ -69,39 +68,39 @@ fn main() -> Result<()> {
     }
     run_with_tokio(async_main())
 }
-async fn run_metrics_server(port: u16, ready: Arc<AtomicBool>) {
+async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    metrics::init();
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            warn!(addr = %addr, error = %e, "failed to bind metrics server");
+            warn!(addr = %addr, error = %e, "failed to bind healthz server");
             return;
         }
     };
-    info!(addr = %addr, "metrics server started");
+    info!(addr = %addr, "healthz server started");
     loop {
         let Ok((mut stream, _)) = listener.accept().await else { continue };
         let ready = ready.clone();
         crate::spawn_task(async move {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; 256];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-            let is_healthz = req.starts_with("GET /healthz");
-            let (status, body) = if is_healthz {
+            let (status, body) = if req.starts_with("GET /healthz") {
                 if ready.load(Ordering::Acquire) {
-                    ("200 OK", "ok\n".to_string())
+                    ("200 OK", "ok\n")
                 } else {
-                    ("503 Service Unavailable", "not ready\n".to_string())
+                    ("503 Service Unavailable", "not ready\n")
                 }
             } else {
-                ("200 OK", metrics::encode())
+                ("200 OK", "ok\n")
             };
             let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                status, body.len(), body
+                "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                status,
+                body.len(),
+                body
             );
             let _ = stream.write_all(response.as_bytes()).await;
         });
@@ -126,30 +125,10 @@ async fn async_main() -> Result<()> {
     });
     let ready = Arc::new(AtomicBool::new(false));
     if let Some(port) = config.metrics_port {
-        crate::spawn_task(run_metrics_server(port, ready.clone()));
+        crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
 
     let entry_pool = EntryConnPool::new();
-
-    if config.metrics_port.is_some() {
-        let pool_for_poller = entry_pool.clone();
-        let quic_enabled = config.metrics_config.quic;
-        let tokio_enabled = config.metrics_config.tokio;
-        crate::spawn_task(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                if quic_enabled {
-                    let conns = pool_for_poller.all_connections();
-                    metrics::update_quic_stats(&conns);
-                }
-                if tokio_enabled {
-                    metrics::update_tokio_metrics();
-                }
-            }
-        });
-    }
 
     if let Some(entry_port) = config.http_entry_port {
         let pool = entry_pool.clone();
@@ -276,7 +255,6 @@ pub(crate) async fn run_client(
     ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
 ) -> std::result::Result<(), ConnectError> {
-    metrics::reconnect();
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
     let login_timeout = Duration::from_millis(config.reconnect.login_timeout_ms);
@@ -312,10 +290,8 @@ pub(crate) async fn run_client(
         .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
         .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
     if !resp.success {
-        metrics::login_failure();
         return Err(connect::classify_login_failure(resp.error.as_deref()));
     }
-    metrics::login_success();
     info!(
         client_group = %resp.client_group,
         upstreams = resp.config.upstreams.len(),
@@ -346,19 +322,19 @@ pub(crate) async fn run_client(
                             Ok(permit) => permit,
                             Err(_) => {
                                 warn!("Stream rejected: max concurrent streams reached");
-                                metrics::stream_rejected();
+                                // Signal the server that we cannot accept this stream.
                                 let _ = send.reset(0u8.into());
                                 continue;
                             }
                         };
                         debug!("Accepted work stream from server");
-                        metrics::stream_accepted();
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
                         crate::spawn_task(async move {
                             let _permit = permit;
-                            let err = handle_work_stream(send, recv, proxy_map, tcp_params).await.is_err();
-                            metrics::stream_done(err);
+                            if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
+                                debug!(error = %e, "work stream error");
+                            }
                         });
                     }
                     Err(e) => {

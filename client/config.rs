@@ -5,19 +5,6 @@ use figment::{
 };
 use serde::Deserialize;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct MetricsConfig {
-    pub quic: bool,
-    pub tokio: bool,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self { quic: true, tokio: true }
-    }
-}
 use tunnel_lib::transport::quic::QuicTransportParams;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -115,8 +102,6 @@ pub struct ClientConfigFile {
     pub http_entry_port: Option<u16>,
     #[serde(default)]
     pub metrics_port: Option<u16>,
-    #[serde(default)]
-    pub metrics_config: MetricsConfig,
     #[serde(default)]
     pub tls_skip_verify: bool,
     #[serde(default)]
