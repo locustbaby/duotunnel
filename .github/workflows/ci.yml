@@ -1671,13 +1671,12 @@ jobs:
               fi
             fi
 
-            SERVER_PID=$(cat /tmp/server.pid 2>/dev/null)
-            CLIENT_PID=$(cat /tmp/client.pid 2>/dev/null)
             (
               echo "CLK_TCK=$(getconf CLK_TCK)"
               while true; do
                 TS=$(date +%s.%N)
-                for pid in $SERVER_PID $CLIENT_PID; do
+                for d in /proc/[0-9]*/; do
+                  pid=${d#/proc/}; pid=${pid%/}
                   read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
                   comm=$(echo "$stat" | sed 's/.*(\(.*\)).*/\1/')
                   utime=$(echo "$stat" | awk '{print $14}')

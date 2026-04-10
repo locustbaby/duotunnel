@@ -2,8 +2,8 @@ server:
   tunnel_port: 10086
   metrics_port: 9090
   metrics_config:
-    quic: false
-    tokio: false
+    quic: true
+    tokio: true
   log_level: "info"
   max_connections: 10000
   max_tcp_connections: 10000
