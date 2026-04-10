@@ -130,30 +130,18 @@ const FALLBACK_PHASES = [
   {name:'Basic',start:0,end:29},{name:'Body/Payload',start:35,end:59},
   {name:'Ingress 3K',start:65,end:85},{name:'Egress 3K',start:90,end:110},
   {name:'Ingress multihost 3K',start:115,end:135},{name:'Egress multihost 3K',start:140,end:160},
-  {name:'Ingress 8K',start:165,end:185},{name:'Egress 8K',start:190,end:210},
-  {name:'Ingress multihost 8K',start:215,end:235},{name:'Egress multihost 8K',start:240,end:260},
 ];
 
-function phaseAnnotations(entry) {
+// Build phase annotations for a resource chart.
+// phases: array of phase objects with start/end already in chart x-axis seconds.
+function phaseAnnotations(phases) {
   const a = {};
-  const offset = entry?.resources?.k6OffsetSeconds || 0;
-  const phaseDefs = (entry?.phases || FALLBACK_PHASES).slice().sort((x, y) => {
-    const xs = Number.isFinite(x?.start) ? x.start : 0;
-    const ys = Number.isFinite(y?.start) ? y.start : 0;
-    if (xs !== ys) return xs - ys;
-    const xe = Number.isFinite(x?.end) ? x.end : 0;
-    const ye = Number.isFinite(y?.end) ? y.end : 0;
-    if (xe !== ye) return xe - ye;
-    return (x?.name || '').localeCompare(y?.name || '');
-  });
-  phaseDefs.forEach((p, i) => {
-    const isFrp = p.tunnel === 'frp';
-    const s = p.start + (isFrp ? 0 : offset);
-    const e = p.end + (isFrp ? 0 : offset);
+  phases.forEach((p, i) => {
+    const s = p.start || 0;
+    const e = p.end || 0;
     const col = PHASE_COLORS[i % PHASE_COLORS.length];
     const nsc = (p.scenarios||[]).length;
-    const prefix = isFrp ? 'frp: ' : '';
-    const label = nsc ? `${prefix}${p.name} (${nsc})` : `${prefix}${p.name}`;
+    const label = nsc ? `${p.name} (${nsc})` : p.name;
     const yAdj = (i % 2 === 0) ? 10 : 24;
     a['phase'+i] = {
       type: 'box', xMin: s, xMax: e, backgroundColor: col, borderWidth: 0,
@@ -567,12 +555,8 @@ function renderDetail(entry) {
 
   if (res) {
     const proc = res.processes || {};
-    const hasNet    = res.network   && (res.network.rx_kbs?.length   || res.network.tx_kbs?.length);
-    const hasIO     = Object.values(proc).some(p => p.read_kbs?.length || p.write_kbs?.length);
     const hasCtxsw  = Object.values(proc).some(p => p.cswch?.length);
     const hasTCP    = res.tcp_conns && (res.tcp_conns.estab?.length   || res.tcp_conns.timewait?.length);
-    const hasPSI    = res.psi       && (res.psi.cpu?.length);
-    const hasPaging = res.paging    && (res.paging.majflt?.length     || res.paging.minflt?.length);
 
     function row(...panels) {
       // panels: [{id, title, extra?}] — renders up to 2 per row
@@ -595,18 +579,26 @@ function renderDetail(entry) {
       const ram = m.mem_total_mb >= 1024 ? `${Math.round(m.mem_total_mb/1024)} GB` : `${m.mem_total_mb} MB`;
       return ` <span style="color:var(--text2);font-weight:400;font-size:11px">· ${m.cpu_cores} vCPU · ${ram} RAM</span>`;
     })();
-    html += `<div class="sec">Resources${machineSpec}</div>`;
+    html += `<div class="sec">Resources (core)${machineSpec}</div>`;
     html += row({id:'cpuChart',  title:'CPU Usage (% of machine)'},
                 {id:'memChart',  title:'Memory RSS (MB)'});
-    if (hasNet || hasIO)
-      html += row(...[hasNet && {id:'netChart', title:'Network Throughput (KB/s)'},
-                      hasIO  && {id:'ioChart',  title:'Disk IO (KB/s)'}].filter(Boolean));
     if (hasCtxsw || hasTCP)
       html += row(...[hasCtxsw && {id:'ctxswChart', title:'Context Switches / s'},
                       hasTCP   && {id:'tcpChart',   title:'TCP Connections'}].filter(Boolean));
-    if (hasPSI || hasPaging)
-      html += row(...[hasPSI    && {id:'psiChart',    title:'PSI — Pressure Stall (% full)'},
-                      hasPaging && {id:'pagingChart', title:'Page Faults / s'}].filter(Boolean));
+
+    // per-case 8k resource charts
+    const rpc = entry.resources_per_case || {};
+    for (const caseName of Object.keys(rpc)) {
+      const caseRes = rpc[caseName];
+      const caseHasCtxsw = Object.values(caseRes.processes||{}).some(p => p.cswch?.length);
+      const caseHasTCP = caseRes.tcp_conns && (caseRes.tcp_conns.estab?.length || caseRes.tcp_conns.timewait?.length);
+      const cId = caseName.replace(/[^a-z0-9]/gi,'_');
+      html += `<div class="sec">Resources — ${esc(caseName)}</div>`;
+      html += row({id:`cpu_${cId}`, title:'CPU Usage (% of machine)'}, {id:`mem_${cId}`, title:'Memory RSS (MB)'});
+      if (caseHasCtxsw || caseHasTCP)
+        html += row(...[caseHasCtxsw && {id:`ctxsw_${cId}`, title:'Context Switches / s'},
+                        caseHasTCP   && {id:`tcp_${cId}`,   title:'TCP Connections'}].filter(Boolean));
+    }
   }
 
   const idx = entries.findIndex(e => sha7(e) === sha7(entry));
@@ -621,39 +613,30 @@ function renderDetail(entry) {
 
   if (res) {
     const offset = entry?.resources?.k6OffsetSeconds || 0;
-    const allPhases = entry?.phases || FALLBACK_PHASES;
 
-    // Compute max timestamp present in resource data so we can clip the
-    // time axis and phase annotations to what the resource charts actually
-    // cover.  The merged entry includes q1/q4 profiling phases that run
-    // *after* the core monitoring window, so we must not extend xMax to
-    // those extra phases.
+    // core phases: only phases without tunnel/case, shifted by k6OffsetSeconds
+    // so they align with the resource chart x-axis (seconds since sampling start).
+    const corePhases = (entry?.phases || FALLBACK_PHASES)
+      .filter(p => !p.tunnel && !p.case)
+      .map(p => ({...p, start: (p.start||0) + offset, end: (p.end||0) + offset}));
+
+    // Clip to what the resource data actually covers.
     const resMaxT = (() => {
       const proc = res.processes || {};
       const allPts = [
         ...(res.system?.cpu || []),
-        ...(res.network?.rx_kbs || []),
-        ...(res.network?.tx_kbs || []),
         ...Object.values(proc).flatMap(p => [...(p.cpu||[]), ...(p.rss||[])]),
       ];
       if (!allPts.length) return 0;
       return Math.max(...allPts.map(p => p.t ?? 0));
     })();
+    const clippedPhases = resMaxT > 0 ? corePhases.filter(p => (p.start||0) <= resMaxT + 30) : corePhases;
 
-    // For the resource charts only include phases whose start falls within
-    // the resource data window (core phases).  q1/q4 profiling phases are
-    // offset far beyond the resource data and would produce a blank tail.
-    const corePhases = allPhases.filter(p => {
-      const isFrp = p.tunnel === 'frp';
-      const s = (p.start || 0) + (isFrp ? 0 : offset);
-      return resMaxT <= 0 || s <= resMaxT + 30;
-    });
-    const annotations = phaseAnnotations({...entry, phases: corePhases});
+    const annotations = phaseAnnotations(clippedPhases);
 
-    const lastPhaseEnd = Math.max(...corePhases.map(p => {
-      const isFrp = p.tunnel === 'frp';
-      return (p.end || 0) + (isFrp ? 0 : offset);
-    }));
+    const lastPhaseEnd = clippedPhases.length
+      ? Math.max(...clippedPhases.map(p => p.end || 0))
+      : 0;
     const xMax = isFinite(lastPhaseEnd) && lastPhaseEnd > 0 ? lastPhaseEnd + 5 : undefined;
     const TSO = {  // base time-scale options
       ...CO,
@@ -738,26 +721,6 @@ function renderDetail(entry) {
     if (memDS.length) mkChart('memChart',{type:'line',data:{datasets:memDS},
       options:{...TSO,...yTitle('MB')}});
 
-    // ── Network ───────────────────────────────────────────────────────────
-    if (res.network && (res.network.rx_kbs?.length || res.network.tx_kbs?.length)) {
-      const netDS = [];
-      if (res.network.rx_kbs?.length) netDS.push(linePts(res.network.rx_kbs,'#4da6ff','RX'));
-      if (res.network.tx_kbs?.length) netDS.push(linePts(res.network.tx_kbs,'#34d399','TX'));
-      mkChart('netChart',{type:'line',data:{datasets:netDS},options:{...TSO,...yTitle('KB/s')}});
-    }
-
-    // ── Disk IO — per process (fixed: uses res.processes.*.read_kbs) ──────
-    const ioDS = [];
-    for (const s of PSERIES) {
-      const p = proc[s.key];
-      if (!p) continue;
-      if (p.read_kbs?.length)  ioDS.push(linePts(p.read_kbs,  s.color, `${s.label} R`));
-      if (p.write_kbs?.length) ioDS.push(linePts(p.write_kbs, s.color, `${s.label} W`,
-        {borderDash:[4,2], borderWidth:1}));
-    }
-    if (ioDS.length) mkChart('ioChart',{type:'line',data:{datasets:ioDS},
-      options:{...TSO,...yTitle('KB/s')}});
-
     // ── Context switches — voluntary (solid) + involuntary (dashed) ───────
     const csDS = [];
     for (const s of PSERIES) {
@@ -781,26 +744,87 @@ function renderDetail(entry) {
         options:{...TSO,...yTitle('connections')}});
     }
 
-    // ── PSI (pressure stall) ──────────────────────────────────────────────
-    if (res.psi?.cpu?.length) {
-      const psiDS = [
-        linePts(res.psi.cpu, '#4da6ff', 'CPU'),
-        ...(res.psi.mem?.length ? [linePts(res.psi.mem,'#34d399','Memory')] : []),
-        ...(res.psi.io?.length  ? [linePts(res.psi.io, '#f5a623','IO')]     : []),
-      ];
-      mkChart('psiChart',{type:'line',data:{datasets:psiDS},
-        options:{...TSO,scales:{...TSO.scales,y:{...TSO.scales.y,min:0,
-          title:{display:true,text:'% stall (full)',color:'#6b7d93'}}}}});
+    // ── Per-case 8k resource charts ───────────────────────────────────────
+    function renderCaseResources(caseName, caseRes) {
+      const cId = caseName.replace(/[^a-z0-9]/gi,'_');
+      const caseOffset = caseRes.k6OffsetSeconds || 0;
+
+      // phases for this specific case (matched by case field)
+      const casePhaseDefs = (entry?.phases || [])
+        .filter(p => p.case === caseName || p.case === caseName.replace(/ \(8k-q4\)$/,''))
+        .map(p => ({...p, start: (p.start||0) + caseOffset, end: (p.end||0) + caseOffset}));
+
+      const caseResMaxT = (() => {
+        const pr = caseRes.processes || {};
+        const pts = [...(caseRes.system?.cpu||[]), ...Object.values(pr).flatMap(p=>[...(p.cpu||[]),...(p.rss||[])])];
+        return pts.length ? Math.max(...pts.map(p=>p.t??0)) : 0;
+      })();
+      const clipped = caseResMaxT > 0 ? casePhaseDefs.filter(p=>(p.start||0)<=caseResMaxT+30) : casePhaseDefs;
+      const caseLastEnd = clipped.length ? Math.max(...clipped.map(p=>p.end||0)) : 0;
+      const caseXMax = isFinite(caseLastEnd) && caseLastEnd > 0 ? caseLastEnd + 5 : undefined;
+
+      const cTSO = {
+        ...CO, showLine:true,
+        plugins:{...CO.plugins, annotation:{annotations:phaseAnnotations(clipped)}, tooltip:{mode:'index',intersect:false}},
+        scales:{
+          x:{...CO.scales.x, type:'linear', title:{display:true,text:'seconds',color:'#6b7d93'}, ...(caseXMax?{max:caseXMax}:{})},
+          y:{...CO.scales.y},
+        },
+      };
+      function cYTitle(text){return{scales:{...cTSO.scales,y:{...cTSO.scales.y,title:{display:true,text,color:'#6b7d93'}}}};}
+      function cLinePts(pts,color,label,extra={}){return{label,data:pts.map(p=>({x:p.t,y:p.v})),borderColor:color,backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1.5,...extra};}
+
+      const cProc = caseRes.processes || {};
+      // CPU
+      const cCpuTimes = [...new Set(PSERIES.flatMap(s=>(cProc[s.key]?.cpu||[]).map(p=>p.t)))].sort((a,b)=>a-b);
+      const cCpuDS = [];
+      if (cCpuTimes.length) {
+        for (const s of PSERIES) {
+          const pts = cProc[s.key]?.cpu||[];
+          if (!pts.length) continue;
+          const byT = Object.fromEntries(pts.map(p=>[p.t,p.v]));
+          cCpuDS.push({label:s.label,data:cCpuTimes.map(t=>({x:t,y:byT[t]??null})),
+            borderColor:s.color,backgroundColor:s.color+'28',fill:true,tension:.3,pointRadius:0,borderWidth:1.5});
+        }
+      }
+      if (caseRes.system?.cpu?.length)
+        cCpuDS.push({label:'System total',data:caseRes.system.cpu.map(p=>({x:p.t,y:p.v})),
+          borderColor:'#ffffff',backgroundColor:'transparent',fill:false,tension:.3,pointRadius:0,borderWidth:1,borderDash:[4,3]});
+      if (cCpuDS.length) mkChart(`cpu_${cId}`,{type:'line',data:{datasets:cCpuDS},options:{
+        ...cTSO,
+        scales:{...cTSO.scales,y:{...cTSO.scales.y,stacked:false,min:0,max:100,title:{display:true,text:'% of machine',color:'#6b7d93'}}},
+        plugins:{...cTSO.plugins,tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>ctx.raw?.y!=null?`${ctx.dataset.label}: ${ctx.raw.y}%`:''}}},
+      }});
+
+      // Memory
+      const cMemDS = PSERIES.flatMap(s=>{const pts=cProc[s.key]?.rss||[];return pts.length?[cLinePts(pts,s.color,s.label)]:[];});
+      if (cMemDS.length) mkChart(`mem_${cId}`,{type:'line',data:{datasets:cMemDS},options:{...cTSO,...cYTitle('MB')}});
+
+      // Context switches
+      const cCsDS = [];
+      for (const s of PSERIES) {
+        const p = cProc[s.key];
+        if (!p) continue;
+        if (p.cswch?.length)   cCsDS.push(cLinePts(p.cswch,  s.color,`${s.label} vol`));
+        if (p.nvcswch?.length) cCsDS.push(cLinePts(p.nvcswch,s.color,`${s.label} invol`,{borderDash:[3,2],borderWidth:1}));
+      }
+      if (cCsDS.length) mkChart(`ctxsw_${cId}`,{type:'line',data:{datasets:cCsDS},options:{...cTSO,...cYTitle('/s')}});
+
+      // TCP
+      if (caseRes.tcp_conns) {
+        const cTcpDS = [];
+        const tc = caseRes.tcp_conns;
+        if (tc.estab?.length)    cTcpDS.push(cLinePts(tc.estab,   '#4da6ff','Established'));
+        if (tc.timewait?.length) cTcpDS.push(cLinePts(tc.timewait,'#f5a623','TIME_WAIT'));
+        if (tc.closed?.length)   cTcpDS.push(cLinePts(tc.closed,  '#4a5a6d','Closed'));
+        if (cTcpDS.length) mkChart(`tcp_${cId}`,{type:'line',data:{datasets:cTcpDS},options:{...cTSO,...cYTitle('connections')}});
+      }
     }
 
-    // ── Page faults ───────────────────────────────────────────────────────
-    if (res.paging) {
-      const pgDS = [];
-      if (res.paging.majflt?.length) pgDS.push(linePts(res.paging.majflt,'#ef5350','Major'));
-      if (res.paging.minflt?.length) pgDS.push(linePts(res.paging.minflt,'#4da6ff','Minor (fault/s)'));
-      if (pgDS.length) mkChart('pagingChart',{type:'line',data:{datasets:pgDS},
-        options:{...TSO,...yTitle('/s')}});
+    for (const [caseName, caseRes] of Object.entries(entry.resources_per_case || {})) {
+      renderCaseResources(caseName, caseRes);
     }
+
   }
 }
 
