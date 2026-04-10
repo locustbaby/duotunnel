@@ -1580,6 +1580,7 @@ jobs:
             fi
             if [ -z "$TOKEN" ]; then echo "ERROR: failed to obtain token"; exit 1; fi
             python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$CLIENT_QUIC_CONNECTIONS"
+            sed -i 's/quic: false/quic: true/g; s/tokio: false/tokio: true/g' ci-helpers/server.yaml ci-helpers/client.yaml
 
             sleep 3
 
@@ -1670,11 +1671,63 @@ jobs:
               fi
             fi
 
+            SERVER_PID=$(cat /tmp/server.pid 2>/dev/null)
+            CLIENT_PID=$(cat /tmp/client.pid 2>/dev/null)
+            (
+              echo "CLK_TCK=$(getconf CLK_TCK)"
+              while true; do
+                TS=$(date +%s.%N)
+                for pid in $SERVER_PID $CLIENT_PID; do
+                  read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
+                  comm=$(echo "$stat" | sed 's/.*(\(.*\)).*/\1/')
+                  utime=$(echo "$stat" | awk '{print $14}')
+                  stime=$(echo "$stat" | awk '{print $15}')
+                  rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+                  echo "$TS $pid $comm $utime $stime ${rss:-0}"
+                done
+                echo "---"
+                sleep 2
+              done
+            ) > "/tmp/proc-cpu-${SUFFIX}.log" 2>&1 &
+            echo $! > /tmp/proc-cpu.pid
+
+            (
+              while true; do
+                TS=$(date +%s)
+                BODY=$(curl -sf --max-time 1 http://127.0.0.1:9090/metrics 2>/dev/null || true)
+                if [ -n "$BODY" ]; then
+                  echo "# ts=$TS"
+                  echo "$BODY"
+                  echo ""
+                fi
+                BODY=$(curl -sf --max-time 1 http://127.0.0.1:9092/metrics 2>/dev/null || true)
+                if [ -n "$BODY" ]; then
+                  echo "# ts=$TS"
+                  echo "$BODY"
+                  echo ""
+                fi
+                sleep 2
+              done
+            ) > "/tmp/metrics-scrape-${SUFFIX}.txt" 2>/dev/null &
+            METRICS_SCRAPE_PID=$!
+
             (cd ci-helpers/k6 && k6 run \
               -e GITHUB_SHA=${{ github.sha }} \
               -e BENCH_PROFILE=8k \
               -e BENCH_CASE="${CASE_NAME}" \
               bench.js)
+
+            kill "$METRICS_SCRAPE_PID" 2>/dev/null || true
+            kill "$(cat /tmp/proc-cpu.pid 2>/dev/null)" 2>/dev/null || true
+            nproc > "/tmp/nproc-${SUFFIX}"
+            echo "$(nproc) $(grep MemTotal /proc/meminfo | awk '{print $2}')" > "/tmp/machine-info-${SUFFIX}"
+            python3 "${{ github.workspace }}/ci-helpers/parse-resources.py" \
+              --proc-cpu       "/tmp/proc-cpu-${SUFFIX}.log" \
+              --metrics-scrape "/tmp/metrics-scrape-${SUFFIX}.txt" \
+              --nproc          "/tmp/nproc-${SUFFIX}" \
+              --machine-info   "/tmp/machine-info-${SUFFIX}" \
+              --output         "/tmp/resource-data-${SUFFIX}.json" \
+              || echo "Resource parsing failed (non-fatal)"
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
@@ -1694,6 +1747,9 @@ jobs:
               cp /tmp/server-trace.0.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
               cp /tmp/client-trace.0.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
             fi
+            cp "/tmp/proc-cpu-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/proc-cpu.log" 2>/dev/null || true
+            cp "/tmp/metrics-scrape-${SUFFIX}.txt" "/tmp/trace-${SUFFIX}/metrics-scrape.txt" 2>/dev/null || true
+            cp "/tmp/resource-data-${SUFFIX}.json" "/tmp/trace-${SUFFIX}/resource-data.json" 2>/dev/null || true
             cp "/tmp/ci-server-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-server.log"
             cp "/tmp/ci-client-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-client.log"
             cp "/tmp/ci-ctld-${SUFFIX}.log" "/tmp/trace-${SUFFIX}/ci-ctld.log"
@@ -1854,6 +1910,15 @@ jobs:
           path: /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
 
 
+      - name: Upload resource data (ingress 8k — contains prom_metrics)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-trace-8k-resource-data-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: /tmp/trace-ingress_8000qps/resource-data.json
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1903,6 +1968,13 @@ jobs:
         with:
           name: stress-profile-8k-results-${{ github.run_id }}
           path: /tmp/profile8k
+
+      - name: Download 8k resource data (prom_metrics)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-trace-8k-resource-data-${{ github.run_id }}
+          path: /tmp/trace8k-resource
 
       - name: Download dial9 trace (8k ingress server)
         continue-on-error: true
@@ -2124,7 +2196,9 @@ jobs:
             fi
           fi
           RES_ARG=""
-          if [ -s /tmp/core/resource-data.json ]; then
+          if [ -s /tmp/trace8k-resource/resource-data.json ]; then
+            RES_ARG="--resources /tmp/trace8k-resource/resource-data.json"
+          elif [ -s /tmp/core/resource-data.json ]; then
             RES_ARG="--resources /tmp/core/resource-data.json"
           fi
           TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL="${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"

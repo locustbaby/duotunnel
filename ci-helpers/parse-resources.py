@@ -550,54 +550,237 @@ def parse_psi(path, sampling_epoch=None):
 
 
 # ---------------------------------------------------------------------------
+# New parsers: collect-metrics.py JSON + Prometheus metrics-scrape
+# ---------------------------------------------------------------------------
+
+def parse_collected(path):
+    """Load JSON written by collect-metrics.py directly — no transformation needed."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def parse_metrics_scrape(path):
+    """Parse the Prometheus text-format scrape log written by the CI metrics loop.
+
+    File format:
+        # ts=<unix_epoch>
+        # HELP ...
+        # TYPE ...
+        metric_name{labels} value
+        ...
+        (blank line)
+        # ts=<next_epoch>
+        ...
+
+    Returns a dict keyed by metric name, each value is [{t, v}] timeseries.
+    t is seconds relative to first scrape timestamp.
+    Counter metrics (ending in _total) are kept as-is (cumulative).
+    """
+    if not path or not os.path.exists(path):
+        return {}
+
+    WANT = {
+        # server quinn
+        "duotunnel_quic_rtt_us",
+        "duotunnel_quic_cwnd_bytes",
+        "duotunnel_quic_lost_packets_total",
+        "duotunnel_quic_sent_packets_total",
+        "duotunnel_quic_congestion_events_total",
+        "duotunnel_quic_tx_bytes_total",
+        "duotunnel_quic_rx_bytes_total",
+        # server tokio
+        "duotunnel_tokio_num_workers",
+        "duotunnel_tokio_alive_tasks",
+        "duotunnel_tokio_global_queue_depth",
+        "duotunnel_tokio_spawned_tasks_total",
+        "duotunnel_tokio_park_count_total",
+        "duotunnel_tokio_steal_count_total",
+        "duotunnel_tokio_poll_count_total",
+        "duotunnel_tokio_busy_duration_us_total",
+        "duotunnel_tokio_local_queue_depth_total",
+        "duotunnel_tokio_blocking_threads",
+        "duotunnel_tokio_io_fd_registered",
+        "duotunnel_tokio_io_ready_total",
+        "duotunnel_tokio_mean_poll_time_us",
+        "duotunnel_tokio_overflow_count_total",
+        # server open_bi / connections
+        "duotunnel_open_bi_wait_ms",
+        "duotunnel_open_bi_total",
+        "duotunnel_open_bi_timeout_total",
+        "duotunnel_open_bi_inflight",
+        "duotunnel_open_bi_timeout_ratio",
+        "duotunnel_active_quic_connections",
+        "duotunnel_active_tcp_connections",
+        "duotunnel_total_quic_connections",
+        "duotunnel_total_tcp_connections",
+        "duotunnel_requests_total",
+        "duotunnel_auth_success_total",
+        "duotunnel_auth_failure_total",
+        "duotunnel_clients_per_group",
+        "duotunnel_connections_rejected_total",
+        # client quinn
+        "duotunnel_client_quic_pool_size",
+        "duotunnel_client_quic_rtt_us",
+        "duotunnel_client_quic_cwnd_bytes",
+        "duotunnel_client_quic_lost_packets_total",
+        "duotunnel_client_quic_sent_packets_total",
+        "duotunnel_client_quic_congestion_events_total",
+        "duotunnel_client_quic_tx_bytes_total",
+        "duotunnel_client_quic_rx_bytes_total",
+        # client tokio
+        "duotunnel_client_tokio_num_workers",
+        "duotunnel_client_tokio_alive_tasks",
+        "duotunnel_client_tokio_global_queue_depth",
+        "duotunnel_client_tokio_spawned_tasks_total",
+        "duotunnel_client_tokio_park_count_total",
+        "duotunnel_client_tokio_steal_count_total",
+        "duotunnel_client_tokio_poll_count_total",
+        "duotunnel_client_tokio_busy_duration_us_total",
+        "duotunnel_client_tokio_local_queue_depth_total",
+        "duotunnel_client_tokio_io_ready_total",
+        "duotunnel_client_tokio_mean_poll_time_us",
+        "duotunnel_client_tokio_overflow_count_total",
+        # client streams / connections
+        "duotunnel_client_streams_accepted_total",
+        "duotunnel_client_streams_rejected_total",
+        "duotunnel_client_streams_error_total",
+        "duotunnel_client_streams_inflight",
+        "duotunnel_client_reconnects_total",
+        "duotunnel_client_login_success_total",
+        "duotunnel_client_login_failure_total",
+        "duotunnel_client_entry_conns_active",
+        "duotunnel_client_entry_conns_total",
+        "duotunnel_client_open_bi_total",
+        "duotunnel_client_open_bi_timeout_total",
+        "duotunnel_client_open_bi_wait_ms",
+    }
+
+    result: dict[str, list] = {}
+    first_ts = None
+    cur_ts = None
+
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if line.startswith("# ts="):
+                try:
+                    cur_ts = float(line[5:])
+                    if first_ts is None:
+                        first_ts = cur_ts
+                except ValueError:
+                    pass
+                continue
+            if not line or line.startswith("#"):
+                continue
+            if cur_ts is None:
+                continue
+
+            # parse "metric_name{...} value [timestamp]"
+            # or    "metric_name value [timestamp]"
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name_part = parts[0]
+            try:
+                value = float(parts[1])
+            except ValueError:
+                continue
+
+            # strip label block if present
+            brace = name_part.find("{")
+            base_name = name_part[:brace] if brace != -1 else name_part
+
+            # aggregate labelled metrics by summing (e.g. requests_total{protocol,status})
+            if base_name not in WANT:
+                continue
+
+            t_rel = round(cur_ts - first_ts, 1)
+            series = result.setdefault(base_name, [])
+            # if last point has same t, sum (handles multiple label combos per scrape)
+            if series and series[-1]["t"] == t_rel:
+                series[-1]["v"] = round(series[-1]["v"] + value, 4)
+            else:
+                series.append({"t": t_rel, "v": round(value, 4)})
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--proc-cpu",      required=True)
-    p.add_argument("--mpstat",        required=True)
+    # legacy sysstat inputs (all optional when --collected is provided)
+    p.add_argument("--proc-cpu",      default="")
+    p.add_argument("--mpstat",        default="")
     p.add_argument("--pidstat-io",    default="")
     p.add_argument("--pidstat-ctxsw", default="")
     p.add_argument("--sar-net",       default="")
     p.add_argument("--sar-paging",    default="")
     p.add_argument("--ss",            default="")
     p.add_argument("--psi",           default="")
+    # new inputs
+    p.add_argument("--collected",      default="", help="JSON from collect-metrics.py")
+    p.add_argument("--metrics-scrape", default="", help="Prometheus text scrape log")
     p.add_argument("--k6-offset",     type=int, default=0)
     p.add_argument("--nproc",         default="/tmp/nproc")
     p.add_argument("--machine-info",  default="")
     p.add_argument("--output",        required=True)
     args = p.parse_args()
 
-    nproc        = _read_nproc(args.nproc)
-    proc_groups  = parse_proc_cpu(args.proc_cpu, nproc)
-    mpstat_data  = parse_mpstat(args.mpstat)
-    io_groups    = parse_pidstat_io(args.pidstat_io)       if args.pidstat_io   else {}
-    ctxsw_groups = parse_pidstat_ctxsw(args.pidstat_ctxsw) if args.pidstat_ctxsw else {}
-    net          = parse_sar_net(args.sar_net)             if args.sar_net      else {}
-    paging       = parse_sar_paging(args.sar_paging)       if args.sar_paging   else {}
-    tcp          = parse_ss_timeseries(args.ss)            if args.ss           else {}
-    psi          = parse_psi(args.psi)                     if args.psi          else {}
+    collected = parse_collected(args.collected)
+    prom      = parse_metrics_scrape(args.metrics_scrape)
 
-    # Merge CPU/RSS + IO + ctxsw into per-process entries; only emit groups with data
-    processes = {}
-    for g in ["server", "client", "http_echo", "ws_echo", "grpc_echo", "k6", "frps", "frpc", "other"]:
-        entry = {**proc_groups.get(g, {})}
-        for src in (io_groups.get(g, {}), ctxsw_groups.get(g, {})):
-            for k, v in src.items():
-                if v:
-                    entry[k] = v
-        if any(v for v in entry.values()):
-            processes[g] = entry
+    if collected:
+        # use psutil-collected data as primary source
+        nproc     = collected.get("nproc", _read_nproc(args.nproc))
+        processes = collected.get("processes", {})
+        system    = collected.get("system", {})
+        psi       = collected.get("psi", {})
+        # tcp and net are embedded in system already
+        tcp       = {
+            "estab":    system.pop("tcp_estab",    []),
+            "timewait": system.pop("tcp_timewait", []),
+        }
+        net       = {
+            "rx_kbs": system.pop("net_rx_kbs", []),
+            "tx_kbs": system.pop("net_tx_kbs", []),
+        }
+        paging    = {}
+    else:
+        # fall back to legacy sysstat parsers
+        nproc        = _read_nproc(args.nproc)
+        proc_groups  = parse_proc_cpu(args.proc_cpu, nproc)  if args.proc_cpu  else {}
+        mpstat_data  = parse_mpstat(args.mpstat)              if args.mpstat   else {}
+        io_groups    = parse_pidstat_io(args.pidstat_io)      if args.pidstat_io   else {}
+        ctxsw_groups = parse_pidstat_ctxsw(args.pidstat_ctxsw) if args.pidstat_ctxsw else {}
+        net          = parse_sar_net(args.sar_net)            if args.sar_net  else {}
+        paging       = parse_sar_paging(args.sar_paging)      if args.sar_paging else {}
+        tcp          = parse_ss_timeseries(args.ss)           if args.ss       else {}
+        psi          = parse_psi(args.psi)                    if args.psi      else {}
 
-    system = {k: v for k, v in mpstat_data.items() if v}
+        processes = {}
+        for g in ["server", "client", "http_echo", "ws_echo", "grpc_echo", "k6", "frps", "frpc", "other"]:
+            entry = {**proc_groups.get(g, {})}
+            for src in (io_groups.get(g, {}), ctxsw_groups.get(g, {})):
+                for k, v in src.items():
+                    if v:
+                        entry[k] = v
+            if any(v for v in entry.values()):
+                processes[g] = entry
+
+        system = {k: v for k, v in mpstat_data.items() if v}
 
     result = {
-        "processes": processes,
-        "system":    system,
-        "nproc":     nproc,
+        "processes":       processes,
+        "system":          system,
+        "nproc":           nproc,
         "k6OffsetSeconds": args.k6_offset,
     }
+
     machine = parse_machine_info(args.machine_info) if args.machine_info else None
     if machine:
         result["machine"] = machine
@@ -605,19 +788,23 @@ def main():
         result["network"] = net
     if paging and any(paging.values()):
         result["paging"] = paging
-    if tcp and any(tcp.values()):
+    if tcp and any(v for v in tcp.values()):
         result["tcp_conns"] = tcp
-    if psi and any(psi.values()):
+    if psi and any(v for v in psi.values() if isinstance(v, list)):
         result["psi"] = psi
+    if prom:
+        result["prom_metrics"] = prom
 
     with open(args.output, "w") as f:
         json.dump(result, f, indent=2)
 
-    counts = {g: len(processes.get(g, {}).get("cpu", [])) for g in processes}
+    n_sys  = len(system.get("cpu_pct", []))
+    n_proc = {g: len(processes.get(g, {}).get("cpu_pct", [])) for g in processes}
+    n_prom = len(prom)
     print(
-        f"nproc={nproc}, system_cpu={len(mpstat_data.get('cpu',[]))}, processes={counts}, "
-        f"tcp_estab={len(tcp.get('estab',[]))}, psi_pts={len(psi.get('cpu',[]))}, "
-        f"paging_pts={len(paging.get('majflt',[]))}"
+        f"nproc={nproc}, system_samples={n_sys}, processes={n_proc}, "
+        f"prom_metrics={n_prom}, tcp_pts={len(tcp.get('estab',[]))}, "
+        f"psi_pts={len(psi.get('cpu',[]) if isinstance(psi, dict) else [])}"
     )
 
 

@@ -17,6 +17,22 @@ use std::collections::HashMap;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 use tunnel_lib::PkiParams;
 
+// ── Metrics config ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    pub quic: bool,
+    pub tokio: bool,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self { quic: true, tokio: true }
+    }
+}
+
+
 // ── Full server config file schema ───────────────────────────────────────────
 
 /// Mirrors the on-disk `server.yaml` layout. Only the routing sections
@@ -47,6 +63,8 @@ pub struct ServerBasicConfig {
     pub max_tcp_connections: usize,
     #[serde(default)]
     pub metrics_port: Option<u16>,
+    #[serde(default)]
+    pub metrics_config: MetricsConfig,
     #[serde(default)]
     pub quic: QuicConfig,
     #[serde(default)]

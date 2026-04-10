@@ -49,3 +49,6 @@ uuid = { version = "1", features = ["v4"] }
 crossbeam-utils = "0.8"
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 dial9-tokio-telemetry = { version = "0.2.0", features = ["cpu-profiling"], optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(tokio_unstable)'] }

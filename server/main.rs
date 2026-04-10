@@ -398,6 +398,23 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
                 error!(port = %metrics_port, error = %e, "Metrics server failed");
             }
         });
+        let registry_for_poller = state.registry.clone();
+        let quic_enabled = config.server.metrics_config.quic;
+        let tokio_enabled = config.server.metrics_config.tokio;
+        crate::spawn_task(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if quic_enabled {
+                    let conns = registry_for_poller.all_connections();
+                    metrics::update_quic_stats(&conns);
+                }
+                if tokio_enabled {
+                    metrics::update_tokio_metrics();
+                }
+            }
+        });
     }
     let quic_state = state.clone();
     let quic_handle =

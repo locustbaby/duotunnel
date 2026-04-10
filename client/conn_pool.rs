@@ -48,4 +48,8 @@ impl EntryConnPool {
     pub fn pool_size(&self) -> usize {
         self.snapshot.load().len()
     }
+
+    pub fn all_connections(&self) -> Vec<Connection> {
+        self.snapshot.load().to_vec()
+    }
 }

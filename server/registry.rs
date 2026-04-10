@@ -172,6 +172,13 @@ impl ClientRegistry {
         }
         conn
     }
+
+    pub fn all_connections(&self) -> Vec<Connection> {
+        self.clients
+            .iter()
+            .map(|entry| entry.conn.clone())
+            .collect()
+    }
 }
 
 impl Default for ClientRegistry {
