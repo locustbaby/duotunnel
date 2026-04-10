@@ -29,6 +29,35 @@ pub async fn forward_to_client(
     }
 }
 
+pub async fn forward_prefixed(
+    mut send: SendStream,
+    recv: RecvStream,
+    external_stream: TcpStream,
+    prefix: bytes::Bytes,
+    relay_buf_size: usize,
+) -> Result<()> {
+    use crate::transport::quinn_io::PrefixedReadWrite;
+    let (tcp_read, mut tcp_write) = external_stream.into_split();
+    let prefixed_read = PrefixedReadWrite::new(tcp_read, prefix);
+    let mut quic_recv = BufReader::with_capacity(relay_buf_size, recv);
+    let mut tcp_read = BufReader::with_capacity(relay_buf_size, prefixed_read);
+    let quic_to_tcp = async {
+        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
+        let _ = tcp_write.shutdown().await;
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let tcp_to_quic = async {
+        let bytes = tokio::io::copy_buf(&mut tcp_read, &mut send).await?;
+        let _ = send.finish();
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let (r1, r2) = tokio::join!(quic_to_tcp, tcp_to_quic);
+    match (r1, r2) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+    }
+}
+
 pub async fn forward_with_initial_data(
     mut send: SendStream,
     recv: RecvStream,

@@ -194,16 +194,19 @@ async fn handle_plaintext_h2_connection(
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use std::sync::OnceLock;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
     debug!("plaintext H2 detected, using L7 proxy");
     let src_addr = peer_addr.ip().to_string();
     let src_port = peer_addr.port();
     let h2_single_authority = state.config.server.h2_single_authority;
-    let first_authority: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     #[allow(clippy::type_complexity)]
-    let route_cache: Arc<OnceLock<Option<(Arc<str>, Arc<str>)>>> = Arc::new(OnceLock::new());
-    let sender_cache: Arc<OnceLock<(quinn::Connection, tunnel_lib::H2Sender)>> =
-        Arc::new(OnceLock::new());
+    let route_cache: Arc<Mutex<HashMap<String, Option<(Arc<str>, Arc<str>)>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    #[allow(clippy::type_complexity)]
+    let sender_cache: Arc<Mutex<HashMap<(Arc<str>, Arc<str>), (quinn::Connection, tunnel_lib::H2Sender)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();
         let first_authority = first_authority.clone();
@@ -232,21 +235,29 @@ async fn handle_plaintext_h2_connection(
             };
             let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
             if h2_single_authority {
-                let pinned = first_authority.get_or_init(|| route_host.clone());
-                if pinned != &route_host {
-                    return Ok(Response::builder()
-                        .status(421)
-                        .body(
-                            Full::new(bytes::Bytes::from("Misdirected Request"))
-                                .map_err(|_| unreachable!())
-                                .boxed_unsync(),
-                        )
-                        .unwrap());
+                let mut fa = first_authority.lock().unwrap();
+                match fa.as_ref() {
+                    None => *fa = Some(route_host.clone()),
+                    Some(pinned) if pinned != &route_host => {
+                        return Ok(Response::builder()
+                            .status(421)
+                            .body(
+                                Full::new(bytes::Bytes::from("Misdirected Request"))
+                                    .map_err(|_| unreachable!())
+                                    .boxed_unsync(),
+                            )
+                            .unwrap());
+                    }
+                    Some(_) => {}
                 }
             }
-            let route = route_cache
-                .get_or_init(|| lookup_route(&state, port, &route_host))
-                .clone();
+            let route = {
+                let mut cache = route_cache.lock().unwrap();
+                cache
+                    .entry(route_host.clone())
+                    .or_insert_with(|| lookup_route(&state, port, &route_host))
+                    .clone()
+            };
             let (group_id, proxy_name) = match route {
                 Some(r) => r,
                 None => {
@@ -262,13 +273,30 @@ async fn handle_plaintext_h2_connection(
                     );
                 }
             };
-            let (client_conn, h2_sender) = sender_cache.get_or_init(|| {
-                let selected = state
-                    .registry
-                    .select_client_for_group(&group_id)
-                    .expect("no client for group");
-                (selected.conn, tunnel_lib::new_h2_sender())
-            });
+            let cache_key = (group_id.clone(), proxy_name.clone());
+            let (client_conn, h2_sender) = {
+                let mut guard = sender_cache.lock().unwrap();
+                if !guard.contains_key(&cache_key) {
+                    if let Some(selected) =
+                        state.registry.select_client_for_group(&group_id)
+                    {
+                        guard.insert(cache_key.clone(), (selected.conn, tunnel_lib::new_h2_sender()));
+                    }
+                }
+                match guard.get(&cache_key) {
+                    Some(pair) => (pair.0.clone(), pair.1.clone()),
+                    None => {
+                        return Ok(Response::builder()
+                            .status(502)
+                            .body(
+                                Full::new(bytes::Bytes::from("No client available"))
+                                    .map_err(|_| unreachable!())
+                                    .boxed_unsync(),
+                            )
+                            .unwrap());
+                    }
+                }
+            };
             let (parts, body) = req.into_parts();
             debug!(
                 "L7 Proxy (plaintext H2): {} {} -> {}",
@@ -283,10 +311,11 @@ async fn handle_plaintext_h2_connection(
             };
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
-            match tunnel_lib::forward_h2_request(client_conn, h2_sender, routing_info, upstream_req).await {
+            match tunnel_lib::forward_h2_request(&client_conn, &h2_sender, routing_info, upstream_req).await {
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
                 Err(e) => {
                     tracing::error!("L7 Proxy upstream error: {}", e);
+                    sender_cache.lock().unwrap().remove(&cache_key);
                     Ok(Response::builder()
                         .status(502)
                         .body(
@@ -308,14 +337,13 @@ async fn handle_plaintext_h2_connection(
 }
 async fn handle_plaintext_h1_connection(
     state: Arc<ServerState>,
-    mut stream: TcpStream,
+    stream: TcpStream,
     host: String,
     protocol: String,
     peer_addr: std::net::SocketAddr,
     initial_data: &[u8],
     port: u16,
 ) -> Result<()> {
-    use tokio::io::AsyncReadExt;
     debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
@@ -323,8 +351,6 @@ async fn handle_plaintext_h1_connection(
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-    let mut discard = vec![0u8; initial_data.len()];
-    stream.read_exact(&mut discard).await?;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name: proxy_name.to_string(),
         src_addr: peer_addr.ip().to_string(),
@@ -351,11 +377,11 @@ async fn handle_plaintext_h1_connection(
         }
     };
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-    proxy::forward_with_initial_data(
+    proxy::forward_prefixed(
         send,
         recv,
         stream,
-        initial_data,
+        bytes::Bytes::copy_from_slice(initial_data),
         state.proxy_buffer_params.relay_buf_size,
     )
     .await
