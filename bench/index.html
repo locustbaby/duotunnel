@@ -389,14 +389,23 @@ function renderOverview() {
     const lbl = entries.map(sha7);
     const catScenarios = {};
     for (const cat of categoryDefs) catScenarios[cat.id] = [];
+    // Exclude ws_multi_msg from overview charts — its ws_session_duration p95 is
+    // orders of magnitude larger than HTTP/gRPC latency and distorts the y-axis.
+    const OVERVIEW_EXCLUDE = new Set(['ws_multi_msg']);
+    // catScenarios stores {name, tunnel} pairs; use "tunnel:name" as dedup key.
     const seen = {};
     entries.forEach(e => (e.scenarios||[]).forEach(s => {
-      if (!seen[s.name] && s.category && catScenarios[s.category]) {
-        catScenarios[s.category].push(s.name);
-        seen[s.name] = true;
+      const tunnel = s.tunnel || 'duotunnel';
+      const key = tunnel + ':' + s.name;
+      if (!seen[key] && s.category && catScenarios[s.category] && !OVERVIEW_EXCLUDE.has(s.name)) {
+        catScenarios[s.category].push({name: s.name, tunnel});
+        seen[key] = true;
       }
     }));
-    Object.values(catScenarios).forEach(arr => arr.sort());
+    Object.values(catScenarios).forEach(arr => arr.sort((a, b) => {
+      if (a.tunnel !== b.tunnel) return a.tunnel === 'frp' ? 1 : -1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    }));
 
     const palette = [
       '#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24',
@@ -404,23 +413,27 @@ function renderOverview() {
     ];
     const dashes = [[], [6,3], [2,2], [8,4,2,4], [4,4]];
 
-    function renderCatChart(canvasId, names) {
-      if (!names.length || entries.length < 2) {
+    function renderCatChart(canvasId, entries_list) {
+      if (!entries_list.length || entries.length < 2) {
         const el = document.getElementById(canvasId);
         if (el) el.closest('.panel').querySelector('h3').textContent += ' — need ≥ 2 runs';
         return;
       }
-      const ds = names.map((name, i) => ({
-        label: name.replace(/_/g, ' '),
-        data: entries.map(e => { const s = (e.scenarios||[]).find(x => x.name === name); return s ? s.p95 : null; }),
-        borderColor: palette[i % palette.length],
-        backgroundColor: 'transparent',
-        borderDash: dashes[Math.floor(i / palette.length) % dashes.length],
-        tension: .3,
-        pointRadius: 2,
-        borderWidth: 1.5,
-        spanGaps: true,
-      }));
+      const ds = entries_list.map(({name, tunnel}, i) => {
+        const isFrp = tunnel === 'frp';
+        const label = name.replace(/_/g, ' ');
+        return {
+          label,
+          data: entries.map(e => { const s = (e.scenarios||[]).find(x => x.name === name && (x.tunnel||'duotunnel') === tunnel); return s ? s.p95 : null; }),
+          borderColor: palette[i % palette.length],
+          backgroundColor: 'transparent',
+          borderDash: isFrp ? [4,3] : dashes[Math.floor(i / palette.length) % dashes.length],
+          tension: .3,
+          pointRadius: 2,
+          borderWidth: 1.5,
+          spanGaps: true,
+        };
+      });
       mkChart(canvasId, {type:'line', data:{labels:lbl, datasets:ds}, options:{
         ...CO,
         onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },
