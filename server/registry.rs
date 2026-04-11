@@ -46,9 +46,11 @@ impl SelectedConnection {
 ///
 /// This replaces the previous `DashMap<String, Connection>` pattern that caused
 /// a heap allocation + many Arc reference-count bumps on *every* routing lookup.
+type ClientIndex = std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>;
+
 pub struct ClientGroup {
     /// Mutable index: client_id → (Connection, inflight counter).  Only touched by writers.
-    index: Mutex<std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>>,
+    index: Mutex<ClientIndex>,
     /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
     snapshot: ArcSwap<Vec<SelectedConnection>>,
 }
@@ -61,9 +63,7 @@ impl ClientGroup {
         }
     }
 
-    fn build_snapshot(
-        idx: &std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>,
-    ) -> Vec<SelectedConnection> {
+    fn build_snapshot(idx: &ClientIndex) -> Vec<SelectedConnection> {
         idx.iter()
             .map(|(client_id, (conn, inflight))| SelectedConnection {
                 conn_id: Arc::<str>::from(client_id.as_str()),
@@ -110,7 +110,7 @@ impl ClientGroup {
             .iter()
             .filter(|c| c.conn.close_reason().is_none())
             .min_by_key(|c| c.inflight.load(Ordering::Relaxed))
-            .map(|c| c.clone())
+            .cloned()
     }
 }
 
