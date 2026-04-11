@@ -51,8 +51,16 @@ def main():
             sc["tunnel"] = "frp"
             entry["scenarios"].append(sc)
         for ph in frp.get("phases", []):
-            ph["tunnel"] = "frp"
-            entry.setdefault("phases", []).append(ph)
+            # Shift frp phase times onto the resource-sampling axis so the
+            # frontend can render them without any special-case offset logic.
+            # frp_k6_offset = frp_k6_start_epoch - sampling_start_epoch
+            entry.setdefault("phases", []).append({
+                **ph,
+                "tunnel": "frp",
+                "resourceCase": "core",
+                "start": (ph.get("start") or 0) + args.frp_k6_offset,
+                "end":   (ph.get("end")   or 0) + args.frp_k6_offset,
+            })
 
     PREFIX = "window.BENCHMARK_DATA = "
     SUFFIX = ";"

@@ -153,9 +153,12 @@ export function ingressHttpGet() {
   const res = http.get(`http://echo.local:8080/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
-    responseType: 'none',
+    responseType: 'text',
   });
-  const ok = check(res, { 'ingress GET 200': (r) => r.status === 200 });
+  const ok = check(res, {
+    'ingress GET 200': (r) => r.status === 200,
+    'ingress GET id echo': (r) => r.body && r.body.includes(id),
+  });
   track(ok);
 }
 
@@ -221,9 +224,12 @@ export function egressHttpGet() {
     headers: { Host: 'echo.local' },
     timeout: '10s',
     tags: { name: sn },
-    responseType: 'none',
+    responseType: 'text',
   });
-  const ok = check(res, { 'egress GET 200': (r) => r.status === 200 });
+  const ok = check(res, {
+    'egress GET 200': (r) => r.status === 200,
+    'egress GET id echo': (r) => r.body && r.body.includes(id),
+  });
   track(ok);
 }
 
@@ -460,7 +466,10 @@ export function grpcHighQps() {
     try { grpcHighQpsClient.close(); } catch (_) {}
     grpcHighQpsClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
   }
-  check(resp, { 'grpc high qps OK': (r) => r && r.status === grpc.StatusOK });
+  check(resp, {
+    'grpc high qps OK': (r) => r && r.status === grpc.StatusOK,
+    'grpc high qps body': (r) => r && r.message && r.message.body === id,
+  });
 }
 
 export function bidirectional() {
