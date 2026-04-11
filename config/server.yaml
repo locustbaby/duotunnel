@@ -33,7 +33,7 @@ server:
     max_concurrent_streams: 1000  # Max concurrent bidi QUIC streams per connection (default: 1000)
     keepalive_secs: 20            # QUIC keepalive ping interval in seconds (default: 20)
     idle_timeout_secs: 60         # Close idle QUIC connections after N seconds (default: 60)
-    # congestion: "bbr"           # Congestion controller: "bbr" or "new_reno" (default: "bbr")
+    # congestion: "bbr"           # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
     # stream_window_mb: 4         # Per-stream receive window in MB (default: 4)
     # connection_window_mb: 32    # Per-connection receive window in MB (default: 32)
 

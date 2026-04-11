@@ -16,6 +16,26 @@ struct ClientInfo {
 pub struct SelectedConnection {
     pub conn_id: Arc<str>,
     pub conn: Connection,
+    /// Shared inflight counter for this specific connection slot.
+    /// Incremented by the caller before `open_bi`, decremented on drop via `InflightGuard`.
+    pub inflight: Arc<CachePadded<AtomicUsize>>,
+}
+
+/// RAII guard: decrements the per-connection inflight counter on drop.
+pub struct InflightGuard(Arc<CachePadded<AtomicUsize>>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl SelectedConnection {
+    /// Increment inflight and return a guard that decrements on drop.
+    pub fn begin_inflight(&self) -> InflightGuard {
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        InflightGuard(self.inflight.clone())
+    }
 }
 
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
@@ -27,11 +47,10 @@ pub struct SelectedConnection {
 /// This replaces the previous `DashMap<String, Connection>` pattern that caused
 /// a heap allocation + many Arc reference-count bumps on *every* routing lookup.
 pub struct ClientGroup {
-    /// Mutable index: client_id → Connection.  Only touched by writers.
-    index: Mutex<std::collections::HashMap<String, Connection>>,
+    /// Mutable index: client_id → (Connection, inflight counter).  Only touched by writers.
+    index: Mutex<std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>>,
     /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
     snapshot: ArcSwap<Vec<SelectedConnection>>,
-    counter: CachePadded<AtomicUsize>,
 }
 
 impl ClientGroup {
@@ -39,35 +58,37 @@ impl ClientGroup {
         Self {
             index: Mutex::new(std::collections::HashMap::new()),
             snapshot: ArcSwap::from_pointee(Vec::new()),
-            counter: CachePadded::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn build_snapshot(
+        idx: &std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>,
+    ) -> Vec<SelectedConnection> {
+        idx.iter()
+            .map(|(client_id, (conn, inflight))| SelectedConnection {
+                conn_id: Arc::<str>::from(client_id.as_str()),
+                conn: conn.clone(),
+                inflight: inflight.clone(),
+            })
+            .collect()
     }
 
     pub fn set(&self, client_id: String, conn: Connection) {
         let mut idx = self.index.lock();
-        idx.insert(client_id, conn);
-        let snap: Vec<SelectedConnection> = idx
-            .iter()
-            .map(|(client_id, conn)| SelectedConnection {
-                conn_id: Arc::<str>::from(client_id.as_str()),
-                conn: conn.clone(),
-            })
-            .collect();
-        self.snapshot.store(Arc::new(snap));
+        // Reuse existing inflight counter if this client_id reconnects.
+        let inflight = idx
+            .get(&client_id)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| Arc::new(CachePadded::new(AtomicUsize::new(0))));
+        idx.insert(client_id, (conn, inflight));
+        self.snapshot.store(Arc::new(Self::build_snapshot(&idx)));
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
         let mut idx = self.index.lock();
         let removed = idx.remove(client_id).is_some();
         if removed {
-            let snap: Vec<SelectedConnection> = idx
-                .iter()
-                .map(|(cid, conn)| SelectedConnection {
-                    conn_id: Arc::<str>::from(cid.as_str()),
-                    conn: conn.clone(),
-                })
-                .collect();
-            self.snapshot.store(Arc::new(snap));
+            self.snapshot.store(Arc::new(Self::build_snapshot(&idx)));
         }
         removed
     }
@@ -76,21 +97,20 @@ impl ClientGroup {
         self.snapshot.load().is_empty()
     }
 
-    /// O(1) allocation-free routing read via RCU snapshot.
+    /// Select the healthy connection with the fewest in-flight streams (least-inflight).
+    ///
+    /// Reads are allocation-free: one atomic pointer load from the RCU snapshot,
+    /// then a linear scan over healthy connections comparing `AtomicUsize` inflight counts.
     pub fn select_healthy(&self) -> Option<SelectedConnection> {
         let conns = self.snapshot.load();
-        let len = conns.len();
-        if len == 0 {
+        if conns.is_empty() {
             return None;
         }
-        let start = self.counter.fetch_add(1, Ordering::Relaxed);
-        for i in 0..len {
-            let conn = &conns[(start + i) % len];
-            if conn.conn.close_reason().is_none() {
-                return Some(conn.clone());
-            }
-        }
-        None
+        conns
+            .iter()
+            .filter(|c| c.conn.close_reason().is_none())
+            .min_by_key(|c| c.inflight.load(Ordering::Relaxed))
+            .map(|c| c.clone())
     }
 }
 

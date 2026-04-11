@@ -25,7 +25,7 @@ quic:
   max_concurrent_streams: 1000    # Max concurrent bidi streams / semaphore size (default: 100)
   keepalive_secs: 20              # QUIC keepalive ping interval in seconds (default: 20)
   idle_timeout_secs: 60           # Close idle QUIC connections after N seconds (default: 60)
-  congestion: "bbr"               # Congestion controller: "bbr" or "new_reno" (default: "bbr")
+  congestion: "bbr"               # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
   # stream_window_mb: 4           # Per-stream receive window in MB (default: 4)
   # connection_window_mb: 32      # Per-connection receive window in MB (default: 32)
   # send_window_mb: 8             # Send window override in MB (default: connection_window_mb)

@@ -8,7 +8,7 @@ server:
     max_concurrent_streams: 1000
     keepalive_secs: 10
     idle_timeout_secs: 30
-    congestion: "cubic"
+    congestion: "bbr"
 
 server_egress_upstream:
   upstreams:

@@ -363,6 +363,7 @@ async fn handle_plaintext_h1_connection(
     };
     let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
     let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
+    let _inflight_guard = selected.begin_inflight();
     let wait_started = Instant::now();
     let (mut send, recv) = match tokio::time::timeout(open_timeout, selected.conn.open_bi()).await {
         Ok(Ok(streams)) => {

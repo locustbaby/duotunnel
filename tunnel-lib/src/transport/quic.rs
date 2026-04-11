@@ -38,9 +38,18 @@ fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTranspor
             .try_into()
             .unwrap(),
     ));
-    if let Some(ref mode) = params.congestion {
-        if mode.eq_ignore_ascii_case("bbr") {
+    match params.congestion.as_deref().unwrap_or("bbr") {
+        m if m.eq_ignore_ascii_case("bbr") => {
             tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        }
+        m if m.eq_ignore_ascii_case("cubic") => {
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+        }
+        m if m.eq_ignore_ascii_case("new_reno") || m.eq_ignore_ascii_case("newreno") => {
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+        }
+        _ => {
+            // unknown value, fall back to quinn default (NewReno)
         }
     }
 }
