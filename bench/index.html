@@ -753,11 +753,35 @@ function renderDetail(entry) {
         'rgba(148,163,184,.06)',
       ];
       const boundaryAnnotations = {};
-      rpcEntries.forEach(([caseName,], idx) => {
+      rpcEntries.forEach(([caseName, caseRes], idx) => {
         const xStart = caseOffsets[idx];
         const xEnd   = xStart + caseMaxTs[idx];
         // core: phases already shown via phaseAnnotations — only add separator line, no big box
-        if (caseName !== 'core') {
+        // but add a frp band if frp phases exist
+        if (caseName === 'core') {
+          const k6off = caseRes.k6OffsetSeconds || 0;
+          const chartOff = xStart;
+          const frpPhases = (entry.phases || []).filter(p => p.tunnel === 'frp');
+          if (frpPhases.length) {
+            const frpStart = Math.min(...frpPhases.map(p => (p.start || 0) + k6off + chartOff));
+            const frpEnd   = Math.max(...frpPhases.map(p => (p.end   || 0) + k6off + chartOff));
+            boundaryAnnotations['frpBand'] = {
+              type: 'box',
+              xMin: frpStart, xMax: frpEnd,
+              backgroundColor: 'rgba(245,166,35,.08)',
+              borderWidth: 1,
+              borderColor: 'rgba(245,166,35,.25)',
+              label: {
+                display: true,
+                content: 'frp',
+                color: 'rgba(245,166,35,0.7)',
+                font: {size: 11, weight: 'bold'},
+                position: {x: 'center', y: 'end'},
+                yAdjust: -4,
+              },
+            };
+          }
+        } else {
           const shortName = caseName.replace(/ \(.*?\)$/, '').replace(/_8000qps$/, ' 8k').replace(/_multihost/, ' mh').replace(/_/g, ' ');
           const bgColor = CASE_BG_COLORS[idx % CASE_BG_COLORS.length];
           boundaryAnnotations[`caseBg${idx}`] = {
