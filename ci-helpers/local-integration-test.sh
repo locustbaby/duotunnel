@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-helpers/local-integration-test.sh
 # Mirrors CI integration-test job using *.localtest.com domains
-# (wss/ws/grpc.localtest.com all resolve to 127.0.0.1 — no /etc/hosts sudo needed)
+# (localtest.com resolves to 127.0.0.1 — no /etc/hosts sudo needed)
 #
 # Usage (run from repo root):
 #   bash ci-helpers/local-integration-test.sh
@@ -11,18 +11,24 @@
 # Sections:
 #   1 — External (continue-on-error)
 #   2 — HTTP/1.1 ingress + egress
-#   3 — HTTP/2 h2c ingress + egress
+#   3 — HTTP/2 h2c
 #   4 — WebSocket ingress
 #   5 — gRPC (Health, Echo, ServerStream, BidiStream)
-#   6 — Concurrent & mixed-protocol
+#   6 — Mixed-protocol smoke tests
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/target/release"
-CLIENT="$BIN/ci-test-client"
-CFGDIR="$REPO/ci-helpers"
+export BIN="$REPO/target/release"
+export CFGDIR="$REPO/ci-helpers"
+export LOG_PREFIX="lt"
 
-PASS=0; FAIL=0; SKIP=0
+# Local-test overrides for tunnel-stack.sh
+export CTLD_CONFIG="$CFGDIR/local-test-ctld.yaml"
+export SERVER_CONFIG="$CFGDIR/local-test-server.yaml"
+export CLIENT_CONFIG="$CFGDIR/local-test-client.yaml"
+export CLIENT_GROUP="local-group"
+export CLIENT_HEALTHZ_PORT="9092"
+
 KEEP=0
 ONLY_SECTION="all"
 
@@ -35,18 +41,18 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ─── Colors ──────────────────────────────────────────────────────────────────
+# ─── Colors + helpers ─────────────────────────────────────────────────────────
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; C='\033[0;36m'; N='\033[0m'
 log()  { echo -e "${C}[+]${N} $*"; }
 hdr()  { echo -e "\n${C}══ $* ══${N}"; }
 _pass(){ echo -e " ${G}PASS${N}"; PASS=$((PASS+1)); }
 _fail(){ echo -e " ${R}FAIL${N}"; echo "    └─ $(echo "$*" | head -3)"; FAIL=$((FAIL+1)); }
 _skip(){ echo -e " ${Y}SKIP${N}"; SKIP=$((SKIP+1)); }
+PASS=0; FAIL=0; SKIP=0
 
 should_run() { [[ "$ONLY_SECTION" == "all" ]] || [[ "$ONLY_SECTION" == "$1" ]]; }
 
 # ─── Portable timeout ─────────────────────────────────────────────────────────
-# macOS ships without GNU timeout; use Perl as a portable fallback.
 if command -v timeout &>/dev/null; then
   _timeout() { timeout "$@"; }
 elif command -v gtimeout &>/dev/null; then
@@ -71,13 +77,14 @@ run() {
   else _fail "$out"; fi
 }
 
-# ─── Background process tracking ─────────────────────────────────────────────
-BGPIDS=()
+# ─── Source shared tunnel-stack functions ────────────────────────────────────
+# shellcheck source=ci-helpers/tunnel-stack.sh
+source "$CFGDIR/tunnel-stack.sh"
 
+# ─── Cleanup ─────────────────────────────────────────────────────────────────
 cleanup() {
   if [[ "$KEEP" -eq 0 ]]; then
-    log "Stopping background processes..."
-    for p in "${BGPIDS[@]}"; do kill "$p" 2>/dev/null || true; done
+    stack_stop_all 2>/dev/null || true
   fi
   echo ""
   echo "══════════════════════════════════════"
@@ -87,19 +94,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ─── Preflight ───────────────────────────────────────────────────────────────
+# ─── Preflight: binaries ──────────────────────────────────────────────────────
 log "Checking binaries in $BIN ..."
 for b in server client tunnel-ctld http-echo-server ws-echo-server grpc-echo-server ci-test-client; do
-  [[ -x "$BIN/$b" ]] || { echo "MISSING: $BIN/$b  →  cargo build --release --workspace"; exit 1; }
+  [[ -x "$BIN/$b" ]] || {
+    echo "MISSING: $BIN/$b  →  cargo build --release --workspace"
+    exit 1
+  }
 done
 
-# Check that test domains resolve to 127.0.0.1 (requires /etc/hosts entries).
-# Add them with: sudo tee -a /etc/hosts << 'EOF'
-#   127.0.0.1  ws.localtest.com
-#   127.0.0.1  grpc.localtest.com
-# EOF
+# ─── Preflight: domain resolution ────────────────────────────────────────────
 for domain in ws.localtest.com grpc.localtest.com; do
-  ip=$(dig +short "$domain" 2>/dev/null | grep -m1 '^[0-9]' || getent hosts "$domain" 2>/dev/null | awk '{print $1}')
+  ip=$(dig +short "$domain" 2>/dev/null | grep -m1 '^[0-9]' \
+       || getent hosts "$domain" 2>/dev/null | awk '{print $1}')
   if [[ "$ip" != "127.0.0.1" ]]; then
     echo ""
     echo "WARNING: $domain resolves to '${ip:-<nothing>}', not 127.0.0.1"
@@ -109,98 +116,28 @@ for domain in ws.localtest.com grpc.localtest.com; do
   fi
 done
 
-# Kill any leftover test processes from a previous run
-pkill -f "http-echo-server 9999"         2>/dev/null || true
-pkill -f "ws-echo-server 8765"           2>/dev/null || true
-pkill -f "grpc-echo-server 50051"        2>/dev/null || true
-pkill -f "tunnel-ctld.*local-test-ctld"  2>/dev/null || true
-pkill -f "server.*local-test-server"     2>/dev/null || true
-pkill -f "client.*local-test-client"     2>/dev/null || true
+# Kill any leftover processes from a previous run
+pkill -f "http-echo-server 9999"          2>/dev/null || true
+pkill -f "ws-echo-server 8765"            2>/dev/null || true
+pkill -f "grpc-echo-server 50051"         2>/dev/null || true
+pkill -f "tunnel-ctld.*local-test-ctld"   2>/dev/null || true
+pkill -f "server.*local-test-server"      2>/dev/null || true
+pkill -f "client.*local-test-client"      2>/dev/null || true
 sleep 0.5
 
 # Remove stale DBs so ctld seeds routing fresh
 rm -f "$REPO/data/local-test.db" "$REPO/data/duotunnel-local-test.db"
 
-# ─── Start backends ──────────────────────────────────────────────────────────
-log "Starting backend servers ..."
-mkdir -p "$REPO/data"
+# ─── Start the full tunnel stack (backends + ctld + server + client) ──────────
+stack_start_backends
+stack_start_ctld
+stack_start_server
+stack_create_token
+stack_start_client
 
-"$BIN/http-echo-server" 9999  > /tmp/lt-http-echo.log  2>&1 & BGPIDS+=($!)
-"$BIN/ws-echo-server"   8765  > /tmp/lt-ws-echo.log    2>&1 & BGPIDS+=($!)
-"$BIN/grpc-echo-server" 50051 > /tmp/lt-grpc-echo.log  2>&1 & BGPIDS+=($!)
+log "Tunnel ready  (ingress: *.localtest.com:8081  egress: 127.0.0.1:8082)"
 
-for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:9999/ > /dev/null 2>&1 && break; sleep 0.2
-done
-sleep 0.5
-log "Backends ready  (http:9999  ws:8765  grpc:50051)"
-
-# ─── Start tunnel-ctld ───────────────────────────────────────────────────────
-log "Starting tunnel-ctld ..."
-"$BIN/tunnel-ctld" --config "$CFGDIR/local-test-ctld.yaml" > /tmp/lt-ctld.log 2>&1 & BGPIDS+=($!)
-for i in $(seq 1 60); do
-  curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break; sleep 0.5
-done
-curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 || {
-  echo "ERROR: ctld not ready"; cat /tmp/lt-ctld.log; exit 1
-}
-log "ctld ready"
-
-# ─── Start tunnel server ─────────────────────────────────────────────────────
-log "Starting tunnel server ..."
-"$BIN/server" --config "$CFGDIR/local-test-server.yaml" \
-  --ctld-addr 127.0.0.1:7788 > /tmp/lt-server.log 2>&1 & BGPIDS+=($!)
-for i in $(seq 1 60); do
-  curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break; sleep 0.5
-done
-curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 || {
-  echo "ERROR: server not ready"; cat /tmp/lt-server.log; exit 1
-}
-log "Server ready"
-
-# ─── Create/rotate token, patch client config ────────────────────────────────
-log "Getting client token ..."
-TOKEN=$("$BIN/tunnel-ctld" --config "$CFGDIR/local-test-ctld.yaml" \
-  client create-client local-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
-  || "$BIN/tunnel-ctld" --config "$CFGDIR/local-test-ctld.yaml" \
-  client rotate-token local-group 2>/dev/null | awk '{print $NF}')
-[[ -n "$TOKEN" ]] || { echo "ERROR: failed to get token"; exit 1; }
-python3 - "$TOKEN" <<'PY'
-import re, sys
-f = sys.argv[2] if len(sys.argv) > 2 else "ci-helpers/local-test-client.yaml"
-# path injected at shell expansion time below
-PY
-python3 -c "
-import re, sys
-f = '$CFGDIR/local-test-client.yaml'
-c = open(f).read()
-c = re.sub(r'^auth_token:.*', 'auth_token: \"' + sys.argv[1] + '\"', c, flags=re.MULTILINE)
-open(f, 'w').write(c)
-" "$TOKEN"
-sleep 3   # wait for ctld to push new token to server
-log "Token ready"
-
-# ─── Start tunnel client ─────────────────────────────────────────────────────
-log "Starting tunnel client ..."
-"$BIN/client" --config "$CFGDIR/local-test-client.yaml" > /tmp/lt-client.log 2>&1 &
-CLI_PID=$!
-BGPIDS+=($CLI_PID)
-
-for i in $(seq 1 60); do
-  kill -0 "$CLI_PID" 2>/dev/null || break
-  curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
-  sleep 0.5
-done
-
-if ! kill -0 "$CLI_PID" 2>/dev/null; then
-  echo "ERROR: client process exited"
-  cat /tmp/lt-server.log; cat /tmp/lt-client.log; exit 1
-fi
-if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
-  echo "ERROR: client healthz not ready"
-  cat /tmp/lt-client.log; exit 1
-fi
-log "Client connected  (ingress: *.localtest.com:8081  egress: 127.0.0.1:8082)"
+CLIENT="$BIN/ci-test-client"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — External backends (continue-on-error)
@@ -219,7 +156,6 @@ if should_run 2; then
 hdr "SECTION 2 — HTTP/1.1"
 H="http://wss.localtest.com:8081"
 E="http://127.0.0.1:8082"
-EH="--header Host:wss.localtest.com"
 
 run "[HTTP] GET ingress"                  "$CLIENT" http "$H/"
 run "[HTTP] POST + body verify ingress"   "$CLIENT" http "$H/" --method POST \
@@ -267,9 +203,9 @@ run "[HTTP2] POST h2c + body egress"      "$CLIENT" http2 "$E/" --method POST \
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — WebSocket
+# SECTION 4 — WebSocket ingress
+# Requires ws.localtest.com → 127.0.0.1
 # ═════════════════════════════════════════════════════════════════════════════
-# Requires ws.localtest.com → 127.0.0.1 in /etc/hosts.
 if should_run 4; then
 hdr "SECTION 4 — WebSocket"
 run "[WS] Echo ingress"                   "$CLIENT" ws "ws://ws.localtest.com:8081" \
@@ -282,18 +218,18 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — gRPC
+# Requires grpc.localtest.com → 127.0.0.1
 # ═════════════════════════════════════════════════════════════════════════════
-# Requires grpc.localtest.com → 127.0.0.1 in /etc/hosts.
 if should_run 5; then
 hdr "SECTION 5 — gRPC"
 G5="grpc.localtest.com:8081"
 
-run "[gRPC] Health/Check SERVING"         "$CLIENT" grpc        "$G5" --service ""
-run "[gRPC] EchoService/Echo body"        "$CLIENT" grpc-echo   "$G5" --ping "ci-local-echo-test"
-run "[gRPC] EchoService/Echo headers"     "$CLIENT" grpc-echo   "$G5" --ping "ci-header-check"
+run "[gRPC] Health/Check SERVING"         "$CLIENT" grpc              "$G5" --service ""
+run "[gRPC] EchoService/Echo body"        "$CLIENT" grpc-echo         "$G5" --ping "ci-local-echo-test"
+run "[gRPC] EchoService/Echo headers"     "$CLIENT" grpc-echo         "$G5" --ping "ci-header-check"
 run "[gRPC] ServerStreamEcho (5 msgs)"    "$CLIENT" grpc-server-stream "$G5" \
   --ping "ci-stream" --count 5
-run "[gRPC] BidiStreamEcho (5 msgs)"      "$CLIENT" grpc-bidi-stream "$G5" \
+run "[gRPC] BidiStreamEcho (5 msgs)"      "$CLIENT" grpc-bidi-stream  "$G5" \
   --ping "ci-bidi" --count 5
 fi
 

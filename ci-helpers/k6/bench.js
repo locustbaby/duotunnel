@@ -12,6 +12,7 @@ import {
   buildScenarios,
   buildThresholds,
   buildSummaryOutput,
+  enrichCaseDefs,
 } from './catalog.js';
 
 function activeProfile() {
@@ -55,6 +56,32 @@ function apply8kScenarioOverrides(cases) {
   });
 }
 
+// Apply K6_CORE_STRESS_RATE override to stress-category cases in the core profile.
+// Scales both constant-arrival-rate `rate` and the final target of ramping stages.
+// Does not affect 8k cases (those are handled by apply8kScenarioOverrides).
+function applyCoreStressRateOverride(cases) {
+  const rate = parseEnvPositiveInt(__ENV.K6_CORE_STRESS_RATE);
+  if (rate === null) return cases;
+
+  return cases.map((c) => {
+    if (c.category !== 'stress' || c.name.includes('_8000qps')) return c;
+    const scenario = { ...(c.scenario || {}) };
+    if (scenario.executor === 'constant-arrival-rate') {
+      scenario.rate = rate;
+    } else if (Array.isArray(scenario.stages) && scenario.stages.length > 0) {
+      // Scale the final stage target; keep intermediate ramp proportional
+      const originalPeak = scenario.stages[scenario.stages.length - 1].target;
+      scenario.stages = scenario.stages.map((st, i) => {
+        if (i === scenario.stages.length - 1) return { ...st, target: rate };
+        // Scale intermediate targets proportionally, minimum 1
+        const scaled = Math.max(1, Math.round((st.target / originalPeak) * rate));
+        return { ...st, target: scaled };
+      });
+    }
+    return { ...c, scenario, targetRate: rate };
+  });
+}
+
 function parseSeconds(v) {
   if (v === undefined || v === null) return 0;
   if (typeof v === 'number') return v;
@@ -87,13 +114,17 @@ function filterPhases(phases, activeCases) {
 }
 
 const BENCH_PROFILE = activeProfile();
-const FILTERED_CASES = apply8kScenarioOverrides(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)));
-const { cases: ACTIVE_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
+const FILTERED_CASES = apply8kScenarioOverrides(
+  applyCoreStressRateOverride(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)))
+);
+const { cases: NORMALIZED_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
 const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
   ...p,
   start: Math.max(0, (p.start || 0) - ACTIVE_OFFSET),
   end: Math.max(0, (p.end || 0) - ACTIVE_OFFSET),
 }));
+// Enrich cases with derived display metadata (timeRange, thresholdSpec, phase).
+const ACTIVE_CASES = enrichCaseDefs(NORMALIZED_CASES, ACTIVE_PHASES);
 
 const { reqCounters, errCounters } = buildCounters(ACTIVE_CASES, Counter);
 

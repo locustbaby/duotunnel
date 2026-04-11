@@ -62,6 +62,10 @@ on:
         description: 'QUIC client connection count for stress jobs'
         type: number
         default: 4
+      stress_core_target_rate:
+        description: 'Target RPS for stress-category cases in core profile (0 = use catalog default of 3000)'
+        type: number
+        default: 0
       # ── Monitor ───────────────────────────────────────────────────────────────
       monitor_cpu:
         description: 'Collect CPU/memory/IO/ctxsw metrics (collect-resources.py via psutil)'
@@ -1245,8 +1249,13 @@ jobs:
       - name: Run k6 stress test
         working-directory: ci-helpers/k6
         run: |
+          CORE_RATE="${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate || '0' }}"
           date +%s > /tmp/k6_start_epoch
-          k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=core bench.js &
+          k6 run \
+            -e GITHUB_SHA=${{ github.sha }} \
+            -e BENCH_PROFILE=core \
+            ${CORE_RATE:+$([ "$CORE_RATE" -gt 0 ] && echo "-e K6_CORE_STRESS_RATE=$CORE_RATE" || true)} \
+            bench.js &
           echo $! > /tmp/k6.pid
           wait "$(cat /tmp/k6.pid)"
 

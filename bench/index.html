@@ -126,12 +126,6 @@ const PHASE_COLORS = [
   'rgba(56,189,248,.08)','rgba(251,191,36,.08)',
   'rgba(132,204,22,.08)','rgba(168,85,247,.08)',
 ];
-const FALLBACK_PHASES = [
-  {name:'Basic',start:0,end:29},{name:'Body/Payload',start:35,end:59},
-  {name:'Ingress 3K',start:65,end:85},{name:'Egress 3K',start:90,end:110},
-  {name:'Ingress multihost 3K',start:115,end:135},{name:'Egress multihost 3K',start:140,end:160},
-];
-
 // Build phase annotations for a resource chart.
 // phases: array of phase objects with start/end already in chart x-axis seconds.
 function phaseAnnotations(phases) {
@@ -249,6 +243,26 @@ const DEFAULT_CATEGORY_DEFS = [
     description: 'High-QPS stress stages for ingress and egress under pressure.',
   },
 ];
+
+// Build a display label for a scenario: prefer s.label, else humanize name.
+function scenarioLabel(s) {
+  if (s.label) return s.label;
+  return s.name.replace(/_/g, ' ');
+}
+
+// Format a timeRange as "0–25s" or "35–55s".
+function fmtTimeRange(tr) {
+  if (!tr) return '—';
+  return `${tr.startSec}–${tr.endSec}s`;
+}
+
+// Format payloadBytes as "1 KB", "10 KB", "100 KB".
+function fmtPayload(bytes) {
+  if (!bytes) return null;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
 
 function normalizeCategoryDefs(defs) {
   if (!Array.isArray(defs)) return [];
@@ -375,10 +389,9 @@ function renderOverview() {
     const lbl = entries.map(sha7);
     const catScenarios = {};
     for (const cat of categoryDefs) catScenarios[cat.id] = [];
-    const OVERVIEW_EXCLUDE = new Set(['ws_ingress','ws_multi_msg']);
     const seen = {};
     entries.forEach(e => (e.scenarios||[]).forEach(s => {
-      if (!seen[s.name] && s.category && catScenarios[s.category] && !OVERVIEW_EXCLUDE.has(s.name)) {
+      if (!seen[s.name] && s.category && catScenarios[s.category]) {
         catScenarios[s.category].push(s.name);
         seen[s.name] = true;
       }
@@ -508,10 +521,10 @@ function renderDetail(entry) {
       <h3>All Scenarios — ${s7}</h3>
       <div class="tbl-wrap">
         <table>
-          <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>p50 (ms)</th><th>p95 (ms)</th><th>Latency</th><th>RPS (req/s)</th><th>Reqs</th><th>Err %</th>${prev ? '<th>Δ p50 (ms)</th><th>Δ p95 (ms)</th><th>Δ RPS</th>' : ''}</tr></thead>
+          <thead><tr><th>Scenario</th><th>Proto</th><th>Dir</th><th>Time</th><th>Target</th><th>Threshold</th><th>p50 (ms)</th><th>p95 (ms)</th><th>Latency</th><th>RPS (req/s)</th><th>Reqs</th><th>Err %</th>${prev ? '<th>Δ p50 (ms)</th><th>Δ p95 (ms)</th><th>Δ RPS</th>' : ''}</tr></thead>
           <tbody>`;
 
-  const colSpan = prev ? 12 : 9;
+  const colSpan = prev ? 16 : 12;
   for (const catDef of categoryDefs) {
     const cat = catDef.id;
     const group = sc.filter(s => s.category === cat);
@@ -527,27 +540,46 @@ function renderDetail(entry) {
       <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${categoryDefById[cat]?.label || cat}</div>
       <div class="cat-desc">${categoryDefById[cat]?.description || ''}</div>
     </td></tr>`;
+    // Group by phase within category
+    const phaseOrder = [];
+    const byPhase = {};
     for (const s of group) {
-      const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
-      const isFrp = s.tunnel === 'frp';
-      const ps = prevScMap[(s.tunnel||'duotunnel')+':'+s.name];
-      const tunnelTag = isFrp ? ` <span style="font-size:9px;font-weight:600;color:var(--orange);background:rgba(245,166,35,.15);padding:1px 5px;border-radius:3px">frp</span>` : '';
-      html += `<tr>
-        <td style="color:var(--text)">${s.name}${tunnelTag}</td>
-        <td>${pillFor(s.protocol)}</td>
-        <td style="color:var(--text2)">${s.direction}</td>
-        <td>${s.p50} <span class="c-dim">ms</span></td>
-        <td>${s.p95} <span class="c-dim">ms</span></td>
-        <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95} <span class="c-dim">ms</span></td>
-        <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
-        <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
-        <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>`;
-      if (prev) {
-        html += `<td>${ps ? deltaVal(s.p50, ps.p50, true) : '—'}</td>`;
-        html += `<td>${ps ? deltaVal(s.p95, ps.p95, true) : '—'}</td>`;
-        html += `<td>${ps ? deltaVal(s.rps, ps.rps, false) : '—'}</td>`;
+      const ph = s.phase || '—';
+      if (!byPhase[ph]) { byPhase[ph] = []; phaseOrder.push(ph); }
+      byPhase[ph].push(s);
+    }
+    for (const ph of phaseOrder) {
+      if (phaseOrder.length > 1) {
+        html += `<tr><td colspan="${colSpan}" style="padding:4px 10px 2px;border-bottom:none">
+          <span style="font-size:9px;font-weight:600;color:var(--blue);opacity:.7;text-transform:uppercase;letter-spacing:.4px">phase: ${esc(ph)}</span>
+        </td></tr>`;
       }
-      html += `</tr>`;
+      for (const s of byPhase[ph]) {
+        const errCls = s.err > 0 ? 'c-bad' : 'c-dim';
+        const isFrp = s.tunnel === 'frp';
+        const ps = prevScMap[(s.tunnel||'duotunnel')+':'+s.name];
+        const tunnelTag = isFrp ? ` <span style="font-size:9px;font-weight:600;color:var(--orange);background:rgba(245,166,35,.15);padding:1px 5px;border-radius:3px">frp</span>` : '';
+        const payloadTag = s.payloadBytes ? ` <span style="font-size:9px;color:var(--text2)">${fmtPayload(s.payloadBytes)}</span>` : '';
+        html += `<tr>
+          <td style="color:var(--text)">${scenarioLabel(s)}${tunnelTag}${payloadTag}</td>
+          <td>${pillFor(s.protocol)}</td>
+          <td style="color:var(--text2)">${s.direction}</td>
+          <td style="color:var(--text2);font-size:10px">${fmtTimeRange(s.timeRange)}</td>
+          <td style="color:var(--text2);font-size:10px">${s.targetRate ? fmt(s.targetRate) + ' rps' : '—'}</td>
+          <td style="color:var(--text3);font-size:10px">${s.thresholdSpec ? esc(s.thresholdSpec) : '—'}</td>
+          <td>${s.p50} <span class="c-dim">ms</span></td>
+          <td>${s.p95} <span class="c-dim">ms</span></td>
+          <td>${latencyBar(s.p95, maxP95, s.protocol)}${s.p95} <span class="c-dim">ms</span></td>
+          <td>${s.rps > 0 ? fmt(s.rps) : '<span class="c-dim">0</span>'}</td>
+          <td>${s.requests > 0 ? fmt(s.requests) : '<span class="c-dim">0</span>'}</td>
+          <td class="${errCls}">${s.err > 0 ? s.err + '%' : '0'}</td>`;
+        if (prev) {
+          html += `<td>${ps ? deltaVal(s.p50, ps.p50, true) : '—'}</td>`;
+          html += `<td>${ps ? deltaVal(s.p95, ps.p95, true) : '—'}</td>`;
+          html += `<td>${ps ? deltaVal(s.rps, ps.rps, false) : '—'}</td>`;
+        }
+        html += `</tr>`;
+      }
     }
   }
   html += `</tbody></table></div></div></div>`;
@@ -652,7 +684,7 @@ function renderDetail(entry) {
       const caseMaxTs = rpcEntries.map(([, caseRes]) => {
         const pr = caseRes.processes || {};
         const pts = [...(caseRes.system?.cpu||[]), ...Object.values(pr).flatMap(p=>[...(p.cpu||[]),...(p.rss||[])])];
-        return pts.length ? Math.max(...pts.map(p=>p.t??0)) : 0;
+        return pts.length ? Math.max(...pts.map(p=>p[0]??0)) : 0;
       });
       for (let i = 0; i < rpcEntries.length; i++) {
         caseOffsets.push(runningOffset);
@@ -660,27 +692,42 @@ function renderDetail(entry) {
       }
       const totalXMax = runningOffset - CASE_GAP + 5;
 
-      // Build merged phase annotations: each case's phases shifted by its offset.
-      // core: phases without a .case field; times are relative to k6 start, so add k6OffsetSeconds.
-      // 8k cases: match by .case (strip label suffix); times are already 0-based per case.
+      // Build merged phase annotations.
+      // Because core and 8k are parallel CI jobs with independent clocks, their
+      // resource time axes are independent — there is no shared wall-clock origin.
+      // We annotate at phase granularity (not per-scenario) to avoid visual clutter.
+      //
+      // core: use entry.phases (which have absolute k6-relative start/end seconds),
+      //       shift by k6OffsetSeconds so they align with the resource sampling axis,
+      //       then shift by caseOffsets[idx] for the merged chart x-axis.
+      //
+      // 8k cases: each case runs its own k6 + tunnel with sampling starting at t=0.
+      //           The entire case occupies [0, caseMaxTs[idx]] on its own axis.
+      //           We label it with the case name at the centre of that range.
       const mergedPhases = [];
       rpcEntries.forEach(([caseName, caseRes], idx) => {
-        let casePhaseDefs;
+        const chartOff = caseOffsets[idx];
         if (caseName === 'core') {
           const k6off = caseRes.k6OffsetSeconds || 0;
-          casePhaseDefs = (entry?.phases || [])
-            .filter(p => !p.case && !p.tunnel)
-            .map(p => ({...p,
-              start: (p.start||0) + k6off + caseOffsets[idx],
-              end:   (p.end||0)   + k6off + caseOffsets[idx],
-            }));
+          const corePhaseDefs = (entry.phases || []).filter(p => !p.case && !p.tunnel);
+          for (const p of corePhaseDefs) {
+            mergedPhases.push({
+              name: p.name,
+              scenarios: p.scenarios || [],
+              start: (p.start || 0) + k6off + chartOff,
+              end:   (p.end   || 0) + k6off + chartOff,
+            });
+          }
         } else {
-          const baseName = caseName.replace(/ \(.*?\)$/, '');
-          casePhaseDefs = (entry?.phases || [])
-            .filter(p => p.case === caseName || p.case === baseName)
-            .map(p => ({...p, start: (p.start||0) + caseOffsets[idx], end: (p.end||0) + caseOffsets[idx]}));
+          // 8k case: single scenario spanning the full sampling window.
+          const shortName = caseName.replace(/ \(.*?\)$/, '').replace(/_8000qps$/, ' 8k').replace(/_multihost/, ' mh').replace(/_/g, ' ');
+          mergedPhases.push({
+            name: shortName,
+            scenarios: [caseName],
+            start: chartOff,
+            end:   chartOff + caseMaxTs[idx],
+          });
         }
-        mergedPhases.push(...casePhaseDefs);
       });
       // Case background bands + name labels
       const CASE_BG_COLORS = [
@@ -724,7 +771,7 @@ function renderDetail(entry) {
       });
       const allAnnotations = {...phaseAnnotations(mergedPhases), ...boundaryAnnotations};
 
-      function shiftPts(pts, offset) { return pts.map(p=>({x:(p.t??0)+offset, y:p.v})); }
+      function shiftPts(pts, offset) { return pts.map(p=>({x:(p[0]??0)+offset, y:p[1]})); }
 
       const cTSO = {
         ...CO, showLine:true,
@@ -918,11 +965,11 @@ function renderDetail(entry) {
         const off = caseOffsets[idx];
         for (const [name, pts] of Object.entries(caseRes.top_cpu || {})) {
           if (!merged8kTopCpu[name]) merged8kTopCpu[name] = [];
-          merged8kTopCpu[name].push(...pts.map(p => ({t: (p.t||0)+off, v: p.v})));
+          merged8kTopCpu[name].push(...pts.map(p => [(p[0]||0)+off, p[1]]));
         }
         for (const [name, pts] of Object.entries(caseRes.top_rss || {})) {
           if (!merged8kTopRss[name]) merged8kTopRss[name] = [];
-          merged8kTopRss[name].push(...pts.map(p => ({t: (p.t||0)+off, v: p.v})));
+          merged8kTopRss[name].push(...pts.map(p => [(p[0]||0)+off, p[1]]));
         }
       });
       // Use cTSO (same x-axis as merged 8k charts)
@@ -930,7 +977,7 @@ function renderDetail(entry) {
         if (!seriesMap || !Object.keys(seriesMap).length) return;
         const ds = Object.entries(seriesMap).map(([name, pts], i) => ({
           label: name,
-          data: pts.map(p => ({x: p.t, y: p.v})),
+          data: pts.map(p => ({x: p[0], y: p[1]})),
           borderColor: TOP_PALETTE[i % TOP_PALETTE.length],
           backgroundColor: 'transparent',
           tension: .3, pointRadius: 0, borderWidth: 1.5,
@@ -949,12 +996,12 @@ function renderDetail(entry) {
         if (!Array.isArray(cores)) return;
         cores.forEach((pts, ci) => {
           if (!merged8kPerCore[ci]) merged8kPerCore[ci] = [];
-          merged8kPerCore[ci].push(...pts.map(p => ({t:(p.t||0)+off, v:p.v})), {x: off+caseMaxTs[idx]+0.01, y:null});
+          merged8kPerCore[ci].push(...pts.map(p => [(p[0]||0)+off, p[1]]), {x: off+caseMaxTs[idx]+0.01, y:null});
         });
       });
       if (merged8kPerCore.length) {
         const CORE_COLORS=['#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24','#818cf8','#fb923c','#22d3ee','#a3e635','#e879f9','#94a3b8','#fb7185','#4ade80'];
-        const pcDS = merged8kPerCore.map((pts,i)=>({label:`Core ${i}`,data:pts.map(p=>({x:p.t,y:p.v})),borderColor:CORE_COLORS[i%CORE_COLORS.length],backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1}));
+        const pcDS = merged8kPerCore.map((pts,i)=>({label:`Core ${i}`,data:pts.map(p=>Array.isArray(p)?{x:p[0],y:p[1]}:p),borderColor:CORE_COLORS[i%CORE_COLORS.length],backgroundColor:'transparent',tension:.3,pointRadius:0,borderWidth:1}));
         mkChart('perCore8k',{type:'line',data:{datasets:pcDS},options:{...cTSO,scales:{...cTSO.scales,y:{...cTSO.scales.y,min:0,max:100,title:{display:true,text:'%',color:'#6b7d93'}}}}});
       }
 
@@ -963,10 +1010,10 @@ function renderDetail(entry) {
       rpcEntries.forEach(([,caseRes],idx)=>{
         const off=caseOffsets[idx]; const s=caseRes.system||{};
         const gap=[{x:off+caseMaxTs[idx]+0.01,y:null}];
-        (s.loadavg_1||[]).forEach(p=>m8kLoad1.push({x:(p.t||0)+off,y:p.v})); m8kLoad1.push(...gap);
-        (s.loadavg_5||[]).forEach(p=>m8kLoad5.push({x:(p.t||0)+off,y:p.v})); m8kLoad5.push(...gap);
-        (s.loadavg_15||[]).forEach(p=>m8kLoad15.push({x:(p.t||0)+off,y:p.v})); m8kLoad15.push(...gap);
-        (s.swap_used_mb||[]).forEach(p=>m8kSwap.push({x:(p.t||0)+off,y:p.v})); m8kSwap.push(...gap);
+        (s.loadavg_1||[]).forEach(p=>m8kLoad1.push({x:(p[0]||0)+off,y:p[1]})); m8kLoad1.push(...gap);
+        (s.loadavg_5||[]).forEach(p=>m8kLoad5.push({x:(p[0]||0)+off,y:p[1]})); m8kLoad5.push(...gap);
+        (s.loadavg_15||[]).forEach(p=>m8kLoad15.push({x:(p[0]||0)+off,y:p[1]})); m8kLoad15.push(...gap);
+        (s.swap_used_mb||[]).forEach(p=>m8kSwap.push({x:(p[0]||0)+off,y:p[1]})); m8kSwap.push(...gap);
       });
       if (m8kLoad1.length) {
         const ldDS=[];
@@ -982,12 +1029,12 @@ function renderDetail(entry) {
       rpcEntries.forEach(([,caseRes],idx)=>{
         const off=caseOffsets[idx]; const s=caseRes.system||{};
         const gap=[{x:off+caseMaxTs[idx]+0.01,y:null}];
-        (s.net_rx_kbs||[]).forEach(p=>m8kRxKbs.push({x:(p.t||0)+off,y:p.v})); m8kRxKbs.push(...gap);
-        (s.net_tx_kbs||[]).forEach(p=>m8kTxKbs.push({x:(p.t||0)+off,y:p.v})); m8kTxKbs.push(...gap);
-        (s.net_rx_pkts||[]).forEach(p=>m8kRxPkts.push({x:(p.t||0)+off,y:p.v})); m8kRxPkts.push(...gap);
-        (s.net_tx_pkts||[]).forEach(p=>m8kTxPkts.push({x:(p.t||0)+off,y:p.v})); m8kTxPkts.push(...gap);
-        (s.net_drop_in||[]).forEach(p=>m8kDropIn.push({x:(p.t||0)+off,y:p.v})); m8kDropIn.push(...gap);
-        (s.net_drop_out||[]).forEach(p=>m8kDropOut.push({x:(p.t||0)+off,y:p.v})); m8kDropOut.push(...gap);
+        (s.net_rx_kbs||[]).forEach(p=>m8kRxKbs.push({x:(p[0]||0)+off,y:p[1]})); m8kRxKbs.push(...gap);
+        (s.net_tx_kbs||[]).forEach(p=>m8kTxKbs.push({x:(p[0]||0)+off,y:p[1]})); m8kTxKbs.push(...gap);
+        (s.net_rx_pkts||[]).forEach(p=>m8kRxPkts.push({x:(p[0]||0)+off,y:p[1]})); m8kRxPkts.push(...gap);
+        (s.net_tx_pkts||[]).forEach(p=>m8kTxPkts.push({x:(p[0]||0)+off,y:p[1]})); m8kTxPkts.push(...gap);
+        (s.net_drop_in||[]).forEach(p=>m8kDropIn.push({x:(p[0]||0)+off,y:p[1]})); m8kDropIn.push(...gap);
+        (s.net_drop_out||[]).forEach(p=>m8kDropOut.push({x:(p[0]||0)+off,y:p[1]})); m8kDropOut.push(...gap);
       });
       if(m8kRxKbs.length||m8kTxKbs.length){
         const nDS=[];

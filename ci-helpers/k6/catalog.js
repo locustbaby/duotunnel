@@ -16,6 +16,30 @@ export const CATEGORY_DEFS = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// CaseDef schema (each field documented):
+//
+//   name            — unique scenario id (used as k6 scenario key and metric tag)
+//   exec            — k6 exported function name
+//   protocol        — 'HTTP' | 'WS' | 'gRPC'
+//   direction       — 'ingress' | 'egress' | 'bidir'
+//   category        — category id; must match a CATEGORY_DEFS entry
+//   durationSec     — how long the scenario runs (used for RPS calculation)
+//   includeInTotalRps — whether this case counts toward summary Total RPS
+//   label           — short human-readable display name (auto-derived if omitted)
+//   payloadBytes    — payload size in bytes (body_size cases only)
+//   thresholds      — k6 threshold config:
+//                       duration:       p(95) latency threshold string (default 'p(95)<60000')
+//                       httpReqFailed:  error rate threshold (e.g. 'rate<0.05')
+//                       errCounter:     absolute error count threshold (e.g. 'count<50')
+//   scenario        — k6 scenario executor config (startTime, executor, rate/stages, VUs)
+//
+// Derived at runtime (by enrichCaseDefs):
+//   timeRange       — { startSec, endSec } absolute seconds from start of k6 run
+//   thresholdSpec   — human-readable threshold summary string for display
+//   phase           — name of the PHASE this case belongs to (or null)
+// ---------------------------------------------------------------------------
+
 export const DUOTUNNEL_CASES = [
   {
     name: 'ingress_http_get',
@@ -188,6 +212,7 @@ export const DUOTUNNEL_CASES = [
     direction: 'ingress',
     category: 'body_size',
     durationSec: 20,
+    payloadBytes: 1024,
     includeInTotalRps: false,
     thresholds: { httpReqFailed: 'rate<0.05' },
     scenario: {
@@ -207,6 +232,7 @@ export const DUOTUNNEL_CASES = [
     direction: 'ingress',
     category: 'body_size',
     durationSec: 20,
+    payloadBytes: 10240,
     includeInTotalRps: false,
     thresholds: { httpReqFailed: 'rate<0.05' },
     scenario: {
@@ -226,6 +252,7 @@ export const DUOTUNNEL_CASES = [
     direction: 'ingress',
     category: 'body_size',
     durationSec: 20,
+    payloadBytes: 102400,
     includeInTotalRps: false,
     thresholds: { httpReqFailed: 'rate<0.05' },
     scenario: {
@@ -245,6 +272,7 @@ export const DUOTUNNEL_CASES = [
     direction: 'egress',
     category: 'body_size',
     durationSec: 20,
+    payloadBytes: 10240,
     includeInTotalRps: false,
     thresholds: { httpReqFailed: 'rate<0.05' },
     scenario: {
@@ -262,7 +290,7 @@ export const DUOTUNNEL_CASES = [
     exec: 'wsMultiMsg',
     protocol: 'WS',
     direction: 'ingress',
-    category: 'basic',
+    category: 'body_size',
     durationSec: 20,
     includeInTotalRps: false,
     thresholds: { errCounter: 'count<50' },
@@ -283,6 +311,7 @@ export const DUOTUNNEL_CASES = [
     direction: 'ingress',
     category: 'body_size',
     durationSec: 20,
+    payloadBytes: 10240,
     includeInTotalRps: false,
     scenario: {
       executor: 'constant-arrival-rate',
@@ -299,7 +328,7 @@ export const DUOTUNNEL_CASES = [
     exec: 'grpcHighQps',
     protocol: 'gRPC',
     direction: 'ingress',
-    category: 'stress',
+    category: 'body_size',
     durationSec: 20,
     includeInTotalRps: true,
     scenario: {
@@ -567,6 +596,10 @@ export const FRP_PHASES = [
   { name: '8K Multihost (frp)', start: 50, end: 70, scenarios: ['ingress_multihost_8000qps'] },
 ];
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function round2(v) {
   return Math.round(v * 100) / 100;
 }
@@ -575,6 +608,51 @@ function metricForProtocol(protocol) {
   if (protocol === 'gRPC') return 'grpc_req_duration';
   if (protocol === 'WS') return 'ws_session_duration';
   return 'http_req_duration';
+}
+
+function parseSeconds(v) {
+  if (v === undefined || v === null) return 0;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim();
+  if (s.endsWith('s')) return Number(s.slice(0, -1)) || 0;
+  return Number(s) || 0;
+}
+
+// Build a human-readable threshold spec string for display.
+function buildThresholdSpec(c) {
+  const parts = [];
+  const dur = (c.thresholds && c.thresholds.duration) || 'p(95)<60000';
+  parts.push(dur.replace('p(95)<', 'p95<').replace('p(99)<', 'p99<'));
+  if (c.thresholds && c.thresholds.httpReqFailed) parts.push(`err ${c.thresholds.httpReqFailed}`);
+  if (c.thresholds && c.thresholds.errCounter) parts.push(`errs ${c.thresholds.errCounter}`);
+  return parts.join(', ');
+}
+
+// Build a phase lookup map: case name -> phase name.
+function buildPhaseMap(phases) {
+  const map = {};
+  for (const p of phases) {
+    for (const s of (p.scenarios || [])) {
+      map[s] = p.name;
+    }
+  }
+  return map;
+}
+
+// Enrich caseDefs with derived fields: timeRange, thresholdSpec, phase.
+// This is called once after filtering/normalising start times.
+export function enrichCaseDefs(caseDefs, phases) {
+  const phaseMap = buildPhaseMap(phases);
+  return caseDefs.map((c) => {
+    const startSec = parseSeconds(c.scenario && c.scenario.startTime);
+    const endSec = startSec + (c.durationSec || 0);
+    return {
+      ...c,
+      timeRange: { startSec, endSec },
+      thresholdSpec: buildThresholdSpec(c),
+      phase: phaseMap[c.name] || null,
+    };
+  });
 }
 
 export function buildScenarios(caseDefs) {
@@ -668,11 +746,21 @@ export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
     if (c.includeInTotalRps) totalRPS += rps;
 
     scenarios.push({
+      // identity
       name: c.name,
       protocol: c.protocol,
       direction: c.direction,
       category: c.category,
+      phase: c.phase || null,
+      // display metadata derived from CaseDef
+      label: c.label || null,
+      payloadBytes: c.payloadBytes || null,
+      timeRange: c.timeRange || null,
+      thresholdSpec: c.thresholdSpec || null,
       includeInTotalRps: !!c.includeInTotalRps,
+      // configured target rate (null for ramping cases or when not overridden)
+      targetRate: c.targetRate != null ? c.targetRate : (c.scenario?.rate || null),
+      // results
       p50,
       p95,
       p99,

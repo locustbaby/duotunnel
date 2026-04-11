@@ -180,7 +180,7 @@ def parse_pidstat_ur(path, nproc=1):
                 if group == "other":
                     other_by_t[t] = other_by_t.get(t, 0.0) + cpu_pct
                 else:
-                    groups[group]["cpu"].append({"t": t, "v": round(cpu_pct, 2)})
+                    groups[group]["cpu"].append([t, round(cpu_pct, 2)])
             else:
                 if mem_epoch is None:
                     mem_epoch = ts
@@ -197,14 +197,14 @@ def parse_pidstat_ur(path, nproc=1):
                 if group != "other":
                     # Keep max RSS per group per timestamp
                     existing = groups[group]["rss"]
-                    if existing and existing[-1]["t"] == t:
-                        existing[-1]["v"] = round(max(existing[-1]["v"], rss_mb), 1)
+                    if existing and existing[-1][0] == t:
+                        existing[-1][1] = round(max(existing[-1][1], rss_mb), 1)
                     else:
-                        groups[group]["rss"].append({"t": t, "v": round(rss_mb, 1)})
+                        groups[group]["rss"].append([t, round(rss_mb, 1)])
 
         if is_cpu_block:
             for t, v in sorted(other_by_t.items()):
-                groups["other"]["cpu"].append({"t": t, "v": round(v, 2)})
+                groups["other"]["cpu"].append([t, round(v, 2)])
 
     return groups
 
@@ -253,13 +253,13 @@ def parse_pidstat_io(path):
                 other_read_by_t[t] = other_read_by_t.get(t, 0.0) + read_kb
                 other_write_by_t[t] = other_write_by_t.get(t, 0.0) + write_kb
             else:
-                groups[group]["read_kbs"].append({"t": t, "v": round(read_kb, 1)})
-                groups[group]["write_kbs"].append({"t": t, "v": round(write_kb, 1)})
+                groups[group]["read_kbs"].append([t, round(read_kb, 1)])
+                groups[group]["write_kbs"].append([t, round(write_kb, 1)])
 
     for t, v in sorted(other_read_by_t.items()):
-        groups["other"]["read_kbs"].append({"t": t, "v": round(v, 1)})
+        groups["other"]["read_kbs"].append([t, round(v, 1)])
     for t, v in sorted(other_write_by_t.items()):
-        groups["other"]["write_kbs"].append({"t": t, "v": round(v, 1)})
+        groups["other"]["write_kbs"].append([t, round(v, 1)])
 
     return groups
 
@@ -314,13 +314,13 @@ def parse_pidstat_ctxsw(path):
                 other_cs_by_t[t] = other_cs_by_t.get(t, 0.0) + cswch
                 other_nvcs_by_t[t] = other_nvcs_by_t.get(t, 0.0) + nvcswch
             else:
-                groups[group]["cswch"].append({"t": t, "v": round(cswch, 1)})
-                groups[group]["nvcswch"].append({"t": t, "v": round(nvcswch, 1)})
+                groups[group]["cswch"].append([t, round(cswch, 1)])
+                groups[group]["nvcswch"].append([t, round(nvcswch, 1)])
 
         for t, v in sorted(other_cs_by_t.items()):
-            groups["other"]["cswch"].append({"t": t, "v": round(v, 1)})
+            groups["other"]["cswch"].append([t, round(v, 1)])
         for t, v in sorted(other_nvcs_by_t.items()):
-            groups["other"]["nvcswch"].append({"t": t, "v": round(v, 1)})
+            groups["other"]["nvcswch"].append([t, round(v, 1)])
 
     return groups
 
@@ -380,9 +380,9 @@ def parse_mpstat(path):
                 if key == "_idle":
                     idle = v
                 else:
-                    result[key].append({"t": t, "v": round(v, 1)})
+                    result[key].append([t, round(v, 1)])
             if idle is not None:
-                result["cpu"].append({"t": t, "v": round(100.0 - idle, 1)})
+                result["cpu"].append([t, round(100.0 - idle, 1)])
 
     return result
 
@@ -429,8 +429,8 @@ def parse_sar_net(path):
             if epoch is None:
                 epoch = ts
             t = _to_relative(ts, epoch)
-            net["rx_kbs"].append({"t": t, "v": round(rx_kbs, 1)})
-            net["tx_kbs"].append({"t": t, "v": round(tx_kbs, 1)})
+            net["rx_kbs"].append([t, round(rx_kbs, 1)])
+            net["tx_kbs"].append([t, round(tx_kbs, 1)])
 
     return net
 
@@ -464,9 +464,9 @@ def parse_sar_paging(path):
             if epoch is None:
                 epoch = ts
             t = _to_relative(ts, epoch)
-            paging["majflt"].append({"t": t, "v": round(majflt, 2)})
-            paging["minflt"].append({"t": t, "v": round(minflt, 1)})
-            paging["pgfree"].append({"t": t, "v": round(pgfree, 1)})
+            paging["majflt"].append([t, round(majflt, 2)])
+            paging["minflt"].append([t, round(minflt, 1)])
+            paging["pgfree"].append([t, round(pgfree, 1)])
 
     return paging
 
@@ -513,9 +513,9 @@ def parse_ss_timeseries(path, sampling_epoch=None):
             if m:
                 closed = int(m.group(1))
 
-            tcp["estab"].append({"t": t, "v": estab})
-            tcp["timewait"].append({"t": t, "v": timewait})
-            tcp["closed"].append({"t": t, "v": closed})
+            tcp["estab"].append([t, estab])
+            tcp["timewait"].append([t, timewait])
+            tcp["closed"].append([t, closed])
 
     return tcp
 
@@ -563,9 +563,9 @@ def parse_psi(path, sampling_epoch=None):
                     except ValueError:
                         pass
 
-            psi["cpu"].append({"t": t, "v": vals.get("cpu", 0.0)})
-            psi["mem"].append({"t": t, "v": vals.get("mem", 0.0)})
-            psi["io"].append({"t": t, "v": vals.get("io", 0.0)})
+            psi["cpu"].append([t, vals.get("cpu", 0.0)])
+            psi["mem"].append([t, vals.get("mem", 0.0)])
+            psi["io"].append([t, vals.get("io", 0.0)])
 
     return psi
 
@@ -627,7 +627,7 @@ def parse_collect_jsonl(path):
             for k in sys_keys:
                 v = sys_d.get(k)
                 if v is not None:
-                    mpstat_data[k].append({"t": t, "v": v})
+                    mpstat_data[k].append([t, v])
 
             # per-core CPU (variable length list)
             cores = sys_d.get("cpu_per_core")
@@ -636,7 +636,7 @@ def parse_collect_jsonl(path):
                 while len(cpu_per_core_series) < len(cores):
                     cpu_per_core_series.append([])
                 for i, v in enumerate(cores):
-                    cpu_per_core_series[i].append({"t": t, "v": v})
+                    cpu_per_core_series[i].append([t, v])
 
             # per-process groups
             procs_d = row.get("procs") or {}
@@ -647,7 +647,7 @@ def parse_collect_jsonl(path):
                 for field in ("cpu", "rss", "vms", "read_kbs", "write_kbs", "cswch", "nvcswch", "fds"):
                     v = gd.get(field)
                     if v is not None and v != 0:
-                        proc_groups[g][field].append({"t": t, "v": v})
+                        proc_groups[g][field].append([t, v])
 
             # top-10 CPU
             for entry in (row.get("top_cpu") or []):
@@ -655,7 +655,7 @@ def parse_collect_jsonl(path):
                 v = entry.get("cpu", 0)
                 if name not in top_cpu_by_name:
                     top_cpu_by_name[name] = []
-                top_cpu_by_name[name].append({"t": t, "v": round(v, 2)})
+                top_cpu_by_name[name].append([t, round(v, 2)])
 
             # top-10 RSS
             for entry in (row.get("top_rss") or []):
@@ -663,14 +663,14 @@ def parse_collect_jsonl(path):
                 v = entry.get("rss", 0)
                 if name not in top_rss_by_name:
                     top_rss_by_name[name] = []
-                top_rss_by_name[name].append({"t": t, "v": round(v, 1)})
+                top_rss_by_name[name].append([t, round(v, 1)])
 
     if cpu_per_core_series:
         mpstat_data["cpu_per_core"] = cpu_per_core_series
 
     # Keep only top 10 by total accumulated value to avoid chart explosion
     def _top10(series_by_name):
-        scored = {name: sum(p["v"] for p in pts) for name, pts in series_by_name.items()}
+        scored = {name: sum(p[1] for p in pts) for name, pts in series_by_name.items()}
         top = sorted(scored, key=lambda n: scored[n], reverse=True)[:10]
         return {name: series_by_name[name] for name in top}
 

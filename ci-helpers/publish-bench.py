@@ -80,7 +80,7 @@ def main():
     os.makedirs(detail_dir, exist_ok=True)
     detail_path = os.path.join(detail_dir, f"{sha7}.json")
     with open(detail_path, "w") as f:
-        f.write(json.dumps(entry, indent=2) + "\n")
+        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     index_entry = {
         "commit": entry["commit"],
@@ -89,7 +89,13 @@ def main():
         "artifacts": entry.get("artifacts"),
         "run_url": entry.get("run_url", ""),
         "scenarios": [
-            {k: s[k] for k in ("name", "category", "p50", "p95", "rps", "requests", "err", "protocol", "direction", "tunnel", "includeInTotalRps") if k in s}
+            {k: s[k] for k in (
+                "name", "category", "phase", "label", "payloadBytes",
+                "timeRange", "thresholdSpec", "includeInTotalRps",
+                "targetRate",
+                "p50", "p95", "rps", "requests", "err",
+                "protocol", "direction", "tunnel",
+            ) if k in s}
             for s in entry.get("scenarios", [])
         ],
     }
@@ -98,7 +104,7 @@ def main():
     entries = entries[-args.max_entries:]
 
     with open(args.data, "w") as f:
-        f.write(PREFIX + json.dumps({"entries": entries}, indent=2) + SUFFIX + "\n")
+        f.write(PREFIX + json.dumps({"entries": entries}, separators=(",", ":")) + SUFFIX + "\n")
 
     kept_shas = set()
     for e in entries:
