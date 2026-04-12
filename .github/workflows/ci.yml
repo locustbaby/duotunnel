@@ -1211,45 +1211,6 @@ jobs:
           date +%s > /tmp/sampling_start_epoch
           echo "Sampling: cpu=$DO_CPU io=$DO_IO ctxsw=$DO_CTXSW net=$DO_NET tcp=$DO_TCP psi=$DO_PSI paging=$DO_PAGING"
 
-      - name: Install frp
-        if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-        run: |
-          FRP_VER=0.61.0
-          wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
-          tar -xzf /tmp/frp.tar.gz -C /tmp
-          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
-          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
-
-      - name: Start frp and run frp benchmark
-        if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-        run: |
-          frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
-          echo $! > /tmp/frps.pid
-          sleep 1
-          frpc -c ci-helpers/frpc.toml > /tmp/frpc.log 2>&1 &
-          echo $! > /tmp/frpc.pid
-          FRP_READY=0
-          for i in $(seq 1 20); do
-            curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
-            sleep 0.5
-          done
-          if [ "$FRP_READY" -eq 0 ]; then
-            echo "WARNING: frp did not become ready, skipping benchmark"
-            echo "=== frps ===" && cat /tmp/frps.log || true
-            echo "=== frpc ===" && cat /tmp/frpc.log || true
-            exit 0
-          fi
-          echo "frp ready, running benchmark..."
-          date +%s > /tmp/frp_k6_start_epoch
-          cd ci-helpers/k6
-          k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js || true
-
-      - name: Stop frp
-        if: always() && ((github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        run: |
-          kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
-
       - name: Run k6 stress test
         working-directory: ci-helpers/k6
         run: |
@@ -1348,10 +1309,8 @@ jobs:
           if-no-files-found: warn
           path: |
             /tmp/bench-results.json
-            /tmp/bench-results-frp.json
             /tmp/resource-data.json
             /tmp/sampling_start_epoch
-            /tmp/frp_k6_start_epoch
 
       - name: Dump tunnel error logs
         if: always()
@@ -1369,8 +1328,6 @@ jobs:
             /tmp/ci-server.log
             /tmp/ci-client.log
             /tmp/http-echo.log
-            /tmp/frps.log
-            /tmp/frpc.log
 
       - name: Cleanup
         if: always()
@@ -1380,6 +1337,104 @@ jobs:
           kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+
+  stress-test-frp:
+    name: Stress Test (frp baseline)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bins-${{ github.run_id }}
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/http-echo-server
+
+      - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Configure /etc/hosts
+        run: |
+          {
+            echo "127.0.0.1  echo.local"
+            for i in $(seq 1 50); do printf "127.0.0.1  echo-%02d.local\n" "$i"; done
+          } | sudo tee -a /etc/hosts
+
+      - name: Start http echo backend
+        run: |
+          ./target/release/http-echo-server 9999 > /tmp/http-echo-frp.log 2>&1 &
+          echo $! > /tmp/http-echo-frp.pid
+          for i in $(seq 1 30); do
+            curl -sf --max-time 2 http://127.0.0.1:9999/ > /dev/null && break
+            sleep 0.2
+          done
+          curl -sf --max-time 2 http://127.0.0.1:9999/ > /dev/null
+
+      - name: Install frp
+        run: |
+          FRP_VER=0.61.0
+          wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
+          tar -xzf /tmp/frp.tar.gz -C /tmp
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
+
+      - name: Start frp and run benchmark
+        run: |
+          frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
+          echo $! > /tmp/frps.pid
+          sleep 1
+          frpc -c ci-helpers/frpc.toml > /tmp/frpc.log 2>&1 &
+          echo $! > /tmp/frpc.pid
+          FRP_READY=0
+          for i in $(seq 1 20); do
+            curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
+            sleep 0.5
+          done
+          if [ "$FRP_READY" -eq 0 ]; then
+            echo "ERROR: frp did not become ready"
+            cat /tmp/frps.log || true
+            cat /tmp/frpc.log || true
+            exit 1
+          fi
+          date +%s > /tmp/sampling_start_epoch
+          date +%s > /tmp/frp_k6_start_epoch
+          cd ci-helpers/k6
+          k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js
+
+      - name: Upload benchmark outputs (frp)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-frp-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/bench-results-frp.json
+            /tmp/sampling_start_epoch
+            /tmp/frp_k6_start_epoch
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stress-frp-logs-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /tmp/http-echo-frp.log
+            /tmp/frps.log
+            /tmp/frpc.log
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/http-echo-frp.pid 2>/dev/null)" 2>/dev/null || true
 
   stress-trace-8k:
     name: Stress Trace 8K (dial9)
@@ -1904,11 +1959,12 @@ jobs:
     if: |
       always() &&
       (needs.stress-test.result == 'success' || needs.stress-test.result == 'skipped') &&
+      (needs.stress-test-frp.result == 'success' || needs.stress-test-frp.result == 'skipped' || needs.stress-test-frp.result == 'failure') &&
       (needs.stress-trace-8k.result == 'success' || needs.stress-trace-8k.result == 'skipped') &&
       (needs.stress-test.result == 'success' || needs.stress-trace-8k.result == 'success') &&
       (github.ref == 'refs/heads/main' || inputs.publish_pages == true)
     runs-on: ubuntu-latest
-    needs: [stress-test, stress-trace-8k]
+    needs: [stress-test, stress-test-frp, stress-trace-8k]
     permissions:
       contents: write
     steps:
@@ -1919,6 +1975,13 @@ jobs:
         with:
           name: stress-core-results-${{ github.run_id }}
           path: /tmp/core
+
+      - name: Download frp benchmark outputs
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-frp-results-${{ github.run_id }}
+          path: /tmp/frp
 
       - name: Download 8k benchmark outputs
         continue-on-error: true
@@ -2136,10 +2199,10 @@ jobs:
           fi
           FRP_ARG=""
           FRP_OFFSET_ARG=""
-          if [ -s /tmp/core/bench-results-frp.json ]; then
-            FRP_ARG="--frp-result /tmp/core/bench-results-frp.json"
-            if [ -f /tmp/core/frp_k6_start_epoch ] && [ -f /tmp/core/sampling_start_epoch ]; then
-              FRP_K6_OFFSET=$(( $(cat /tmp/core/frp_k6_start_epoch) - $(cat /tmp/core/sampling_start_epoch) ))
+          if [ -s /tmp/frp/bench-results-frp.json ]; then
+            FRP_ARG="--frp-result /tmp/frp/bench-results-frp.json"
+            if [ -f /tmp/frp/frp_k6_start_epoch ] && [ -f /tmp/frp/sampling_start_epoch ]; then
+              FRP_K6_OFFSET=$(( $(cat /tmp/frp/frp_k6_start_epoch) - $(cat /tmp/frp/sampling_start_epoch) ))
               FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
             fi
           fi
