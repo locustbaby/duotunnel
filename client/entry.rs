@@ -2,6 +2,7 @@ use crate::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -62,7 +63,7 @@ pub async fn start_entry_listener(
 
 async fn handle_entry_connection(
     pool: Arc<EntryConnPool>,
-    local_stream: TcpStream,
+    mut local_stream: TcpStream,
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
@@ -100,6 +101,11 @@ async fn handle_entry_connection(
                     host,
                 };
                 send_routing_info(&mut send, &routing_info).await?;
+                if !initial_bytes.is_empty() {
+                    send.write_all(&initial_bytes).await?;
+                    let mut discard = vec![0u8; initial_bytes.len()];
+                    local_stream.read_exact(&mut discard).await?;
+                }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 debug!(
                     sent = sent, received = received, protocol = % protocol,

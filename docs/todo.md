@@ -20,6 +20,85 @@ After `dial9-tokio-telemetry` publishes a crate version that includes commit `64
 
 1. Milestone D: remove legacy static token map from server config (or keep read-only compatibility window).
 
+## Code Quality Refactor
+
+> 来源：CODE_REVIEW.md。按依赖顺序排列，必须先做 TODO-CR1，才能推进 TODO-CR2。TODO-CR3/4/5 完全独立可并行。
+
+### [TODO-CR1] 强类型路由：RoutingInfo.protocol → enum
+**Priority**: High | **Status**: TODO
+**依赖**: 无（本项是后续 TODO-CR2 的前置）
+
+**Problem**: `RoutingInfo.protocol` 是 `String`，整条链路有 4 处各自做字符串→枚举转换：
+- `protocol/detect.rs` 返回 `"h2"` / `"websocket"` / `"h1"` / `"tcp"` 字面量
+- `proxy/core.rs:84` `ri.protocol.as_str()` match 转回 `Protocol` 枚举
+- `tunnel_handler.rs:16` `routing_info.protocol.as_str()` match 转 `Protocol`
+- `client/proxy.rs:20` `routing_info.protocol == "h2"` 字符串比较
+
+**Fix**:
+1. `protocol/detect.rs::detect_protocol_and_host` 返回值从 `(&'static str, Option<String>)` 改为 `(Protocol, Option<String>)`
+2. `RoutingInfo.protocol` 从 `String` 改为 `Protocol` 枚举（加 `#[repr(u8)]` + serde 支持保证 bincode 兼容）
+3. 删除上述 4 处字符串 match，改为枚举 match
+4. `VhostRouter` 返回值从匿名元组 `(Arc<str>, Arc<str>)` 改为 `RouteTarget { group_id, proxy_name }`
+
+**Files**: `tunnel-lib/src/models/msg.rs`, `tunnel-lib/src/protocol/detect.rs`, `tunnel-lib/src/proxy/core.rs`, `server/tunnel_handler.rs`, `client/proxy.rs`, `server/handlers/http.rs`
+**Risk**: 中（bincode 序列化格式变更，需同步升级 server+client）
+
+---
+
+### [TODO-CR2] Relay 逻辑归一化
+**Priority**: Medium | **Status**: TODO
+**依赖**: TODO-CR1（protocol 枚举化后，relay 分支判断更清晰）
+
+**Problem**: 同一件事（join 两个方向的 copy_buf + shutdown/finish）散落在 3 个模块 6 个函数：
+`bridge.rs`（relay / relay_unidirectional / relay_quic_to_tcp / relay_with_first_data）、`relay.rs`（relay_bidirectional / relay_with_initial）、`proxy/base.rs`（forward_to_client / forward_with_initial_data）。
+任何新增（timeout、字节计数回调）都要改 6 处。
+
+**Fix**: 统一为 `relay_bidir(r1, w1, r2, w2, initial: Option<&[u8]>)`，`into_split` vs `split` 在调用点处理。分两步 PR：先统一签名，再替换调用方。
+
+**Files**: `tunnel-lib/src/engine/bridge.rs`, `tunnel-lib/src/engine/relay.rs`, `tunnel-lib/src/proxy/base.rs`, `tunnel-lib/src/proxy/tcp.rs`, `server/handlers/http.rs`, `server/handlers/tcp.rs`, `client/entry.rs`
+**Risk**: 中（调用点多，建议分阶段替换）
+
+---
+
+### [TODO-CR3] URL 解析归一化
+**Priority**: Low | **Status**: TODO
+**依赖**: 无（独立）
+
+**Problem**: `UpstreamScheme::from_address`（`proxy/tcp.rs`）和 `parse_upstream`（`transport/addr.rs`）各自实现了"port 443 → https"启发式规则，两份逻辑独立维护。`client/app.rs` 和 `server/egress.rs` 用前者，`egress/http.rs` 用后者。
+
+**Fix**: 统一到 `transport/addr.rs::parse_upstream`，`UpstreamScheme::from_address` 改为调用它，消除重复。
+
+**Files**: `tunnel-lib/src/proxy/tcp.rs`, `tunnel-lib/src/transport/addr.rs`, `tunnel-lib/src/egress/http.rs`
+**Risk**: 低
+
+---
+
+### [TODO-CR4] 解耦观测性逻辑
+**Priority**: Low | **Status**: TODO
+**依赖**: 无（独立）
+
+**Problem**: 业务热路径里散布大量显式 `metrics::xxx()` 调用，与 tracing 体系并存，可读性差。`open_bi_wait_ms` 直方图桶硬编码，不同网络拓扑下分位数失真。
+
+**Fix**: 业务层只抛 `tracing` 事件（`info!(event = "open_bi_complete", wait_ms = ...)`），由独立 subscriber 汇总成 Prometheus metrics，解耦观测与业务。
+
+**Files**: `server/metrics.rs`, `server/handlers/http.rs`, `server/handlers/quic.rs`
+**Risk**: 低
+
+---
+
+### [TODO-CR5] 配置流式化（ConfigStream）
+**Priority**: Low | **Status**: TODO
+**依赖**: 无（独立）
+
+**Problem**: 当前是 Pull 模型，`ConfigSource::load()` 全量拉取快照，热更新依赖文件系统轮询或 ctld watch stream 触发。业务层需关注"配置从哪来"和"何时触发重载"。
+
+**Fix**: 定义 `ConfigStream: Stream<Item = RoutingSnapshot>`，业务层只监听流的变化，配置源可自然扩展到 etcd / Nacos 等动态中心。
+
+**Files**: `server/config.rs`, `server/control_client.rs`, `server/hot_reload.rs`
+**Risk**: 中（涉及 ServerState 初始化流程）
+
+---
+
 ## Code Optimization
 
 ## open_bi 优化专区
