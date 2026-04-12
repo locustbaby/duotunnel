@@ -1,4 +1,5 @@
 use crate::engine::{bridge, relay::relay_with_initial};
+use crate::transport::addr::parse_upstream;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use quinn::{RecvStream, SendStream};
@@ -18,34 +19,32 @@ pub enum UpstreamScheme {
     Wss,
 }
 impl UpstreamScheme {
+    /// Parse an upstream address string into a scheme, a `host:port` connect address,
+    /// and an optional TLS SNI hostname.
+    ///
+    /// Delegates address/port/host extraction to [`parse_upstream`] so there is a
+    /// single source of truth for URL parsing in `transport::addr`.
     pub fn from_address(addr: &str) -> (Self, String, Option<String>) {
-        let (scheme, rest) = if addr.starts_with("https://") {
-            (Self::Https, addr.trim_start_matches("https://"))
+        let parsed = parse_upstream(addr);
+        let scheme = if addr.starts_with("https://") {
+            Self::Https
         } else if addr.starts_with("http://") {
-            (Self::Http, addr.trim_start_matches("http://"))
+            Self::Http
         } else if addr.starts_with("wss://") {
-            (Self::Wss, addr.trim_start_matches("wss://"))
+            Self::Wss
         } else if addr.starts_with("ws://") {
-            (Self::Ws, addr.trim_start_matches("ws://"))
-        } else if has_port_443(addr) {
-            (Self::Tls, addr)
+            Self::Ws
+        } else if parsed.is_https {
+            Self::Tls
         } else {
-            (Self::Tcp, addr)
+            Self::Tcp
         };
-        let host = extract_host_part(rest);
-        let addr_with_port = if has_explicit_port(rest) {
-            rest.to_string()
+        let tls_host = if scheme.requires_tls() {
+            Some(parsed.host)
         } else {
-            match scheme {
-                Self::Https | Self::Wss | Self::Tls => format!("{}:443", rest),
-                _ => format!("{}:80", rest),
-            }
+            None
         };
-        let tls_host = match scheme {
-            Self::Https | Self::Wss | Self::Tls => Some(host),
-            _ => None,
-        };
-        (scheme, addr_with_port, tls_host)
+        (scheme, parsed.connect_addr, tls_host)
     }
     pub fn requires_tls(&self) -> bool {
         matches!(self, Self::Tls | Self::Https | Self::Wss)
@@ -56,30 +55,6 @@ impl UpstreamScheme {
             Self::Wss => Some(vec![b"http/1.1".to_vec()]),
             _ => None,
         }
-    }
-}
-fn extract_host_part(addr: &str) -> String {
-    if let Some(rest) = addr.strip_prefix('[') {
-        rest.split(']').next().unwrap_or(addr).to_string()
-    } else {
-        addr.split(':').next().unwrap_or(addr).to_string()
-    }
-}
-fn has_explicit_port(addr: &str) -> bool {
-    if addr.starts_with('[') {
-        addr.contains("]:")
-    } else {
-        addr.contains(':')
-    }
-}
-fn has_port_443(addr: &str) -> bool {
-    extract_port_number(addr) == Some(443)
-}
-fn extract_port_number(addr: &str) -> Option<u16> {
-    if addr.starts_with('[') {
-        addr.rsplit(':').next()?.parse().ok()
-    } else {
-        addr.split(':').nth(1)?.parse().ok()
     }
 }
 pub struct TcpPeer {
