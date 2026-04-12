@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
+use tunnel_lib::RouteTarget;
 pub async fn run_http_listener(
     state: Arc<ServerState>,
     port: u16,
@@ -95,7 +96,7 @@ async fn handle_http_connection(
         }
     }
 }
-fn lookup_route(state: &ServerState, port: u16, host: &str) -> Option<(Arc<str>, Arc<str>)> {
+fn lookup_route(state: &ServerState, port: u16, host: &str) -> Option<RouteTarget> {
     state
         .routing
         .load()
@@ -116,8 +117,9 @@ async fn handle_tls_connection(
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
     debug!(host = %host, "TLS connection detected, terminating");
-    let (group_id, proxy_name) = lookup_route(&state, port, &host)
+    let route = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
+    let (group_id, proxy_name) = (route.group_id, route.proxy_name);
     let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)?;
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let tls_stream = acceptor.accept(stream).await?;
@@ -201,11 +203,9 @@ async fn handle_plaintext_h2_connection(
     let src_port = peer_addr.port();
     let h2_single_authority = state.config.server.h2_single_authority;
     let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    #[allow(clippy::type_complexity)]
-    let route_cache: Arc<Mutex<HashMap<String, Option<(Arc<str>, Arc<str>)>>>> =
+    let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    #[allow(clippy::type_complexity)]
-    let sender_cache: Arc<Mutex<HashMap<(Arc<str>, Arc<str>), (quinn::Connection, tunnel_lib::H2Sender)>>> =
+    let sender_cache: Arc<Mutex<HashMap<RouteTarget, (quinn::Connection, tunnel_lib::H2Sender)>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let state = state.clone();
@@ -258,7 +258,7 @@ async fn handle_plaintext_h2_connection(
                     .or_insert_with(|| lookup_route(&state, port, &route_host))
                     .clone()
             };
-            let (group_id, proxy_name) = match route {
+            let route = match route {
                 Some(r) => r,
                 None => {
                     return Ok::<_, hyper::Error>(
@@ -273,17 +273,17 @@ async fn handle_plaintext_h2_connection(
                     );
                 }
             };
-            let cache_key = (group_id.clone(), proxy_name.clone());
+            let (group_id, proxy_name) = (route.group_id.clone(), route.proxy_name.clone());
             let (client_conn, h2_sender) = {
                 let mut guard = sender_cache.lock().unwrap();
-                if !guard.contains_key(&cache_key) {
+                if !guard.contains_key(&route) {
                     if let Some(selected) =
                         state.registry.select_client_for_group(&group_id)
                     {
-                        guard.insert(cache_key.clone(), (selected.conn, tunnel_lib::new_h2_sender()));
+                        guard.insert(route.clone(), (selected.conn, tunnel_lib::new_h2_sender()));
                     }
                 }
-                match guard.get(&cache_key) {
+                match guard.get(&route) {
                     Some(pair) => (pair.0.clone(), pair.1.clone()),
                     None => {
                         return Ok(Response::builder()
@@ -315,7 +315,7 @@ async fn handle_plaintext_h2_connection(
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
                 Err(e) => {
                     tracing::error!("L7 Proxy upstream error: {}", e);
-                    sender_cache.lock().unwrap().remove(&cache_key);
+                    sender_cache.lock().unwrap().remove(&route);
                     Ok(Response::builder()
                         .status(502)
                         .body(
@@ -346,8 +346,9 @@ async fn handle_plaintext_h1_connection(
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
     debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, using byte-level forwarding");
-    let (group_id, proxy_name) = lookup_route(&state, port, &host)
+    let route = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
+    let (group_id, proxy_name) = (route.group_id, route.proxy_name);
     let selected = state
         .registry
         .select_client_for_group(&group_id)

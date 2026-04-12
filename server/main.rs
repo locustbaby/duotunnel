@@ -32,7 +32,7 @@ use config::{
 };
 use null_stores::{NullConfigSource, NullRuleStore};
 use registry::{new_shared_registry, SharedRegistry};
-use tunnel_lib::{HttpClientParams, VhostRouter};
+use tunnel_lib::{HttpClientParams, RouteTarget, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
 
 #[cfg(feature = "dial9-telemetry")]
@@ -91,7 +91,7 @@ enum TokenAction {
         name: String,
     },
 }
-pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>>>;
+pub type HttpRouterMap = Arc<HashMap<u16, Arc<VhostRouter<RouteTarget>>>>;
 pub struct RoutingSnapshot {
     pub http_routers: HttpRouterMap,
     pub tunnel_management: Arc<TunnelManagement>,
@@ -414,18 +414,17 @@ pub fn build_routing_snapshot(
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
 ) -> RoutingSnapshot {
-    #[allow(clippy::type_complexity)]
-    let mut http_routers: HashMap<u16, Arc<VhostRouter<(Arc<str>, Arc<str>)>>> = HashMap::new();
+    let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
         if let IngressMode::Http(cfg) = &listener.mode {
-            let router: VhostRouter<(Arc<str>, Arc<str>)> = VhostRouter::new();
+            let router: VhostRouter<RouteTarget> = VhostRouter::new();
             for rule in &cfg.vhost {
                 router.add_route(
                     &rule.match_host,
-                    (
-                        Arc::from(rule.client_group.as_str()),
-                        Arc::from(rule.proxy_name.as_str()),
-                    ),
+                    RouteTarget {
+                        group_id: Arc::from(rule.client_group.as_str()),
+                        proxy_name: Arc::from(rule.proxy_name.as_str()),
+                    },
                 );
             }
             info!(

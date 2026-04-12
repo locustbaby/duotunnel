@@ -50,6 +50,14 @@ where
 pub async fn peek_bytes(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
     stream.peek(buf).await
 }
+/// Typed result of a `VhostRouter` lookup: replaces the anonymous `(Arc<str>, Arc<str>)` tuple
+/// to give callers named fields instead of positional `.0` / `.1` access.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RouteTarget {
+    pub group_id: Arc<str>,
+    pub proxy_name: Arc<str>,
+}
+
 pub struct VhostRouter<T: Clone + Send + Sync> {
     exact: DashMap<String, T>,
     wildcards: RwLock<Vec<(String, T)>>,
