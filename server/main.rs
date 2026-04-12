@@ -97,58 +97,7 @@ pub struct RoutingSnapshot {
     pub tunnel_management: Arc<TunnelManagement>,
     pub egress_map: Arc<egress::ServerEgressMap>,
 }
-/// Thread-local free-list for peek buffers.
-/// Each tokio worker thread keeps its own pool — no lock, no cross-thread contention.
-/// Buffers are returned with their original capacity; `set_len` avoids zeroing.
-pub struct PeekBufPool {
-    buf_size: usize,
-}
-impl PeekBufPool {
-    /// Max buffers kept per thread. With 8–16 worker threads this caps total idle RAM at
-    /// 16 threads × 32 bufs × 16 KiB = ~8 MiB, same order as the old global cap (256 × 16 KiB).
-    const MAX_IDLE_PER_THREAD: usize = 32;
-
-    pub fn new(buf_size: usize) -> Self {
-        Self { buf_size }
-    }
-
-    pub fn take(&self) -> Vec<u8> {
-        PEEK_BUF_POOL.with(|cell| {
-            let buf = cell.borrow_mut().pop();
-            match buf {
-                Some(mut b) => {
-                    // SAFETY: capacity == buf_size (enforced in put); bytes are
-                    // overwritten by peek() before any read occurs.
-                    unsafe {
-                        b.set_len(self.buf_size);
-                    }
-                    b
-                }
-                None => vec![0u8; self.buf_size],
-            }
-        })
-    }
-
-    pub fn put(&self, mut buf: Vec<u8>) {
-        if buf.capacity() < self.buf_size {
-            return; // undersized — drop
-        }
-        // Truncate to buf_size so the slice passed to peek() is exactly buf_size bytes.
-        unsafe {
-            buf.set_len(self.buf_size);
-        }
-        PEEK_BUF_POOL.with(|cell| {
-            let mut pool = cell.borrow_mut();
-            if pool.len() < Self::MAX_IDLE_PER_THREAD {
-                pool.push(buf);
-            }
-        });
-    }
-}
-
-thread_local! {
-    static PEEK_BUF_POOL: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
+pub use tunnel_lib::PeekBufPool;
 
 pub struct ServerState {
     pub config: Arc<ServerConfigFile>,

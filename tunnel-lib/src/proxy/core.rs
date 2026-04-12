@@ -1,7 +1,9 @@
 use super::peers::PeerKind;
+use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
     H1,
@@ -26,9 +28,9 @@ pub struct ProxyEngine<A: UpstreamResolver> {
     app: A,
 }
 
-thread_local! {
-    /// Per-worker-thread reusable peek buffer. Avoids zeroed() allocation on every stream.
-    static STREAM_PEEK_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+static STREAM_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
+fn stream_peek_pool() -> &'static PeekBufPool {
+    STREAM_PEEK_POOL.get_or_init(|| PeekBufPool::new(4096))
 }
 
 impl<A: UpstreamResolver> ProxyEngine<A> {
@@ -42,25 +44,16 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
-        // Take the thread-local buffer so we can use it across the await point.
-        // The TL slot holds an empty Vec while this frame is live; it is restored below.
-        let mut tl_buf = STREAM_PEEK_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-        if tl_buf.capacity() < 4096 {
-            tl_buf.reserve(4096);
-        }
-        // SAFETY: capacity >= 4096; recv.read() overwrites bytes before any read occurs.
-        unsafe { tl_buf.set_len(4096) };
-        let n = recv.read(&mut tl_buf[..]).await?.unwrap_or(0);
+        let pool = stream_peek_pool();
+        let mut buf = pool.take();
+        let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
 
         let initial_bytes: bytes::Bytes = if n > 0 {
-            // Copy only the actual bytes into a frozen Bytes; return buffer to TL pool.
-            let b = bytes::Bytes::copy_from_slice(&tl_buf[..n]);
-            tl_buf.truncate(0);
-            STREAM_PEEK_BUF.with(|cell| *cell.borrow_mut() = tl_buf);
+            let b = bytes::Bytes::copy_from_slice(&buf[..n]);
+            pool.put(buf);
             b
         } else {
-            tl_buf.truncate(0);
-            STREAM_PEEK_BUF.with(|cell| *cell.borrow_mut() = tl_buf);
+            pool.put(buf);
             bytes::Bytes::new()
         };
 

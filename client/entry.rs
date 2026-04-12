@@ -8,12 +8,12 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, RoutingInfo, TcpParams,
+    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, PeekBufPool, RoutingInfo,
+    TcpParams,
 };
+use std::sync::OnceLock;
 
-thread_local! {
-    static PEEK_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-}
+static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
@@ -71,15 +71,11 @@ async fn handle_entry_connection(
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
 
-    let mut tl_buf = PEEK_BUF.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    if tl_buf.capacity() < peek_buf_size {
-        tl_buf.reserve(peek_buf_size - tl_buf.capacity());
-    }
-    unsafe { tl_buf.set_len(peek_buf_size) };
-    let n = local_stream.peek(&mut tl_buf).await?;
-    let initial_bytes = bytes::Bytes::copy_from_slice(&tl_buf[..n]);
-    tl_buf.truncate(0);
-    PEEK_BUF.with(|c| *c.borrow_mut() = tl_buf);
+    let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
+    let mut buf = peek_pool.take();
+    let n = local_stream.peek(&mut buf).await?;
+    let initial_bytes = bytes::Bytes::copy_from_slice(&buf[..n]);
+    peek_pool.put(buf);
 
     let (protocol, host) = detect_protocol_and_host(&initial_bytes);
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");

@@ -16,6 +16,7 @@ pub use engine::bridge::{
     relay as bridge_relay, relay_quic_to_tcp, relay_with_first_data, QuicBiStream,
 };
 pub use engine::relay::{relay_bidirectional, relay_with_initial};
+pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::apply_worker_threads;
 pub use models::msg::{
