@@ -55,38 +55,9 @@ impl QuicBiStream {
         (self.send, self.recv)
     }
 }
-pub async fn relay_quic_to_tcp(
-    quic_recv: quinn::RecvStream,
-    mut quic_send: quinn::SendStream,
-    tcp_stream: tokio::net::TcpStream,
-) -> anyhow::Result<(u64, u64)> {
-    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
-    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, quic_recv);
-    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
-    let quic_to_tcp = async {
-        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
-        let _ = tcp_write.shutdown().await;
-        Ok::<_, std::io::Error>(bytes)
-    };
-    let tcp_to_quic = async {
-        let bytes = tokio::io::copy_buf(&mut tcp_read, &mut quic_send).await?;
-        let _ = quic_send.finish();
-        Ok::<_, std::io::Error>(bytes)
-    };
-    let (sent, recv) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
-    match (sent, recv) {
-        (Ok(a), Ok(b)) => Ok((a, b)),
-        (Err(e1), Err(e2)) => {
-            debug!(
-                "relay_quic_to_tcp: both directions failed; suppressed: {}",
-                e2
-            );
-            Err(e1.into())
-        }
-        (Err(e), _) | (_, Err(e)) => Err(e.into()),
-    }
-}
+/// Core QUIC↔TCP bidirectional relay.
+/// Writes `first_data` to the TCP stream before the copy loop.
+/// Pass `None` when there is no initial data.
 pub async fn relay_with_first_data(
     quic_recv: quinn::RecvStream,
     mut quic_send: quinn::SendStream,
@@ -110,17 +81,23 @@ pub async fn relay_with_first_data(
         Ok::<_, std::io::Error>(bytes)
     };
     let (sent, recv) = tokio::join!(quic_to_tcp, tcp_to_quic);
+    debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
     match (sent, recv) {
         (Ok(a), Ok(b)) => Ok((a, b)),
         (Err(e1), Err(e2)) => {
-            debug!(
-                "relay_with_first_data: both directions failed; suppressed: {}",
-                e2
-            );
+            debug!("relay_with_first_data: both directions failed; suppressed: {}", e2);
             Err(e1.into())
         }
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
     }
+}
+
+pub async fn relay_quic_to_tcp(
+    quic_recv: quinn::RecvStream,
+    quic_send: quinn::SendStream,
+    tcp_stream: tokio::net::TcpStream,
+) -> anyhow::Result<(u64, u64)> {
+    relay_with_first_data(quic_recv, quic_send, tcp_stream, None).await
 }
 #[cfg(test)]
 mod tests {
