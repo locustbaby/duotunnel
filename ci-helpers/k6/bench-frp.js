@@ -12,15 +12,61 @@ import {
   buildSummaryOutput,
 } from './catalog.js';
 
-const { reqCounters, errCounters } = buildCounters(FRP_CASES, Counter);
+function parseEnvPositiveInt(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number.parseInt(String(v), 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
+function parseCaseParamMap(raw) {
+  const out = new Map();
+  const text = String(raw || '').trim();
+  if (!text) return out;
+  for (const seg of text.split(';')) {
+    const item = seg.trim();
+    if (!item) continue;
+    const eq = item.indexOf('=');
+    if (eq <= 0) continue;
+    const name = item.slice(0, eq).trim();
+    const body = item.slice(eq + 1).trim();
+    if (!name || !body) continue;
+    const parts = body.split(',').map((v) => v.trim());
+    const rate = parseEnvPositiveInt(parts[0] || '');
+    const preAllocatedVUs = parseEnvPositiveInt(parts[1] || '');
+    const maxVUs = parseEnvPositiveInt(parts[2] || '');
+    if (rate === null && preAllocatedVUs === null && maxVUs === null) continue;
+    out.set(name, { rate, preAllocatedVUs, maxVUs });
+  }
+  return out;
+}
+
+function applyCaseScenarioOverrides(cases) {
+  const overrides = parseCaseParamMap(__ENV.K6_CASE_PARAMS);
+  if (overrides.size === 0) return cases;
+  return cases.map((c) => {
+    const o = overrides.get(c.name);
+    if (!o) return c;
+    const scenario = { ...(c.scenario || {}) };
+    if (o.rate !== null) scenario.rate = o.rate;
+    if (o.preAllocatedVUs !== null) scenario.preAllocatedVUs = o.preAllocatedVUs;
+    if (o.maxVUs !== null) scenario.maxVUs = o.maxVUs;
+    const next = { ...c, scenario };
+    if (o.rate !== null) next.targetRate = o.rate;
+    return next;
+  });
+}
+
+const ACTIVE_FRP_CASES = applyCaseScenarioOverrides(FRP_CASES);
+const { reqCounters, errCounters } = buildCounters(ACTIVE_FRP_CASES, Counter);
 
 export const options = {
   discardResponseBodies: true,
-  scenarios: buildScenarios(FRP_CASES),
+  scenarios: buildScenarios(ACTIVE_FRP_CASES),
 
   noConnectionReuse: false,
 
-  thresholds: buildThresholds(FRP_CASES),
+  thresholds: buildThresholds(ACTIVE_FRP_CASES),
 };
 
 function track(ok) {
@@ -64,7 +110,7 @@ export function ingressMultihost() {
 }
 
 export function handleSummary(data) {
-  const output = buildSummaryOutput(data, FRP_CASES, FRP_PHASES, { tunnel: 'frp' });
+  const output = buildSummaryOutput(data, ACTIVE_FRP_CASES, FRP_PHASES, { tunnel: 'frp' });
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: false }),

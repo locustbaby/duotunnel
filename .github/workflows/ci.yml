@@ -66,6 +66,26 @@ on:
         description: 'Target RPS for stress-category cases in core profile (0 = use catalog default of 3000)'
         type: number
         default: 0
+      k6_core_preallocated_vus:
+        description: 'Override preAllocatedVUs for core stress cases (0 = keep catalog)'
+        type: number
+        default: 0
+      k6_core_max_vus:
+        description: 'Override maxVUs for core stress cases (0 = keep catalog)'
+        type: number
+        default: 0
+      k6_8k_preallocated_vus:
+        description: 'Override preAllocatedVUs for 8k cases (0 = keep catalog)'
+        type: number
+        default: 0
+      k6_8k_max_vus:
+        description: 'Override maxVUs for 8k cases (0 = keep catalog)'
+        type: number
+        default: 0
+      k6_case_params:
+        description: 'Per-case overrides: case=rate,preAllocatedVUs,maxVUs;case2=rate,pre,max'
+        type: string
+        default: ''
       # ── Monitor ───────────────────────────────────────────────────────────────
       monitor_cpu:
         description: 'Collect CPU/memory/IO/ctxsw metrics (collect-resources.py via psutil)'
@@ -1215,12 +1235,35 @@ jobs:
         working-directory: ci-helpers/k6
         run: |
           CORE_RATE="${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate || '0' }}"
+          CORE_PREALLOCATED_VUS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_core_preallocated_vus || '0' }}"
+          CORE_MAX_VUS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_core_max_vus || '0' }}"
+          K6_CASE_PARAMS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_case_params || '' }}"
+          for V in "$CORE_RATE" "$CORE_PREALLOCATED_VUS" "$CORE_MAX_VUS"; do
+            case "$V" in
+              ''|*[!0-9]*)
+                echo "ERROR: k6 core overrides must be non-negative integers, got: $V"
+                exit 1
+                ;;
+            esac
+          done
           date +%s > /tmp/k6_start_epoch
-          k6 run \
-            -e GITHUB_SHA=${{ github.sha }} \
-            -e BENCH_PROFILE=core \
-            ${CORE_RATE:+$([ "$CORE_RATE" -gt 0 ] && echo "-e K6_CORE_STRESS_RATE=$CORE_RATE" || true)} \
-            bench.js &
+          K6_ARGS=(
+            -e "GITHUB_SHA=${{ github.sha }}"
+            -e "BENCH_PROFILE=core"
+          )
+          if [ "$CORE_RATE" -gt 0 ]; then
+            K6_ARGS+=(-e "K6_CORE_STRESS_RATE=$CORE_RATE")
+          fi
+          if [ "$CORE_PREALLOCATED_VUS" -gt 0 ]; then
+            K6_ARGS+=(-e "K6_CORE_PREALLOCATED_VUS=$CORE_PREALLOCATED_VUS")
+          fi
+          if [ "$CORE_MAX_VUS" -gt 0 ]; then
+            K6_ARGS+=(-e "K6_CORE_MAX_VUS=$CORE_MAX_VUS")
+          fi
+          if [ -n "$K6_CASE_PARAMS" ]; then
+            K6_ARGS+=(-e "K6_CASE_PARAMS=$K6_CASE_PARAMS")
+          fi
+          k6 run "${K6_ARGS[@]}" bench.js &
           echo $! > /tmp/k6.pid
           wait "$(cat /tmp/k6.pid)"
 
@@ -1384,6 +1427,7 @@ jobs:
 
       - name: Start frp and run benchmark
         run: |
+          K6_CASE_PARAMS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_case_params || '' }}"
           frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
           echo $! > /tmp/frps.pid
           sleep 1
@@ -1403,7 +1447,11 @@ jobs:
           date +%s > /tmp/sampling_start_epoch
           date +%s > /tmp/frp_k6_start_epoch
           cd ci-helpers/k6
-          k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js
+          K6_ARGS=(-e "GITHUB_SHA=${{ github.sha }}")
+          if [ -n "$K6_CASE_PARAMS" ]; then
+            K6_ARGS+=(-e "K6_CASE_PARAMS=$K6_CASE_PARAMS")
+          fi
+          k6 run "${K6_ARGS[@]}" bench-frp.js
 
       - name: Upload benchmark outputs (frp)
         if: always()
@@ -1547,6 +1595,9 @@ jobs:
         timeout-minutes: 25
         run: |
           CLIENT_QUIC_CONNECTIONS="${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          K6_8K_PREALLOCATED_VUS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_8k_preallocated_vus || '0' }}"
+          K6_8K_MAX_VUS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_8k_max_vus || '0' }}"
+          K6_CASE_PARAMS="${{ github.event_name == 'workflow_dispatch' && inputs.k6_case_params || '' }}"
           case "$CLIENT_QUIC_CONNECTIONS" in
             ''|*[!0-9]*)
               echo "ERROR: stress_quic_connections must be a positive integer, got: $CLIENT_QUIC_CONNECTIONS"
@@ -1557,6 +1608,14 @@ jobs:
             echo "ERROR: stress_quic_connections must be >= 1, got: $CLIENT_QUIC_CONNECTIONS"
             exit 1
           fi
+          for V in "$K6_8K_PREALLOCATED_VUS" "$K6_8K_MAX_VUS"; do
+            case "$V" in
+              ''|*[!0-9]*)
+                echo "ERROR: k6 8k overrides must be non-negative integers, got: $V"
+                exit 1
+                ;;
+            esac
+          done
 
           run_case() {
             CASE_NAME="$1"
@@ -1712,11 +1771,21 @@ jobs:
             echo $! > /tmp/ss-loop.pid
             date +%s > /tmp/sampling_start_epoch
 
-            (cd ci-helpers/k6 && k6 run \
-              -e GITHUB_SHA=${{ github.sha }} \
-              -e BENCH_PROFILE=8k \
-              -e BENCH_CASE="${CASE_NAME}" \
-              bench.js)
+            K6_ARGS=(
+              -e "GITHUB_SHA=${{ github.sha }}"
+              -e "BENCH_PROFILE=8k"
+              -e "BENCH_CASE=${CASE_NAME}"
+            )
+            if [ "$K6_8K_PREALLOCATED_VUS" -gt 0 ]; then
+              K6_ARGS+=(-e "K6_8K_PREALLOCATED_VUS=$K6_8K_PREALLOCATED_VUS")
+            fi
+            if [ "$K6_8K_MAX_VUS" -gt 0 ]; then
+              K6_ARGS+=(-e "K6_8K_MAX_VUS=$K6_8K_MAX_VUS")
+            fi
+            if [ -n "$K6_CASE_PARAMS" ]; then
+              K6_ARGS+=(-e "K6_CASE_PARAMS=$K6_CASE_PARAMS")
+            fi
+            (cd ci-helpers/k6 && k6 run "${K6_ARGS[@]}" bench.js)
 
             # Stop resource sampling
             kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
