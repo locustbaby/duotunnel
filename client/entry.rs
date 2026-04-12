@@ -97,7 +97,7 @@ async fn handle_entry_connection(
                     proxy_name: "entry".to_string(),
                     src_addr: peer_addr.ip().to_string(),
                     src_port: peer_addr.port(),
-                    protocol: protocol.clone(),
+                    protocol,
                     host,
                 };
                 send_routing_info(&mut send, &routing_info).await?;

@@ -2,7 +2,7 @@ use super::peers::PeerKind;
 use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
     H1,
     H2,
@@ -83,7 +83,7 @@ fn detect_protocol(n: usize, data: &[u8], routing_info: Option<&RoutingInfo>) ->
     if let Some(ri) = routing_info {
         match ri.protocol {
             Protocol::Unknown => {}
-            ref p => return p.clone(),
+            p => return p,
         }
     }
     if n == 0 {
