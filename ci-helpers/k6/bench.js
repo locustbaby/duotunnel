@@ -56,9 +56,6 @@ function apply8kScenarioOverrides(cases) {
   });
 }
 
-// Apply K6_CORE_STRESS_RATE override to stress-category cases in the core profile.
-// Scales both constant-arrival-rate `rate` and the final target of ramping stages.
-// Does not affect 8k cases (those are handled by apply8kScenarioOverrides).
 function applyCoreStressRateOverride(cases) {
   const rate = parseEnvPositiveInt(__ENV.K6_CORE_STRESS_RATE);
   if (rate === null) return cases;
@@ -79,6 +76,58 @@ function applyCoreStressRateOverride(cases) {
       });
     }
     return { ...c, scenario, targetRate: rate };
+  });
+}
+
+function applyCoreStressVuOverrides(cases) {
+  const preAllocatedVUs = parseEnvPositiveInt(__ENV.K6_CORE_PREALLOCATED_VUS);
+  const maxVUs = parseEnvPositiveInt(__ENV.K6_CORE_MAX_VUS);
+  if (preAllocatedVUs === null && maxVUs === null) return cases;
+
+  return cases.map((c) => {
+    if (c.category !== 'stress' || c.name.includes('_8000qps')) return c;
+    const scenario = { ...(c.scenario || {}) };
+    if (preAllocatedVUs !== null) scenario.preAllocatedVUs = preAllocatedVUs;
+    if (maxVUs !== null) scenario.maxVUs = maxVUs;
+    return { ...c, scenario };
+  });
+}
+
+function parseCaseParamMap(raw) {
+  const out = new Map();
+  const text = String(raw || '').trim();
+  if (!text) return out;
+  for (const seg of text.split(';')) {
+    const item = seg.trim();
+    if (!item) continue;
+    const eq = item.indexOf('=');
+    if (eq <= 0) continue;
+    const name = item.slice(0, eq).trim();
+    const body = item.slice(eq + 1).trim();
+    if (!name || !body) continue;
+    const parts = body.split(',').map((v) => v.trim());
+    const rate = parseEnvPositiveInt(parts[0] || '');
+    const preAllocatedVUs = parseEnvPositiveInt(parts[1] || '');
+    const maxVUs = parseEnvPositiveInt(parts[2] || '');
+    if (rate === null && preAllocatedVUs === null && maxVUs === null) continue;
+    out.set(name, { rate, preAllocatedVUs, maxVUs });
+  }
+  return out;
+}
+
+function applyCaseScenarioOverrides(cases) {
+  const overrides = parseCaseParamMap(__ENV.K6_CASE_PARAMS);
+  if (overrides.size === 0) return cases;
+  return cases.map((c) => {
+    const o = overrides.get(c.name);
+    if (!o) return c;
+    const scenario = { ...(c.scenario || {}) };
+    if (o.rate !== null) scenario.rate = o.rate;
+    if (o.preAllocatedVUs !== null) scenario.preAllocatedVUs = o.preAllocatedVUs;
+    if (o.maxVUs !== null) scenario.maxVUs = o.maxVUs;
+    const next = { ...c, scenario };
+    if (o.rate !== null) next.targetRate = o.rate;
+    return next;
   });
 }
 
@@ -114,8 +163,12 @@ function filterPhases(phases, activeCases) {
 }
 
 const BENCH_PROFILE = activeProfile();
-const FILTERED_CASES = apply8kScenarioOverrides(
-  applyCoreStressRateOverride(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)))
+const FILTERED_CASES = applyCaseScenarioOverrides(
+  apply8kScenarioOverrides(
+    applyCoreStressVuOverrides(
+      applyCoreStressRateOverride(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)))
+    )
+  )
 );
 const { cases: NORMALIZED_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
 const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
