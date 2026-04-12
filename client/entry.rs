@@ -82,7 +82,7 @@ async fn handle_entry_connection(
     PEEK_BUF.with(|c| *c.borrow_mut() = tl_buf);
 
     let (protocol, host) = detect_protocol_and_host(&initial_bytes);
-    debug!(protocol = % protocol, host = ? host, "detected protocol from entry");
+    debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
     let pool_size = pool.pool_size();
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
@@ -97,7 +97,7 @@ async fn handle_entry_connection(
                     proxy_name: "entry".to_string(),
                     src_addr: peer_addr.ip().to_string(),
                     src_port: peer_addr.port(),
-                    protocol: protocol.to_string(),
+                    protocol: protocol.clone(),
                     host,
                 };
                 send_routing_info(&mut send, &routing_info).await?;
@@ -108,7 +108,7 @@ async fn handle_entry_connection(
                 }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 debug!(
-                    sent = sent, received = received, protocol = % protocol,
+                    sent = sent, received = received, protocol = ? protocol,
                     "entry relay completed"
                 );
                 return Ok(());

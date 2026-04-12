@@ -1,8 +1,10 @@
+use crate::proxy::core::Protocol;
+
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-pub fn detect_protocol_and_host(data: &[u8]) -> (&'static str, Option<String>) {
+pub fn detect_protocol_and_host(data: &[u8]) -> (Protocol, Option<String>) {
     if data.len() >= HTTP2_PREFACE.len() && &data[..HTTP2_PREFACE.len()] == HTTP2_PREFACE {
-        return ("h2", None);
+        return (Protocol::H2, None);
     }
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
@@ -27,17 +29,17 @@ pub fn detect_protocol_and_host(data: &[u8]) -> (&'static str, Option<String>) {
                 }
             }
             if is_websocket {
-                return ("websocket", host);
+                return (Protocol::WebSocket, host);
             }
-            return ("h1", host);
+            return (Protocol::H1, host);
         }
     }
     if data.len() > 5 && data[0] == 0x16 && data[1] == 0x03 {
         if let Some(sni) = extract_tls_sni(data) {
-            return ("tcp", Some(sni));
+            return (Protocol::Tcp, Some(sni));
         }
     }
-    ("tcp", None)
+    (Protocol::Tcp, None)
 }
 
 pub fn extract_tls_sni(data: &[u8]) -> Option<String> {

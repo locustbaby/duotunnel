@@ -2,7 +2,7 @@ use super::peers::PeerKind;
 use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
     H1,
     H2,
@@ -81,12 +81,9 @@ impl<A: ProxyApp> ProxyEngine<A> {
 /// Consolidates the websocket upgrade check into a single httparse pass.
 fn detect_protocol(n: usize, data: &[u8], routing_info: Option<&RoutingInfo>) -> Protocol {
     if let Some(ri) = routing_info {
-        match ri.protocol.as_str() {
-            "h2" => return Protocol::H2,
-            "websocket" => return Protocol::WebSocket,
-            "h1" => return Protocol::H1,
-            "tcp" => return Protocol::Tcp,
-            _ => {}
+        match ri.protocol {
+            Protocol::Unknown => {}
+            ref p => return p.clone(),
         }
     }
     if n == 0 {

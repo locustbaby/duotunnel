@@ -66,7 +66,7 @@ async fn handle_tcp_connection(
     let n = stream.peek(&mut buf).await?;
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
     pool.put(buf);
-    debug!(protocol = % protocol, host = ? host, "detected protocol on tcp listener");
+    debug!(protocol = ? protocol, host = ? host, "detected protocol on tcp listener");
     let selected = state
         .registry
         .select_client_for_group(&group_id)
@@ -75,7 +75,7 @@ async fn handle_tcp_connection(
         proxy_name,
         src_addr: peer_addr.ip().to_string(),
         src_port: peer_addr.port(),
-        protocol: protocol.to_string(),
+        protocol,
         host,
     };
     let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{Protocol, ProxyApp, ProxyEngine};
+use tunnel_lib::proxy::core::{ProxyApp, ProxyEngine};
 use tunnel_lib::recv_routing_info;
 
 pub async fn handle_tunnel_stream<A: ProxyApp>(
@@ -10,15 +10,9 @@ pub async fn handle_tunnel_stream<A: ProxyApp>(
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
     info!(
-        target_host = ?routing_info.host, protocol = %routing_info.protocol,
+        target_host = ?routing_info.host, protocol = ?routing_info.protocol,
         "handling egress request from client"
     );
-    let _protocol = match routing_info.protocol.as_str() {
-        "websocket" => Protocol::WebSocket,
-        "h1" => Protocol::H1,
-        "h2" => Protocol::H2,
-        _ => Protocol::Unknown,
-    };
     let client_addr = match format!("{}:{}", routing_info.src_addr, routing_info.src_port).parse() {
         Ok(addr) => addr,
         Err(e) => {

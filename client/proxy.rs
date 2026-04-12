@@ -13,11 +13,11 @@ pub async fn handle_work_stream(
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
     info!(
-        proxy_name = % routing_info.proxy_name, protocol = % routing_info.protocol, host
+        proxy_name = % routing_info.proxy_name, protocol = ? routing_info.protocol, host
         = ? routing_info.host, src = format!("{}:{}", routing_info.src_addr, routing_info
         .src_port), "received work stream"
     );
-    if routing_info.protocol == "h2" {
+    if routing_info.protocol == tunnel_lib::proxy::core::Protocol::H2 {
         // Round-robin select the backend, then look up its pre-parsed (scheme, authority).
         let upstream_addr = proxy_map
             .get_local_address(&routing_info.proxy_name)

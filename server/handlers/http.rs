@@ -73,7 +73,7 @@ async fn handle_http_connection(
         handle_tls_connection(state, stream, host, peer_addr, port).await
     } else {
         let (protocol, detected_host) = detect_protocol_and_host(&buf[..n]);
-        if protocol == "h2" {
+        if protocol == tunnel_lib::proxy::core::Protocol::H2 {
             pool.put(buf);
             handle_plaintext_h2_connection(state, stream, peer_addr, port).await
         } else {
@@ -86,7 +86,7 @@ async fn handle_http_connection(
                 state,
                 stream,
                 host,
-                protocol.to_string(),
+                protocol,
                 peer_addr,
                 &initial_data,
                 port,
@@ -155,7 +155,7 @@ async fn handle_tls_connection(
                 proxy_name: proxy_name.to_string(),
                 src_addr,
                 src_port,
-                protocol: "h2".to_string(),
+                protocol: tunnel_lib::proxy::core::Protocol::H2,
                 host: Some(target_host),
             };
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
@@ -306,7 +306,7 @@ async fn handle_plaintext_h2_connection(
                 proxy_name: proxy_name.to_string(),
                 src_addr,
                 src_port,
-                protocol: "h2".to_string(),
+                protocol: tunnel_lib::proxy::core::Protocol::H2,
                 host: Some(host),
             };
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
@@ -339,13 +339,13 @@ async fn handle_plaintext_h1_connection(
     state: Arc<ServerState>,
     mut stream: TcpStream,
     host: String,
-    protocol: String,
+    protocol: tunnel_lib::proxy::core::Protocol,
     peer_addr: std::net::SocketAddr,
     initial_data: &[u8],
     port: u16,
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
-    debug!(host = %host, protocol = %protocol, "plaintext H1/WS, using byte-level forwarding");
+    debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, using byte-level forwarding");
     let (group_id, proxy_name) = lookup_route(&state, port, &host)
         .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
     let selected = state

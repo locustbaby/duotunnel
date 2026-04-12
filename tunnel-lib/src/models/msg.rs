@@ -1,3 +1,4 @@
+use crate::proxy::core::Protocol;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -74,7 +75,7 @@ pub struct RoutingInfo {
     pub proxy_name: String,
     pub src_addr: String,
     pub src_port: u16,
-    pub protocol: String,
+    pub protocol: Protocol,
     pub host: Option<String>,
 }
 pub async fn send_message<W, M>(writer: &mut W, msg_type: MessageType, msg: &M) -> Result<()>
@@ -150,7 +151,7 @@ mod tests {
             proxy_name: "web".to_string(),
             src_addr: "192.168.1.1".to_string(),
             src_port: 12345,
-            protocol: "http".to_string(),
+            protocol: Protocol::H1,
             host: Some("example.com".to_string()),
         };
         let encoded = bincode::serialize(&info).unwrap();
@@ -189,13 +190,13 @@ mod tests {
             proxy_name: "tcp-proxy".to_string(),
             src_addr: "10.0.0.1".to_string(),
             src_port: 9000,
-            protocol: "tcp".to_string(),
+            protocol: Protocol::Tcp,
             host: None,
         };
         let encoded = bincode::serialize(&info).unwrap();
         let decoded: RoutingInfo = bincode::deserialize(&encoded).unwrap();
         assert_eq!(decoded.host, None);
-        assert_eq!(decoded.protocol, "tcp");
+        assert_eq!(decoded.protocol, Protocol::Tcp);
     }
     #[tokio::test]
     async fn test_send_recv_login_full_frame() {
@@ -260,7 +261,7 @@ mod tests {
             proxy_name: "web".to_string(),
             src_addr: "192.168.0.1".to_string(),
             src_port: 54321,
-            protocol: "https".to_string(),
+            protocol: Protocol::H2,
             host: Some("example.com".to_string()),
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
@@ -270,7 +271,7 @@ mod tests {
         assert_eq!(decoded.proxy_name, info.proxy_name);
         assert_eq!(decoded.src_addr, info.src_addr);
         assert_eq!(decoded.src_port, info.src_port);
-        assert_eq!(decoded.protocol, info.protocol);
+        assert_eq!(decoded.protocol, Protocol::H2);
         assert_eq!(decoded.host, info.host);
     }
     #[tokio::test]
@@ -279,7 +280,7 @@ mod tests {
             proxy_name: "tcp-svc".to_string(),
             src_addr: "::1".to_string(),
             src_port: 22,
-            protocol: "tcp".to_string(),
+            protocol: Protocol::Tcp,
             host: None,
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
@@ -287,7 +288,7 @@ mod tests {
         drop(writer);
         let decoded = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded.host, None);
-        assert_eq!(decoded.protocol, "tcp");
+        assert_eq!(decoded.protocol, Protocol::Tcp);
     }
     #[tokio::test]
     async fn test_recv_routing_info_wrong_type_returns_error() {
@@ -333,7 +334,7 @@ mod tests {
             proxy_name: "p".to_string(),
             src_addr: "1.2.3.4".to_string(),
             src_port: 80,
-            protocol: "http".to_string(),
+            protocol: Protocol::H1,
             host: Some("foo.com".to_string()),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
