@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use tunnel_lib::proxy::core::{Context, Protocol, ProxyApp};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
-use tunnel_lib::proxy::tcp::{TcpPeer, TlsTcpPeer, UpstreamScheme};
+use tunnel_lib::proxy::tcp::{TcpPeer, UpstreamScheme};
 use tunnel_lib::{HttpClientParams, UpstreamGroup};
 type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
@@ -95,16 +95,16 @@ impl ProxyApp for ServerEgressMap {
                         .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?
                 };
                 if is_https {
-                    Ok(PeerKind::Tls(TlsTcpPeer::new(
+                    Ok(PeerKind::Tcp(TcpPeer::new_tls(
                         target_addr,
                         tls_host.unwrap_or_default(),
                         scheme.alpn(),
                     )?))
                 } else {
-                    Ok(PeerKind::Tcp(TcpPeer {
+                    Ok(PeerKind::Tcp(TcpPeer::new(
                         target_addr,
-                        tcp_params: tunnel_lib::TcpParams::default(),
-                    }))
+                        tunnel_lib::TcpParams::default(),
+                    )))
                 }
             }
             Protocol::H1 | Protocol::H2 | Protocol::Unknown => {

@@ -161,8 +161,8 @@ impl ProxyApp for ClientApp {
                 info!("WebSocket protocol detected, using TCP relay");
                 let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
                 if is_https {
-                    Ok(PeerKind::Tls(
-                        tunnel_lib::proxy::tcp::TlsTcpPeer::new_with_params(
+                    Ok(PeerKind::Tcp(
+                        tunnel_lib::proxy::tcp::TcpPeer::new_tls_with_params(
                             target_addr,
                             tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
                             None,
@@ -170,10 +170,10 @@ impl ProxyApp for ClientApp {
                         )?,
                     ))
                 } else {
-                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer {
+                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer::new(
                         target_addr,
-                        tcp_params: self.tcp_params.clone(),
-                    }))
+                        self.tcp_params.clone(),
+                    )))
                 }
             }
             Protocol::Tcp => {
@@ -248,10 +248,10 @@ impl ProxyApp for ClientApp {
                         h2c_client: self.map.h2c_client.clone(),
                     })))
                 } else {
-                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer {
+                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer::new(
                         target_addr,
-                        tcp_params: self.tcp_params.clone(),
-                    }))
+                        self.tcp_params.clone(),
+                    )))
                 }
             }
             _ => Err(anyhow!("unsupported protocol")),
