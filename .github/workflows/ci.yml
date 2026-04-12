@@ -115,6 +115,10 @@ env:
   # varying CPU micro-architectures so we must build portable binaries.
   CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 1: Unit tests + clippy  (no binary build, fast feedback)
@@ -912,7 +916,7 @@ jobs:
     name: Stress Test (k6 multi-protocol)
     runs-on: ubuntu-latest
     needs: [build]
-    if: always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.run_stress != false)
+    if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
       contents: write
     steps:
@@ -1208,7 +1212,7 @@ jobs:
           echo "Sampling: cpu=$DO_CPU io=$DO_IO ctxsw=$DO_CTXSW net=$DO_NET tcp=$DO_TCP psi=$DO_PSI paging=$DO_PAGING"
 
       - name: Install frp
-        if: github.event_name != 'workflow_dispatch' || inputs.run_frp != false
+        if: github.event_name == 'workflow_dispatch' && inputs.run_frp != false
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -1217,7 +1221,7 @@ jobs:
           sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
 
       - name: Start frp and run frp benchmark
-        if: github.event_name != 'workflow_dispatch' || inputs.run_frp != false
+        if: github.event_name == 'workflow_dispatch' && inputs.run_frp != false
         run: |
           frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
           echo $! > /tmp/frps.pid
@@ -1241,7 +1245,7 @@ jobs:
           k6 run -e GITHUB_SHA=${{ github.sha }} bench-frp.js || true
 
       - name: Stop frp
-        if: always() && (github.event_name != 'workflow_dispatch' || inputs.run_frp != false)
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.run_frp != false
         run: |
           kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
           kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
@@ -1381,7 +1385,7 @@ jobs:
     name: Stress Trace 8K (dial9)
     runs-on: ubuntu-latest
     needs: [build, build-dial9]
-    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false)
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && inputs.run_stress_trace != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
       contents: read
     outputs:
@@ -1676,9 +1680,24 @@ jobs:
 
             kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-            sleep 35
+            for i in $(seq 1 20); do
+              CLIENT_UP=0
+              SERVER_UP=0
+              kill -0 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null && CLIENT_UP=1
+              kill -0 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null && SERVER_UP=1
+              [ "$CLIENT_UP" -eq 0 ] && [ "$SERVER_UP" -eq 0 ] && break
+              sleep 0.5
+            done
+            for i in $(seq 1 20); do
+              [ ! -f /tmp/server-trace.0.bin.active ] && [ ! -f /tmp/client-trace.0.bin.active ] && break
+              sleep 0.5
+            done
             kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
             kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              [ -s /tmp/server-trace.0.bin ] && [ -s /tmp/client-trace.0.bin ] && break
+              sleep 0.5
+            done
             echo "=== trace files after shutdown ===" && ls -lh /tmp/server-trace.0.bin /tmp/client-trace.0.bin 2>&1 || true
 
             mkdir -p "/tmp/trace-${SUFFIX}"
