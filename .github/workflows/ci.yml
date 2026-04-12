@@ -202,11 +202,11 @@ jobs:
 
       - name: Build release binaries (stress + integration base)
         run: |
-          cargo build --release --locked \
+          cargo build --release \
             -p server \
             -p client \
             -p tunnel-service
-          cargo build --release --locked \
+          cargo build --release \
             -p ci-helpers \
             --bin http-echo-server \
             --bin ws-echo-server \
@@ -214,7 +214,7 @@ jobs:
 
       - name: Build ci-test-client (integration only)
         if: github.event_name != 'workflow_dispatch' || inputs.run_integration != false
-        run: cargo build --release --locked -p ci-helpers --bin ci-test-client
+        run: cargo build --release -p ci-helpers --bin ci-test-client
 
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
