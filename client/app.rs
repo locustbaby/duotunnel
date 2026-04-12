@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 pub use tunnel_lib::egress::http::{H2cClient, HttpsClient};
-use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, ProxyApp};
+use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::{ClientConfig, HttpClientParams, UpstreamGroup};
@@ -130,7 +130,7 @@ impl ClientApp {
         Self { map, tcp_params }
     }
 }
-impl ProxyApp for ClientApp {
+impl UpstreamResolver for ClientApp {
     async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerKind> {
         let routing = context
             .routing_info

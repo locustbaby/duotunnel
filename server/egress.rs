@@ -5,7 +5,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{Context, Protocol, ProxyApp};
+use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::proxy::tcp::{TcpPeer, UpstreamScheme};
@@ -65,7 +65,7 @@ impl ServerEgressMap {
         None
     }
 }
-impl ProxyApp for ServerEgressMap {
+impl UpstreamResolver for ServerEgressMap {
     async fn upstream_peer(&self, context: &mut Context) -> Result<PeerKind> {
         let routing = context
             .routing_info
@@ -120,11 +120,11 @@ impl ProxyApp for ServerEgressMap {
     }
 }
 
-/// Newtype around `Arc<ServerEgressMap>` so it can impl `ProxyApp` without
+/// Newtype around `Arc<ServerEgressMap>` so it can impl `UpstreamResolver` without
 /// violating the orphan rule (`Arc` is a foreign type).
 pub struct EgressProxy(pub std::sync::Arc<ServerEgressMap>);
 
-impl ProxyApp for EgressProxy {
+impl UpstreamResolver for EgressProxy {
     async fn upstream_peer(&self, context: &mut Context) -> Result<PeerKind> {
         self.0.upstream_peer(context).await
     }

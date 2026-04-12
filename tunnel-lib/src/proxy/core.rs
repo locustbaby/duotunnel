@@ -16,13 +16,13 @@ pub struct Context {
     pub initial_bytes: Option<bytes::Bytes>,
     pub routing_info: Option<RoutingInfo>,
 }
-pub trait ProxyApp: Send + Sync {
+pub trait UpstreamResolver: Send + Sync {
     fn upstream_peer(
         &self,
         context: &mut Context,
     ) -> impl std::future::Future<Output = Result<PeerKind>> + Send;
 }
-pub struct ProxyEngine<A: ProxyApp> {
+pub struct ProxyEngine<A: UpstreamResolver> {
     app: A,
 }
 
@@ -31,7 +31,7 @@ thread_local! {
     static STREAM_PEEK_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-impl<A: ProxyApp> ProxyEngine<A> {
+impl<A: UpstreamResolver> ProxyEngine<A> {
     pub fn new(app: A) -> Self {
         Self { app }
     }
