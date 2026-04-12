@@ -17,13 +17,15 @@ import {
 
 function activeProfile() {
   const p = (__ENV.BENCH_PROFILE || 'full').toLowerCase();
-  if (p === '8k' || p === 'core' || p === 'full') return p;
+  if (p === '8k' || p === 'core' || p === 'full' || p === 'basic' || p === 'stress') return p;
   return 'full';
 }
 
 function filterCases(cases, profile) {
   if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps'));
   if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps'));
+  if (profile === 'basic') return cases.filter((c) => c.category === 'basic' || c.category === 'body_size');
+  if (profile === 'stress') return cases.filter((c) => c.category === 'stress' && !c.name.includes('_8000qps'));
   return cases;
 }
 

@@ -37,13 +37,11 @@ impl PeekBufPool {
         PEEK_BUF_POOL.with(|cell| {
             let buf = cell.borrow_mut().pop();
             match buf {
-                Some(mut b) => {
-                    // SAFETY: capacity == buf_size (enforced by put()); bytes are
-                    // overwritten by the caller before any read occurs.
+                Some(mut b) if b.capacity() >= self.buf_size => {
                     unsafe { b.set_len(self.buf_size) };
                     b
                 }
-                None => vec![0u8; self.buf_size],
+                _ => vec![0u8; self.buf_size],
             }
         })
     }
