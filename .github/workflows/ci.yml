@@ -180,13 +180,27 @@ jobs:
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      - name: Build all binaries
-        run: cargo build --release --workspace
+      - name: Build release binaries (stress + integration base)
+        run: |
+          cargo build --release --locked \
+            -p server \
+            -p client \
+            -p tunnel-service
+          cargo build --release --locked \
+            -p ci-helpers \
+            --bin http-echo-server \
+            --bin ws-echo-server \
+            --bin grpc-echo-server
+
+      - name: Build ci-test-client (integration only)
+        if: github.event_name != 'workflow_dispatch' || inputs.run_integration != false
+        run: cargo build --release --locked -p ci-helpers --bin ci-test-client
 
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-bins-${{ github.run_id }}
+          compression-level: 0
           retention-days: 1
           path: |
             target/release/server
@@ -236,6 +250,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-bins-dial9-${{ github.run_id }}
+          compression-level: 0
           retention-days: 1
           path: |
             target/release/server
