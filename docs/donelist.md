@@ -131,6 +131,16 @@ Change to 1000.
 
 已完成：`server/handlers/http.rs` 与 `server/handlers/tcp.rs` 已使用 `build_reuseport_listener()`。
 
+## Performance Fix
+
+### Egress 首批字节提前写入 QUIC stream ✅
+
+**根因**：`client/entry.rs` 在 `open_bi` 后只发 `routing_info`，随即进入 `relay_quic_to_tcp` 循环。server 侧 `ProxyEngine::run_stream` 的 `recv.read()` 必须等 client 把本地 TCP 数据读出再通过 QUIC 传过来，多了一个完整的写→传输→唤醒周期，导致 egress avg 比 ingress 高 ~15ms。
+
+ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forward_with_initial_data` 把已 peek 到的首批字节写进 QUIC stream，对端 `recv.read()` 几乎 0 等待。
+
+**修复**（`client/entry.rs`）：`send_routing_info` 之后，把已 peek 到的 `initial_bytes` 先写入 QUIC stream，同时用 `read_exact` 消费掉本地 TCP 对应字节防止 relay 重发，与 ingress 路径完全对称。
+
 ## Tmp Tune
 
 ### 通信层调优已完成项 ✅
