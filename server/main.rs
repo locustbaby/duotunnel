@@ -147,7 +147,7 @@ async fn async_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Token { action }) => handle_token_command(&cli.config, action).await,
-        Some(Commands::Run) | None => run_server(&cli.config, cli.ctld_addr.as_deref()),
+        Some(Commands::Run) | None => run_server(&cli.config, cli.ctld_addr.as_deref()).await,
     }
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
@@ -253,7 +253,7 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
     }
     Ok(())
 }
-fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
+async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
     if ctld_addr.is_none() {
         config::validate_server_config(&config)?;
@@ -273,8 +273,7 @@ fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         crate::metrics::set_handle(handle);
     }
 
-    let proxy_rt = tunnel_lib::build_proxy_runtime();
-    let proxy_handle = proxy_rt.handle().clone();
+    let proxy_handle = tokio::runtime::Handle::current();
     let shutdown = CancellationToken::new();
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -302,8 +301,7 @@ fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let shutdown_bg = shutdown.clone();
     let proxy_handle_bg = proxy_handle.clone();
     let background_thread = {
-        // build state synchronously in proxy_rt so async stores are initialised
-        let state = proxy_rt.block_on(build_server_state(&config, config_path, ctld_addr))?;
+        let state = build_server_state(&config, config_path, ctld_addr).await?;
         let state_bg = state.clone();
         let t = std::thread::spawn(move || {
             let rt = tunnel_lib::build_single_thread_runtime("bg-worker");
@@ -319,8 +317,7 @@ fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     };
     let (state, background_thread) = background_thread;
 
-    // ── proxy main (blocks main thread) ────────────────────────────────────────
-    let result = proxy_rt.block_on(proxy_main(state, shutdown, ready));
+    let result = proxy_main(state, shutdown, ready).await;
 
     background_thread.join().ok();
     if let Some(t) = metrics_thread {
