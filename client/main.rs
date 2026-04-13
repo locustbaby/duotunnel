@@ -249,12 +249,11 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
-    let proxy_map = Arc::new(LocalProxyMap::from_config(
-        &resp.config,
-        &tunnel_lib::HttpClientParams::from(&config.http_pool),
-    ));
-    let session_cancel = CancellationToken::new();
     let max_streams = config.quic.max_concurrent_streams;
+    let mut http_params = tunnel_lib::HttpClientParams::from(&config.http_pool);
+    http_params.pool_max_idle_per_host = http_params.pool_max_idle_per_host.max(max_streams as usize);
+    let proxy_map = Arc::new(LocalProxyMap::from_config(&resp.config, &http_params));
+    let session_cancel = CancellationToken::new();
     let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
     info!(max_concurrent_streams = % max_streams, "Stream backpressure configured");
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
