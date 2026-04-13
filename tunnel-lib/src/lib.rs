@@ -15,14 +15,22 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
-pub use infra::runtime::apply_worker_threads;
+pub use infra::http_server::{healthz_handler, run_http1_server};
+pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
 pub use models::msg::{
-    recv_message, recv_message_type, recv_routing_info, recv_typed_message, send_message,
-    send_routing_info, ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig,
-    UpstreamServer,
+    recv_http_body, recv_http_request_head, recv_http_response_head, recv_message,
+    recv_message_type, recv_raw_message, recv_routing_info, recv_typed_message, send_http_body,
+    send_http_request_head, send_http_response_head, send_message, send_raw_message,
+    send_routing_info, ClientConfig, HeaderField, HttpRequestHead, HttpResponseHead, Login,
+    LoginResp, MessageType, RoutingInfo, UpstreamConfig, UpstreamServer,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use proxy::h2_proxy::{new_h2_sender, forward_h2_request, H2Sender};
+pub use proxy::{
+    authority_from_request, normalize_route_host, resolve_http_route, rewrite_request_authority,
+    rewrite_request_upstream, EndpointDecision, FixedHttpFlowResolver, HttpFlow, HttpFlowResolver,
+    HttpRequestContext, ResolvedHttpTarget, RouteDecision, RuleMatchContext, RuleSet,
+};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::listener::{build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter};

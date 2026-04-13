@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 http = "1.0"
 dashmap = "6.1"
 parking_lot = "0.12"
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 hpack = "0.3"
