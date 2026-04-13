@@ -269,24 +269,29 @@ pub(crate) async fn run_client(
             stream_result = conn.accept_bi() => {
                 match stream_result {
                     Ok((mut send, recv)) => {
+                        let available = stream_semaphore.available_permits();
                         let permit = match tokio::time::timeout(
                             std::time::Duration::from_millis(500),
                             stream_semaphore.clone().acquire_owned(),
                         ).await {
                             Ok(Ok(permit)) => permit,
-                            _ => {
-                                warn!("Stream rejected: max concurrent streams reached");
+                            Ok(Err(_)) => {
+                                warn!(available, "stream semaphore closed, resetting stream");
+                                let _ = send.reset(0u8.into());
+                                continue;
+                            }
+                            Err(_) => {
+                                warn!(available, "stream semaphore timeout (500ms), resetting stream");
                                 let _ = send.reset(0u8.into());
                                 continue;
                             }
                         };
-                        debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
                         tokio::task::spawn(async move {
                             let _permit = permit;
                             if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
-                                debug!(error = %e, "work stream error");
+                                warn!(error = %e, "work stream error");
                             }
                         });
                     }
