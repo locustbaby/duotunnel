@@ -1,5 +1,8 @@
 use crate::proxy::core::Protocol;
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
+use futures_util::stream::try_unfold;
+use http_body_util::{BodyExt, StreamBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[repr(u8)]
@@ -8,6 +11,10 @@ pub enum MessageType {
     Login = 0x01,
     LoginResp = 0x02,
     RoutingInfo = 0x10,
+    HttpRequestHead = 0x11,
+    HttpResponseHead = 0x12,
+    HttpBodyChunk = 0x13,
+    HttpBodyEnd = 0x14,
     Ping = 0x04,
     Pong = 0x05,
     ConfigPush = 0x06,
@@ -18,6 +25,10 @@ impl MessageType {
             0x01 => Ok(MessageType::Login),
             0x02 => Ok(MessageType::LoginResp),
             0x10 => Ok(MessageType::RoutingInfo),
+            0x11 => Ok(MessageType::HttpRequestHead),
+            0x12 => Ok(MessageType::HttpResponseHead),
+            0x13 => Ok(MessageType::HttpBodyChunk),
+            0x14 => Ok(MessageType::HttpBodyEnd),
             0x04 => Ok(MessageType::Ping),
             0x05 => Ok(MessageType::Pong),
             0x06 => Ok(MessageType::ConfigPush),
@@ -73,10 +84,121 @@ pub struct UpstreamServer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingInfo {
     pub proxy_name: String,
-    pub src_addr: String,
-    pub src_port: u16,
     pub protocol: Protocol,
     pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeaderField {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpRequestHead {
+    pub method: String,
+    pub uri: String,
+    pub version: String,
+    pub headers: Vec<HeaderField>,
+    pub route_key: Option<String>,
+    pub target_host: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpResponseHead {
+    pub status: u16,
+    pub version: String,
+    pub headers: Vec<HeaderField>,
+}
+
+fn http_version_to_string(version: http::Version) -> &'static str {
+    match version {
+        http::Version::HTTP_09 => "HTTP/0.9",
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_11 => "HTTP/1.1",
+        http::Version::HTTP_2 => "HTTP/2",
+        http::Version::HTTP_3 => "HTTP/3",
+        _ => "HTTP/1.1",
+    }
+}
+
+fn http_version_from_string(version: &str) -> Result<http::Version> {
+    match version {
+        "HTTP/0.9" => Ok(http::Version::HTTP_09),
+        "HTTP/1.0" => Ok(http::Version::HTTP_10),
+        "HTTP/1.1" => Ok(http::Version::HTTP_11),
+        "HTTP/2" => Ok(http::Version::HTTP_2),
+        "HTTP/3" => Ok(http::Version::HTTP_3),
+        _ => Err(anyhow!("unsupported HTTP version: {}", version)),
+    }
+}
+
+fn headers_to_wire(headers: &http::HeaderMap) -> Vec<HeaderField> {
+    headers
+        .iter()
+        .map(|(name, value)| HeaderField {
+            name: name.as_str().to_string(),
+            value: value.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+fn headers_from_wire(headers: &[HeaderField]) -> Result<http::HeaderMap> {
+    let mut header_map = http::HeaderMap::new();
+    for field in headers {
+        let name = http::header::HeaderName::from_bytes(field.name.as_bytes())
+            .map_err(|e| anyhow!("invalid header name {}: {}", field.name, e))?;
+        let value = http::header::HeaderValue::from_bytes(&field.value)
+            .map_err(|e| anyhow!("invalid header value for {}: {}", field.name, e))?;
+        header_map.append(name, value);
+    }
+    Ok(header_map)
+}
+
+impl HttpRequestHead {
+    pub fn from_parts(
+        parts: &http::request::Parts,
+        route_key: Option<String>,
+        target_host: Option<String>,
+    ) -> Self {
+        Self {
+            method: parts.method.to_string(),
+            uri: parts.uri.to_string(),
+            version: http_version_to_string(parts.version).to_string(),
+            headers: headers_to_wire(&parts.headers),
+            route_key,
+            target_host,
+        }
+    }
+
+    pub fn into_parts(self) -> Result<http::request::Parts> {
+        let mut req = http::Request::builder()
+            .method(self.method.parse::<http::Method>()?)
+            .uri(self.uri.parse::<http::Uri>()?)
+            .version(http_version_from_string(&self.version)?)
+            .body(())?;
+        *req.headers_mut() = headers_from_wire(&self.headers)?;
+        Ok(req.into_parts().0)
+    }
+}
+
+impl HttpResponseHead {
+    pub fn from_parts(parts: &http::response::Parts) -> Self {
+        Self {
+            status: parts.status.as_u16(),
+            version: http_version_to_string(parts.version).to_string(),
+            headers: headers_to_wire(&parts.headers),
+        }
+    }
+
+    pub fn into_parts(self) -> Result<http::response::Parts> {
+        let mut resp = http::Response::builder()
+            .status(http::StatusCode::from_u16(self.status)?)
+            .version(http_version_from_string(&self.version)?)
+            .body(())?;
+        *resp.headers_mut() = headers_from_wire(&self.headers)?;
+        Ok(resp.into_parts().0)
+    }
 }
 pub async fn send_message<W, M>(writer: &mut W, msg_type: MessageType, msg: &M) -> Result<()>
 where
@@ -95,6 +217,22 @@ where
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(&payload);
     writer.write_all(&frame).await?;
+    Ok(())
+}
+
+pub async fn send_raw_message<W>(writer: &mut W, msg_type: MessageType, payload: &[u8]) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    if payload.len() > 10 * 1024 * 1024 {
+        return Err(anyhow!(
+            "Message too large to send: {} bytes",
+            payload.len()
+        ));
+    }
+    writer.write_u8(msg_type as u8).await?;
+    writer.write_u32(payload.len() as u32).await?;
+    writer.write_all(payload).await?;
     Ok(())
 }
 pub async fn recv_message_type<R>(reader: &mut R) -> Result<MessageType>
@@ -116,6 +254,19 @@ where
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await?;
     Ok(bincode::deserialize(&buf)?)
+}
+
+pub async fn recv_raw_message<R>(reader: &mut R) -> Result<Vec<u8>>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let len = reader.read_u32().await? as usize;
+    if len > 10 * 1024 * 1024 {
+        return Err(anyhow!("Message too large: {} bytes", len));
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).await?;
+    Ok(buf)
 }
 pub async fn recv_typed_message<R, M>(reader: &mut R, expected: MessageType) -> Result<M>
 where
@@ -140,6 +291,86 @@ where
 {
     recv_typed_message(reader, MessageType::RoutingInfo).await
 }
+
+pub async fn send_http_request_head<W>(writer: &mut W, head: &HttpRequestHead) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    send_message(writer, MessageType::HttpRequestHead, head).await
+}
+
+pub async fn recv_http_request_head<R>(reader: &mut R) -> Result<HttpRequestHead>
+where
+    R: AsyncReadExt + Unpin,
+{
+    recv_typed_message(reader, MessageType::HttpRequestHead).await
+}
+
+pub async fn send_http_response_head<W>(writer: &mut W, head: &HttpResponseHead) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    send_message(writer, MessageType::HttpResponseHead, head).await
+}
+
+pub async fn recv_http_response_head<R>(reader: &mut R) -> Result<HttpResponseHead>
+where
+    R: AsyncReadExt + Unpin,
+{
+    recv_typed_message(reader, MessageType::HttpResponseHead).await
+}
+
+pub async fn send_http_body<W, B>(writer: &mut W, body: B) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    B: hyper::body::Body + Send,
+    B::Data: Into<Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    futures_util::pin_mut!(body);
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| anyhow!("http body read failed: {}", e.into()))?;
+        if let Ok(data) = frame.into_data() {
+            send_raw_message(writer, MessageType::HttpBodyChunk, &data.into()).await?;
+        }
+    }
+    send_raw_message(writer, MessageType::HttpBodyEnd, &[]).await
+}
+
+pub fn recv_http_body<R>(
+    reader: R,
+) -> http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>
+where
+    R: AsyncReadExt + Unpin + Send + 'static,
+{
+    let stream = try_unfold(reader, |mut reader| async move {
+        let msg_type = recv_message_type(&mut reader)
+            .await
+            .map_err(std::io::Error::other)?;
+        match msg_type {
+            MessageType::HttpBodyChunk => {
+                let payload = recv_raw_message(&mut reader)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                Ok(Some((
+                    hyper::body::Frame::data(Bytes::from(payload)),
+                    reader,
+                )))
+            }
+            MessageType::HttpBodyEnd => {
+                let _ = recv_raw_message(&mut reader)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                Ok(None)
+            }
+            other => Err(std::io::Error::other(format!(
+                "unexpected body message type: {:?}",
+                other
+            ))),
+        }
+    });
+    StreamBody::new(stream).boxed_unsync()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,14 +387,13 @@ mod tests {
     fn test_routing_info_serialize() {
         let info = RoutingInfo {
             proxy_name: "web".to_string(),
-            src_addr: "192.168.1.1".to_string(),
-            src_port: 12345,
             protocol: Protocol::H1,
             host: Some("example.com".to_string()),
         };
         let encoded = bincode::serialize(&info).unwrap();
         let decoded: RoutingInfo = bincode::deserialize(&encoded).unwrap();
         assert_eq!(info.proxy_name, decoded.proxy_name);
+        assert_eq!(info.protocol, decoded.protocol);
         assert_eq!(info.host, decoded.host);
     }
     #[test]
@@ -192,18 +422,17 @@ mod tests {
         assert!(MessageType::from_u8(0x07).is_err());
     }
     #[test]
-    fn test_routing_info_host_none() {
+    fn test_routing_info_tcp() {
         let info = RoutingInfo {
             proxy_name: "tcp-proxy".to_string(),
-            src_addr: "10.0.0.1".to_string(),
-            src_port: 9000,
             protocol: Protocol::Tcp,
             host: None,
         };
         let encoded = bincode::serialize(&info).unwrap();
         let decoded: RoutingInfo = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(decoded.host, None);
+        assert_eq!(decoded.proxy_name, "tcp-proxy");
         assert_eq!(decoded.protocol, Protocol::Tcp);
+        assert_eq!(decoded.host, None);
     }
     #[tokio::test]
     async fn test_send_recv_login_full_frame() {
@@ -266,36 +495,30 @@ mod tests {
     async fn test_send_recv_routing_info_full_frame() {
         let info = RoutingInfo {
             proxy_name: "web".to_string(),
-            src_addr: "192.168.0.1".to_string(),
-            src_port: 54321,
             protocol: Protocol::H2,
-            host: Some("example.com".to_string()),
-        };
-        let (mut writer, mut reader) = tokio::io::duplex(1024);
-        send_routing_info(&mut writer, &info).await.unwrap();
-        drop(writer);
-        let decoded = recv_routing_info(&mut reader).await.unwrap();
-        assert_eq!(decoded.proxy_name, info.proxy_name);
-        assert_eq!(decoded.src_addr, info.src_addr);
-        assert_eq!(decoded.src_port, info.src_port);
-        assert_eq!(decoded.protocol, Protocol::H2);
-        assert_eq!(decoded.host, info.host);
-    }
-    #[tokio::test]
-    async fn test_send_recv_routing_info_no_host() {
-        let info = RoutingInfo {
-            proxy_name: "tcp-svc".to_string(),
-            src_addr: "::1".to_string(),
-            src_port: 22,
-            protocol: Protocol::Tcp,
             host: None,
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         send_routing_info(&mut writer, &info).await.unwrap();
         drop(writer);
         let decoded = recv_routing_info(&mut reader).await.unwrap();
-        assert_eq!(decoded.host, None);
+        assert_eq!(decoded.proxy_name, info.proxy_name);
+        assert_eq!(decoded.protocol, Protocol::H2);
+    }
+    #[tokio::test]
+    async fn test_send_recv_routing_info_tcp() {
+        let info = RoutingInfo {
+            proxy_name: "tcp-svc".to_string(),
+            protocol: Protocol::Tcp,
+            host: Some("target.example.com".to_string()),
+        };
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        send_routing_info(&mut writer, &info).await.unwrap();
+        drop(writer);
+        let decoded = recv_routing_info(&mut reader).await.unwrap();
+        assert_eq!(decoded.proxy_name, "tcp-svc");
         assert_eq!(decoded.protocol, Protocol::Tcp);
+        assert_eq!(decoded.host.as_deref(), Some("target.example.com"));
     }
     #[tokio::test]
     async fn test_recv_routing_info_wrong_type_returns_error() {
@@ -339,10 +562,8 @@ mod tests {
         };
         let info = RoutingInfo {
             proxy_name: "p".to_string(),
-            src_addr: "1.2.3.4".to_string(),
-            src_port: 80,
             protocol: Protocol::H1,
-            host: Some("foo.com".to_string()),
+            host: None,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::Login, &login)
@@ -356,6 +577,64 @@ mod tests {
         assert_eq!(decoded_login.token, "tok1");
         let decoded_info = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded_info.proxy_name, "p");
-        assert_eq!(decoded_info.host.as_deref(), Some("foo.com"));
+        assert_eq!(decoded_info.protocol, Protocol::H1);
+    }
+
+    #[tokio::test]
+    async fn test_send_recv_http_request_head_and_body() {
+        use http_body_util::Full;
+
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/ping?x=1")
+            .header("host", "api.example.com")
+            .header("content-type", "text/plain")
+            .body(Full::new(Bytes::from_static(b"hello world")))
+            .unwrap();
+        let (parts, body) = req.into_parts();
+        let head = HttpRequestHead::from_parts(
+            &parts,
+            Some("route-a".to_string()),
+            Some("backend.internal".to_string()),
+        );
+
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        send_http_request_head(&mut writer, &head).await.unwrap();
+        send_http_body(&mut writer, body).await.unwrap();
+        drop(writer);
+
+        let decoded_head = recv_http_request_head(&mut reader).await.unwrap();
+        assert_eq!(decoded_head.method, "POST");
+        assert_eq!(decoded_head.uri, "/v1/ping?x=1");
+        assert_eq!(decoded_head.route_key.as_deref(), Some("route-a"));
+        assert_eq!(decoded_head.target_host.as_deref(), Some("backend.internal"));
+
+        let body = recv_http_body(reader);
+        let collected = body.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.as_ref(), b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_send_recv_http_response_head_and_body() {
+        use http_body_util::Full;
+
+        let resp = http::Response::builder()
+            .status(201)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(br#"{"ok":true}"#)))
+            .unwrap();
+        let (parts, body) = resp.into_parts();
+        let head = HttpResponseHead::from_parts(&parts);
+
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        send_http_response_head(&mut writer, &head).await.unwrap();
+        send_http_body(&mut writer, body).await.unwrap();
+        drop(writer);
+
+        let decoded_head = recv_http_response_head(&mut reader).await.unwrap();
+        assert_eq!(decoded_head.status, 201);
+        let body = recv_http_body(reader);
+        let collected = body.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.as_ref(), br#"{"ok":true}"#);
     }
 }

@@ -1,3 +1,4 @@
+use crate::proxy::core::Protocol;
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
 use anyhow::Result;
@@ -24,6 +25,11 @@ impl HttpPeer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
+        let flow = crate::HttpFlow::new(
+            crate::FixedHttpFlowResolver::new(self.target_host.clone())
+                .with_route_key(self.target_host.clone())
+                .with_selected_endpoint(self.target_host.clone()),
+        );
         let mut driver = Http1Driver::new(
             send,
             recv,
@@ -57,6 +63,18 @@ impl HttpPeer {
                 *headers = req.headers;
             }
             let request = builder.body(req.body)?;
+            let resolved = match flow.resolve_target_for_request(0, &request, Protocol::H1).await? {
+                Some(resolved) => resolved,
+                None => unreachable!("fixed upstream resolver always resolves"),
+            };
+            let target_host = resolved
+                .context
+                .target_host
+                .clone()
+                .unwrap_or_else(|| self.target_host.clone());
+            let (mut parts, body) = request.into_parts();
+            crate::rewrite_request_upstream(&mut parts, &self.scheme, &target_host);
+            let request = Request::from_parts(parts, body);
             debug!(uri = % request.uri(), "H1 sending request to upstream");
             let response = match self.client.request(request).await {
                 Ok(resp) => resp,
@@ -67,6 +85,11 @@ impl HttpPeer {
                     break;
                 }
             };
+            let (mut parts, body) = response.into_parts();
+            if let Err(e) = flow.filter_response_parts(&resolved, &mut parts).await {
+                debug!(error = %e, "H1 response filter failed");
+            }
+            let response = http::Response::from_parts(parts, body);
             debug!(status = % response.status(), "H1 received response");
             if let Err(e) = driver.write_response(response).await {
                 debug!(error = % e, "H1 write_response error, closing");

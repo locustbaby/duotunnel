@@ -1,4 +1,5 @@
 use crate::egress::http::{H2cClient, HttpsClient};
+use crate::proxy::core::Protocol;
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use anyhow::Result;
 use bytes::Bytes;
@@ -21,29 +22,39 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let use_h2c = scheme == "http";
+    let flow = std::sync::Arc::new(crate::HttpFlow::new(
+        crate::FixedHttpFlowResolver::new(target_host.clone())
+            .with_route_key(target_host.clone())
+            .with_selected_endpoint(target_host.clone()),
+    ));
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let https_client = https_client.clone();
         let h2c_client = h2c_client.clone();
         let scheme = scheme.clone();
-        let target_host = target_host.clone();
+        let flow = flow.clone();
         async move {
+            let resolved = match flow.resolve_target_for_request(0, &req, Protocol::H2).await {
+                Ok(Some(resolved)) => resolved,
+                Ok(None) => unreachable!("fixed upstream resolver always resolves"),
+                Err(e) => {
+                    debug!(error = %e, "H2 forward: target resolution failed");
+                    return Ok(Response::builder()
+                        .status(502)
+                        .body(
+                            http_body_util::Full::new(Bytes::from("Bad Gateway"))
+                                .map_err(|_| unreachable!())
+                                .boxed_unsync(),
+                        )
+                        .unwrap());
+                }
+            };
+            let target_host = resolved
+                .context
+                .target_host
+                .clone()
+                .unwrap_or_default();
             let (mut parts, body) = req.into_parts();
-            let target_uri: hyper::Uri = format!(
-                "{}://{}{}",
-                scheme,
-                target_host,
-                parts
-                    .uri
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/")
-            )
-            .parse()
-            .unwrap();
-            parts.uri = target_uri;
-            if let Ok(hv) = target_host.parse() {
-                parts.headers.insert(hyper::header::HOST, hv);
-            }
+            crate::rewrite_request_upstream(&mut parts, &scheme, &target_host);
             debug!("H2 forward: {} {}", parts.method, parts.uri);
             let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
             let upstream_req = Request::from_parts(parts, boxed_body);
@@ -54,7 +65,10 @@ where
             };
             match result {
                 Ok(resp) => {
-                    let (parts, body) = resp.into_parts();
+                    let (mut parts, body) = resp.into_parts();
+                    if let Err(e) = flow.filter_response_parts(&resolved, &mut parts).await {
+                        debug!(error = %e, "H2 forward: response filter failed");
+                    }
                     let boxed = body.map_err(std::io::Error::other).boxed_unsync();
                     Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                 }

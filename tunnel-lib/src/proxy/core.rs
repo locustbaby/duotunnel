@@ -4,7 +4,7 @@ use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
     H1,
     H2,
@@ -12,28 +12,79 @@ pub enum Protocol {
     Tcp,
     Unknown,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowDirection {
+    Ingress,
+    Egress,
+}
+
 pub struct Context {
     pub client_addr: SocketAddr,
     pub protocol: Protocol,
+    pub direction: FlowDirection,
     pub initial_bytes: Option<bytes::Bytes>,
     pub routing_info: Option<RoutingInfo>,
+    pub route_key: Option<String>,
+    pub selected_endpoint: Option<String>,
+    pub target_host: Option<String>,
 }
+
+impl Context {
+    pub fn set_route_key(&mut self, value: impl Into<String>) {
+        self.route_key = Some(value.into());
+    }
+
+    pub fn set_selected_endpoint(&mut self, value: impl Into<String>) {
+        self.selected_endpoint = Some(value.into());
+    }
+
+    pub fn set_target_host(&mut self, value: impl Into<String>) {
+        self.target_host = Some(value.into());
+    }
+}
+
 pub trait UpstreamResolver: Send + Sync {
     fn upstream_peer(
         &self,
         context: &mut Context,
     ) -> impl std::future::Future<Output = Result<PeerKind>> + Send;
+
+    fn on_stream_start(
+        &self,
+        _ctx: &mut Context,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    fn on_stream_end(
+        &self,
+        _ctx: &Context,
+        _result: &Result<()>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
+
+    fn on_upstream_selected(
+        &self,
+        _ctx: &Context,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(Ok(()))
+    }
 }
-pub struct ProxyEngine<A: UpstreamResolver> {
+
+pub struct StreamFlow<A: UpstreamResolver> {
     app: A,
 }
+
+pub type ProxyEngine<A> = StreamFlow<A>;
 
 static STREAM_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 fn stream_peek_pool() -> &'static PeekBufPool {
     STREAM_PEEK_POOL.get_or_init(|| PeekBufPool::new(4096))
 }
 
-impl<A: UpstreamResolver> ProxyEngine<A> {
+impl<A: UpstreamResolver> StreamFlow<A> {
     pub fn new(app: A) -> Self {
         Self { app }
     }
@@ -42,6 +93,7 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         send: quinn::SendStream,
         mut recv: quinn::RecvStream,
         client_addr: SocketAddr,
+        direction: FlowDirection,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
         let pool = stream_peek_pool();
@@ -61,12 +113,20 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         let mut ctx = Context {
             client_addr,
             protocol,
+            direction,
             initial_bytes: if n > 0 { Some(initial_bytes) } else { None },
             routing_info,
+            route_key: None,
+            selected_endpoint: None,
+            target_host: None,
         };
+        self.app.on_stream_start(&mut ctx).await?;
         let peer = self.app.upstream_peer(&mut ctx).await?;
-        peer.connect(send, recv, ctx.initial_bytes).await?;
-        Ok(())
+        self.app.on_upstream_selected(&ctx).await?;
+        let initial_bytes = ctx.initial_bytes.take();
+        let result = peer.connect(send, recv, initial_bytes).await;
+        self.app.on_stream_end(&ctx, &result).await;
+        result
     }
 }
 
