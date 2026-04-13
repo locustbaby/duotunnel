@@ -23,27 +23,57 @@ use crate::config::{
     TunnelManagement, UpstreamDef, VhostRule,
 };
 use crate::local_auth::CacheEntry;
+use crate::service::BackgroundService;
 use crate::{build_routing_snapshot, ServerState};
+use tokio_util::sync::CancellationToken;
 
-/// Spawn the control client watch loop as a background task.
-pub fn spawn_control_client(ctld_addr: SocketAddr, state: Arc<ServerState>) {
-    crate::spawn_task(async move {
-        let mut backoff = Duration::from_secs(1);
-        let mut last_version: u64 = 0;
-        loop {
-            match connect_and_watch(ctld_addr, &state, last_version).await {
-                Ok(version) => {
-                    last_version = version;
-                    backoff = Duration::from_secs(1);
-                }
-                Err(e) => {
-                    error!(error = %e, addr = %ctld_addr, "ctld watch connection failed");
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+pub struct ControlClientService {
+    pub ctld_addr: SocketAddr,
+}
+
+impl BackgroundService for ControlClientService {
+    fn name(&self) -> &'static str {
+        "control-client"
+    }
+
+    fn run(
+        self: Box<Self>,
+        state: Arc<ServerState>,
+        shutdown: CancellationToken,
+        _proxy_handle: tokio::runtime::Handle,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+        Box::pin(async move {
+            watch_loop(self.ctld_addr, state, shutdown).await;
+            Ok(())
+        })
+    }
+}
+
+
+async fn watch_loop(ctld_addr: SocketAddr, state: Arc<ServerState>, shutdown: CancellationToken) {
+    let mut backoff = Duration::from_secs(1);
+    let mut last_version: u64 = 0;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            result = connect_and_watch(ctld_addr, &state, last_version) => {
+                match result {
+                    Ok(version) => {
+                        last_version = version;
+                        backoff = Duration::from_secs(1);
+                    }
+                    Err(e) => {
+                        error!(error = %e, addr = %ctld_addr, "ctld watch connection failed");
+                        tokio::select! {
+                            _ = shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
                 }
             }
         }
-    });
+    }
 }
 
 async fn connect_and_watch(

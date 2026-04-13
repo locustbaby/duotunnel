@@ -14,6 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 mod config;
 mod control_client;
@@ -25,6 +26,7 @@ mod local_auth;
 mod metrics;
 mod null_stores;
 mod registry;
+mod service;
 mod tunnel_handler;
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
@@ -39,6 +41,7 @@ use tunnel_store::{AuthStore, RuleStore};
 static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
     std::sync::OnceLock::new();
 
+// proxy-rt–local spawn helper: used only inside proxy_main (multi-thread runtime).
 pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -148,11 +151,7 @@ async fn async_main() -> Result<()> {
     }
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    tunnel_lib::apply_worker_threads(&mut builder);
-    builder.enable_all();
-    let runtime = builder.build()?;
-    runtime.block_on(fut)
+    tunnel_lib::build_proxy_runtime().block_on(fut)
 }
 #[cfg(feature = "dial9-telemetry")]
 fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
@@ -256,8 +255,6 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
 }
 async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
-    // In standalone mode the routing sections are used at runtime, so validate them.
-    // In ctld-managed mode the routing sections are ignored by the server, so skip.
     if ctld_addr.is_none() {
         config::validate_server_config(&config)?;
     }
@@ -266,6 +263,75 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     info!("Starting DuoTunnel Server");
     info!(tunnel_port = %config.server.tunnel_port, "Configuration loaded");
     tunnel_lib::init_cert_cache(&config.server.pki);
+
+    // Install Prometheus recorder before any runtime starts so no metrics are lost.
+    {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+        let handle = PrometheusBuilder::new()
+            .install_recorder()
+            .expect("failed to install prometheus recorder");
+        crate::metrics::set_handle(handle);
+    }
+
+    let proxy_handle = tokio::runtime::Handle::current();
+    let shutdown = CancellationToken::new();
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // ── metrics thread ──────────────────────────────────────────────────────────
+    let metrics_thread = if let Some(metrics_port) = config.server.metrics_port {
+        let ready2 = ready.clone();
+        let shutdown2 = shutdown.clone();
+        Some(std::thread::spawn(move || {
+            let rt = tunnel_lib::build_single_thread_runtime("metrics-worker");
+            rt.block_on(async move {
+                if let Err(e) =
+                    handlers::metrics::run_metrics_server(metrics_port, ready2, shutdown2).await
+                {
+                    error!(port = %metrics_port, error = %e, "Metrics server failed");
+                }
+            });
+        }))
+    } else {
+        None
+    };
+
+    // ── background thread ───────────────────────────────────────────────────────
+    let config_path_bg = config_path.to_string();
+    let ctld_addr_bg = ctld_addr.map(|s| s.to_string());
+    let shutdown_bg = shutdown.clone();
+    let proxy_handle_bg = proxy_handle.clone();
+    let background_thread = {
+        let state = build_server_state(&config, config_path, ctld_addr).await?;
+        let state_bg = state.clone();
+        let t = std::thread::spawn(move || {
+            let rt = tunnel_lib::build_single_thread_runtime("bg-worker");
+            rt.block_on(background_main(
+                state_bg,
+                config_path_bg,
+                ctld_addr_bg.as_deref(),
+                shutdown_bg,
+                proxy_handle_bg,
+            ));
+        });
+        (state, t)
+    };
+    let (state, background_thread) = background_thread;
+
+    let result = proxy_main(state, shutdown, ready).await;
+
+    background_thread.join().ok();
+    if let Some(t) = metrics_thread {
+        t.join().ok();
+    }
+
+    result
+}
+
+async fn build_server_state(
+    config: &ServerConfigFile,
+    config_path: &str,
+    ctld_addr: Option<&str>,
+) -> Result<Arc<ServerState>> {
     #[allow(clippy::type_complexity)]
     let (auth_store, rule_store, config_source, local_token_cache): (
         Arc<dyn AuthStore>,
@@ -273,7 +339,6 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         Arc<dyn ConfigSource>,
         Option<Arc<local_auth::LocalTokenCache>>,
     ) = if ctld_addr.is_some() {
-        // ctld-managed mode: no local SQLite; all config comes from ctld watch stream.
         info!("running in ctld-managed mode; no local SQLite stores");
         let token_cache = Arc::new(local_auth::LocalTokenCache::new());
         let auth: Arc<dyn AuthStore> = token_cache.clone();
@@ -288,15 +353,13 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         info!(url = %config.server.database_url, "auth and rule stores initialized (shared pool)");
         match rule_store.is_routing_empty().await {
             Ok(true) => {
-                if let Err(e) = config::sync_file_to_db(&config, rule_store.as_ref()).await {
+                if let Err(e) = config::sync_file_to_db(config, rule_store.as_ref()).await {
                     tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
                 } else {
                     info!("routing rules seeded into DB from config file (first boot)");
                 }
             }
-            Ok(false) => {
-                info!("routing DB already populated, skipping YAML seed");
-            }
+            Ok(false) => info!("routing DB already populated, skipping YAML seed"),
             Err(e) => {
                 tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
             }
@@ -304,12 +367,13 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         let cs = build_config_source(config_path, rule_store.clone());
         (auth_store, rule_store, cs, None)
     };
+
     let http_params = HttpClientParams::from(&config.server.http_pool);
     let (tm, egress) = config_source.load().await?;
     let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
     let proxy_buffer_params = tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers);
-    let state = Arc::new(ServerState {
+    Ok(Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
@@ -324,39 +388,66 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
         revocation_tx,
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
-    });
+    }))
+}
+
+async fn proxy_main(
+    state: Arc<ServerState>,
+    shutdown: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     info!(
-        max_quic_connections = %config.server.max_connections,
-        max_tcp_connections = %config.server.max_tcp_connections,
+        max_quic_connections = %state.config.server.max_connections,
+        max_tcp_connections = %state.config.server.max_tcp_connections,
         "Connection limits configured"
     );
 
-    if let Some(addr_str) = ctld_addr {
-        let addr: std::net::SocketAddr = addr_str.parse()?;
-        info!(addr = %addr, "starting ctld watch client");
-        control_client::spawn_control_client(addr, state.clone());
-    } else {
-        hot_reload::spawn_config_watcher(config_path.to_string(), state.clone());
+    // Sync initial listeners before QUIC starts.
+    {
+        let routing = state.routing.load();
+        let listeners: Vec<_> = routing.tunnel_management.server_ingress_routing.listeners.to_vec();
+        sync_listeners(&state, &listeners);
     }
 
-    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if let Some(metrics_port) = config.server.metrics_port {
-        let ready2 = ready.clone();
-        crate::spawn_task(async move {
-            if let Err(e) = handlers::metrics::run_metrics_server(metrics_port, ready2).await {
-                error!(port = %metrics_port, error = %e, "Metrics server failed");
-            }
-        });
-    }
     let quic_state = state.clone();
     let quic_handle =
         crate::spawn_task(async move { handlers::quic::run_quic_server(quic_state, ready).await });
-    {
-        let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
-        sync_listeners(&state, &listeners);
+
+    tokio::select! {
+        r = quic_handle => { r??; }
+        _ = shutdown.cancelled() => {}
     }
-    quic_handle.await??;
     Ok(())
+}
+
+async fn background_main(
+    state: Arc<ServerState>,
+    config_path: String,
+    ctld_addr: Option<&str>,
+    shutdown: CancellationToken,
+    proxy_handle: tokio::runtime::Handle,
+) {
+    use service::BackgroundService;
+
+    let svc: Box<dyn BackgroundService> = if let Some(addr_str) = ctld_addr {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                info!(addr = %addr, "starting ctld watch client");
+                Box::new(control_client::ControlClientService { ctld_addr: addr })
+            }
+            Err(e) => {
+                error!(error = %e, "invalid ctld_addr");
+                return;
+            }
+        }
+    } else {
+        Box::new(hot_reload::HotReloadService { config_path })
+    };
+
+    let name = svc.name();
+    if let Err(e) = svc.run(state, shutdown, proxy_handle).await {
+        error!(service = name, error = %e, "background service exited with error");
+    }
 }
 pub fn build_routing_snapshot(
     tm: &TunnelManagement,

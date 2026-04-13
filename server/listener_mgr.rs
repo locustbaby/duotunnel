@@ -131,7 +131,14 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
         spawns
     }; // lock released here
 
-    // 3. Spawn tasks outside the lock.
+    // 3. Spawn N accept loops per listener outside the lock.
+    let accept_workers = state
+        .config
+        .server
+        .accept_workers
+        .unwrap_or(4)
+        .max(1);
+
     for desc in to_spawn {
         let SpawnDesc {
             port,
@@ -141,42 +148,69 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             tcp_group,
             tcp_proxy,
         } = desc;
+
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = match tunnel_lib::build_reuseport_listener(addr.parse().unwrap()) {
+            Ok(l) => Arc::new(l),
+            Err(e) => {
+                error!(port = %port, error = %e, "failed to bind listener");
+                continue;
+            }
+        };
+
         match mode {
             IngressMode::Http(_) => {
-                let s = state.clone();
-                crate::spawn_task(async move {
-                    if let Err(e) =
-                        crate::handlers::http::run_http_listener(s.clone(), port, cancel).await
-                    {
-                        error!(port = %port, error = %e, "HTTP listener failed");
-                    }
-                    let mut map = s.listeners.map.lock();
-                    if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&port);
-                    }
-                });
+                for i in 0..accept_workers {
+                    let s = state.clone();
+                    let listener = listener.clone();
+                    let cancel = cancel.clone();
+                    let is_last = i == accept_workers - 1;
+                    tokio::task::spawn(async move {
+                        if let Err(e) =
+                            crate::handlers::http::run_http_accept_loop(listener, s.clone(), port, cancel).await
+                        {
+                            error!(port = %port, error = %e, "HTTP accept loop failed");
+                        }
+                        if is_last {
+                            let mut map = s.listeners.map.lock();
+                            if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
+                                map.remove(&port);
+                            }
+                        }
+                    });
+                }
             }
             IngressMode::Tcp(_) => {
-                let s = state.clone();
                 let group_id = tcp_group.unwrap_or_default();
                 let proxy_name = tcp_proxy.unwrap_or_default();
-                crate::spawn_task(async move {
-                    if let Err(e) = crate::handlers::tcp::run_tcp_listener(
-                        s.clone(),
-                        port,
-                        proxy_name,
-                        group_id,
-                        cancel,
-                    )
-                    .await
-                    {
-                        error!(port = %port, error = %e, "TCP listener failed");
-                    }
-                    let mut map = s.listeners.map.lock();
-                    if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&port);
-                    }
-                });
+                for i in 0..accept_workers {
+                    let s = state.clone();
+                    let listener = listener.clone();
+                    let cancel = cancel.clone();
+                    let proxy_name = proxy_name.clone();
+                    let group_id = group_id.clone();
+                    let is_last = i == accept_workers - 1;
+                    tokio::task::spawn(async move {
+                        if let Err(e) = crate::handlers::tcp::run_tcp_accept_loop(
+                            listener,
+                            s.clone(),
+                            port,
+                            proxy_name,
+                            group_id,
+                            cancel,
+                        )
+                        .await
+                        {
+                            error!(port = %port, error = %e, "TCP accept loop failed");
+                        }
+                        if is_last {
+                            let mut map = s.listeners.map.lock();
+                            if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
+                                map.remove(&port);
+                            }
+                        }
+                    });
+                }
             }
         }
     }

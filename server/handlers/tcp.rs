@@ -2,22 +2,21 @@ use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy;
-pub async fn run_tcp_listener(
+
+pub async fn run_tcp_accept_loop(
+    listener: Arc<TcpListener>,
     state: Arc<ServerState>,
-    port: u16,
+    _port: u16,
     proxy_name: String,
     group_id: String,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
-    info!(
-        addr = % addr, proxy = % proxy_name, group = % group_id, "TCP listener started"
-    );
+    let addr = listener.local_addr()?;
+    info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
     loop {
         let (stream, peer_addr) = tokio::select! {
             _ = cancel.cancelled() => {
@@ -39,7 +38,7 @@ pub async fn run_tcp_listener(
         let state = state.clone();
         let proxy_name = proxy_name.clone();
         let group_id = group_id.clone();
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;

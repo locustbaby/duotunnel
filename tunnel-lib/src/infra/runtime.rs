@@ -7,3 +7,20 @@ pub fn apply_worker_threads(builder: &mut tokio::runtime::Builder) {
         }
     }
 }
+
+pub fn build_proxy_runtime() -> tokio::runtime::Runtime {
+    let mut b = tokio::runtime::Builder::new_multi_thread();
+    apply_worker_threads(&mut b);
+    b.enable_all()
+        .thread_name("proxy-worker")
+        .build()
+        .expect("proxy runtime")
+}
+
+pub fn build_single_thread_runtime(name: &str) -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .thread_name(name)
+        .build()
+        .expect("single thread runtime")
+}
