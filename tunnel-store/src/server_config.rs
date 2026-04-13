@@ -63,6 +63,8 @@ pub struct ServerBasicConfig {
     pub open_stream_timeout_ms: u64,
     #[serde(default = "default_h2_single_authority")]
     pub h2_single_authority: bool,
+    #[serde(default)]
+    pub accept_workers: Option<usize>,
 }
 
 fn default_max_connections() -> usize {

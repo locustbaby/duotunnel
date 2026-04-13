@@ -2,20 +2,21 @@ use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
 use tunnel_lib::RouteTarget;
-pub async fn run_http_listener(
+
+pub async fn run_http_accept_loop(
+    listener: Arc<TcpListener>,
     state: Arc<ServerState>,
     port: u16,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
-    info!(addr = %addr, "http listener started");
+    let addr = listener.local_addr()?;
+    info!(addr = %addr, "http accept loop started");
     loop {
         let (stream, peer_addr) = tokio::select! {
             _ = cancel.cancelled() => {
@@ -35,7 +36,7 @@ pub async fn run_http_listener(
             }
         };
         let state = state.clone();
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_http_connection(state, stream, port).await;
