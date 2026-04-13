@@ -1,132 +1,3 @@
-⏺ 现在全貌已清楚，做完整对比分析。                                                                                                                                                        
-                                                                                                                                                                                          
-  ---                                                                                                                                                                                     
-  DuoTunnel Proxy 抽象 vs Pingora 对比                                                                                                                                                    
-                                                                                                                                                                                          
-  整体结构对比                                                                                                                                                                            
-                                                                                                                                                                                          
-  Pingora：                                                                                                                                                                               
-  ProxyHttp trait (用户实现)                                                                                                                                                              
-      upstream_peer()          → 返回 Peer (含地址、TLS配置、连接池key)                                                                                                                   
-      request_filter()         → 过滤/修改请求 hook                                                                                                                                       
-      response_filter()        → 过滤/修改响应 hook                                                                                                                                       
-      upstream_peer_filter()   → 决定是否去upstream hook                                                                                                                                  
-      ...8个以上 hook                                                                                                                                                                     
-                                                                                                                                                                                          
-  HttpProxy (框架实现)                                                                                                                                                                    
-      process_request()        → 固定流程骨架                                                                                                                                             
-          ↓ request_filter hook                                                                                                                                                           
-          ↓ proxy_cache hook                                                                                                                                                              
-          ↓ proxy_to_upstream()
-              get_http_session()  → 连接池取/建连                                                                                                                                         
-              send_request        → 发给 upstream                                
-              read_response       → 读响应                                                                                                                                                
-              release_session()   → 归还连接池                                                                                                                                            
-          ↓ response_filter hook                                                                                                                                                          
-                                                                                                                                                                                          
-  DuoTunnel：                                                                                                                                                                             
-  UpstreamResolver trait (用户实现)
-      upstream_peer()          → 返回 PeerKind                                                                                                                                            
-                                                                                 
-  ProxyEngine (框架实现)                                                                                                                                                                  
-      run_stream()             → 固定流程骨架
-          peek 初始字节                                                                                                                                                                   
-          detect_protocol()                                                                                                                                                               
-          ↓ upstream_peer()                                                                                                                                                               
-          peer.connect()       → 连接+relay全部在此                                                                                                                                       
-                                                                                                                                                                                          
-  PeerKind (enum dispatch)                                                                                                                                                                
-      Tcp  → TcpPeer::connect_inner()   → raw relay
-      Http → HttpPeer::connect_inner()  → Http1Driver loop → hyper client                                                                                                                 
-      H2   → H2Peer::connect_inner()    → serve_h2_forward                                                                                                                                
-      Dyn  → UpstreamPeer::connect_boxed()                                                                                                                                                
-                                                                                                                                                                                          
-  ---                                                                                                                                                                                     
-  具体差距分析                                                                   
-                                                                                                                                                                                          
-  1. Hook 体系：Pingora 有，DuoTunnel 无                                         
-                                                                                                                                                                                          
-  Pingora 的 ProxyHttp trait 有 8+ 个 hook，覆盖请求生命周期每个阶段：                                                                                                                    
-  early_request_filter → request_filter → upstream_peer_filter                                                                                                                            
-  → upstream_request_filter → response_filter → upstream_response_filter                                                                                                                  
-  → logging                                                                                                                                                                               
-           
-  DuoTunnel 的 UpstreamResolver 只有一个 upstream_peer()，连接建立前后完全不可扩展。想加 header 注入、访问日志、重试逻辑，只能改 PeerKind::connect_inner 内部，侵入性强。                 
-                                                                                                                                                                                          
-  2. 错误重试：Pingora 有，DuoTunnel 无
-                                                                                                                                                                                          
-  Pingora 在 proxy_to_upstream 里有显式重试循环，upstream_peer() 可以被多次调用（每次失败换一个 backend）。DuoTunnel 选完 peer 就直接 connect，失败即报错，无重试。                       
-  
-  3. connect_inner 签名：消费 self，不可重用                                                                                                                                              
-                                                                                 
-  // DuoTunnel — self 被消费                                                                                                                                                              
-  pub async fn connect_inner(                                                    
-      self,              // ← move，用完即丢
-      send: SendStream,                                                                                                                                                                   
-      recv: RecvStream,
-      initial_data: Option<Bytes>,                                                                                                                                                        
-  ) -> Result<()>                                                                
-
-  // Pingora — &self，可重用，连接池持有引用                                                                                                                                              
-  pub async fn proxy_to_upstream(&self, session, ctx) -> Result<bool>
-                                                                                                                                                                                          
-  DuoTunnel 的 TcpPeer/HttpPeer 每次都是新建，持有的 hyper client 虽然是 clone（引用计数），但 peer 结构体本身不能复用，也不能放进池里。                                                  
-                                                                                                                                                                                          
-  4. H2 路径游离于 PeerKind 之外（已在 CODE_REVIEW 里记录）                                                                                                                               
-                                                                                 
-  proxy.rs:handle_work_stream 里对 H2 有特殊 if 分支，绕过了 ProxyEngine，导致同一功能两套路径。Pingora 没有这个问题，H1/H2 都走同一个 proxy_to_upstream 骨架，只是内部 session 类型不同。
-                                                                                 
-  5. ProtocolDriver trait 有但未被充分使用                                                                                                                                                
-                                                                                 
-  // 定义了但只有 h1 实现，h2 没走这条路                                                                                                                                                  
-  pub trait ProtocolDriver {                                                                                                                                                              
-      async fn read_request(&mut self) -> Result<Option<ProxyRequest>>;                                                                                                                   
-      async fn write_response(&mut self, response: http::Response<Incoming>) -> Result<()>;                                                                                               
-  }                                                                                                                                                                                       
-                                                                                                                                                                                          
-  Pingora 的 HttpSession 是统一抽象，H1/H2 都实现同一套接口，上层 proxy 逻辑完全不感知协议版本。DuoTunnel 的 ProtocolDriver 本来可以做到这一点，但 H2 绕过了它。                          
-                                                                                                                                                                                          
-  6. UpstreamGroup 过于简单                                                                                                                                                               
-                                                                                 
-  // DuoTunnel — 只有 round-robin
-  pub struct UpstreamGroup {                                                                                                                                                              
-      servers: Vec<String>,
-      counter: AtomicUsize,                                                                                                                                                               
-  }                                                                                                                                                                                       
-  
-  Pingora 的 LoadBalancer 支持 RoundRobin / Weighted / ConsistentHash，health check 独立运行，后端动态更新。DuoTunnel 的 UpstreamGroup 无 health check，无权重，无一致性哈希。（对于      
-  tunnel 场景影响不大，因为 server 侧选的是 client QUIC 连接而非 HTTP backend，ClientGroup::select_healthy 更重要）
-                                                                                                                                                                                          
-  ---                                                                            
-  总结：哪里值得改
-                  
-  ┌────────────────────────────────┬─────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────┐
-  │              问题              │                  影响                   │                                           建议                                            │                
-  ├────────────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 无 hook 体系，逻辑不可扩展     │ 中：加功能要改 core                     │ 在 UpstreamResolver 之外加 pre_connect/post_connect hook，或允许 PeerKind 包装 middleware │                
-  ├────────────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
-  │ H2 绕过 ProxyEngine            │ 中：两套路径，维护负担                  │ 让 serve_h2_forward 也走 PeerKind::H2，proxy.rs 删掉特殊分支                              │                
-  ├────────────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤                
-  │ connect_inner 消费 self        │ 低：peer 重建成本很低                   │ 可以改为 &self，但收益不大                                                                │                
-  ├────────────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤                
-  │ ProtocolDriver trait 未用于 H2 │ 低：当前 H2 路径够用                    │ 若未来统一骨架再补                                                                        │
-  ├────────────────────────────────┼─────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤                
-  │ UpstreamGroup 无 health check  │ 低：tunnel 场景 egress backend 通常固定 │ 按需加，不急                                                                              │
-  └────────────────────────────────┴─────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────┘                
-                                                                                 
-  最值得做的是H2 路径统一进 ProxyEngine，消除两套调用路径；其次是在 run_stream 骨架里加 pre/post hook 点，让可观测性（日志、metrics）能在骨架层注入而非散落在各 peer 实现里。 
-
-
-
-  ~/.claude/plans/hazy-mapping-milner-ultraplan.md
-
-
-
-
-
-  ====
-
-  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  DuoTunnel 架构改造：Runtime 分层 + Proxy 抽象对齐      
 
  Context
@@ -391,3 +262,273 @@
  3. accept_workers 配置：加到 ServerConfig 里，字段名 accept_workers: Option<usize>，None 时默认 4。
  4. H2 统一的前提：ProxyEngine::run_stream 需要能在 detect_protocol 阶段之前或之后获知 Protocol::H2，确认 Context.protocol 已在 handle_work_stream 调用前被正确设置（来自 RoutingInfo
  解析）。
+
+
+
+ ===
+
+ 
+  # DuoTunnel 双向代理重设计方案（校正后的版本）
+
+  ## Summary
+
+  上一版方案方向对，但表达上不够准确：DuoTunnel 不是单向 HTTP proxy，而是两条对称但职责不同的链路同时存在。
+
+  实际必须按两条业务流设计：
+
+  - Ingress：外部 -> server -> select client -> client -> target
+  - Egress：本地应用 -> client -> server -> target
+
+  因此不能简单照搬 Pingora 的“单边 HTTP pipeline”思维，也不能只拆成两个大块就结束。正确方案应是：
+
+  1. 共享基础层：TransportDemux、StreamFlow、HttpFlow、RuleEngine、EndpointSelector、UpstreamConnector
+  2. 角色适配层：
+      - ServerIngressGateway
+      - ClientIngressExecutor
+      - ClientEgressGateway
+      - ServerEgressExecutor
+
+  这样既能双端对齐，又不会把 ingress 和 egress 的责任错误混在一起。
+
+  ## Corrected Architecture
+
+  ### 1. 共享基础层
+
+  这些层是双端共用的，不带“server/client”业务语义。
+
+  - TransportDemux
+      - 识别 TLS / H1 / H2 / WS / TCP / opaque TLS
+      - 提供 ConnectionContext
+      - 决定进入 HttpFlow 或 StreamFlow
+      - 不做路由，不做 upstream 选择
+  - StreamFlow
+      - 用于 TCP / WS / opaque relay
+      - 输入是连接或 QUIC stream
+      - 进行一次选路、一次建连、全程 relay
+      - 只提供 stream 级 hooks
+  - HttpFlow
+      - 用于 H1 / H2
+      - 输入是 request 或 H2 substream
+      - 负责 request filter、route resolve、upstream session 获取/释放、response filter、retry
+      - 提供 request 级 hooks
+  - RuleEngine
+      - 纯数据驱动，不直接承担 IO
+      - 根据规则集和上下文产出 route decision
+      - 规则不是 hook，本质上是 hook 中调用的数据引擎
+  - EndpointSelector
+      - 把 route decision 映射成实际 endpoint
+      - Ingress 场景：选 client group / client connection
+      - Egress 场景：选 upstream group / upstream server
+  - UpstreamConnector
+      - StreamConnector：建立 raw stream / tcp / ws relay
+      - HttpConnector：获取/释放 H1/H2 upstream session
+
+  ### 2. 四个角色适配层
+
+  不要只定义“client/server”，要定义“gateway/executor”。
+
+  - ServerIngressGateway
+      - 面向外部连接
+      - 负责 listener accept、TLS terminate、HTTP/stream demux
+      - 根据 ingress rules 决定发给哪个 client group
+      - 对 HTTP：
+          - request 级路由在这里完成
+          - 向 client 发出 request 或 stream
+      - 对 TCP/WS：
+          - 走 StreamFlow
+  - ClientIngressExecutor
+      - 接收 server 发来的 ingress work stream / request
+      - 根据 client local upstream config 连接本地 target
+      - HTTP 走 HttpFlow
+      - TCP/WS 走 StreamFlow
+  - ClientEgressGateway
+      - 面向本地应用 entry listener
+      - 做本地协议识别与最小 request/stream 上下文提取
+      - 发往 server
+      - HTTP 走 HttpFlow
+      - TCP/WS 走 StreamFlow
+  - ServerEgressExecutor
+      - 接收 client 发来的 egress request / stream
+      - 根据 egress rules 选择外部 upstream
+      - HTTP 走 HttpFlow
+      - TCP/WS 走 StreamFlow
+
+  ## Rules and Hook Design
+
+  ### 1. Rules 不应直接建模为 hook type
+
+  这点需要明确。
+
+  hook 是执行时机。
+  rule 是数据和匹配逻辑。
+
+  正确关系应为：
+
+  - hook 决定“何时介入”
+  - RuleEngine 决定“根据什么规则得出什么路由决策”
+
+  所以规则最适合作为：
+
+  - request_filter / select_route / select_endpoint 阶段使用的数据输入
+  - 而不是把每条 rule 直接变成一个 hook 实例
+
+  ### 2. 建议的规则分层
+
+  当前已有规则天然分成两类：
+
+  - Ingress rules
+      - listener + host -> client_group + proxy_name
+      - 本质是“边缘入口路由规则”
+  - Egress rules
+      - host -> upstream_group
+      - 本质是“外部目标路由规则”
+
+  应重构成统一的中间表达：
+
+  - RouteRule
+      - match 条件：port / host / protocol / authority / listener mode
+      - action：logical route key
+  - EndpointPolicy
+      - logical route key -> endpoint group / backend group / client group
+  - SelectionPolicy
+      - round robin / weighted / least inflight / healthy only
+
+  默认映射：
+
+  - server ingress vhost/tcp rules -> RouteRule + EndpointPolicy
+  - server egress vhost rules -> RouteRule + EndpointPolicy
+  - client local upstream config -> EndpointPolicy
+
+  ### 3. Hook 最小集合
+
+  为了避免过早变成 Pingora 全量 clone，这次只定义必要 hooks。
+
+  #### Stream hooks
+
+  - on_stream_start
+  - on_route_selected
+  - on_endpoint_connected
+  - on_stream_end
+  - on_stream_error
+
+  #### HTTP hooks
+
+  - early_request_filter
+  - request_filter
+  - select_route
+  - select_endpoint
+  - connected_to_upstream
+  - upstream_request_filter
+  - response_filter
+  - fail_to_connect
+
+  规则引擎的调用点：
+
+  - ingress HTTP：select_route
+  - ingress TCP/WS：on_route_selected
+  - egress HTTP：select_route
+  - egress TCP/WS：on_route_selected
+
+  ## Metadata / Wire Design
+
+  ### 1. RoutingInfo 不能继续混合 request-level 字段
+
+  上一版判断是对的，这里确认保留。
+
+  新原则：
+
+  - RoutingInfo 仅保留 stream-level control metadata
+  - request-level metadata 不通过初始化控制帧传输
+
+  ### 2. 上下文拆分
+
+  引入三层上下文：
+
+  - ConnectionContext
+      - remote addr
+      - listener port
+      - tls info
+      - alpn / protocol hint
+  - StreamContext
+      - route key
+      - direction: ingress / egress
+      - tunnel metadata
+      - selected endpoint metadata
+  - RequestContext
+      - host / authority
+      - method
+      - forwarded source info
+      - retry state
+      - request-scoped annotations
+
+  ### 3. wire shape 默认策略
+
+  - L4/TCP/WS：
+      - 继续需要最小 RoutingInfo
+      - 用于跨端定位 logical route / direction
+  - HTTP：
+      - 不再依赖 RoutingInfo.host
+      - host/authority 从真实 request 读取
+      - src_addr/src_port 转成本地 Forwarded / X-Forwarded-For 注入语义
+      - 若 QUIC 对端确需来源信息，使用专门的 request metadata frame，而不是复用 stream init frame
+
+  ## Implementation Plan
+
+  ### Phase 1: 先立正确骨架
+
+  - 引入共享层类型：
+      - TransportDemux
+      - StreamFlow
+      - HttpFlow
+      - RuleEngine
+      - EndpointSelector
+  - 不先清空旧实现，先做 adapter 包住现有逻辑
+  - 目标是让 ingress/egress 两端都能映射到同一套共享层，而不是继续复制 handler 逻辑
+
+  ### Phase 2: 先做双向 HTTP 正路
+
+  - ServerIngressGateway -> ClientIngressExecutor
+  - ClientEgressGateway -> ServerEgressExecutor
+  - 这两条 HTTP 路径统一收敛到 HttpFlow
+  - 把 H1/H2 的 request lifecycle、header 注入、response filter、retry 放到一个位置
+
+  完成标准：
+
+  - H2 不再是旁路
+  - HTTP 行为不再散在 handler / peer / helper 中
+
+  ### Phase 3: 再统一 TCP / WS / opaque stream
+
+  - ingress TCP/WS 和 egress TCP/WS 统一收敛到 StreamFlow
+  - 保证 route select、endpoint connect、relay 生命周期统一
+
+  ### Phase 4: 规则引擎与协议语义收缩
+
+  - 将当前 ingress/egress rules 编译成统一 RouteRule 模型
+  - 精简 RoutingInfo
+
+
+  - ProxyEngine 退化为 StreamFlow compatibility layer 或删除
+  - PeerKind 退化为内部 adaptor 或删除
+  - 旧 ad-hoc H2 path 删除
+  - 旧 handler 中的业务路由决策移除，只保留 accept/demux
+
+  必须按双向场景测，不允许只测 ingress。
+
+  - Ingress HTTP
+      - 外部 H1 -> server -> client -> local backend
+      - 外部 H2 -> server -> client -> local backend
+      - host route、authority 改写、header 注入
+  - Ingress TCP/WS
+      - server 正确选 client
+      - client 正确连接 local target
+  - Egress TCP/WS
+      - client 正确发送 route metadata
+      - server 正确连到 target
+  - Metadata correctness
+      - request-level host 不依赖 RoutingInfo
+
+  ## Assumptions
+
+  - 本次以“先方案，后实施”为目标，不在当前大改基础上继续增量堆逻辑。
+  - 双向流量模型是第一约束，任何抽象都必须同时解释 ingress 和 egress。
