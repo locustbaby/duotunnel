@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
     ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
@@ -26,20 +27,34 @@ use crate::local_auth::CacheEntry;
 use crate::{build_routing_snapshot, ServerState};
 
 /// Spawn the control client watch loop as a background task.
-pub fn spawn_control_client(ctld_addr: SocketAddr, state: Arc<ServerState>) {
-    crate::spawn_task(async move {
+pub fn spawn_control_client(
+    ctld_addr: SocketAddr,
+    state: Arc<ServerState>,
+    proxy_handle: tokio::runtime::Handle,
+    accept_workers: usize,
+    shutdown: CancellationToken,
+) {
+    tokio::task::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         let mut last_version: u64 = 0;
         loop {
-            match connect_and_watch(ctld_addr, &state, last_version).await {
-                Ok(version) => {
-                    last_version = version;
-                    backoff = Duration::from_secs(1);
-                }
-                Err(e) => {
-                    error!(error = %e, addr = %ctld_addr, "ctld watch connection failed");
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                result = connect_and_watch(ctld_addr, &state, last_version, &proxy_handle, accept_workers, shutdown.clone()) => {
+                    match result {
+                        Ok(version) => {
+                            last_version = version;
+                            backoff = Duration::from_secs(1);
+                        }
+                        Err(e) => {
+                            error!(error = %e, addr = %ctld_addr, "ctld watch connection failed");
+                            tokio::select! {
+                                _ = shutdown.cancelled() => break,
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                        }
+                    }
                 }
             }
         }
@@ -50,9 +65,15 @@ async fn connect_and_watch(
     addr: SocketAddr,
     state: &Arc<ServerState>,
     last_version: u64,
+    proxy_handle: &tokio::runtime::Handle,
+    accept_workers: usize,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<u64> {
     info!(addr = %addr, "connecting to tunnel-ctld");
-    let stream = TcpStream::connect(addr).await?;
+    let stream = tokio::select! {
+        _ = shutdown.cancelled() => return Err(anyhow::anyhow!("shutdown")),
+        result = TcpStream::connect(addr) => result?,
+    };
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -67,22 +88,26 @@ async fn connect_and_watch(
     // Returns the last seen resource_version so the caller can reconnect with it.
     let mut last_seen: u64 = 0;
     let err = loop {
-        let event: WatchEvent =
-            match recv_typed_message(&mut reader, MessageType::ConfigPush).await {
-                Ok(e) => e,
-                Err(e) => break e,
-            };
+        let event: WatchEvent = tokio::select! {
+            _ = shutdown.cancelled() => return Ok(last_seen),
+            result = recv_typed_message(&mut reader, MessageType::ConfigPush) => {
+                match result {
+                    Ok(e) => e,
+                    Err(e) => break e,
+                }
+            }
+        };
         last_seen = match event {
             WatchEvent::Snapshot(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
-                apply_snapshot(snap, state);
+                apply_snapshot(snap, state, proxy_handle, accept_workers);
                 v
             }
             WatchEvent::Patch(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Patch from ctld");
-                apply_snapshot(snap, state);
+                apply_snapshot(snap, state, proxy_handle, accept_workers);
                 v
             }
         };
@@ -93,7 +118,12 @@ async fn connect_and_watch(
 }
 
 /// Apply a ConfigSnapshot to both the routing ArcSwap and the token cache.
-fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
+fn apply_snapshot(
+    snap: ConfigSnapshot,
+    state: &Arc<ServerState>,
+    proxy_handle: &tokio::runtime::Handle,
+    accept_workers: usize,
+) {
     // Update token cache
     if let Some(cache) = state.local_token_cache.as_ref() {
         let entries: Vec<CacheEntry> = snap
@@ -132,7 +162,7 @@ fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
     // started yet returns 503 (recoverable), while a route pointing to a port
     // with no listener silently drops the connection (unrecoverable from client POV).
     let listeners = tm.server_ingress_routing.listeners.clone();
-    crate::sync_listeners(state, &listeners);
+    crate::sync_listeners(state, &listeners, proxy_handle, accept_workers);
     state.routing.store(Arc::new(routing_snapshot));
 }
 
