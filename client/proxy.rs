@@ -3,7 +3,8 @@ use anyhow::Result;
 use http_body_util::BodyExt;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
-use tracing::{error, info};
+use std::time::Instant;
+use tracing::{error, info, warn};
 use tunnel_lib::proxy::core::{FlowDirection, StreamFlow};
 use tunnel_lib::proxy::core::Protocol;
 use tunnel_lib::proxy::tcp::UpstreamScheme;
@@ -41,7 +42,17 @@ async fn handle_h1_request_stream(
     routing_info: tunnel_lib::RoutingInfo,
     proxy_map: Arc<LocalProxyMap>,
 ) -> Result<()> {
-    let head = tunnel_lib::recv_http_request_head(&mut recv).await?;
+    let t0 = Instant::now();
+    let head = match tunnel_lib::recv_http_request_head(&mut recv).await {
+        Ok(h) => h,
+        Err(err) => {
+            warn!(proxy_name = %routing_info.proxy_name, error = %err, "client H1 recv_request_head failed");
+            return Err(err);
+        }
+    };
+    let method = head.method.clone();
+    let uri = head.uri.clone();
+    let t_head = t0.elapsed().as_millis();
     let upstream_addr = proxy_map
         .get_local_address(&routing_info.proxy_name)
         .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", routing_info.proxy_name))?;
@@ -70,8 +81,18 @@ async fn handle_h1_request_stream(
         &target_host,
     );
     let upstream_req = hyper::Request::from_parts(parts, body);
+    let t_upstream_start = t0.elapsed().as_millis();
     let response = match proxy_map.https_client.request(upstream_req).await {
         Ok(resp) => {
+            let t_upstream = t0.elapsed().as_millis();
+            tracing::trace!(
+                proxy_name = %routing_info.proxy_name,
+                method = %method,
+                uri = %uri,
+                head_ms = t_head,
+                upstream_ms = t_upstream - t_upstream_start,
+                "client H1 upstream ok"
+            );
             let (mut parts, body) = resp.into_parts();
             if let Err(err) = flow.filter_response_parts(&resolved, &mut parts).await {
                 error!(error = %err, "client H1 response filter error");
@@ -79,11 +100,22 @@ async fn handle_h1_request_stream(
             hyper::Response::from_parts(parts, body.map_err(std::io::Error::other).boxed_unsync())
         }
         Err(err) => {
-            error!(error = %err, "client H1 upstream request failed");
+            error!(proxy_name = %routing_info.proxy_name, method = %method, uri = %uri, elapsed_ms = %t0.elapsed().as_millis(), error = %err, "client H1 upstream request failed");
             http_error_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway")
         }
     };
-    write_http_response(&mut send, response).await
+    if let Err(err) = write_http_response(&mut send, response).await {
+        warn!(proxy_name = %routing_info.proxy_name, method = %method, uri = %uri, elapsed_ms = %t0.elapsed().as_millis(), error = %err, "client H1 write_response failed");
+        return Err(err);
+    }
+    tracing::trace!(
+        proxy_name = %routing_info.proxy_name,
+        method = %method,
+        uri = %uri,
+        total_ms = %t0.elapsed().as_millis(),
+        "client H1 stream done"
+    );
+    Ok(())
 }
 
 pub async fn handle_work_stream(

@@ -454,21 +454,37 @@ async fn forward_ingress_h1_request(
     }
     .await
     {
-        tracing::error!("H1 request forwarding failed: {}", err);
+        tracing::error!(
+            proxy_name = %routing_info.proxy_name,
+            conn_id = %resolved.endpoint.endpoint.conn_id,
+            elapsed_ms = %wait_started.elapsed().as_millis(),
+            error = %err,
+            "H1 request forwarding failed"
+        );
         return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
     }
 
     let response_head = match tunnel_lib::recv_http_response_head(&mut recv).await {
         Ok(head) => head,
         Err(err) => {
-            tracing::error!("H1 response head receive failed: {}", err);
+            tracing::error!(
+                proxy_name = %routing_info.proxy_name,
+                conn_id = %resolved.endpoint.endpoint.conn_id,
+                error = %err,
+                "H1 response head receive failed"
+            );
             return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
         }
     };
     let mut response_parts = match response_head.into_parts() {
         Ok(parts) => parts,
         Err(err) => {
-            tracing::error!("H1 response head decode failed: {}", err);
+            tracing::error!(
+                proxy_name = %routing_info.proxy_name,
+                conn_id = %resolved.endpoint.endpoint.conn_id,
+                error = %err,
+                "H1 response head decode failed"
+            );
             return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
         }
     };
