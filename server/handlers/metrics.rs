@@ -7,7 +7,9 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 pub async fn run_metrics_server(port: u16, ready: Arc<AtomicBool>) -> Result<()> {
-    metrics::init();
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    let handle = PrometheusBuilder::new().install_recorder().expect("failed to install prometheus recorder");
+    crate::metrics::set_handle(handle);
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
     info!(addr = %addr, "metrics server started");
