@@ -141,10 +141,15 @@ export const options = {
   thresholds: buildThresholds(ACTIVE_CASES),
 };
 
-function track(ok) {
+function track(ok, res) {
   const sn = exec.scenario.name;
   reqCounters[sn].add(1);
-  if (!ok) errCounters[sn].add(1);
+  if (!ok) {
+    errCounters[sn].add(1);
+    if (res) {
+      console.error(`[FAIL] scenario=${sn} status=${res.status} error_code=${res.error_code} error=${res.error}`);
+    }
+  }
 }
 
 export function ingressHttpGet() {
@@ -159,7 +164,7 @@ export function ingressHttpGet() {
     'ingress GET 200': (r) => r.status === 200,
     'ingress GET id echo': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 
@@ -180,7 +185,7 @@ export function ingressMultihost() {
     'ingress multihost host echo': (r) => r.body && r.body.includes(host),
     'ingress multihost id echo': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function egressMultihost() {
@@ -199,7 +204,7 @@ export function egressMultihost() {
     'egress multihost host echo': (r) => r.body && r.body.includes(host),
     'egress multihost id echo': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function ingressHttpPost() {
@@ -214,7 +219,7 @@ export function ingressHttpPost() {
     'ingress POST 200': (r) => r.status === 200,
     'ingress POST body': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function egressHttpGet() {
@@ -230,7 +235,7 @@ export function egressHttpGet() {
     'egress GET 200': (r) => r.status === 200,
     'egress GET id echo': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function egressHttpPost() {
@@ -250,7 +255,7 @@ export function egressHttpPost() {
     'egress POST 200': (r) => r.status === 200,
     'egress POST body': (r) => r.body && r.body.includes(id),
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function ingressPost1K() {
@@ -269,7 +274,7 @@ export function ingressPost1K() {
     'ingress 1K 200': (r) => r.status === 200,
     'ingress 1K size': (r) => r.body && r.body.length >= 1024,
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function ingressPost10K() {
@@ -288,7 +293,7 @@ export function ingressPost10K() {
     'ingress 10K 200': (r) => r.status === 200,
     'ingress 10K size': (r) => r.body && r.body.length >= 10240,
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function ingressPost100K() {
@@ -307,7 +312,7 @@ export function ingressPost100K() {
     'ingress 100K 200': (r) => r.status === 200,
     'ingress 100K size': (r) => r.body && r.body.length >= 102400,
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function egressPost10K() {
@@ -326,7 +331,7 @@ export function egressPost10K() {
     'egress 10K 200': (r) => r.status === 200,
     'egress 10K size': (r) => r.body && r.body.length >= 10240,
   });
-  track(ok);
+  track(ok, res);
 }
 
 export function wsIngress() {
