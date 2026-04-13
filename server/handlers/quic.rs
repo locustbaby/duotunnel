@@ -34,7 +34,7 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
                 continue;
             }
         };
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             let _permit = permit;
             metrics::quic_connection_opened();
             if let Err(e) = handle_quic_connection(state, incoming).await {
@@ -147,7 +147,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                     Ok((send, recv)) => {
                         debug!("accepted reverse stream from client");
                         let state = state.clone();
-                        crate::spawn_task(async move {
+                        tokio::task::spawn(async move {
                             let egress_map = state.routing.load().egress_map.clone();
                             if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
                                 debug!(error = %e, "egress stream error");

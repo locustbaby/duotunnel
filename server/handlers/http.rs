@@ -1,20 +1,23 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
+use tunnel_lib::RuleMatchContext;
 use tunnel_lib::RouteTarget;
 pub async fn run_http_listener(
     state: Arc<ServerState>,
+    listener: TcpListener,
     port: u16,
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
-    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
     info!(addr = %addr, "http listener started");
     loop {
         let (stream, peer_addr) = tokio::select! {
@@ -35,7 +38,7 @@ pub async fn run_http_listener(
             }
         };
         let state = state.clone();
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_http_connection(state, stream, port).await;
@@ -77,18 +80,20 @@ async fn handle_http_connection(
         if protocol == tunnel_lib::proxy::core::Protocol::H2 {
             pool.put(buf);
             handle_plaintext_h2_connection(state, stream, peer_addr, port).await
+        } else if protocol == tunnel_lib::proxy::core::Protocol::H1 {
+            pool.put(buf);
+            handle_plaintext_h1_request_connection(state, stream, peer_addr, port).await
         } else {
             let host = detected_host.or_else(|| extract_host_from_http(&buf[..n]));
             let initial_data: Vec<u8> = buf[..n].to_vec();
             pool.put(buf);
             let host =
                 host.ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
-            handle_plaintext_h1_connection(
+            handle_plaintext_stream_connection(
                 state,
                 stream,
                 host,
                 protocol,
-                peer_addr,
                 &initial_data,
                 port,
             )
@@ -100,9 +105,380 @@ fn lookup_route(state: &ServerState, port: u16, host: &str) -> Option<RouteTarge
     state
         .routing
         .load()
-        .http_routers
-        .get(&port)
-        .and_then(|router| router.get(host))
+        .ingress_rules
+        .resolve(&RuleMatchContext::new(Some(port), Some(host), None))
+}
+
+fn rewrite_request_for_target(
+    parts: &mut hyper::http::request::Parts,
+    target_host: &str,
+) {
+    tunnel_lib::rewrite_request_authority(parts, target_host);
+}
+
+type ResponseBody = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, std::io::Error>;
+
+#[derive(Clone)]
+struct H2UpstreamEndpoint {
+    conn_id: Arc<str>,
+    client_conn: quinn::Connection,
+    sender_cache: tunnel_lib::H2Sender,
+}
+
+#[derive(Clone)]
+struct H1UpstreamEndpoint {
+    conn_id: Arc<str>,
+    client_conn: quinn::Connection,
+}
+
+#[derive(Clone)]
+struct ServerIngressH2Resolver {
+    state: Arc<ServerState>,
+    forced_authority: Option<String>,
+    single_authority: bool,
+    first_authority: Arc<Mutex<Option<String>>>,
+    endpoints: Arc<Mutex<HashMap<RouteTarget, H2UpstreamEndpoint>>>,
+}
+
+impl ServerIngressH2Resolver {
+    fn new(
+        state: Arc<ServerState>,
+        forced_authority: Option<String>,
+        single_authority: bool,
+    ) -> Self {
+        Self {
+            state,
+            forced_authority,
+            single_authority,
+            first_authority: Arc::new(Mutex::new(None)),
+            endpoints: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn invalidate_route(&self, route: &RouteTarget) {
+        self.endpoints.lock().unwrap().remove(route);
+    }
+}
+
+#[derive(Clone)]
+struct ServerIngressH1Resolver {
+    state: Arc<ServerState>,
+}
+
+#[async_trait::async_trait]
+impl tunnel_lib::HttpFlowResolver for ServerIngressH1Resolver {
+    type Route = RouteTarget;
+    type Endpoint = H1UpstreamEndpoint;
+
+    fn select_route(
+        &self,
+        port: u16,
+        ctx: &tunnel_lib::HttpRequestContext,
+    ) -> Result<Option<tunnel_lib::RouteDecision<Self::Route>>> {
+        let route =
+            tunnel_lib::resolve_http_route(&self.state.routing.load().ingress_rules, port, ctx);
+        Ok(route.map(|route| tunnel_lib::RouteDecision {
+            route: route.clone(),
+            route_key: Some(route.proxy_name.to_string()),
+            target_host: ctx.authority.clone(),
+        }))
+    }
+
+    async fn select_endpoint(
+        &self,
+        _ctx: &tunnel_lib::HttpRequestContext,
+        route: &tunnel_lib::RouteDecision<Self::Route>,
+    ) -> Result<tunnel_lib::EndpointDecision<Self::Endpoint>> {
+        let selected = self
+            .state
+            .registry
+            .select_client_for_group(&route.route.group_id)
+            .ok_or_else(|| anyhow::anyhow!("no client for group: {}", route.route.group_id))?;
+        Ok(tunnel_lib::EndpointDecision {
+            selected_endpoint: Some(selected.conn_id.to_string()),
+            endpoint: H1UpstreamEndpoint {
+                conn_id: selected.conn_id,
+                client_conn: selected.conn,
+            },
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl tunnel_lib::HttpFlowResolver for ServerIngressH2Resolver {
+    type Route = RouteTarget;
+    type Endpoint = H2UpstreamEndpoint;
+
+    async fn request_filter(&self, ctx: &mut tunnel_lib::HttpRequestContext) -> Result<()> {
+        if let Some(authority) = self.forced_authority.as_deref() {
+            ctx.set_authority(authority.to_string());
+        }
+        if self.single_authority {
+            let Some(route_host) = ctx.route_host.clone() else {
+                return Ok(());
+            };
+            let mut first = self.first_authority.lock().unwrap();
+            match first.as_ref() {
+                None => *first = Some(route_host),
+                Some(pinned) if pinned != &route_host => {
+                    anyhow::bail!("misdirected request");
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn select_route(
+        &self,
+        port: u16,
+        ctx: &tunnel_lib::HttpRequestContext,
+    ) -> Result<Option<tunnel_lib::RouteDecision<Self::Route>>> {
+        let route = tunnel_lib::resolve_http_route(&self.state.routing.load().ingress_rules, port, ctx);
+        Ok(route.map(|route| tunnel_lib::RouteDecision {
+            route: route.clone(),
+            route_key: Some(route.proxy_name.to_string()),
+            target_host: ctx.authority.clone(),
+        }))
+    }
+
+    async fn select_endpoint(
+        &self,
+        _ctx: &tunnel_lib::HttpRequestContext,
+        route: &tunnel_lib::RouteDecision<Self::Route>,
+    ) -> Result<tunnel_lib::EndpointDecision<Self::Endpoint>> {
+        if let Some(endpoint) = self.endpoints.lock().unwrap().get(&route.route).cloned() {
+            if endpoint.client_conn.close_reason().is_none() {
+                return Ok(tunnel_lib::EndpointDecision {
+                    selected_endpoint: Some(endpoint.conn_id.to_string()),
+                    endpoint,
+                });
+            }
+            self.endpoints.lock().unwrap().remove(&route.route);
+        }
+        let selected = self
+            .state
+            .registry
+            .select_client_for_group(&route.route.group_id)
+            .ok_or_else(|| anyhow::anyhow!("no client for group: {}", route.route.group_id))?;
+        let endpoint = H2UpstreamEndpoint {
+            conn_id: selected.conn_id.clone(),
+            client_conn: selected.conn,
+            sender_cache: tunnel_lib::new_h2_sender(),
+        };
+        self.endpoints
+            .lock()
+            .unwrap()
+            .insert(route.route.clone(), endpoint.clone());
+        Ok(tunnel_lib::EndpointDecision {
+            selected_endpoint: Some(endpoint.conn_id.to_string()),
+            endpoint,
+        })
+    }
+}
+
+fn text_response(status: hyper::StatusCode, body: &'static str) -> hyper::Response<ResponseBody> {
+    use http_body_util::{BodyExt, Full};
+    hyper::Response::builder()
+        .status(status)
+        .body(
+            Full::new(bytes::Bytes::from(body))
+                .map_err(|_| unreachable!())
+                .boxed_unsync(),
+        )
+        .unwrap()
+}
+
+async fn forward_ingress_h2_request(
+    flow: &tunnel_lib::HttpFlow<ServerIngressH2Resolver>,
+    port: u16,
+    req: hyper::Request<hyper::body::Incoming>,
+    src_addr: &str,
+) -> std::result::Result<hyper::Response<ResponseBody>, hyper::Error> {
+    use http_body_util::BodyExt;
+    let authority = tunnel_lib::authority_from_request(&req);
+    let resolved = match flow
+        .resolve_target_for_request(port, &req, tunnel_lib::proxy::core::Protocol::H2)
+        .await
+    {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => {
+            return Ok(if authority.is_none() && flow.resolver().forced_authority.is_none() {
+                text_response(hyper::StatusCode::BAD_REQUEST, "Missing authority")
+            } else {
+                text_response(hyper::StatusCode::NOT_FOUND, "No route")
+            });
+        }
+        Err(err) if err.to_string().contains("misdirected request") => {
+            return Ok(text_response(
+                hyper::StatusCode::MISDIRECTED_REQUEST,
+                "Misdirected Request",
+            ));
+        }
+        Err(err) => {
+            tracing::error!("L7 target resolution error: {}", err);
+            return Ok(text_response(
+                hyper::StatusCode::BAD_GATEWAY,
+                "No client available",
+            ));
+        }
+    };
+
+    let target_host = resolved
+        .context
+        .target_host
+        .clone()
+        .or_else(|| resolved.context.authority.clone())
+        .unwrap_or_default();
+    let (mut parts, body) = req.into_parts();
+    rewrite_request_for_target(&mut parts, &target_host);
+    if let Ok(v) = src_addr.parse::<hyper::header::HeaderValue>() {
+        parts.headers.append("x-forwarded-for", v.clone());
+        parts.headers.insert("x-real-ip", v);
+    }
+    debug!(
+        "L7 Proxy: rewriting authority to {}, forwarding {} {}",
+        target_host, parts.method, parts.uri
+    );
+    let routing_info = tunnel_lib::RoutingInfo {
+        proxy_name: resolved.route.route.proxy_name.to_string(),
+        protocol: tunnel_lib::proxy::core::Protocol::H2,
+        host: None,
+    };
+    let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+    let upstream_req = hyper::Request::from_parts(parts, boxed_body);
+    match tunnel_lib::forward_h2_request(
+        &resolved.endpoint.endpoint.client_conn,
+        &resolved.endpoint.endpoint.sender_cache,
+        routing_info,
+        upstream_req,
+    )
+    .await
+    {
+        Ok(resp) => {
+            let (mut parts, body) = resp.into_parts();
+            if let Err(err) = flow.filter_response_parts(&resolved, &mut parts).await {
+                tracing::error!("L7 response filter error: {}", err);
+            }
+            Ok(hyper::Response::from_parts(parts, body))
+        }
+        Err(err) => {
+            tracing::error!("L7 Proxy upstream error: {}", err);
+            flow.resolver().invalidate_route(&resolved.route.route);
+            Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"))
+        }
+    }
+}
+
+async fn forward_ingress_h1_request(
+    state: &Arc<ServerState>,
+    flow: &tunnel_lib::HttpFlow<ServerIngressH1Resolver>,
+    port: u16,
+    req: hyper::Request<hyper::body::Incoming>,
+    src_addr: &str,
+) -> std::result::Result<hyper::Response<ResponseBody>, hyper::Error> {
+    let authority = tunnel_lib::authority_from_request(&req);
+    let resolved = match flow
+        .resolve_target_for_request(port, &req, tunnel_lib::proxy::core::Protocol::H1)
+        .await
+    {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => {
+            return Ok(if authority.is_none() {
+                text_response(hyper::StatusCode::BAD_REQUEST, "Missing authority")
+            } else {
+                text_response(hyper::StatusCode::NOT_FOUND, "No route")
+            });
+        }
+        Err(err) => {
+            tracing::error!("L7 H1 target resolution error: {}", err);
+            return Ok(text_response(
+                hyper::StatusCode::BAD_GATEWAY,
+                "No client available",
+            ));
+        }
+    };
+
+    let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
+    let _open_bi_guard = metrics::open_bi_begin(&resolved.endpoint.endpoint.conn_id);
+    let wait_started = Instant::now();
+    let (mut send, mut recv) = match tokio::time::timeout(
+        open_timeout,
+        resolved.endpoint.endpoint.client_conn.open_bi(),
+    )
+    .await
+    {
+        Ok(Ok(streams)) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            streams
+        }
+        Ok(Err(err)) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            tracing::error!("H1 open_bi failed: {}", err);
+            return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
+        }
+        Err(_) => {
+            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
+            metrics::open_bi_timeout();
+            return Ok(text_response(hyper::StatusCode::GATEWAY_TIMEOUT, "Gateway Timeout"));
+        }
+    };
+
+    let (mut parts, body) = req.into_parts();
+    let target_host = resolved
+        .context
+        .target_host
+        .clone()
+        .or_else(|| resolved.context.authority.clone());
+    if let Ok(v) = src_addr.parse::<hyper::header::HeaderValue>() {
+        parts.headers.append("x-forwarded-for", v.clone());
+        parts.headers.insert("x-real-ip", v);
+    }
+    let routing_info = tunnel_lib::RoutingInfo {
+        proxy_name: resolved.route.route.proxy_name.to_string(),
+        protocol: tunnel_lib::proxy::core::Protocol::H1,
+        host: None,
+    };
+    let request_head = tunnel_lib::HttpRequestHead::from_parts(
+        &parts,
+        resolved.context.route_key.clone(),
+        target_host,
+    );
+
+    if let Err(err) = async {
+        tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
+        tunnel_lib::send_http_request_head(&mut send, &request_head).await?;
+        tunnel_lib::send_http_body(&mut send, body).await?;
+        send.finish()?;
+        Result::<()>::Ok(())
+    }
+    .await
+    {
+        tracing::error!("H1 request forwarding failed: {}", err);
+        return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
+    }
+
+    let response_head = match tunnel_lib::recv_http_response_head(&mut recv).await {
+        Ok(head) => head,
+        Err(err) => {
+            tracing::error!("H1 response head receive failed: {}", err);
+            return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
+        }
+    };
+    let mut response_parts = match response_head.into_parts() {
+        Ok(parts) => parts,
+        Err(err) => {
+            tracing::error!("H1 response head decode failed: {}", err);
+            return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
+        }
+    };
+    if let Err(err) = flow.filter_response_parts(&resolved, &mut response_parts).await {
+        tracing::error!("H1 response filter error: {}", err);
+    }
+    Ok(hyper::Response::from_parts(
+        response_parts,
+        tunnel_lib::recv_http_body(recv),
+    ))
 }
 async fn handle_tls_connection(
     state: Arc<ServerState>,
@@ -111,78 +487,50 @@ async fn handle_tls_connection(
     peer_addr: std::net::SocketAddr,
     port: u16,
 ) -> Result<()> {
-    use http_body_util::{BodyExt, Full};
+    use hyper::server::conn::http1::Builder as H1Builder;
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
-    use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
     debug!(host = %host, "TLS connection detected, terminating");
-    let route = lookup_route(&state, port, &host)
-        .ok_or_else(|| anyhow::anyhow!("no route for host: {}", host))?;
-    let (group_id, proxy_name) = (route.group_id, route.proxy_name);
     let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)?;
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let tls_stream = acceptor.accept(stream).await?;
-    info!("TLS terminated, serving H2 with authority rewriting");
-    let target_host = host.clone();
+    let is_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
     let src_addr = peer_addr.ip().to_string();
-    let src_port = peer_addr.port();
-    let selected = state
-        .registry
-        .select_client_for_group(&group_id)
-        .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-    let client_conn = selected.conn;
-    let sender_cache = tunnel_lib::new_h2_sender();
-    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let client_conn = client_conn.clone();
-        let sender_cache = sender_cache.clone();
-        let proxy_name = proxy_name.clone();
-        let target_host = target_host.clone();
-        let src_addr = src_addr.clone();
-        async move {
-            let (mut parts, body) = req.into_parts();
-            let mut uri_parts = parts.uri.clone().into_parts();
-            if let Ok(authority) = target_host.parse() {
-                uri_parts.authority = Some(authority);
-            }
-            parts.uri = hyper::Uri::from_parts(uri_parts).unwrap_or(parts.uri);
-            if let Ok(host_value) = target_host.parse() {
-                parts.headers.insert(hyper::header::HOST, host_value);
-            }
-            debug!(
-                "L7 Proxy: rewriting authority to {}, forwarding {} {}",
-                target_host, parts.method, parts.uri
-            );
-            let routing_info = tunnel_lib::RoutingInfo {
-                proxy_name: proxy_name.to_string(),
-                src_addr,
-                src_port,
-                protocol: tunnel_lib::proxy::core::Protocol::H2,
-                host: Some(target_host),
-            };
-            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
-            let upstream_req = Request::from_parts(parts, boxed_body);
-            match tunnel_lib::forward_h2_request(&client_conn, &sender_cache, routing_info, upstream_req).await {
-                Ok(resp) => Ok::<_, hyper::Error>(resp),
-                Err(e) => {
-                    tracing::error!("L7 Proxy upstream error: {}", e);
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(
-                            Full::new(bytes::Bytes::from("Bad Gateway"))
-                                .map_err(|_| unreachable!())
-                                .boxed_unsync(),
-                        )
-                        .unwrap())
-                }
-            }
-        }
-    });
-    let io = TokioIo::new(tls_stream);
-    H2Builder::new(hyper_util::rt::TokioExecutor::new())
-        .serve_connection(io, service)
-        .await
-        .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;
+    if is_h2 {
+        info!("TLS terminated, serving H2 with authority rewriting");
+        let flow = Arc::new(tunnel_lib::HttpFlow::new(ServerIngressH2Resolver::new(
+            state.clone(),
+            Some(host),
+            false,
+        )));
+        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let flow = flow.clone();
+            let src_addr = src_addr.clone();
+            async move { forward_ingress_h2_request(&flow, port, req, &src_addr).await }
+        });
+        let io = TokioIo::new(tls_stream);
+        H2Builder::new(hyper_util::rt::TokioExecutor::new())
+            .serve_connection(io, service)
+            .await
+            .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;
+    } else {
+        info!("TLS terminated, serving H1 with authority rewriting");
+        let flow = Arc::new(tunnel_lib::HttpFlow::new(ServerIngressH1Resolver {
+            state: state.clone(),
+        }));
+        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let flow = flow.clone();
+            let state = state.clone();
+            let src_addr = src_addr.clone();
+            async move { forward_ingress_h1_request(&state, &flow, port, req, &src_addr).await }
+        });
+        H1Builder::new()
+            .keep_alive(true)
+            .serve_connection(TokioIo::new(tls_stream), service)
+            .await
+            .map_err(|e| anyhow::anyhow!("H1 TLS connection error: {}", e))?;
+    }
     Ok(())
 }
 async fn handle_plaintext_h2_connection(
@@ -191,142 +539,21 @@ async fn handle_plaintext_h2_connection(
     peer_addr: std::net::SocketAddr,
     port: u16,
 ) -> Result<()> {
-    use http_body_util::{BodyExt, Full};
     use hyper::server::conn::http2::Builder as H2Builder;
     use hyper::service::service_fn;
-    use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
     debug!("plaintext H2 detected, using L7 proxy");
     let src_addr = peer_addr.ip().to_string();
-    let src_port = peer_addr.port();
     let h2_single_authority = state.config.server.h2_single_authority;
-    let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let sender_cache: Arc<Mutex<HashMap<RouteTarget, (quinn::Connection, tunnel_lib::H2Sender)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let state = state.clone();
-        let first_authority = first_authority.clone();
-        let route_cache = route_cache.clone();
-        let sender_cache = sender_cache.clone();
+    let flow = Arc::new(tunnel_lib::HttpFlow::new(ServerIngressH2Resolver::new(
+        state,
+        None,
+        h2_single_authority,
+    )));
+    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let flow = flow.clone();
         let src_addr = src_addr.clone();
-        async move {
-            let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
-                req.headers()
-                    .get(hyper::header::HOST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(|s| s.to_string())
-            });
-            let host = match authority {
-                Some(h) => h,
-                None => {
-                    return Ok(Response::builder()
-                        .status(400)
-                        .body(
-                            Full::new(bytes::Bytes::from("Missing authority"))
-                                .map_err(|_| unreachable!())
-                                .boxed_unsync(),
-                        )
-                        .unwrap());
-                }
-            };
-            let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
-            if h2_single_authority {
-                let mut fa = first_authority.lock().unwrap();
-                match fa.as_ref() {
-                    None => *fa = Some(route_host.clone()),
-                    Some(pinned) if pinned != &route_host => {
-                        return Ok(Response::builder()
-                            .status(421)
-                            .body(
-                                Full::new(bytes::Bytes::from("Misdirected Request"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap());
-                    }
-                    Some(_) => {}
-                }
-            }
-            let route = {
-                let mut cache = route_cache.lock().unwrap();
-                cache
-                    .entry(route_host.clone())
-                    .or_insert_with(|| lookup_route(&state, port, &route_host))
-                    .clone()
-            };
-            let route = match route {
-                Some(r) => r,
-                None => {
-                    return Ok::<_, hyper::Error>(
-                        Response::builder()
-                            .status(404)
-                            .body(
-                                Full::new(bytes::Bytes::from("No route"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap(),
-                    );
-                }
-            };
-            let (group_id, proxy_name) = (route.group_id.clone(), route.proxy_name.clone());
-            let (client_conn, h2_sender) = {
-                let mut guard = sender_cache.lock().unwrap();
-                if !guard.contains_key(&route) {
-                    if let Some(selected) =
-                        state.registry.select_client_for_group(&group_id)
-                    {
-                        guard.insert(route.clone(), (selected.conn, tunnel_lib::new_h2_sender()));
-                    }
-                }
-                match guard.get(&route) {
-                    Some(pair) => (pair.0.clone(), pair.1.clone()),
-                    None => {
-                        return Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                Full::new(bytes::Bytes::from("No client available"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
-                            )
-                            .unwrap());
-                    }
-                }
-            };
-            let (parts, body) = req.into_parts();
-            debug!(
-                "L7 Proxy (plaintext H2): {} {} -> {}",
-                parts.method, parts.uri, host
-            );
-            let routing_info = tunnel_lib::RoutingInfo {
-                proxy_name: proxy_name.to_string(),
-                src_addr,
-                src_port,
-                protocol: tunnel_lib::proxy::core::Protocol::H2,
-                host: Some(host),
-            };
-            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
-            let upstream_req = Request::from_parts(parts, boxed_body);
-            match tunnel_lib::forward_h2_request(&client_conn, &h2_sender, routing_info, upstream_req).await {
-                Ok(resp) => Ok::<_, hyper::Error>(resp),
-                Err(e) => {
-                    tracing::error!("L7 Proxy upstream error: {}", e);
-                    sender_cache.lock().unwrap().remove(&route);
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(
-                            Full::new(bytes::Bytes::from("Bad Gateway"))
-                                .map_err(|_| unreachable!())
-                                .boxed_unsync(),
-                        )
-                        .unwrap())
-                }
-            }
-        }
+        async move { forward_ingress_h2_request(&flow, port, req, &src_addr).await }
     });
     let io = TokioIo::new(stream);
     H2Builder::new(hyper_util::rt::TokioExecutor::new())
@@ -335,12 +562,39 @@ async fn handle_plaintext_h2_connection(
         .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;
     Ok(())
 }
-async fn handle_plaintext_h1_connection(
+async fn handle_plaintext_h1_request_connection(
+    state: Arc<ServerState>,
+    stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    port: u16,
+) -> Result<()> {
+    use hyper::server::conn::http1::Builder as H1Builder;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    let src_addr = peer_addr.ip().to_string();
+    let flow = Arc::new(tunnel_lib::HttpFlow::new(ServerIngressH1Resolver {
+        state: state.clone(),
+    }));
+    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let flow = flow.clone();
+        let state = state.clone();
+        let src_addr = src_addr.clone();
+        async move { forward_ingress_h1_request(&state, &flow, port, req, &src_addr).await }
+    });
+    H1Builder::new()
+        .keep_alive(true)
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+        .map_err(|e| anyhow::anyhow!("H1 connection error: {}", e))?;
+    Ok(())
+}
+
+async fn handle_plaintext_stream_connection(
     state: Arc<ServerState>,
     mut stream: TcpStream,
     host: String,
     protocol: tunnel_lib::proxy::core::Protocol,
-    peer_addr: std::net::SocketAddr,
     initial_data: &[u8],
     port: u16,
 ) -> Result<()> {
@@ -357,10 +611,8 @@ async fn handle_plaintext_h1_connection(
     stream.read_exact(&mut discard).await?;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name: proxy_name.to_string(),
-        src_addr: peer_addr.ip().to_string(),
-        src_port: peer_addr.port(),
         protocol,
-        host: Some(host),
+        host: None,
     };
     let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
     let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{UpstreamResolver, ProxyEngine};
+use tracing::{debug, info};
+use tunnel_lib::proxy::core::{FlowDirection, StreamFlow, UpstreamResolver};
 use tunnel_lib::recv_routing_info;
 
 pub async fn handle_tunnel_stream<A: UpstreamResolver>(
@@ -10,18 +10,11 @@ pub async fn handle_tunnel_stream<A: UpstreamResolver>(
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
     info!(
-        target_host = ?routing_info.host, protocol = ?routing_info.protocol,
+        protocol = ?routing_info.protocol,
         "handling egress request from client"
     );
-    let client_addr = match format!("{}:{}", routing_info.src_addr, routing_info.src_port).parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            warn!(src_addr = %routing_info.src_addr, src_port = routing_info.src_port, error = %e, "failed to parse client addr");
-            return Err(anyhow::anyhow!("invalid client addr: {}", e));
-        }
-    };
-    ProxyEngine::new(app)
-        .run_stream(send, recv, client_addr, Some(routing_info))
+    StreamFlow::new(app)
+        .run_stream(send, recv, "0.0.0.0:0".parse().unwrap(), FlowDirection::Egress, Some(routing_info))
         .await?;
     debug!("egress stream completed");
     Ok(())

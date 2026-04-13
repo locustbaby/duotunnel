@@ -2,19 +2,19 @@ use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::proxy;
 pub async fn run_tcp_listener(
     state: Arc<ServerState>,
+    listener: TcpListener,
     port: u16,
     proxy_name: String,
     group_id: String,
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
-    let listener = tunnel_lib::build_reuseport_listener(addr.parse()?)?;
     info!(
         addr = % addr, proxy = % proxy_name, group = % group_id, "TCP listener started"
     );
@@ -39,7 +39,7 @@ pub async fn run_tcp_listener(
         let state = state.clone();
         let proxy_name = proxy_name.clone();
         let group_id = group_id.clone();
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
@@ -60,7 +60,7 @@ async fn handle_tcp_connection(
     group_id: String,
 ) -> Result<()> {
     use tunnel_lib::detect_protocol_and_host;
-    let peer_addr = stream.peer_addr()?;
+    let _peer_addr = stream.peer_addr()?;
     let pool = &state.peek_buf_pool;
     let mut buf = pool.take();
     let n = stream.peek(&mut buf).await?;
@@ -73,8 +73,6 @@ async fn handle_tcp_connection(
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name,
-        src_addr: peer_addr.ip().to_string(),
-        src_port: peer_addr.port(),
         protocol,
         host,
     };
