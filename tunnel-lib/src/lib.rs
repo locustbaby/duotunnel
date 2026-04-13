@@ -20,8 +20,9 @@ pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::apply_worker_threads;
 pub use models::msg::{
-    recv_message, recv_message_type, recv_routing_info, send_message, send_routing_info,
-    ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig, UpstreamServer,
+    recv_message, recv_message_type, recv_routing_info, recv_typed_message, send_message,
+    send_routing_info, ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig,
+    UpstreamServer,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::rewrite::Rewriter;

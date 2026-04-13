@@ -117,6 +117,17 @@ where
     reader.read_exact(&mut buf).await?;
     Ok(bincode::deserialize(&buf)?)
 }
+pub async fn recv_typed_message<R, M>(reader: &mut R, expected: MessageType) -> Result<M>
+where
+    R: AsyncReadExt + Unpin,
+    M: for<'de> Deserialize<'de>,
+{
+    let msg_type = recv_message_type(reader).await?;
+    if msg_type != expected {
+        return Err(anyhow!("expected {:?}, got {:?}", expected, msg_type));
+    }
+    recv_message(reader).await
+}
 pub async fn send_routing_info<W>(writer: &mut W, info: &RoutingInfo) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
@@ -127,11 +138,7 @@ pub async fn recv_routing_info<R>(reader: &mut R) -> Result<RoutingInfo>
 where
     R: AsyncReadExt + Unpin,
 {
-    let msg_type = recv_message_type(reader).await?;
-    if msg_type != MessageType::RoutingInfo {
-        return Err(anyhow!("Expected RoutingInfo, got {:?}", msg_type));
-    }
-    recv_message(reader).await
+    recv_typed_message(reader, MessageType::RoutingInfo).await
 }
 #[cfg(test)]
 mod tests {

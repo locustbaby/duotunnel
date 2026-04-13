@@ -15,7 +15,7 @@ use tunnel_lib::ctld_proto::{
     ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
     ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
 };
-use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
+use tunnel_lib::models::msg::{recv_typed_message, send_message, MessageType};
 
 use crate::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -67,17 +67,11 @@ async fn connect_and_watch(
     // Returns the last seen resource_version so the caller can reconnect with it.
     let mut last_seen: u64 = 0;
     let err = loop {
-        let msg_type = match recv_message_type(&mut reader).await {
-            Ok(t) => t,
-            Err(e) => break e,
-        };
-        if msg_type != MessageType::ConfigPush {
-            break anyhow::anyhow!("expected ConfigPush, got {:?}", msg_type);
-        }
-        let event: WatchEvent = match recv_message(&mut reader).await {
-            Ok(e) => e,
-            Err(e) => break e,
-        };
+        let event: WatchEvent =
+            match recv_typed_message(&mut reader, MessageType::ConfigPush).await {
+                Ok(e) => e,
+                Err(e) => break e,
+            };
         last_seen = match event {
             WatchEvent::Snapshot(snap) => {
                 let v = snap.resource_version;
