@@ -8,46 +8,117 @@
 
 ## 零、 核心业务流转与领域抽象缺陷
 
-要准确评价代码质量，必须首先建立对业务功能的全局理解。DuoTunnel 是一个高性能的双向代理隧道，其请求流转有两条核心主线：
-1. **Ingress (反向代理)**: 外部请求 → Server Ingress 监听器 (根据 Host 或 Port 路由) → 建立/复用 QUIC Stream → 写入 `RoutingInfo` 传递寻址要求 → Client 接收 Stream (反序列化路由信息) → 转发给 Local Backend。
-2. **Egress (正向代理)**: 本地服务/应用 → Client Egress 监听器 → 建立 QUIC Stream → Server → 请求公共网络服务。
+### 请求流转全景（代码实际路径）
 
-业务本质是一条连接 L7（HTTP/WS）和 L4（TCP）的纯 L4 QUIC 数据通道。由于涉及多层协议的降级与还原，两端对“元数据（Metadata）”的精确传递与分层隔离尤为关键。
+**Ingress（反向代理）**：外部 TCP 连接 → Server peek+协议检测 → `forward_with_initial_data`（raw TCP↔QUIC relay，server 侧无 HTTP 解析）→ QUIC Stream → Client `Http1Driver` keep-alive 循环 → `hyper_util::Client`（内置连接池，backend 连接**有复用**）→ backend。
+
+**Egress（正向代理）**：本地 app TCP → Client entry listener → `relay_quic_to_tcp`（raw relay，client 侧无 HTTP 解析）→ QUIC Stream → Server `ServerEgressMap::upstream_peer` → `HttpPeer`（hyper 连接池，**有复用**）或 `TcpPeer`（每次 `TcpStream::connect()` 新建，**无复用**）→ 外部服务。
+
+**连接复用总结**：
+
+| 路径段 | 实现 | 是否复用 |
+|---|---|---|
+| Ingress: client → backend | `hyper_util::Client` | ✅ |
+| Egress: server → HTTP 目标 | `hyper_util::Client` | ✅ |
+| Egress: server → TCP 目标 | `TcpPeer::connect_inner` | ❌ 每次新建 |
+
+`TcpPeer` 无连接池，每个请求都经历完整三次握手。纯 L4 TCP 目标（非 HTTP）在高 QPS 下是显著性能缺口。
+
+### `RoutingInfo` 字段语义分析
+
+```rust
+pub struct RoutingInfo {
+    pub proxy_name: String,
+    pub protocol: Protocol,
+    pub src_addr: String,
+    pub src_port: u16,
+    pub host: Option<String>,
+}
+```
+
+实际字段流转：
+
+| 字段 | 方向 | 实际消费方 | 结论 |
+|---|---|---|---|
+| `proxy_name` | Ingress | `client/app.rs:141` `get_local_address(&routing.proxy_name)` | 有效，用于 client 查找本地 upstream |
+| `proxy_name: “entry”` | Egress | 无，server 根本不读 proxy_name | **死字段**，硬编码常量跨 QUIC 传输后被丢弃 |
+| `host` | Egress | `server/egress.rs:74` `routing.host` | 有效，egress 路由依据 |
+| `host` | Ingress | 仅 log | 对路由无影响 |
+| `src_addr` / `src_port` | 两方向 | `tunnel_handler.rs:16` 解析进 `Context.client_addr`，但无任何 `UpstreamResolver` 读取该字段 | **死字段**，跨 QUIC 传输后从未被消费 |
+
+`src_addr`/`src_port` 序列化、传输、解析，三步全做，但 `Context.client_addr` 在所有 `UpstreamResolver` 实现中均未被读取。这是完全无效的网络传输开销。
 
 ### 缺陷案例剖析：`RoutingInfo` 与 H2 多路复用阻碍 (参照 TODO-56)
 
 由于项目早期在领域语义（Domain Semantics）上缺乏严格的分界，导致代码的抽象极度阻碍了高级网络特性的实现。最核心的反面教材是消息模型中的 `RoutingInfo`：
 
-```rust
-pub struct RoutingInfo {
-    pub proxy_name: String,   // 连接级：决定去找个哪个后端机器
-    pub protocol: String,     // 流级：决定后端将用什么协议解析载荷
-    pub src_addr: String,     // 请求级：真实客户端IP
-    pub src_port: u16,        // 请求级：真实客户端Port
-    pub host: Option<String>, // 请求级：请求携带的真实Host
-}
-```
+- **语义错位**：结构体强行把**连接级语义**（`proxy_name`/`protocol`，Stream 建立时确定，整条 QUIC Stream 生命周期内不变）与**请求级语义**（`src_addr`/`src_port`/`host`，每个 HTTP 请求独有）混杂在一起。且在 `open_bi()` 之后立刻作为初始化帧一次性发送。
+- **架构阻塞**：当实施 H2 多路复用（TODO-56，一条 QUIC Stream 承载成千上万并发 HTTP 请求）时，这一设计轰然倒塌。H2 复用后每个 Request 有自己的 `src_addr` 和 `host`，但 `RoutingInfo` 已在建连时发出，后续请求无法携带独立的来源语义，要么退变为”一请求一 Stream”（完全放弃 H2 复用优势）。
 
-- **语义错位**：上述结构体强行把 **流/路由级语义**（Tunnel 应该发给哪个 proxy_name）与 **请求级语义**（每个访客独有的 IP 与 Host）混杂在了一起。且代码在 QUIC Stream 刚建立（`open_bi()` 之后）立刻作为初始化帧一次性发送。
-- **架构阻塞**：当我们尝试实施并发优化（例如 TODO-56 提到的 H2 多路复用，通过一条 QUIC Stream 承载成千上万个并发 HTTP 请求）时，这一设计轰然倒塌。因为 H2 复用之后，每个 Request 都有自己的 `src_addr` 和 `host`。如果我们把 `RoutingInfo` 强绑定在 Stream 建连阶段发送，后续的几十万个请求将完全无法携带属于自己的来源语义，要么就只能退变成“一个请求建一条 QUIC Stream”（这完全放弃了 H2 的复用优势）。
-
-**架构重构的唯一出路**：必须把领域对象解耦。`RoutingInfo` 只应保留 `proxy_name` / `protocol` 这种长期不变的“连接标示”。而属于单次请求的 `src_addr` 和 `host` 必须被剥离出隧道控制面协议，转译成 L7 的 `X-Forwarded-For`、`X-Real-IP` 等 Header，交由 H2/H1 proxy 层在具体请求的帧内部传递。
-
-**结论**：这个案例深刻表明：**代码语义如果没能正确反映业务层级（Session vs Stream vs Request），会在引入高阶抽象时造成降维打击。**
+**架构重构出路**：`RoutingInfo` 只保留 `proxy_name`/`protocol` 等连接级字段；`src_addr`/`host` 剥离出隧道控制面协议，转译为 `X-Forwarded-For`/`X-Real-IP` Header，由 H1/H2 proxy 层在请求帧内传递。
 
 ### 路由职责越位：Control Plane 与 Data Plane 的过度耦合
 
-在分析 `proxy_name` 的字段流转时，可以发现一个隐藏的架构设计倾向：**Server 承担了过重的“控制面”寻址职责，导致了与 Client 内部网络细节的深度耦合。**
+- **现状**：Ingress 要求 Server 必须知道 Client 侧定义的 `proxy_name`（如 `”grpc_service”`）。Client 新增本地后端服务时必须同步修改 Server 路由表。对于 L7 HTTP 流量，`host` 已足够寻址，`proxy_name` 是冗余指令。
+- **问题**：Server 作为公网入口（Control Plane）被迫深入数据面（Data Plane）指名道姓要求 Client 转发给特定别名。多租户场景下 Server 路由规则库急剧膨胀。
+- **优化思路**：L4 TCP 无语义，`proxy_name` 必要；L7 HTTP，Server 仅透传 `host`，Client 侧按 `host → local_backend` 自主路由（Edge Routing）。
 
-*   **现状困境**：目前的 Ingress (反向代理) 逻辑要求 Server 必须知道 Client 侧定义的 `proxy_name`（如 `"grpc_service"`）。这意味着：
-    1.  当一个 Client 想要新增一个本地后端服务时，必须同时在 Server 侧修改路由表映射。
-    2.  对于自带寻址语义的 L7 (HTTP) 流量，Server 在 `RoutingInfo` 中同时传递了 `host`（原本已足够寻址）和 `proxy_name`（冗余的指令）。
-*   **带来的问题（职责越位）**：Server 作为公网入口（Control Plane），原本只需关心“这波流量发给哪群客户端（Client Group）”。但现在的设计强迫 Server 必须深入到数据面（Data Plane）内部，指名道姓地要求 Client 转发给特定的后端别名。这种“中心化指令式”寻址，在多租户、大规模 Client 场景下，会导致 Server 的路由规则库急剧膨胀且难以维护。
-*   **优化思路（去中心化寻址）**：
-    *   **对于 L4 (TCP)**：由于流量本身不具语义，`proxy_name` 是必要的。
-    *   **对于 L7 (HTTP)**：Server 应仅透传 `host`，由 Client 侧的 Agent 根据自身配置的 `host -> local_backend` 映射规律进行“边缘路由（Edge Routing）”。
+### Listen 层、Relay 路径与连接复用全景分析
 
-带着这一视角，我们往下逐一分析其他模块是否也存在类似问题。
+#### Listen 层：server 与 client 不对称
+
+**Server 侧**（`handlers/http.rs` + `handlers/tcp.rs`，由 `listener_mgr.rs` 统一热重载管理）进入四条不同路径：
+
+```
+handle_http_connection
+    ├─ TLS (buf[0]==0x16)  → handle_tls_connection          → hyper H2 server 解包 → forward_h2_request over QUIC
+    ├─ plaintext H2        → handle_plaintext_h2_connection → hyper H2 server 解包 → forward_h2_request over QUIC
+    └─ plaintext H1/WS     → handle_plaintext_h1_connection → open_bi + send_routing_info + forward_with_initial_data (raw relay)
+
+handle_tcp_connection → open_bi + send_routing_info + forward_to_client (raw relay)
+```
+
+TLS 和 H2 在 server 侧做 **L7 解析**（hyper 解包每个 HTTP 请求再通过 `forward_h2_request` 发到 QUIC stream）；H1/WS/TCP 是 **L4 raw relay**（peek 一次后直接 `open_bi` 甩给 client）。这是两条根本不同的数据面路径，但都在同一个 `handlers/http.rs` 里，缺乏结构性边界。
+
+**Client 侧 egress entry**（`client/entry.rs`）只有一条路径：peek → detect → `open_bi` → `send_routing_info` → `relay_quic_to_tcp`（纯 raw relay，无 L7 解析）。协议分叉发生在接收 ingress work stream 时（`proxy.rs`），而非 entry listener 内。
+
+不对称是协议语义决定的（TLS 必须在 server 侧终止才能做 vhost routing），但两侧的代码结构差异未被文档化，对新人理解有较高门槛。
+
+#### Relay 路径：4 条路径，H2 游离于 PeerKind 之外
+
+| 协议 | Server 侧 | QUIC Stream | Client 侧 | 到 backend |
+|---|---|---|---|---|
+| H2 (TLS/plaintext) | hyper 解包每请求 → `forward_h2_request` | **1 条共享**（`H2SenderCache` 复用） | `proxy.rs` 直接调 `serve_h2_forward` | hyper H2/H2c client（连接池） |
+| H1 (plaintext) | raw relay → `forward_with_initial_data` | 每 TCP 连接 1 条 | `ProxyEngine` → `HttpPeer` → `Http1Driver` keep-alive loop | `hyper_util::Client`（连接池） |
+| WebSocket | raw relay（同 H1 路径） | 每 WS 连接 1 条 | `ProxyEngine` → `TcpPeer` | `TcpStream::connect()` 每次新建 |
+| TCP (L4) | `handlers/tcp.rs` → `forward_to_client` | 每 TCP 连接 1 条 | `ProxyEngine` → `TcpPeer` | `TcpStream::connect()` 每次新建 |
+
+**设计模式使用情况**：
+
+- **Strategy + Factory Method**：`PeerKind` 枚举 + `connect()` dispatch 是标准 Strategy；`UpstreamResolver` trait 是 factory，client/server 各自实现，选出 `PeerKind` 再 connect。骨架清晰。
+- **Template Method**：`ProxyEngine::run_stream` 固定流程（peek → detect → resolver → peer.connect），resolver 是可替换策略。
+- **问题**：H2 路径完全绕过了 `ProxyEngine`。`proxy.rs` 对 H2 有独立 if 分支直接调 `serve_h2_forward`；`handlers/http.rs` TLS/H2 path 直接调 `forward_h2_request`。`PeerKind::H2` 变体实际只在 client 侧接收 ingress 的 `ClientApp` 里用，server 侧 ingress H2 并不走这个变体，造成同一功能有两套调用路径。
+
+#### 连接复用汇总
+
+| 路径 | 实现 | backend 连接复用 |
+|---|---|---|
+| ingress: client → HTTP backend | `HttpPeer` / `hyper_util::Client` | ✅ keep-alive 连接池 |
+| ingress: client → H2 backend | `H2Peer` / hyper H2c client | ✅ 多路复用 |
+| ingress: client → TCP/WS backend | `TcpPeer` → `TcpStream::connect()` | ❌ 每请求新建 |
+| egress: server → HTTP/HTTPS 外部 | `HttpPeer` / 共享 `https_client` | ✅ keep-alive 连接池 |
+| egress: server → WebSocket 外部 | `TcpPeer` → `TcpStream::connect()` | ❌ 每请求新建 |
+
+**TCP/WS 无连接复用**是当前最直接的性能缺口：每个请求完整三次握手，高 QPS 下 TIME_WAIT 积压明显。
+
+#### Server 选 Client 的负载均衡实现
+
+`ClientRegistry` → `ClientGroup::select_healthy()`：
+
+- **RCU 读**：`ArcSwap<Vec<SelectedConnection>>`，读路径单次原子指针 load，零分配，无锁。写路径（注册/注销）持 Mutex 重建 Vec 再 swap。
+- **Least-inflight**：对 snapshot 线性扫描，选 `inflight` 计数最低的健康连接。`inflight` 用 `CachePadded<AtomicUsize>` 消除 false sharing。
+- **RAII 计数管理**：`InflightGuard` drop 时自动 decrement，不会泄漏。
+- **唯一缺口**：O(N) 线性扫描，client 数量千级以上时有 CPU 开销，当前规模无影响。
 
 
 ---
