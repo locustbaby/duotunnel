@@ -124,7 +124,13 @@ pub async fn handle_work_stream(
     proxy_map: Arc<LocalProxyMap>,
     tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
-    let routing_info = recv_routing_info(&mut recv).await?;
+    let routing_info = match recv_routing_info(&mut recv).await {
+        Ok(r) => r,
+        Err(err) => {
+            warn!(error = %err, "client recv_routing_info failed");
+            return Err(err);
+        }
+    };
     info!(
         proxy_name = % routing_info.proxy_name, protocol = ? routing_info.protocol,
         "received work stream"

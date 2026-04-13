@@ -414,15 +414,28 @@ async fn forward_ingress_h1_request(
         }
         Ok(Err(err)) => {
             metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
-            tracing::error!("H1 open_bi failed: {}", err);
+            tracing::error!(
+                proxy_name = %resolved.route.route.proxy_name,
+                conn_id = %resolved.endpoint.endpoint.conn_id,
+                open_bi_ms = %wait_started.elapsed().as_millis(),
+                error = %err,
+                "H1 open_bi failed"
+            );
             return Ok(text_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway"));
         }
         Err(_) => {
             metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
             metrics::open_bi_timeout();
+            tracing::error!(
+                proxy_name = %resolved.route.route.proxy_name,
+                conn_id = %resolved.endpoint.endpoint.conn_id,
+                open_bi_ms = %wait_started.elapsed().as_millis(),
+                "H1 open_bi timed out"
+            );
             return Ok(text_response(hyper::StatusCode::GATEWAY_TIMEOUT, "Gateway Timeout"));
         }
     };
+    let open_bi_ms = wait_started.elapsed().as_millis();
 
     let (mut parts, body) = req.into_parts();
     let target_host = resolved
@@ -457,7 +470,8 @@ async fn forward_ingress_h1_request(
         tracing::error!(
             proxy_name = %routing_info.proxy_name,
             conn_id = %resolved.endpoint.endpoint.conn_id,
-            elapsed_ms = %wait_started.elapsed().as_millis(),
+            open_bi_ms = %open_bi_ms,
+            send_ms = %(wait_started.elapsed().as_millis() - open_bi_ms),
             error = %err,
             "H1 request forwarding failed"
         );
