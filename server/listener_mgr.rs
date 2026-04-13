@@ -4,6 +4,7 @@ use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -43,12 +44,17 @@ impl ListenerManager {
 /// Reconcile the running listeners against a desired set.
 /// Cancels removed/changed listeners and spawns new ones.
 /// All map mutations happen under a single lock acquisition.
-pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
+pub fn sync_listeners(
+    state: &Arc<ServerState>,
+    desired: &[IngressListener],
+    proxy_handle: &tokio::runtime::Handle,
+    accept_workers: usize,
+) {
     let desired_ports: HashSet<u16> = desired.iter().map(|l| l.port).collect();
     let desired_by_port: HashMap<u16, &IngressListener> =
         desired.iter().map(|l| (l.port, l)).collect();
 
-    struct SpawnDesc {
+    struct PrepareDesc {
         port: u16,
         listener_id: u64,
         cancel: CancellationToken,
@@ -57,7 +63,17 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
         tcp_proxy: Option<String>,
     }
 
-    let to_spawn: Vec<SpawnDesc> = {
+    struct SpawnDesc {
+        port: u16,
+        listener_id: u64,
+        cancel: CancellationToken,
+        mode: IngressMode,
+        tcp_group: Option<String>,
+        tcp_proxy: Option<String>,
+        listeners: Vec<TcpListener>,
+    }
+
+    let to_prepare: Vec<PrepareDesc> = {
         let mut map = state.listeners.map.lock();
 
         // 1. Prune removed/changed listeners and cancel them.
@@ -92,7 +108,7 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             cancel.cancel();
         }
 
-        // 2. Insert placeholders and collect spawn descriptors.
+        // 2. Collect spawn descriptors for listeners that need to be started.
         let mut spawns = Vec::new();
         for (port, listener) in &desired_by_port {
             if map.contains_key(port) {
@@ -100,26 +116,14 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             }
             let listener_id = state.listeners.next_id();
             let cancel = CancellationToken::new();
-            let (kind, tcp_group, tcp_proxy) = match &listener.mode {
-                IngressMode::Http(_) => (ListenerKind::Http, None, None),
+            let (tcp_group, tcp_proxy) = match &listener.mode {
+                IngressMode::Http(_) => (None, None),
                 IngressMode::Tcp(cfg) => (
-                    ListenerKind::Tcp {
-                        group_id: cfg.client_group.clone(),
-                        proxy_name: cfg.proxy_name.clone(),
-                    },
                     Some(cfg.client_group.clone()),
                     Some(cfg.proxy_name.clone()),
                 ),
             };
-            map.insert(
-                *port,
-                ListenerEntry {
-                    id: listener_id,
-                    kind,
-                    cancel: cancel.clone(),
-                },
-            );
-            spawns.push(SpawnDesc {
+            spawns.push(PrepareDesc {
                 port: *port,
                 listener_id,
                 cancel,
@@ -131,6 +135,54 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
         spawns
     }; // lock released here
 
+    let mut prepared = Vec::new();
+    for desc in to_prepare {
+        let addr: std::net::SocketAddr = format!("0.0.0.0:{}", desc.port).parse().unwrap();
+        let listeners = match bind_listener_workers(addr, accept_workers) {
+            Ok(listeners) => listeners,
+            Err(e) => {
+                error!(port = %desc.port, error = %e, "failed to bind listener");
+                continue;
+            }
+        };
+        prepared.push(SpawnDesc {
+            port: desc.port,
+            listener_id: desc.listener_id,
+            cancel: desc.cancel,
+            mode: desc.mode,
+            tcp_group: desc.tcp_group,
+            tcp_proxy: desc.tcp_proxy,
+            listeners,
+        });
+    }
+
+    let to_spawn: Vec<SpawnDesc> = {
+        let mut map = state.listeners.map.lock();
+        let mut spawns = Vec::new();
+        for desc in prepared {
+            if map.contains_key(&desc.port) {
+                continue;
+            }
+            let kind = match &desc.mode {
+                IngressMode::Http(_) => ListenerKind::Http,
+                IngressMode::Tcp(_) => ListenerKind::Tcp {
+                    group_id: desc.tcp_group.clone().unwrap_or_default(),
+                    proxy_name: desc.tcp_proxy.clone().unwrap_or_default(),
+                },
+            };
+            map.insert(
+                desc.port,
+                ListenerEntry {
+                    id: desc.listener_id,
+                    kind,
+                    cancel: desc.cancel.clone(),
+                },
+            );
+            spawns.push(desc);
+        }
+        spawns
+    };
+
     // 3. Spawn tasks outside the lock.
     for desc in to_spawn {
         let SpawnDesc {
@@ -140,44 +192,73 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             mode,
             tcp_group,
             tcp_proxy,
+            listeners,
         } = desc;
         match mode {
             IngressMode::Http(_) => {
-                let s = state.clone();
-                crate::spawn_task(async move {
-                    if let Err(e) =
-                        crate::handlers::http::run_http_listener(s.clone(), port, cancel).await
-                    {
-                        error!(port = %port, error = %e, "HTTP listener failed");
-                    }
-                    let mut map = s.listeners.map.lock();
-                    if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&port);
-                    }
-                });
+                let worker_count = listeners.len();
+                for (worker_idx, listener) in listeners.into_iter().enumerate() {
+                    let s = state.clone();
+                    let cancel = cancel.clone();
+                    let is_last = worker_idx + 1 == worker_count;
+                    proxy_handle.spawn(async move {
+                        if let Err(e) =
+                            crate::handlers::http::run_http_listener(s.clone(), listener, port, cancel).await
+                        {
+                            error!(port = %port, error = %e, "HTTP listener failed");
+                        }
+                        if is_last {
+                            let mut map = s.listeners.map.lock();
+                            if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
+                                map.remove(&port);
+                            }
+                        }
+                    });
+                }
             }
             IngressMode::Tcp(_) => {
-                let s = state.clone();
                 let group_id = tcp_group.unwrap_or_default();
                 let proxy_name = tcp_proxy.unwrap_or_default();
-                crate::spawn_task(async move {
-                    if let Err(e) = crate::handlers::tcp::run_tcp_listener(
-                        s.clone(),
-                        port,
-                        proxy_name,
-                        group_id,
-                        cancel,
-                    )
-                    .await
-                    {
-                        error!(port = %port, error = %e, "TCP listener failed");
-                    }
-                    let mut map = s.listeners.map.lock();
-                    if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
-                        map.remove(&port);
-                    }
-                });
+                let worker_count = listeners.len();
+                for (worker_idx, listener) in listeners.into_iter().enumerate() {
+                    let s = state.clone();
+                    let cancel = cancel.clone();
+                    let group_id = group_id.clone();
+                    let proxy_name = proxy_name.clone();
+                    let is_last = worker_idx + 1 == worker_count;
+                    proxy_handle.spawn(async move {
+                        if let Err(e) = crate::handlers::tcp::run_tcp_listener(
+                            s.clone(),
+                            listener,
+                            port,
+                            proxy_name,
+                            group_id,
+                            cancel,
+                        )
+                        .await
+                        {
+                            error!(port = %port, error = %e, "TCP listener failed");
+                        }
+                        if is_last {
+                            let mut map = s.listeners.map.lock();
+                            if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
+                                map.remove(&port);
+                            }
+                        }
+                    });
+                }
             }
         }
     }
+}
+
+fn bind_listener_workers(
+    addr: std::net::SocketAddr,
+    accept_workers: usize,
+) -> anyhow::Result<Vec<TcpListener>> {
+    let mut listeners = Vec::with_capacity(accept_workers);
+    for _ in 0..accept_workers {
+        listeners.push(tunnel_lib::build_reuseport_listener(addr)?);
+    }
+    Ok(listeners)
 }
