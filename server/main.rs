@@ -26,6 +26,7 @@ mod local_auth;
 mod metrics;
 mod null_stores;
 mod registry;
+mod service;
 mod tunnel_handler;
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
@@ -427,20 +428,29 @@ async fn background_main(
     config_path: String,
     ctld_addr: Option<&str>,
     shutdown: CancellationToken,
-    _proxy_handle: tokio::runtime::Handle,
+    proxy_handle: tokio::runtime::Handle,
 ) {
-    if let Some(addr_str) = ctld_addr {
+    use service::BackgroundService;
+
+    let svc: Box<dyn BackgroundService> = if let Some(addr_str) = ctld_addr {
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
                 info!(addr = %addr, "starting ctld watch client");
-                control_client::spawn_control_client(addr, state);
+                Box::new(control_client::ControlClientService { ctld_addr: addr })
             }
-            Err(e) => error!(error = %e, "invalid ctld_addr"),
+            Err(e) => {
+                error!(error = %e, "invalid ctld_addr");
+                return;
+            }
         }
     } else {
-        hot_reload::spawn_config_watcher(config_path, state);
+        Box::new(hot_reload::HotReloadService { config_path })
+    };
+
+    let name = svc.name();
+    if let Err(e) = svc.run(state, shutdown, proxy_handle).await {
+        error!(service = name, error = %e, "background service exited with error");
     }
-    shutdown.cancelled().await;
 }
 pub fn build_routing_snapshot(
     tm: &TunnelManagement,

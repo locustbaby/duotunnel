@@ -1,19 +1,44 @@
 use crate::config::ServerConfigFile;
+use crate::service::BackgroundService;
 use crate::{build_routing_snapshot, ServerState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tunnel_lib::HttpClientParams;
-pub fn spawn_config_watcher(config_path: String, state: Arc<ServerState>) {
-    crate::spawn_task(async move {
-        if let Err(e) = watch_loop(config_path, state).await {
-            error!(error = %e, "hot-reload watcher exited unexpectedly");
-        }
-    });
+
+pub struct HotReloadService {
+    pub config_path: String,
 }
-async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Result<()> {
+
+impl BackgroundService for HotReloadService {
+    fn name(&self) -> &'static str {
+        "hot-reload"
+    }
+
+    fn run(
+        self: Box<Self>,
+        state: Arc<ServerState>,
+        shutdown: CancellationToken,
+        _proxy_handle: tokio::runtime::Handle,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+        Box::pin(async move {
+            if let Err(e) = watch_loop(self.config_path, state, shutdown).await {
+                error!(error = %e, "hot-reload watcher exited unexpectedly");
+            }
+            Ok(())
+        })
+    }
+}
+
+
+async fn watch_loop(
+    config_path: String,
+    state: Arc<ServerState>,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<()>(1);
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
@@ -43,23 +68,29 @@ async fn watch_loop(config_path: String, state: Arc<ServerState>) -> anyhow::Res
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
     info!(path = %config_path, "hot-reload watcher started");
     loop {
-        if rx.recv().await.is_none() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        while rx.try_recv().is_ok() {}
-        info!(path = %config_path, "config change detected, reloading");
-        match reload_routing(&config_path, &state).await {
-            Ok(()) => info!(path = %config_path, "hot reload successful"),
-            Err(e) => warn!(
-                path = %config_path,
-                error = %e,
-                "hot reload failed, keeping previous config"
-            ),
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            result = rx.recv() => {
+                if result.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                while rx.try_recv().is_ok() {}
+                info!(path = %config_path, "config change detected, reloading");
+                match reload_routing(&config_path, &state).await {
+                    Ok(()) => info!(path = %config_path, "hot reload successful"),
+                    Err(e) => warn!(
+                        path = %config_path,
+                        error = %e,
+                        "hot reload failed, keeping previous config"
+                    ),
+                }
+            }
         }
     }
     Ok(())
 }
+
 async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
     let http_params = HttpClientParams::from(&state.config.server.http_pool);
     let (tm, egress) = match ServerConfigFile::load(config_path) {
