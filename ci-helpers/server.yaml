@@ -9,6 +9,8 @@ server:
     keepalive_secs: 10
     idle_timeout_secs: 30
     congestion: "bbr"
+    connection_window_mb: 256
+    stream_window_mb: 16
 
 server_egress_upstream:
   upstreams:
