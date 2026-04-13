@@ -50,7 +50,7 @@ pub async fn start_entry_listener(
                 debug!(peer_addr = %peer_addr, "new entry connection");
                 let pool = pool.clone();
                 let tcp_params = tcp_params.clone();
-                crate::spawn_task(async move {
+                tokio::task::spawn(async move {
                     let _permit = permit;
                     if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
                         debug!(error = %e, "entry connection error");
@@ -68,7 +68,7 @@ async fn handle_entry_connection(
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
 ) -> Result<()> {
-    let peer_addr = local_stream.peer_addr()?;
+    let _peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
@@ -91,8 +91,6 @@ async fn handle_entry_connection(
             Ok(Ok((mut send, recv))) => {
                 let routing_info = RoutingInfo {
                     proxy_name: "entry".to_string(),
-                    src_addr: peer_addr.ip().to_string(),
-                    src_port: peer_addr.port(),
                     protocol,
                     host,
                 };

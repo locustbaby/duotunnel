@@ -37,21 +37,6 @@ use proxy::handle_work_stream;
 static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
     std::sync::OnceLock::new();
 
-pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    #[cfg(feature = "dial9-telemetry")]
-    if std::env::var_os("DIAL9_TRACE_PATH").is_some() {
-        if let Some(handle) = DIAL9_HANDLE.get() {
-            return handle.spawn(future);
-        }
-    }
-
-    tokio::task::spawn(future)
-}
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -68,45 +53,6 @@ fn main() -> Result<()> {
     }
     run_with_tokio(async_main())
 }
-async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            warn!(addr = %addr, error = %e, "failed to bind healthz server");
-            return;
-        }
-    };
-    info!(addr = %addr, "healthz server started");
-    loop {
-        let Ok((mut stream, _)) = listener.accept().await else { continue };
-        let ready = ready.clone();
-        crate::spawn_task(async move {
-            let mut buf = [0u8; 256];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-            let (status, body) = if req.starts_with("GET /healthz") {
-                if ready.load(Ordering::Acquire) {
-                    ("200 OK", "ok\n")
-                } else {
-                    ("503 Service Unavailable", "not ready\n")
-                }
-            } else {
-                ("200 OK", "ok\n")
-            };
-            let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                status,
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-        });
-    }
-}
-
 async fn async_main() -> Result<()> {
     let args = Args::parse();
     let config = ClientConfigFile::load(&args.config)?;
@@ -117,7 +63,7 @@ async fn async_main() -> Result<()> {
     let endpoint = build_quic_endpoint(&config)?;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    crate::spawn_task(async move {
+    tokio::task::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             info!("Received Ctrl+C, shutting down...");
             cancel_clone.cancel();
@@ -125,7 +71,13 @@ async fn async_main() -> Result<()> {
     });
     let ready = Arc::new(AtomicBool::new(false));
     if let Some(port) = config.metrics_port {
-        crate::spawn_task(run_healthz_server(port, ready.clone()));
+        let handler = tunnel_lib::healthz_handler(ready.clone());
+        let shutdown = cancel.clone();
+        tokio::task::spawn(async move {
+            if let Err(e) = tunnel_lib::run_http1_server(port, shutdown, "healthz server", handler).await {
+                warn!(port = port, error = %e, "healthz server failed");
+            }
+        });
     }
 
     let entry_pool = EntryConnPool::new();
@@ -137,7 +89,7 @@ async fn async_main() -> Result<()> {
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        crate::spawn_task(async move {
+        tokio::task::spawn(async move {
             if let Err(e) = entry::start_entry_listener(
                 pool,
                 entry_port,
@@ -330,7 +282,7 @@ pub(crate) async fn run_client(
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
-                        crate::spawn_task(async move {
+                        tokio::task::spawn(async move {
                             let _permit = permit;
                             if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 debug!(error = %e, "work stream error");

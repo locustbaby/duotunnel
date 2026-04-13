@@ -1,10 +1,91 @@
 use crate::app::{ClientApp, LocalProxyMap};
 use anyhow::Result;
+use http_body_util::BodyExt;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
-use tracing::info;
-use tunnel_lib::proxy::core::ProxyEngine;
+use tracing::{error, info};
+use tunnel_lib::proxy::core::{FlowDirection, StreamFlow};
+use tunnel_lib::proxy::core::Protocol;
+use tunnel_lib::proxy::tcp::UpstreamScheme;
 use tunnel_lib::recv_routing_info;
+
+fn http_error_response(
+    status: hyper::StatusCode,
+    body: &'static str,
+) -> hyper::Response<http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, std::io::Error>> {
+    hyper::Response::builder()
+        .status(status)
+        .body(
+            http_body_util::Full::new(bytes::Bytes::from(body))
+                .map_err(|_| unreachable!())
+                .boxed_unsync(),
+        )
+        .unwrap()
+}
+
+async fn write_http_response(
+    send: &mut SendStream,
+    response: hyper::Response<impl hyper::body::Body<Data = bytes::Bytes, Error = impl Into<Box<dyn std::error::Error + Send + Sync>> + 'static> + Send>,
+) -> Result<()> {
+    let (parts, body) = response.into_parts();
+    let head = tunnel_lib::HttpResponseHead::from_parts(&parts);
+    tunnel_lib::send_http_response_head(send, &head).await?;
+    tunnel_lib::send_http_body(send, body).await?;
+    send.finish()?;
+    Ok(())
+}
+
+async fn handle_h1_request_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    routing_info: tunnel_lib::RoutingInfo,
+    proxy_map: Arc<LocalProxyMap>,
+) -> Result<()> {
+    let head = tunnel_lib::recv_http_request_head(&mut recv).await?;
+    let upstream_addr = proxy_map
+        .get_local_address(&routing_info.proxy_name)
+        .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", routing_info.proxy_name))?;
+    let (scheme, connect_addr, _tls_host) = UpstreamScheme::from_address(&upstream_addr);
+    let flow = tunnel_lib::HttpFlow::new(
+        tunnel_lib::FixedHttpFlowResolver::new(connect_addr.clone())
+            .with_route_key(routing_info.proxy_name.clone())
+            .with_selected_endpoint(connect_addr.clone()),
+    );
+    let parts = head.into_parts()?;
+    let request_body = tunnel_lib::recv_http_body(recv);
+    let request = hyper::Request::from_parts(parts, request_body);
+    let resolved = flow
+        .resolve_target_for_request(0, &request, Protocol::H1)
+        .await?
+        .expect("fixed resolver always resolves");
+    let target_host = resolved
+        .context
+        .target_host
+        .clone()
+        .unwrap_or(connect_addr.clone());
+    let (mut parts, body) = request.into_parts();
+    tunnel_lib::rewrite_request_upstream(
+        &mut parts,
+        if scheme.requires_tls() { "https" } else { "http" },
+        &target_host,
+    );
+    let upstream_req = hyper::Request::from_parts(parts, body);
+    let response = match proxy_map.https_client.request(upstream_req).await {
+        Ok(resp) => {
+            let (mut parts, body) = resp.into_parts();
+            if let Err(err) = flow.filter_response_parts(&resolved, &mut parts).await {
+                error!(error = %err, "client H1 response filter error");
+            }
+            hyper::Response::from_parts(parts, body.map_err(std::io::Error::other).boxed_unsync())
+        }
+        Err(err) => {
+            error!(error = %err, "client H1 upstream request failed");
+            http_error_response(hyper::StatusCode::BAD_GATEWAY, "Bad Gateway")
+        }
+    };
+    write_http_response(&mut send, response).await
+}
+
 pub async fn handle_work_stream(
     send: SendStream,
     mut recv: RecvStream,
@@ -13,42 +94,21 @@ pub async fn handle_work_stream(
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
     info!(
-        proxy_name = % routing_info.proxy_name, protocol = ? routing_info.protocol, host
-        = ? routing_info.host, src = format!("{}:{}", routing_info.src_addr, routing_info
-        .src_port), "received work stream"
+        proxy_name = % routing_info.proxy_name, protocol = ? routing_info.protocol,
+        "received work stream"
     );
-    if routing_info.protocol == tunnel_lib::proxy::core::Protocol::H2 {
-        // Round-robin select the backend, then look up its pre-parsed (scheme, authority).
-        let upstream_addr = proxy_map
-            .get_local_address(&routing_info.proxy_name)
-            .ok_or_else(|| {
-                anyhow::anyhow!("no upstream for proxy_name: {}", routing_info.proxy_name)
-            })?;
-        let (scheme, authority) = proxy_map
-            .get_h2_addr_for_server(&upstream_addr)
-            .ok_or_else(|| anyhow::anyhow!("no H2 addr cached for upstream: {}", upstream_addr))?;
-        info!(
-            "H2 protocol detected, forwarding to upstream: {}",
-            authority
-        );
-        let stream = tunnel_lib::QuinnStream { send, recv };
-        tunnel_lib::proxy::h2::serve_h2_forward(
-            stream,
-            proxy_map.https_client.clone(),
-            proxy_map.h2c_client.clone(),
-            scheme.to_string(),
-            authority.to_string(),
-        )
-        .await?;
-    } else {
-        let app = ClientApp::new(proxy_map, tcp_params);
-        let engine = ProxyEngine::new(app);
-        let client_addr = format!("{}:{}", routing_info.src_addr, routing_info.src_port)
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
-        engine
-            .run_stream(send, recv, client_addr, Some(routing_info))
-            .await?;
+    if routing_info.protocol == Protocol::H1 {
+        return handle_h1_request_stream(send, recv, routing_info, proxy_map).await;
     }
-    Ok(())
+    let app = ClientApp::new(proxy_map, tcp_params);
+    let engine = StreamFlow::new(app);
+    engine
+        .run_stream(
+            send,
+            recv,
+            "0.0.0.0:0".parse().unwrap(),
+            FlowDirection::Ingress,
+            Some(routing_info),
+        )
+        .await
 }

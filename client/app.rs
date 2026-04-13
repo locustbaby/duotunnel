@@ -16,9 +16,6 @@ struct CachedAddr {
 }
 pub struct LocalProxyMap {
     upstreams: HashMap<String, UpstreamGroup>,
-    /// Pre-computed (scheme, authority) keyed by raw server address string.
-    /// Covers every server in every upstream group — preserves round-robin across all backends.
-    h2_addrs: HashMap<String, (String, String)>,
     /// DNS cache for WebSocket/TCP upstreams: connect_addr_str → SocketAddr.
     /// Populated lazily on first connection; avoids repeated DNS lookups for fixed upstreams.
     dns_cache: DashMap<String, CachedAddr>,
@@ -28,28 +25,14 @@ pub struct LocalProxyMap {
 impl LocalProxyMap {
     pub fn from_config(config: &ClientConfig, http_params: &HttpClientParams) -> Self {
         let mut upstreams = HashMap::new();
-        let mut h2_addrs = HashMap::new();
         for upstream in &config.upstreams {
             let servers: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
-            // Pre-parse H2 (scheme, authority) for every server address.
-            // Keyed by address string so round-robin via get_local_address() is preserved.
-            for addr in &servers {
-                if let Some(parsed) = parse_h2_addr(addr) {
-                    h2_addrs.insert(addr.clone(), parsed);
-                } else {
-                    tracing::warn!(
-                        upstream = %upstream.name, addr = %addr,
-                        "could not parse H2 upstream address — H2 traffic to this server will fail"
-                    );
-                }
-            }
             upstreams.insert(upstream.name.clone(), UpstreamGroup::new(servers));
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
         Self {
             upstreams,
-            h2_addrs,
             dns_cache: DashMap::new(),
             https_client,
             h2c_client,
@@ -60,13 +43,6 @@ impl LocalProxyMap {
         let server = group.next()?;
         debug!(proxy_name = %proxy_name, server = %server, "upstream selected");
         Some(server.clone())
-    }
-    /// Returns pre-computed (scheme, authority) for the given raw server address string.
-    /// Call `get_local_address()` first (for round-robin), then pass the result here.
-    pub fn get_h2_addr_for_server(&self, addr: &str) -> Option<(&str, &str)> {
-        self.h2_addrs
-            .get(addr)
-            .map(|(s, a)| (s.as_str(), a.as_str()))
     }
     /// Resolve `connect_addr_str` to a `SocketAddr`, using a lazy DNS cache.
     /// IP addresses are parsed directly. Hostnames are looked up once and cached.
@@ -103,24 +79,7 @@ impl LocalProxyMap {
     }
 }
 
-/// Normalise a raw upstream address string into (scheme, authority) for H2 use.
-fn parse_h2_addr(addr: &str) -> Option<(String, String)> {
-    let normalized = addr
-        .replace("wss://", "https://")
-        .replace("ws://", "http://");
-    let with_scheme = if normalized.contains("://") {
-        normalized
-    } else {
-        format!("http://{}", normalized)
-    };
-    let uri: hyper::Uri = with_scheme.parse().ok()?;
-    let scheme = uri.scheme_str().unwrap_or("http").to_string();
-    let authority = uri
-        .authority()
-        .map(|a| a.as_str().to_string())
-        .or_else(|| Some(addr.to_string()))?;
-    Some((scheme, authority))
-}
+
 pub struct ClientApp {
     map: Arc<LocalProxyMap>,
     tcp_params: tunnel_lib::TcpParams,
@@ -136,14 +95,21 @@ impl UpstreamResolver for ClientApp {
             .routing_info
             .as_ref()
             .ok_or_else(|| anyhow!("missing routing info in context"))?;
+        let proxy_name = routing.proxy_name.clone();
+        let target_host = routing.host.clone();
+        context.set_route_key(proxy_name.clone());
+        if let Some(host) = target_host {
+            context.set_target_host(host);
+        }
         let upstream_addr = self
             .map
-            .get_local_address(&routing.proxy_name)
-            .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", routing.proxy_name))?;
+            .get_local_address(&proxy_name)
+            .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", proxy_name))?;
         use tunnel_lib::proxy::tcp::UpstreamScheme;
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         let http_scheme = if is_https { "https" } else { "http" };
+        context.set_selected_endpoint(connect_addr_str.clone());
         #[allow(unreachable_patterns)]
         match context.protocol {
             Protocol::H1 | Protocol::Unknown => Ok(PeerKind::Http(Box::new(HttpPeer {
