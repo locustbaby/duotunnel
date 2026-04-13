@@ -269,11 +269,13 @@ pub(crate) async fn run_client(
             stream_result = conn.accept_bi() => {
                 match stream_result {
                     Ok((mut send, recv)) => {
-                        let permit = match stream_semaphore.clone().try_acquire_owned() {
-                            Ok(permit) => permit,
-                            Err(_) => {
+                        let permit = match tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            stream_semaphore.clone().acquire_owned(),
+                        ).await {
+                            Ok(Ok(permit)) => permit,
+                            _ => {
                                 warn!("Stream rejected: max concurrent streams reached");
-                                // Signal the server that we cannot accept this stream.
                                 let _ = send.reset(0u8.into());
                                 continue;
                             }
