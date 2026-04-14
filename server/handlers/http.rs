@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-const EMFILE_BACKOFF_MS: u64 = 100;
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
 use tunnel_lib::RouteTarget;
@@ -17,6 +16,7 @@ pub async fn run_http_accept_loop(
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
+    let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, "http accept loop started");
     loop {
         let (stream, peer_addr) = tokio::select! {
@@ -29,7 +29,7 @@ pub async fn run_http_accept_loop(
                 Err(e) => {
                     if let Some(24) = e.raw_os_error() {
                         warn!("http accept: too many open files, backing off");
-                        tokio::time::sleep(Duration::from_millis(EMFILE_BACKOFF_MS)).await;
+                        tokio::time::sleep(emfile_backoff).await;
                     }
                     continue;
                 }
@@ -355,6 +355,7 @@ async fn handle_plaintext_h1_connection(
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+    crate::handlers::maybe_slow_path(&selected, &state.config.server.overload).await;
     let mut discard = vec![0u8; initial_data.len()];
     stream.read_exact(&mut discard).await?;
     let routing_info = tunnel_lib::RoutingInfo {

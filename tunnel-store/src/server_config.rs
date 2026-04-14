@@ -32,6 +32,36 @@ pub struct ServerConfigFile {
     pub tunnel_management: TunnelManagement,
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadMode {
+    #[default]
+    InflightSlowpath,
+    Burst,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OverloadConfig {
+    pub mode: OverloadMode,
+    pub emfile_backoff_ms: u64,
+    pub inflight_yield_threshold: usize,
+    pub inflight_sleep_threshold: usize,
+    pub inflight_sleep_ms: u64,
+}
+
+impl Default for OverloadConfig {
+    fn default() -> Self {
+        Self {
+            mode: OverloadMode::InflightSlowpath,
+            emfile_backoff_ms: 100,
+            inflight_yield_threshold: 800,
+            inflight_sleep_threshold: 950,
+            inflight_sleep_ms: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerBasicConfig {
     pub tunnel_port: u16,
@@ -61,6 +91,8 @@ pub struct ServerBasicConfig {
     pub h2_single_authority: bool,
     #[serde(default)]
     pub accept_workers: Option<usize>,
+    #[serde(default)]
+    pub overload: OverloadConfig,
 }
 
 fn default_login_timeout_secs() -> u64 {
