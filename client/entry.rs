@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
     port: u16,

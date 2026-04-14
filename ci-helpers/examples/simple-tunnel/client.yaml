@@ -5,5 +5,5 @@ server_addr: "127.0.0.1"
 server_port: 10086
 auth_token: "example-placeholder-token"
 
-# Enable egress (forward proxy) - client listens on port 8002
-http_entry_port: 8002
+entry:
+  port: 8002
