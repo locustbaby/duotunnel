@@ -378,7 +378,10 @@ function initResourceCharts(rpc, entry) {
   });
 
   if (entry) {
-    (entry.phases||[]).filter(p => p.resourceCase).forEach((p, fi) => {
+    (entry.phases||[])
+      .filter(p => p.resourceCase || (p.name?.includes('(8k-q4)') && !p.tunnel && (p.start||0) > 0))
+      .map(p => p.resourceCase ? p : {...p, resourceCase: 'core'})
+      .forEach((p, fi) => {
       const chartOff = p.resourceCase === 'core' ? coreOff : 0;
       const shortName = p.name.replace(/ \([^)]*\)$/i, '').trim();
       const pIdx = mergePhases.length + fi;
@@ -630,11 +633,11 @@ function initResourceCharts(rpc, entry) {
     Charts.create('res_tcp', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('connections')}});
   }
 
-  // VMS
+  // VMS (exclude 'other' — its VMS reflects max across all system processes, not meaningful)
   if (hasVms) {
     addChart('res_vms', 'Virtual Memory Size (MB)');
     const ds=[];
-    for (const s of PSERIES) { if (vmsByKey[s.key]?.length) ds.push(linePts(vmsByKey[s.key], s.color, s.label)); }
+    for (const s of PSERIES) { if (s.key !== 'other' && vmsByKey[s.key]?.length) ds.push(linePts(vmsByKey[s.key], s.color, s.label)); }
     Charts.create('res_vms', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('MB')}});
   }
 
