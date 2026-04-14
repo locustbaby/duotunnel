@@ -293,6 +293,8 @@ function renderDetail(entry) {
   html += UI.Panel(`Detailed Metrics — ${s7}`, UI.Table(headers, tableRows));
 
   // Resources (Adaptive Container)
+  const rpc = entry.resources_per_case || (entry.resources ? { core: entry.resources, catalog: entry.catalog } : null);
+  const rpcKeys = rpc ? Object.keys(rpc).filter(k => k !== 'catalog' && k !== 'nproc' && k !== 'k6OffsetSeconds') : [];
   if (rpcKeys.length) {
     html += UI.Section('System Resources');
     html += `<div id="res-charts-container"></div>`;
