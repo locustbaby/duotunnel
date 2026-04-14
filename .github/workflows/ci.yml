@@ -1032,9 +1032,10 @@ jobs:
           curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 \
             || { echo "ERROR: ctld healthz never became ready"; cat /tmp/ci-ctld.log; exit 1; }
 
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          echo $! > /tmp/server.pid
+          sudo systemd-run --scope --unit=duotunnel-server --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
             sleep 0.5
@@ -1050,16 +1051,15 @@ jobs:
           python3 -c "import re,sys; f='ci-helpers/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$CLIENT_QUIC_CONNECTIONS"
           # Wait for ctld poll to push new token to server (~1500ms poll interval)
           sleep 3
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          echo $! > /tmp/client.pid
+          sudo systemd-run --scope --unit=duotunnel-client --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- ./target/release/client --config ci-helpers/client.yaml >> /tmp/ci-client.log 2>&1 &
           for i in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
-              break
-            fi
+            systemctl is-active duotunnel-client.scope > /dev/null 2>&1 || break
             curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
-          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+          if ! systemctl is-active duotunnel-client.scope > /dev/null 2>&1; then
             echo "ERROR: client did not login"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
@@ -1104,31 +1104,31 @@ jobs:
           echo "=== client log ===" && tail -30 /tmp/ci-client.log || true
           echo "=== server log ===" && tail -30 /tmp/ci-server.log || true
 
-          kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 0.5
-          kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 0.5
+          sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+          sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
 
           echo "Restarting server..."
-          ./target/release/server --config ci-helpers/server.yaml \
-            --ctld-addr 127.0.0.1:7788 > /tmp/ci-server.log 2>&1 &
-          echo $! > /tmp/server.pid
+          sudo systemd-run --scope --unit=duotunnel-server --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- ./target/release/server --config ci-helpers/server.yaml \
+            --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
 
           echo "Restarting client..."
-          ./target/release/client --config ci-helpers/client.yaml > /tmp/ci-client.log 2>&1 &
-          echo $! > /tmp/client.pid
+          sudo systemd-run --scope --unit=duotunnel-client --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- ./target/release/client --config ci-helpers/client.yaml >> /tmp/ci-client.log 2>&1 &
           for i in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
-              break
-            fi
+            systemctl is-active duotunnel-client.scope > /dev/null 2>&1 || break
             curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
             sleep 0.5
           done
-          if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+          if ! systemctl is-active duotunnel-client.scope > /dev/null 2>&1; then
             echo "ERROR: client did not login after restart"
             cat /tmp/ci-ctld.log; cat /tmp/ci-server.log; cat /tmp/ci-client.log
             exit 1
@@ -1223,11 +1223,13 @@ jobs:
       - name: Start frp and run frp benchmark
         if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         run: |
-          frps -c ci-helpers/frps.toml > /tmp/frps.log 2>&1 &
-          echo $! > /tmp/frps.pid
+          sudo systemd-run --scope --unit=frp-server --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- frps -c ci-helpers/frps.toml >> /tmp/frps.log 2>&1 &
           sleep 1
-          frpc -c ci-helpers/frpc.toml > /tmp/frpc.log 2>&1 &
-          echo $! > /tmp/frpc.pid
+          sudo systemd-run --scope --unit=frp-client --collect \
+            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+            -- frpc -c ci-helpers/frpc.toml >> /tmp/frpc.log 2>&1 &
           FRP_READY=0
           for i in $(seq 1 20); do
             curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
@@ -1247,8 +1249,10 @@ jobs:
       - name: Stop frp
         if: always() && ((github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         run: |
-          kill -9 "$(cat /tmp/frps.pid 2>/dev/null)" 2>/dev/null || true
-          kill -9 "$(cat /tmp/frpc.pid 2>/dev/null)" 2>/dev/null || true
+          sudo systemctl stop frp-client.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
+          sudo systemctl stop frp-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
 
       - name: Run k6 stress test
         working-directory: ci-helpers/k6
@@ -1266,24 +1270,10 @@ jobs:
       - name: Stop duotunnel server and client
         if: always()
         run: |
-          SERVER_PID="$(cat /tmp/server.pid 2>/dev/null || true)"
-          if [ -n "$SERVER_PID" ]; then
-            kill -TERM "$SERVER_PID" 2>/dev/null || true
-            for i in $(seq 1 20); do
-              kill -0 "$SERVER_PID" 2>/dev/null || break
-              sleep 0.5
-            done
-            kill -9 "$SERVER_PID" 2>/dev/null || true
-          fi
-          CLIENT_PID="$(cat /tmp/client.pid 2>/dev/null || true)"
-          if [ -n "$CLIENT_PID" ]; then
-            kill -TERM "$CLIENT_PID" 2>/dev/null || true
-            for i in $(seq 1 20); do
-              kill -0 "$CLIENT_PID" 2>/dev/null || break
-              sleep 0.5
-            done
-            kill -9 "$CLIENT_PID" 2>/dev/null || true
-          fi
+          sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+          sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
 
       - name: Stop resource sampling
         if: always()
@@ -1375,8 +1365,10 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
           kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
@@ -1534,10 +1526,12 @@ jobs:
               TOKIO_ENV="TOKIO_WORKER_THREADS=${WORKER_THREADS}"
             fi
 
-            env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/server-trace.bin \
-              ./target/release/server --config ci-helpers/server.yaml \
-              --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
-            echo $! > /tmp/server.pid
+            sudo systemd-run --scope --unit=duotunnel-server --collect \
+              -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+              -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+              ${TOKIO_ENV:+-E $TOKIO_ENV} \
+              -- ./target/release/server --config ci-helpers/server.yaml \
+              --ctld-addr 127.0.0.1:7788 >> "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
             for i in $(seq 1 60); do
               curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
               sleep 0.5
@@ -1557,17 +1551,17 @@ jobs:
 
             sleep 3
 
-            env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/client-trace.bin \
-              ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
-            echo $! > /tmp/client.pid
+            sudo systemd-run --scope --unit=duotunnel-client --collect \
+              -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+              -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+              ${TOKIO_ENV:+-E $TOKIO_ENV} \
+              -- ./target/release/client --config ci-helpers/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
             for i in $(seq 1 60); do
-              if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
-                break
-              fi
+              systemctl is-active duotunnel-client.scope > /dev/null 2>&1 || break
               curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
               sleep 0.5
             done
-            if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+            if ! systemctl is-active duotunnel-client.scope > /dev/null 2>&1; then
               echo "ERROR: client did not login"
               cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
               exit 1
@@ -1597,15 +1591,17 @@ jobs:
 
             if ! warmup_probe; then
               echo "WARNING: warmup failed, restarting client then server..."
-              kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-              sleep 0.5
-              kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
-              sleep 0.5
+              sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
+              sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+              sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
+              sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
 
-              env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/server-trace.bin \
-                ./target/release/server --config ci-helpers/server.yaml \
-                --ctld-addr 127.0.0.1:7788 > "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
-              echo $! > /tmp/server.pid
+              sudo systemd-run --scope --unit=duotunnel-server --collect \
+                -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+                -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
+                ${TOKIO_ENV:+-E $TOKIO_ENV} \
+                -- ./target/release/server --config ci-helpers/server.yaml \
+                --ctld-addr 127.0.0.1:7788 >> "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
               for i in $(seq 1 60); do
                 curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
                 sleep 0.5
@@ -1616,17 +1612,17 @@ jobs:
                 exit 1
               fi
 
-              env $TOKIO_ENV DIAL9_TRACE_PATH=/tmp/client-trace.bin \
-                ./target/release/client --config ci-helpers/client.yaml > "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
-              echo $! > /tmp/client.pid
+              sudo systemd-run --scope --unit=duotunnel-client --collect \
+                -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryMin=512M \
+                -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
+                ${TOKIO_ENV:+-E $TOKIO_ENV} \
+                -- ./target/release/client --config ci-helpers/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
               for i in $(seq 1 60); do
-                if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
-                  break
-                fi
+                systemctl is-active duotunnel-client.scope > /dev/null 2>&1 || break
                 curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
                 sleep 0.5
               done
-              if ! kill -0 "$(cat /tmp/client.pid)" 2>/dev/null; then
+              if ! systemctl is-active duotunnel-client.scope > /dev/null 2>&1; then
                 echo "ERROR: client did not login after restart"
                 cat "/tmp/ci-ctld-${SUFFIX}.log"; cat "/tmp/ci-server-${SUFFIX}.log"; cat "/tmp/ci-client-${SUFFIX}.log"
                 exit 1
@@ -1678,13 +1674,13 @@ jobs:
               --output       "/tmp/resource-data-${CASE_NAME}.json" \
               || echo "Resource parsing failed (non-fatal)"
 
-            kill -TERM "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-            kill -TERM "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+            sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
+            sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
             for i in $(seq 1 20); do
               CLIENT_UP=0
               SERVER_UP=0
-              kill -0 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null && CLIENT_UP=1
-              kill -0 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null && SERVER_UP=1
+              systemctl is-active duotunnel-client.scope > /dev/null 2>&1 && CLIENT_UP=1
+              systemctl is-active duotunnel-server.scope > /dev/null 2>&1 && SERVER_UP=1
               [ "$CLIENT_UP" -eq 0 ] && [ "$SERVER_UP" -eq 0 ] && break
               sleep 0.5
             done
@@ -1692,8 +1688,8 @@ jobs:
               [ ! -f /tmp/server-trace.0.bin.active ] && [ ! -f /tmp/client-trace.0.bin.active ] && break
               sleep 0.5
             done
-            kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
-            kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+            sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+            sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
             for i in $(seq 1 20); do
               [ -s /tmp/server-trace.0.bin ] && [ -s /tmp/client-trace.0.bin ] && break
               sleep 0.5
@@ -1892,9 +1888,9 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
+          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
           kill "$(cat /tmp/ctld.pid      2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/server.pid    2>/dev/null)" 2>/dev/null || true
-          kill "$(cat /tmp/client.pid    2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
