@@ -168,3 +168,27 @@ ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forw
   - fast path：`std::sync::Mutex` 只包住一次 `clone()`，临界区 ns 级，不跨 await
   - slow path：`tokio::sync::Mutex`（`rebuild_mu`）序列化重建，只有一个任务做 `open_bi` + H2 握手
   - double-check 防止多任务同时 miss 时浪费 QUIC stream
+
+- [x] **server 选路改 least-inflight**
+  `registry.rs` `ClientGroup::select_healthy` 目前只做 RR + close_reason 检查，不感知 inflight stream 数。
+  改为在 `ClientGroup` 里维护每连接 `AtomicUsize` inflight 计数，`open_bi` 前后 +1/-1，选路取 min-inflight。
+  **已实现**：`SelectedConnection` 携带 per-connection `Arc<AtomicUsize>`，`begin_inflight()` 返回 RAII guard，`select_healthy` 改为 `min_by_key(inflight)`。
+
+  **后续：负载均衡语义优化方向**
+  - inflight 计数反映的是 stream 数量，不等于实际负载（大 body 请求和心跳请求 inflight 权重相同）
+  - 更精确的方向：按字节流量或响应时间加权（EWMA），但需要额外埋点
+  - 当前 N ≤ 5 的场景下 least-inflight 已足够，EWMA 方案在 N 较大时才有明显收益
+
+## Code Quality
+
+### [TODO-33] Zero-copy HTTP Header Parsing (httparse Deep Integration) ✅
+
+**Files**: `tunnel-lib/src/transport/listener.rs`
+
+`detect_protocol_and_host` 主路径已改用 httparse，`extract_host_from_http` 降为非热路径 fallback。单次 httparse pass 同时完成协议探测 + Host 提取 + WebSocket 检测。
+
+## Bench Fixes
+
+### viewer "No CPU samples" 报错排查 ✅
+
+CI run 24198270418 所有 job 通过，`cpu.json.gz` 有实际数据（837 KB–1.1 MB），问题已确认并标记为已解决。
