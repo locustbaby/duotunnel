@@ -1,0 +1,44 @@
+name: Pages (UI only)
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ci-helpers/bench_ui/**"
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-ui:
+    name: Deploy bench UI to gh-pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Push updated UI assets to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WORKDIR="/tmp/gh-pages-repo"
+          rm -rf "$WORKDIR"
+          if git clone --branch gh-pages --single-branch --depth 1 --filter=blob:none --no-checkout "$REPO_URL" "$WORKDIR" 2>/dev/null; then
+            cd "$WORKDIR"
+            git sparse-checkout init --cone
+            git sparse-checkout set bench
+            git checkout
+          else
+            mkdir -p "$WORKDIR" && cd "$WORKDIR"
+            git init && git checkout --orphan gh-pages
+          fi
+          mkdir -p bench
+          cp "$GITHUB_WORKSPACE/ci-helpers/bench_ui/index.html" bench/index.html
+          cp "$GITHUB_WORKSPACE/ci-helpers/bench_ui/style.css"  bench/style.css
+          cp "$GITHUB_WORKSPACE/ci-helpers/bench_ui/app.js"     bench/app.js
+          rm -rf bench/viewer && cp -r "$GITHUB_WORKSPACE/ci-helpers/bench_ui/viewer" bench/viewer
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench/
+          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
+          git commit -m "pages: update UI assets for ${GITHUB_SHA::7}"
+          git push --force origin gh-pages

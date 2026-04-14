@@ -13,11 +13,8 @@ WORKDIR="/tmp/gh-pages-repo"
 
 echo "==> Preparing gh-pages repository"
 rm -rf "$WORKDIR"
-if git clone --branch gh-pages --single-branch --depth 1 --filter=blob:none --no-checkout "$REPO_URL" "$WORKDIR" 2>/dev/null; then
+if git clone --branch gh-pages --single-branch --depth 1 "$REPO_URL" "$WORKDIR" 2>/dev/null; then
   cd "$WORKDIR"
-  git sparse-checkout init --cone
-  git sparse-checkout set bench
-  git checkout
 else
   mkdir -p "$WORKDIR" && cd "$WORKDIR"
   git init && git checkout --orphan gh-pages

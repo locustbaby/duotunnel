@@ -22,8 +22,8 @@ function activeProfile() {
 }
 
 function filterCases(cases, profile) {
-  if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps'));
-  if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps'));
+  if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
+  if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
   if (profile === 'frp') return cases.filter((c) => c.name.startsWith('frp_'));
   return cases;
 }

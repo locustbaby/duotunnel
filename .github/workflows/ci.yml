@@ -8,8 +8,15 @@ on:
       - "tunnel-lib/**"
       - "tunnel-service/**"
       - "tunnel-store/**"
-      - "ci-helpers/**"
-      - "ci-helpers/bench_ui/**"
+      - "ci-helpers/*.py"
+      - "ci-helpers/*.sh"
+      - "ci-helpers/*.toml"
+      - "ci-helpers/configs/**"
+      - "ci-helpers/k6/**"
+      - "ci-helpers/local-test/**"
+      - "ci-helpers/proto/**"
+      - "ci-helpers/src/**"
+      - "ci-helpers/schema.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
@@ -21,7 +28,15 @@ on:
       - "tunnel-lib/**"
       - "tunnel-service/**"
       - "tunnel-store/**"
-      - "ci-helpers/**"
+      - "ci-helpers/*.py"
+      - "ci-helpers/*.sh"
+      - "ci-helpers/*.toml"
+      - "ci-helpers/configs/**"
+      - "ci-helpers/k6/**"
+      - "ci-helpers/local-test/**"
+      - "ci-helpers/proto/**"
+      - "ci-helpers/src/**"
+      - "ci-helpers/schema.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
@@ -1019,9 +1034,11 @@ jobs:
           python3 ci-helpers/merge-results.py \
             /tmp/trace-ingress_8000qps/bench-results.json \
             /tmp/bench-results-8k-combined.json \
-            /tmp/trace-egress_8000qps/bench-results.json:egress_8000qps:true \
-            /tmp/trace-ingress_multihost_8000qps/bench-results.json:ingress_multihost_8000qps:true \
-            /tmp/trace-egress_multihost_8000qps/bench-results.json:egress_multihost_8000qps:true
+            --core-resource /tmp/trace-ingress_8000qps/resource-data.json \
+            --core-label ingress_8000qps \
+            /tmp/trace-egress_8000qps/bench-results.json:egress_8000qps:true:/tmp/trace-egress_8000qps/resource-data.json \
+            /tmp/trace-ingress_multihost_8000qps/bench-results.json:ingress_multihost_8000qps:true:/tmp/trace-ingress_multihost_8000qps/resource-data.json \
+            /tmp/trace-egress_multihost_8000qps/bench-results.json:egress_multihost_8000qps:true:/tmp/trace-egress_multihost_8000qps/resource-data.json
 
       - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

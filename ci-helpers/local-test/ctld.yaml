@@ -1,5 +1,5 @@
 database_url: "sqlite://./data/duotunnel-local-test.db?mode=rwc"
 watch_addr: "127.0.0.1:7788"
 log_level: "info"
-server_config: "ci-helpers/local-test-server.yaml"
+server_config: "ci-helpers/local-test/server.yaml"
 metrics_port: 9091

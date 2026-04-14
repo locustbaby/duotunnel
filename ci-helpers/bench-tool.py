@@ -116,46 +116,95 @@ def run_collect(args):
         vm, swap = psutil.virtual_memory(), psutil.swap_memory()
 
         sys_out = {
-            "cpu": round(100.0 - ct.idle, 1),
+            "cpu":          round(100.0 - ct.idle, 1),
             "cpu_per_core": [round(v, 1) for v in per_core],
-            "cpu_usr": round(ct.user, 1), "cpu_sys": round(ct.system, 1),
-            "loadavg_1": round(load1, 2), "ctx_switches": int(cs_per_s), "interrupts": int(intr_per_s),
-            "mem_pct": round(vm.percent, 1), "mem_used_mb": round(vm.used / 1048576, 0),
+            "cpu_usr":      round(ct.user, 1),
+            "cpu_sys":      round(ct.system, 1),
+            "cpu_irq":      round(getattr(ct, "irq",     0.0), 1),
+            "cpu_soft":     round(getattr(ct, "softirq", 0.0), 1),
+            "cpu_iowait":   round(getattr(ct, "iowait",  0.0), 1),
+            "cpu_steal":    round(getattr(ct, "steal",   0.0), 1),
+            "loadavg_1":    round(load1,  2),
+            "loadavg_5":    round(load5,  2),
+            "loadavg_15":   round(load15, 2),
+            "ctx_switches": int(cs_per_s),
+            "interrupts":   int(intr_per_s),
+            "mem_pct":      round(vm.percent, 1),
+            "mem_used_mb":  round(vm.used / 1048576, 0),
+            "swap_used_mb": round(swap.used / 1048576, 0),
         }
 
-        # PSI & TCP (Linux/Advanced)
+        # PSI (Linux)
         psi = _read_psi()
         if psi: sys_out["psi"] = psi
-        tcp = _read_tcp_summary()
-        if tcp: sys_out["tcp"] = tcp
 
-        # Disk & Network deltas
+        # TCP snapshot: both per-status dict and aggregate estab/timewait
+        tcp = _read_tcp_summary()
+        if tcp:
+            sys_out["tcp"] = tcp
+            sys_out["tcp_estab"]    = tcp.get("ESTABLISHED", 0)
+            sys_out["tcp_timewait"] = tcp.get("TIME_WAIT", 0)
+
+        # Disk deltas
         if prev_disk_rb is not None and dt_net > 0:
             try:
                 _d = psutil.disk_io_counters()
                 sys_out.update({
-                    "disk_read_kbs": round((_d.read_bytes - prev_disk_rb) / dt_net / 1024, 1),
-                    "disk_write_kbs": round((_d.write_bytes - prev_disk_wb) / dt_net / 1024, 1),
+                    "disk_read_kbs":   round((_d.read_bytes  - prev_disk_rb) / dt_net / 1024, 1),
+                    "disk_write_kbs":  round((_d.write_bytes - prev_disk_wb) / dt_net / 1024, 1),
+                    "disk_read_iops":  round((_d.read_count  - prev_disk_rc) / dt_net, 1),
+                    "disk_write_iops": round((_d.write_count - prev_disk_wc) / dt_net, 1),
                 })
                 prev_disk_rb, prev_disk_wb = _d.read_bytes, _d.write_bytes
+                prev_disk_rc, prev_disk_wc = _d.read_count, _d.write_count
             except Exception: pass
 
+        # UDP errors (Linux)
+        udp_rx_err = udp_buf_err = None
+        if _IS_LINUX and prev_udp_inerr is not None and dt_net > 0:
+            cur_ue, cur_be = _read_udp_snmp()
+            udp_rx_err  = round((cur_ue - prev_udp_inerr)  / dt_net, 2)
+            udp_buf_err = round((cur_be - prev_udp_buferr) / dt_net, 2)
+            prev_udp_inerr, prev_udp_buferr = cur_ue, cur_be
+        if udp_rx_err is not None:
+            sys_out["udp_rx_err"]  = udp_rx_err
+            sys_out["udp_buf_err"] = udp_buf_err
+
+        # Network deltas
         cur_net = psutil.net_io_counters(pernic=True)
-        rx_b = tx_b = 0
+        rx_b = tx_b = rx_pkts = tx_pkts = drop_in = drop_out = err_in = err_out = 0
         for nic, cnt in cur_net.items():
             if nic in _NET_EXCLUDE or nic.startswith("veth"): continue
             prev = prev_net.get(nic)
             if prev and dt_net > 0:
-                rx_b += cnt.bytes_recv - prev.bytes_recv
-                tx_b += cnt.bytes_sent - prev.bytes_sent
-        sys_out.update({"net_rx_kbs": round(rx_b/dt_net/1024, 1), "net_tx_kbs": round(tx_b/dt_net/1024, 1)})
+                rx_b     += cnt.bytes_recv   - prev.bytes_recv
+                tx_b     += cnt.bytes_sent   - prev.bytes_sent
+                rx_pkts  += cnt.packets_recv - prev.packets_recv
+                tx_pkts  += cnt.packets_sent - prev.packets_sent
+                drop_in  += cnt.dropin       - prev.dropin
+                drop_out += cnt.dropout      - prev.dropout
+                err_in   += cnt.errin        - prev.errin
+                err_out  += cnt.errout       - prev.errout
+        if dt_net > 0:
+            sys_out.update({
+                "net_rx_kbs":   round(rx_b    / dt_net / 1024, 1),
+                "net_tx_kbs":   round(tx_b    / dt_net / 1024, 1),
+                "net_rx_pkts":  round(rx_pkts / dt_net, 0),
+                "net_tx_pkts":  round(tx_pkts / dt_net, 0),
+                "net_drop_in":  round(drop_in  / dt_net, 2),
+                "net_drop_out": round(drop_out / dt_net, 2),
+                "net_err_in":   round(err_in   / dt_net, 2),
+                "net_err_out":  round(err_out  / dt_net, 2),
+            })
         prev_net, prev_net_t = cur_net, t0
 
         # Process groups
-        acc = {g: {"cpu": 0.0, "rss": 0.0, "vms": 0.0, "rk": 0.0, "wk": 0.0, "fds": 0} for g in ALL_GROUPS}
-        new_io, pid_cpu, pid_rss = {}, [], []
+        acc = {g: {"cpu": 0.0, "rss": 0.0, "vms": 0.0, "rk": 0.0, "wk": 0.0,
+                   "cswch": 0.0, "nvcswch": 0.0, "fds": 0} for g in ALL_GROUPS}
+        new_io, new_ctx, pid_cpu, pid_rss = {}, {}, [], []
 
-        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "io_counters", "num_fds"]):
+        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info",
+                                       "io_counters", "num_ctx_switches", "num_fds"]):
             try:
                 i = p.info
                 g = get_group(i["name"] or "")
@@ -164,8 +213,10 @@ def run_collect(args):
                 if cpu > 0.5: pid_cpu.append({"pid": i["pid"], "name": i["name"], "cpu": round(cpu, 1)})
                 if i["memory_info"]:
                     rss = i["memory_info"].rss / 1048576
+                    vms = i["memory_info"].vms / 1048576
                     acc[g]["rss"] = max(acc[g]["rss"], rss)
-                    if rss > 10: pid_rss.append({"pid": i["pid"], "name": i["name"], "rss": round(rss, 1)})
+                    acc[g]["vms"] = max(acc[g]["vms"], vms)
+                    if rss > 1: pid_rss.append({"pid": i["pid"], "name": i["name"], "rss": round(rss, 1)})
                 if i["io_counters"]:
                     new_io[i["pid"]] = (i["io_counters"].read_bytes, i["io_counters"].write_bytes, t0)
                     if i["pid"] in prev_io:
@@ -174,15 +225,36 @@ def run_collect(args):
                         if dt > 0:
                             acc[g]["rk"] += (i["io_counters"].read_bytes - pr) / dt / 1024
                             acc[g]["wk"] += (i["io_counters"].write_bytes - pw) / dt / 1024
+                ctx = i.get("num_ctx_switches")
+                if ctx is not None:
+                    new_ctx[i["pid"]] = (ctx.voluntary, ctx.involuntary, t0)
+                    if i["pid"] in prev_ctx:
+                        pv, pi2, pt = prev_ctx[i["pid"]]
+                        dt = t0 - pt
+                        if dt > 0:
+                            acc[g]["cswch"]  += (ctx.voluntary   - pv)  / dt
+                            acc[g]["nvcswch"] += (ctx.involuntary - pi2) / dt
                 acc[g]["fds"] += i.get("num_fds") or 0
             except (psutil.NoSuchProcess, psutil.AccessDenied): continue
-        prev_io = new_io
+        prev_io, prev_ctx = new_io, new_ctx
 
-        procs_out = {g: {k: round(v, 1) for k, v in d.items() if v > 0} for g, d in acc.items()}
-        procs_out = {g: v for g, v in procs_out.items() if v}
-        
+        procs_out = {}
+        for g, d in acc.items():
+            entry = {}
+            if d["cpu"]:    entry["cpu"]     = round(d["cpu"],    2)
+            if d["rss"]:    entry["rss"]     = round(d["rss"],    1)
+            if d["vms"]:    entry["vms"]     = round(d["vms"],    1)
+            if d["rk"]:     entry["rk"]      = round(d["rk"],     1)
+            if d["wk"]:     entry["wk"]      = round(d["wk"],     1)
+            if d["cswch"]:  entry["cswch"]   = round(d["cswch"],  1)
+            if d["nvcswch"]:entry["nvcswch"] = round(d["nvcswch"],1)
+            if d["fds"]:    entry["fds"]     = d["fds"]
+            if entry:
+                procs_out[g] = entry
+
         out = {"t": now_t, "sys": sys_out, "procs": procs_out}
-        if pid_cpu: out["top_cpu"] = sorted(pid_cpu, key=lambda x: x["cpu"], reverse=True)[:5]
+        if pid_cpu: out["top_cpu"] = sorted(pid_cpu, key=lambda x: x["cpu"], reverse=True)[:10]
+        if pid_rss: out["top_rss"] = sorted(pid_rss, key=lambda x: x["rss"], reverse=True)[:10]
         print(json.dumps(out, separators=(",", ":")), flush=True)
 
         elapsed = time.monotonic() - t0
@@ -190,9 +262,12 @@ def run_collect(args):
 
 # --- Subcommand: Parse (Raw Monitoring to JSON) ---
 
+_PROC_FIELDS = {"cpu", "rss", "vms", "read_kbs", "write_kbs", "cswch", "nvcswch", "fds"}
+
 def run_parse(args):
-    result = {"processes": {g: {"cpu":[], "rss":[], "read_kbs":[], "fds":[]} for g in ALL_GROUPS}, "system": {}}
-    
+    result = {"processes": {}, "system": {}, "top_cpu": {}, "top_rss": {}}
+    cpu_per_core_series = []
+
     if os.path.exists(args.input):
         with open(args.input) as f:
             for line in f:
@@ -201,29 +276,49 @@ def run_parse(args):
                     t = row["t"]
                     sys_d = row.get("sys", {})
                     for k, v in sys_d.items():
-                        if k in ["psi", "tcp"]:
-                            # Flattern nested dicts: psi.cpu, tcp.ESTABLISHED, etc.
+                        if k == "cpu_per_core":
+                            if isinstance(v, list):
+                                while len(cpu_per_core_series) < len(v):
+                                    cpu_per_core_series.append([])
+                                for i, cv in enumerate(v):
+                                    cpu_per_core_series[i].append([t, cv])
+                        elif k == "psi" and isinstance(v, dict):
                             for sub_k, sub_v in v.items():
-                                result["system"].setdefault(f"{k}_{sub_k}", []).append([t, sub_v])
-                        else:
+                                result["system"].setdefault(f"psi_{sub_k}", []).append([t, sub_v])
+                        elif k == "tcp" and isinstance(v, dict):
+                            for sub_k, sub_v in v.items():
+                                result["system"].setdefault(f"tcp_{sub_k}", []).append([t, sub_v])
+                        elif not isinstance(v, (list, dict)):
                             result["system"].setdefault(k, []).append([t, v])
-                    
+
                     procs_d = row.get("procs", {})
                     for g, gd in procs_d.items():
                         for k, v in gd.items():
                             fld = "read_kbs" if k == "rk" else ("write_kbs" if k == "wk" else k)
-                            if fld in ["cpu", "rss", "vms", "read_kbs", "write_kbs", "fds"]:
+                            if fld in _PROC_FIELDS and not isinstance(v, (list, dict)):
                                 result["processes"].setdefault(g, {}).setdefault(fld, []).append([t, v])
+
+                    for entry in row.get("top_cpu", []):
+                        name = entry.get("name") or "?"
+                        result["top_cpu"].setdefault(name, []).append([t, entry.get("cpu", 0)])
+                    for entry in row.get("top_rss", []):
+                        name = entry.get("name") or "?"
+                        result["top_rss"].setdefault(name, []).append([t, entry.get("rss", 0)])
                 except Exception: continue
+
+    if cpu_per_core_series:
+        result["system"]["cpu_per_core"] = cpu_per_core_series
 
     result["k6OffsetSeconds"] = args.k6_offset
     result["processes"] = {g: v for g, v in result["processes"].items() if any(v.values())}
+    if not result["top_cpu"]: del result["top_cpu"]
+    if not result["top_rss"]: del result["top_rss"]
     result["catalog"] = {
         "categories": SCHEMA.get("categories", []),
         "metrics": SCHEMA.get("metrics", []),
         "groups": SCHEMA.get("groups", [])
     }
-    
+
     with open(args.output, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Parsed {args.input} -> {args.output}")

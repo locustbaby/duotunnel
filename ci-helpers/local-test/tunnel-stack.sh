@@ -108,8 +108,9 @@ stack_create_token() {
       | grep '^Token:' | awk '{print $2}' \
     || "$BIN/tunnel-ctld" --config "$cfg" \
       client rotate-token "$CLIENT_GROUP" 2>/dev/null \
-      | awk '{print $NF}'
+      | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g'
   )
+  TUNNEL_TOKEN=$(echo "$TUNNEL_TOKEN" | tr -cd '[:print:]')
   [[ -n "$TUNNEL_TOKEN" ]] || { echo "ERROR: failed to get token"; return 1; }
   export TUNNEL_TOKEN
 

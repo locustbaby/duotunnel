@@ -75,7 +75,8 @@ runs:
         TOKEN=$(./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
           client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
           || ./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
-          client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
+          client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
+        TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
         
         python3 -c "import re,sys; f='${{ inputs.tun_config_dir }}/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; w=sys.argv[3]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); c=re.sub(r'^(\\s*worker_threads:)\\s*\\d+', r'\\1 '+w, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "${{ inputs.quic_connections }}" "${{ inputs.worker_threads }}"
         sleep 3
