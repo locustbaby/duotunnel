@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
+pub const DEFAULT_ACCEPT_WORKERS: usize = 4;
+
 pub fn build_reuseport_listener(addr: SocketAddr) -> Result<TcpListener> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6

@@ -120,6 +120,8 @@ pub struct ClientConfigFile {
     pub proxy_buffers: ProxyBufferConfig,
     #[serde(default)]
     pub reconnect: ReconnectConfig,
+    #[serde(default)]
+    pub entry_accept_workers: Option<usize>,
 }
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {

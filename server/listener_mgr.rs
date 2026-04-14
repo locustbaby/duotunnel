@@ -136,7 +136,7 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
         .config
         .server
         .accept_workers
-        .unwrap_or(4)
+        .unwrap_or(tunnel_lib::DEFAULT_ACCEPT_WORKERS)
         .max(1);
 
     for desc in to_spawn {

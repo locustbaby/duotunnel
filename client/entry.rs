@@ -1,9 +1,10 @@
 use crate::conn_pool::EntryConnPool;
 use anyhow::Result;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -23,42 +24,63 @@ pub async fn start_entry_listener(
     tcp_params: TcpParams,
     peek_buf_size: usize,
     open_stream_timeout: Duration,
+    accept_workers: usize,
 ) -> Result<()> {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
     let semaphore = Arc::new(Semaphore::new(max_connections as usize));
     let tcp_params = Arc::new(tcp_params);
     info!(
-        addr = % addr, max_connections = % max_connections,
+        addr = %addr, max_connections = %max_connections, accept_workers = %accept_workers,
         "client entry listener started"
     );
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                debug!(port = port, "entry listener cancelled");
-                break Ok(());
-            }
-            result = listener.accept() => {
-                let (stream, peer_addr) = result?;
-                let permit = match semaphore.clone().try_acquire_owned() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!(port = port, "entry connection rejected: max connections reached");
-                        continue;
+
+    let mut handles = Vec::with_capacity(accept_workers);
+    for _ in 0..accept_workers {
+        let listener = listener.clone();
+        let pool = pool.clone();
+        let semaphore = semaphore.clone();
+        let tcp_params = tcp_params.clone();
+        let cancel_token = cancel_token.clone();
+        handles.push(crate::spawn_task(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        debug!(port = port, "entry listener cancelled");
+                        break;
                     }
-                };
-                debug!(peer_addr = %peer_addr, "new entry connection");
-                let pool = pool.clone();
-                let tcp_params = tcp_params.clone();
-                crate::spawn_task(async move {
-                    let _permit = permit;
-                    if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
-                        debug!(error = %e, "entry connection error");
+                    result = listener.accept() => {
+                        let (stream, peer_addr) = match result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!(error = %e, "entry accept error");
+                                continue;
+                            }
+                        };
+                        let permit = match semaphore.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                warn!(port = port, "entry connection rejected: max connections reached");
+                                continue;
+                            }
+                        };
+                        debug!(peer_addr = %peer_addr, "new entry connection");
+                        let pool = pool.clone();
+                        let tcp_params = tcp_params.clone();
+                        crate::spawn_task(async move {
+                            let _permit = permit;
+                            if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
+                                debug!(error = %e, "entry connection error");
+                            }
+                        });
                     }
-                });
+                }
             }
-        }
+        }));
     }
+
+    futures_util::future::join_all(handles).await;
+    Ok(())
 }
 
 async fn handle_entry_connection(

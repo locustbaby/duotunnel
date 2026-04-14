@@ -25,7 +25,7 @@ pub use protocol::detect::detect_protocol_and_host;
 pub use proxy::h2_proxy::{new_h2_sender, forward_h2_request, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
-pub use transport::listener::{build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter};
+pub use transport::listener::{build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter, DEFAULT_ACCEPT_WORKERS};
 pub use transport::quic::{build_transport_config, QuicTransportParams};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;
