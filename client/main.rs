@@ -313,7 +313,7 @@ pub(crate) async fn run_client(
             }
             stream_result = conn.accept_bi() => {
                 match stream_result {
-                    Ok((mut send, recv)) => {
+                    Ok((send, recv)) => {
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();

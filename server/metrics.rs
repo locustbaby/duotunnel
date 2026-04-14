@@ -50,9 +50,6 @@ pub fn request_completed(protocol: &'static str, status: &'static str) {
     metrics::counter!("duotunnel_requests_total", "protocol" => protocol, "status" => status).increment(1);
 }
 
-pub fn connection_rejected(conn_type: &'static str) {
-    metrics::counter!("duotunnel_connections_rejected_total", "type" => conn_type).increment(1);
-}
 
 pub struct OpenBiInflightGuard;
 
