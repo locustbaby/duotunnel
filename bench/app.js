@@ -381,11 +381,18 @@ function initResourceCharts(rpc, entry) {
     (entry.phases||[]).filter(p => p.resourceCase).forEach((p, fi) => {
       const chartOff = p.resourceCase === 'core' ? coreOff : 0;
       const shortName = p.name.replace(/ \([^)]*\)$/i, '').trim();
+      const pIdx = mergePhases.length + fi;
+      const col = PHASE_COLORS[pIdx % PHASE_COLORS.length];
+      const yAdj = (pIdx % 2 === 0) ? 10 : 24;
+      const nsc = (p.scenarios||[]).length;
+      const label = nsc ? `${shortName} (${nsc})` : shortName;
+      const xMin = (p.start||0)+chartOff, xMax = (p.end||0)+chartOff;
       allAnnotations[`frpOverlay${fi}`] = {
-        type:'box', xMin:(p.start||0)+chartOff, xMax:(p.end||0)+chartOff,
-        backgroundColor:'rgba(245,166,35,.08)', borderWidth:1, borderColor:'rgba(245,166,35,.25)',
-        label:{display:true, content:shortName, color:'rgba(245,166,35,0.75)', font:{size:8,weight:'bold'}, position:{x:'center',y:'end'}, yAdjust:-14},
+        type:'box', xMin, xMax, backgroundColor:col, borderWidth:0,
+        label:{display:true, content:label, color:'rgba(180,200,220,0.75)', font:{size:8,weight:'bold'}, position:{x:'center',y:'start'}, yAdjust:yAdj},
       };
+      allAnnotations[`frpOverlayLineS${fi}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
+      allAnnotations[`frpOverlayLineE${fi}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
     });
   }
 
@@ -429,12 +436,12 @@ function initResourceCharts(rpc, entry) {
 
   const cpuByKey={}, memByKey={}, vmsByKey={}, csVolByKey={}, csInvolByKey={};
   const sysCpuMerged=[], sysBdMerged={};
-  const tcpEstab=[], tcpTimewait=[];
+  const tcpEstab=[], tcpTimewait=[], tcpListen=[], tcpCloseWait=[], tcpFinWait1=[], tcpFinWait2=[], tcpSynSent=[], tcpSynRecv=[], tcpLastAck=[];
   const diskRdKbs=[], diskWrKbs=[], diskRdIops=[], diskWrIops=[];
   const intrPts=[], ctxSwPts=[];
   const udpRxErr=[], udpBufErr=[];
   const m8kRxKbs=[], m8kTxKbs=[], m8kRxPkts=[], m8kTxPkts=[], m8kDropIn=[], m8kDropOut=[];
-  const m8kLoad1=[], m8kLoad5=[], m8kLoad15=[], m8kSwap=[];
+  const m8kLoad1=[], m8kLoad5=[], m8kLoad15=[], m8kSwap=[], m8kMemMb=[];
   const merged8kTopCpu={}, merged8kTopRss={};
   const merged8kPerCore=[];
   let hasCpu=false, hasMem=false, hasVms=false, hasCs=false;
@@ -470,10 +477,17 @@ function initResourceCharts(rpc, entry) {
       }
     }
 
-    const estabPts  = cSys.tcp_ESTABLISHED || cSys.tcp_estab    || [];
-    const twaitPts  = cSys.tcp_TIME_WAIT   || cSys.tcp_timewait || [];
-    if (estabPts.length) { tcpEstab.push(...g_(shiftPts(estabPts, off)));  hasTcp=true; }
+    const estabPts = cSys.tcp_ESTABLISHED || cSys.tcp_estab    || [];
+    const twaitPts = cSys.tcp_TIME_WAIT   || cSys.tcp_timewait || [];
+    if (estabPts.length) { tcpEstab.push(...g_(shiftPts(estabPts, off)));    hasTcp=true; }
     if (twaitPts.length) { tcpTimewait.push(...g_(shiftPts(twaitPts, off))); hasTcp=true; }
+    if (cSys.tcp_LISTEN?.length)     tcpListen.push(...g_(shiftPts(cSys.tcp_LISTEN, off)));
+    if (cSys.tcp_CLOSE_WAIT?.length) tcpCloseWait.push(...g_(shiftPts(cSys.tcp_CLOSE_WAIT, off)));
+    if (cSys.tcp_FIN_WAIT1?.length)  tcpFinWait1.push(...g_(shiftPts(cSys.tcp_FIN_WAIT1, off)));
+    if (cSys.tcp_FIN_WAIT2?.length)  tcpFinWait2.push(...g_(shiftPts(cSys.tcp_FIN_WAIT2, off)));
+    if (cSys.tcp_SYN_SENT?.length)   tcpSynSent.push(...g_(shiftPts(cSys.tcp_SYN_SENT, off)));
+    if (cSys.tcp_SYN_RECV?.length)   tcpSynRecv.push(...g_(shiftPts(cSys.tcp_SYN_RECV, off)));
+    if (cSys.tcp_LAST_ACK?.length)   tcpLastAck.push(...g_(shiftPts(cSys.tcp_LAST_ACK, off)));
 
     if (cSys.disk_read_kbs?.length)   { diskRdKbs.push(...g_(shiftPts(cSys.disk_read_kbs, off)));   hasDisk=true; }
     if (cSys.disk_write_kbs?.length)  { diskWrKbs.push(...g_(shiftPts(cSys.disk_write_kbs, off)));  hasDisk=true; }
@@ -497,6 +511,7 @@ function initResourceCharts(rpc, entry) {
     if (cSys.loadavg_5?.length)  m8kLoad5.push(...g_(shiftPts(cSys.loadavg_5, off)));
     if (cSys.loadavg_15?.length) m8kLoad15.push(...g_(shiftPts(cSys.loadavg_15, off)));
     if (cSys.swap_used_mb?.length) m8kSwap.push(...g_(shiftPts(cSys.swap_used_mb, off)));
+    if (cSys.mem_used_mb?.length)  { m8kMemMb.push(...g_(shiftPts(cSys.mem_used_mb, off))); hasLoad=true; }
 
     for (const [name, pts] of Object.entries(caseRes.top_cpu || {})) {
       if (!merged8kTopCpu[name]) merged8kTopCpu[name]=[];
@@ -569,11 +584,12 @@ function initResourceCharts(rpc, entry) {
 
   // Load Avg + Swap
   if (hasLoad) {
-    addChart('res_load', 'Load Average + Swap');
+    addChart('res_load', 'Load Average + Memory + Swap');
     const ds=[];
     if (m8kLoad1.length)  ds.push(linePts(m8kLoad1,  '#4da6ff', 'load 1m'));
     if (m8kLoad5.length)  ds.push(linePts(m8kLoad5,  '#f5a623', 'load 5m'));
     if (m8kLoad15.length) ds.push(linePts(m8kLoad15, '#a78bfa', 'load 15m', {borderDash:[4,2]}));
+    if (m8kMemMb.length)  ds.push(linePts(m8kMemMb,  '#34d399', 'mem MB',   {borderDash:[3,1]}));
     if (m8kSwap.length)   ds.push(linePts(m8kSwap,   '#ef5350', 'swap MB',  {borderDash:[2,2]}));
     Charts.create('res_load', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('')}});
   }
@@ -602,8 +618,15 @@ function initResourceCharts(rpc, entry) {
   if (hasTcp) {
     addChart('res_tcp', 'TCP Connections');
     const ds=[];
-    if (tcpEstab.length)    ds.push(linePts(tcpEstab,    '#4da6ff', 'ESTABLISHED'));
-    if (tcpTimewait.length) ds.push(linePts(tcpTimewait, '#f5a623', 'TIME_WAIT'));
+    if (tcpEstab.length)     ds.push(linePts(tcpEstab,     '#4da6ff', 'ESTABLISHED'));
+    if (tcpTimewait.length)  ds.push(linePts(tcpTimewait,  '#f5a623', 'TIME_WAIT'));
+    if (tcpListen.length)    ds.push(linePts(tcpListen,    '#34d399', 'LISTEN',    {borderDash:[4,2], borderWidth:1}));
+    if (tcpCloseWait.length) ds.push(linePts(tcpCloseWait, '#ef5350', 'CLOSE_WAIT',{borderDash:[3,2], borderWidth:1}));
+    if (tcpFinWait1.length)  ds.push(linePts(tcpFinWait1,  '#a78bfa', 'FIN_WAIT1', {borderDash:[3,2], borderWidth:1}));
+    if (tcpFinWait2.length)  ds.push(linePts(tcpFinWait2,  '#f472b6', 'FIN_WAIT2', {borderDash:[3,2], borderWidth:1}));
+    if (tcpSynSent.length)   ds.push(linePts(tcpSynSent,   '#38bdf8', 'SYN_SENT',  {borderDash:[2,2], borderWidth:1}));
+    if (tcpSynRecv.length)   ds.push(linePts(tcpSynRecv,   '#fbbf24', 'SYN_RECV',  {borderDash:[2,2], borderWidth:1}));
+    if (tcpLastAck.length)   ds.push(linePts(tcpLastAck,   '#4a5a6d', 'LAST_ACK',  {borderDash:[2,2], borderWidth:1}));
     Charts.create('res_tcp', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('connections')}});
   }
 
