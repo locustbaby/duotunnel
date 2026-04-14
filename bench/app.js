@@ -585,16 +585,24 @@ function initResourceCharts(rpc, entry) {
     Charts.create('res_mem', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('MB')}});
   }
 
-  // Load Avg + Swap
+  // Load Avg + Memory + Swap (dual Y-axis)
   if (hasLoad) {
     addChart('res_load', 'Load Average + Memory + Swap');
     const ds=[];
-    if (m8kLoad1.length)  ds.push(linePts(m8kLoad1,  '#4da6ff', 'load 1m'));
-    if (m8kLoad5.length)  ds.push(linePts(m8kLoad5,  '#f5a623', 'load 5m'));
-    if (m8kLoad15.length) ds.push(linePts(m8kLoad15, '#a78bfa', 'load 15m', {borderDash:[4,2]}));
-    if (m8kMemMb.length)  ds.push(linePts(m8kMemMb,  '#34d399', 'mem MB',   {borderDash:[3,1]}));
-    if (m8kSwap.length)   ds.push(linePts(m8kSwap,   '#ef5350', 'swap MB',  {borderDash:[2,2]}));
-    Charts.create('res_load', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('')}});
+    if (m8kLoad1.length)  ds.push({...linePts(m8kLoad1,  '#4da6ff', 'load 1m'),               yAxisID:'yLoad'});
+    if (m8kLoad5.length)  ds.push({...linePts(m8kLoad5,  '#f5a623', 'load 5m'),               yAxisID:'yLoad'});
+    if (m8kLoad15.length) ds.push({...linePts(m8kLoad15, '#a78bfa', 'load 15m', {borderDash:[4,2]}), yAxisID:'yLoad'});
+    if (m8kMemMb.length)  ds.push({...linePts(m8kMemMb,  '#34d399', 'mem MB',   {borderDash:[3,1]}), yAxisID:'yMem'});
+    if (m8kSwap.length)   ds.push({...linePts(m8kSwap,   '#ef5350', 'swap MB',  {borderDash:[2,2]}), yAxisID:'yMem'});
+    const loadOpts = {
+      ...CO,
+      scales: {
+        ...CO.scales,
+        yLoad: {position:'left',  title:{display:true, text:'load', color:'#6b7d93'}, ticks:{color:'#6b7d93',font:{size:9}}, grid:{color:'rgba(30,42,58,.5)'}},
+        yMem:  {position:'right', title:{display:true, text:'MB',   color:'#6b7d93'}, ticks:{color:'#6b7d93',font:{size:9}}, grid:{drawOnChartArea:false}},
+      },
+    };
+    Charts.create('res_load', {type:'line', data:{datasets:ds}, options:loadOpts});
   }
 
   // Network throughput
