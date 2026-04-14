@@ -1033,7 +1033,7 @@ jobs:
             || { echo "ERROR: ctld healthz never became ready"; cat /tmp/ci-ctld.log; exit 1; }
 
           sudo systemd-run --scope --unit=duotunnel-server --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
           for i in $(seq 1 60); do
@@ -1052,7 +1052,7 @@ jobs:
           # Wait for ctld poll to push new token to server (~1500ms poll interval)
           sleep 3
           sudo systemd-run --scope --unit=duotunnel-client --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- ./target/release/client --config ci-helpers/client.yaml >> /tmp/ci-client.log 2>&1 &
           for i in $(seq 1 60); do
             systemctl is-failed duotunnel-client.scope > /dev/null 2>&1 && break
@@ -1111,7 +1111,7 @@ jobs:
 
           echo "Restarting server..."
           sudo systemd-run --scope --unit=duotunnel-server --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- ./target/release/server --config ci-helpers/server.yaml \
             --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
           for i in $(seq 1 60); do
@@ -1121,7 +1121,7 @@ jobs:
 
           echo "Restarting client..."
           sudo systemd-run --scope --unit=duotunnel-client --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- ./target/release/client --config ci-helpers/client.yaml >> /tmp/ci-client.log 2>&1 &
           for i in $(seq 1 60); do
             systemctl is-failed duotunnel-client.scope > /dev/null 2>&1 && break
@@ -1224,11 +1224,11 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         run: |
           sudo systemd-run --scope --unit=frp-server --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- frps -c ci-helpers/frps.toml >> /tmp/frps.log 2>&1 &
           sleep 1
           sudo systemd-run --scope --unit=frp-client --collect \
-            -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
             -- frpc -c ci-helpers/frpc.toml >> /tmp/frpc.log 2>&1 &
           FRP_READY=0
           for i in $(seq 1 20); do
@@ -1528,7 +1528,7 @@ jobs:
             fi
 
             sudo systemd-run --scope --unit=duotunnel-server --collect \
-              -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+              -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
               -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
               ${TOKIO_ENV:+-E $TOKIO_ENV} \
               -- ./target/release/server --config ci-helpers/server.yaml \
@@ -1553,7 +1553,7 @@ jobs:
             sleep 3
 
             sudo systemd-run --scope --unit=duotunnel-client --collect \
-              -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+              -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
               -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
               ${TOKIO_ENV:+-E $TOKIO_ENV} \
               -- ./target/release/client --config ci-helpers/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
@@ -1598,7 +1598,7 @@ jobs:
               sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
 
               sudo systemd-run --scope --unit=duotunnel-server --collect \
-                -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+                -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
                 -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
                 ${TOKIO_ENV:+-E $TOKIO_ENV} \
                 -- ./target/release/server --config ci-helpers/server.yaml \
@@ -1614,7 +1614,7 @@ jobs:
               fi
 
               sudo systemd-run --scope --unit=duotunnel-client --collect \
-                -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+                -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
                 -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
                 ${TOKIO_ENV:+-E $TOKIO_ENV} \
                 -- ./target/release/client --config ci-helpers/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
