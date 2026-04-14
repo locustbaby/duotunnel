@@ -134,20 +134,16 @@ impl UpstreamResolver for ClientApp {
             }
             Protocol::Tcp => {
                 info!("TCP protocol detected (opaque TLS)");
-                let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
                 if is_https {
                     let host_for_cert = tls_host.as_deref().unwrap_or("localhost").to_string();
                     info!(
                         "Terminating ingress TLS to fix SNI for upstream {}",
                         host_for_cert
                     );
-                    // Reuse a cached ServerConfig (cert generated once per host, TTL 1h).
                     let server_config = tunnel_lib::get_or_create_server_config(&host_for_cert)?;
                     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-                    #[allow(dead_code)]
                     struct MitmH2Peer {
                         acceptor: tokio_rustls::TlsAcceptor,
-                        target_addr: std::net::SocketAddr,
                         tls_host: String,
                         https_client: HttpsClient,
                         h2c_client: H2cClient,
@@ -198,12 +194,12 @@ impl UpstreamResolver for ClientApp {
                     }
                     Ok(PeerKind::Dyn(Box::new(MitmH2Peer {
                         acceptor,
-                        target_addr,
                         tls_host: host_for_cert,
                         https_client: self.map.https_client.clone(),
                         h2c_client: self.map.h2c_client.clone(),
                     })))
                 } else {
+                    let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
                     Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer::new(
                         target_addr,
                         self.tcp_params.clone(),

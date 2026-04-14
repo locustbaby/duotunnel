@@ -1,23 +1,18 @@
 use crate::config::ServerEgressUpstream;
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
+use tunnel_lib::egress::http::{H2cClient, HttpsClient};
 use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::proxy::tcp::{TcpPeer, UpstreamScheme};
 use tunnel_lib::{HttpClientParams, UpstreamGroup};
-type HttpsClient = Client<
-    hyper_rustls::HttpsConnector<HttpConnector>,
-    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
->;
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
     http_rules: HashMap<String, String>,
     https_client: HttpsClient,
+    h2c_client: H2cClient,
 }
 impl ServerEgressMap {
     pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
@@ -42,10 +37,12 @@ impl ServerEgressMap {
             http_rules.insert(host_key, rule.action_upstream.clone());
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
+        let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
         Self {
             upstreams,
             http_rules,
             https_client,
+            h2c_client,
         }
     }
     /// Look up the upstream address for the given host (must be pre-stripped of port).
@@ -107,12 +104,21 @@ impl UpstreamResolver for ServerEgressMap {
                     )))
                 }
             }
-            Protocol::H1 | Protocol::H2 | Protocol::Unknown => {
+            Protocol::H1 | Protocol::Unknown => {
                 let scheme_str = if is_https { "https" } else { "http" }.to_string();
                 Ok(PeerKind::Http(Box::new(HttpPeer {
                     client: self.https_client.clone(),
                     target_host: connect_addr_str,
                     scheme: scheme_str,
+                })))
+            }
+            Protocol::H2 => {
+                let scheme_str = if is_https { "https" } else { "http" }.to_string();
+                Ok(PeerKind::H2(Box::new(tunnel_lib::proxy::h2::H2Peer {
+                    target_host: connect_addr_str,
+                    scheme: scheme_str,
+                    https_client: self.https_client.clone(),
+                    h2c_client: self.h2c_client.clone(),
                 })))
             }
             _ => Err(anyhow!("unsupported protocol for egress")),
