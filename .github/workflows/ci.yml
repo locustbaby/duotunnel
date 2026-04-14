@@ -1236,10 +1236,7 @@ jobs:
             echo "ERROR: missing core benchmark output"
             exit 1
           fi
-          python3 ci-helpers/merge-results.py \
-            /tmp/core/bench-results.json \
-            /tmp/bench-results-merged.json \
-            /tmp/profile8k/bench-results-8k-combined.json:8k-q4:true
+          cp /tmp/core/bench-results.json /tmp/bench-results-merged.json
 
       - name: Publish benchmark to gh-pages
         env:
