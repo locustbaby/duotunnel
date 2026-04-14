@@ -6,6 +6,22 @@ use figment::{
 use serde::Deserialize;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use tunnel_lib::transport::quic::QuicTransportParams;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EntryConfig {
+    pub port: Option<u16>,
+    pub accept_workers: usize,
+}
+
+impl Default for EntryConfig {
+    fn default() -> Self {
+        Self {
+            port: None,
+            accept_workers: tunnel_lib::DEFAULT_ACCEPT_WORKERS,
+        }
+    }
+}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ClientQuicConfig {
@@ -99,7 +115,7 @@ pub struct ClientConfigFile {
     #[allow(dead_code)]
     pub trace_enabled: bool,
     #[serde(default)]
-    pub http_entry_port: Option<u16>,
+    pub entry: EntryConfig,
     #[serde(default)]
     pub metrics_port: Option<u16>,
     #[serde(default)]
@@ -120,8 +136,6 @@ pub struct ClientConfigFile {
     pub proxy_buffers: ProxyBufferConfig,
     #[serde(default)]
     pub reconnect: ReconnectConfig,
-    #[serde(default)]
-    pub entry_accept_workers: Option<usize>,
 }
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {

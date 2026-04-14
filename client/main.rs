@@ -130,14 +130,14 @@ async fn async_main() -> Result<()> {
 
     let entry_pool = EntryConnPool::new();
 
-    if let Some(entry_port) = config.http_entry_port {
+    if let Some(entry_port) = config.entry.port {
         let pool = entry_pool.clone();
         let token = cancel.clone();
         let max_entry_conns = config.quic.max_concurrent_streams;
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        let accept_workers = config.entry_accept_workers.unwrap_or(tunnel_lib::DEFAULT_ACCEPT_WORKERS).max(1);
+        let accept_workers = config.entry.accept_workers.max(1);
         crate::spawn_task(async move {
             if let Err(e) = entry::start_entry_listener(
                 pool,
