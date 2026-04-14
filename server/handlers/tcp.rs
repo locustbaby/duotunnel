@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+const EMFILE_BACKOFF_MS: u64 = 100;
 use tunnel_lib::proxy;
 
 pub async fn run_tcp_accept_loop(
@@ -23,23 +24,23 @@ pub async fn run_tcp_accept_loop(
                 info!(addr = %addr, "TCP listener shutting down");
                 return Ok(());
             }
-            result = listener.accept() => result?,
+            result = listener.accept() => match result {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(24) = e.raw_os_error() {
+                        warn!("tcp accept: too many open files, backing off");
+                        tokio::time::sleep(Duration::from_millis(EMFILE_BACKOFF_MS)).await;
+                    }
+                    continue;
+                }
+            },
         };
         state.tcp_params.apply(&stream)?;
         debug!(peer_addr = % peer_addr, "new TCP connection");
-        let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                warn!(peer_addr = %peer_addr, "TCP connection rejected: max connections reached");
-                metrics::connection_rejected("tcp");
-                continue;
-            }
-        };
         let state = state.clone();
         let proxy_name = proxy_name.clone();
         let group_id = group_id.clone();
         tokio::task::spawn(async move {
-            let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
             if let Err(e) = &result {

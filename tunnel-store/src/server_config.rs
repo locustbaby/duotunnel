@@ -41,10 +41,6 @@ pub struct ServerBasicConfig {
     pub trace_enabled: bool,
     #[serde(default)]
     pub database_url: String,
-    #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
-    #[serde(default = "default_max_connections")]
-    pub max_tcp_connections: usize,
     #[serde(default)]
     pub metrics_port: Option<u16>,
     #[serde(default)]
@@ -67,9 +63,6 @@ pub struct ServerBasicConfig {
     pub accept_workers: Option<usize>,
 }
 
-fn default_max_connections() -> usize {
-    10_000
-}
 fn default_login_timeout_secs() -> u64 {
     10
 }

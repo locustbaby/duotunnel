@@ -2,26 +2,25 @@ use crate::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
     detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, PeekBufPool, RoutingInfo,
     TcpParams,
 };
-use std::sync::OnceLock;
+
+const EMFILE_BACKOFF_MS: u64 = 100;
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
-#[allow(clippy::too_many_arguments)]
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
     port: u16,
     cancel_token: CancellationToken,
-    max_connections: u32,
     tcp_params: TcpParams,
     peek_buf_size: usize,
     open_stream_timeout: Duration,
@@ -29,18 +28,13 @@ pub async fn start_entry_listener(
 ) -> Result<()> {
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
-    let semaphore = Arc::new(Semaphore::new(max_connections as usize));
     let tcp_params = Arc::new(tcp_params);
-    info!(
-        addr = %addr, max_connections = %max_connections, accept_workers = %accept_workers,
-        "client entry listener started"
-    );
+    info!(addr = %addr, accept_workers = %accept_workers, "client entry listener started");
 
     let mut handles = Vec::with_capacity(accept_workers);
     for _ in 0..accept_workers {
         let listener = listener.clone();
         let pool = pool.clone();
-        let semaphore = semaphore.clone();
         let tcp_params = tcp_params.clone();
         let cancel_token = cancel_token.clone();
         handles.push(crate::spawn_task(async move {
@@ -54,14 +48,12 @@ pub async fn start_entry_listener(
                         let (stream, peer_addr) = match result {
                             Ok(v) => v,
                             Err(e) => {
-                                warn!(error = %e, "entry accept error");
-                                continue;
-                            }
-                        };
-                        let permit = match semaphore.clone().try_acquire_owned() {
-                            Ok(p) => p,
-                            Err(_) => {
-                                warn!(port = port, "entry connection rejected: max connections reached");
+                                if let Some(24) = e.raw_os_error() {
+                                    warn!("entry accept: too many open files, backing off");
+                                    tokio::time::sleep(Duration::from_millis(EMFILE_BACKOFF_MS)).await;
+                                } else {
+                                    warn!(error = %e, "entry accept error");
+                                }
                                 continue;
                             }
                         };
@@ -69,7 +61,6 @@ pub async fn start_entry_listener(
                         let pool = pool.clone();
                         let tcp_params = tcp_params.clone();
                         crate::spawn_task(async move {
-                            let _permit = permit;
                             if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
                                 debug!(error = %e, "entry connection error");
                             }

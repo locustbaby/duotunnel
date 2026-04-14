@@ -13,7 +13,6 @@ use std::future::Future;
 use std::sync::Arc;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 mod config;
@@ -105,8 +104,6 @@ pub use tunnel_lib::PeekBufPool;
 pub struct ServerState {
     pub config: Arc<ServerConfigFile>,
     pub registry: SharedRegistry,
-    pub quic_semaphore: Arc<Semaphore>,
-    pub tcp_semaphore: Arc<Semaphore>,
     pub tcp_params: tunnel_lib::TcpParams,
     pub proxy_buffer_params: tunnel_lib::ProxyBufferParams,
     pub peek_buf_pool: PeekBufPool,
@@ -377,8 +374,6 @@ async fn build_server_state(
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
-        quic_semaphore: Arc::new(Semaphore::new(config.server.max_connections)),
-        tcp_semaphore: Arc::new(Semaphore::new(config.server.max_tcp_connections)),
         routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
         registry: new_shared_registry(),
         config: Arc::new(config.clone()),
@@ -396,11 +391,6 @@ async fn proxy_main(
     shutdown: CancellationToken,
     ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    info!(
-        max_quic_connections = %state.config.server.max_connections,
-        max_tcp_connections = %state.config.server.max_tcp_connections,
-        "Connection limits configured"
-    );
 
     // Sync initial listeners before QUIC starts.
     {

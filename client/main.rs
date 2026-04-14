@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -133,7 +132,6 @@ async fn async_main() -> Result<()> {
     if let Some(entry_port) = config.entry.port {
         let pool = entry_pool.clone();
         let token = cancel.clone();
-        let max_entry_conns = config.quic.max_concurrent_streams;
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
@@ -143,7 +141,6 @@ async fn async_main() -> Result<()> {
                 pool,
                 entry_port,
                 token,
-                max_entry_conns,
                 entry_tcp_params,
                 peek_buf_size,
                 open_stream_timeout,
@@ -304,9 +301,6 @@ pub(crate) async fn run_client(
         &tunnel_lib::HttpClientParams::from(&config.http_pool),
     ));
     let session_cancel = CancellationToken::new();
-    let max_streams = config.quic.max_concurrent_streams;
-    let stream_semaphore = Arc::new(Semaphore::new(max_streams as usize));
-    info!(max_concurrent_streams = % max_streams, "Stream backpressure configured");
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
     entry_pool.push(conn.clone());
@@ -320,20 +314,10 @@ pub(crate) async fn run_client(
             stream_result = conn.accept_bi() => {
                 match stream_result {
                     Ok((mut send, recv)) => {
-                        let permit = match stream_semaphore.clone().try_acquire_owned() {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                warn!("Stream rejected: max concurrent streams reached");
-                                // Signal the server that we cannot accept this stream.
-                                let _ = send.reset(0u8.into());
-                                continue;
-                            }
-                        };
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
                         crate::spawn_task(async move {
-                            let _permit = permit;
                             if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 debug!(error = %e, "work stream error");
                             }

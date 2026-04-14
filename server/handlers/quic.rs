@@ -1,6 +1,5 @@
 use crate::config::build_client_config_for_group;
 use crate::egress::EgressProxy;
-use crate::handlers::SEMAPHORE_WAIT_MS;
 use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,25 +16,7 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
     info!(addr = % addr, "QUIC server listening");
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
-        let permit = match tokio::time::timeout(
-            Duration::from_millis(SEMAPHORE_WAIT_MS),
-            state.quic_semaphore.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_semaphore_closed)) => {
-                // Semaphore was closed — server is shutting down, stop accepting.
-                break;
-            }
-            Err(_elapsed) => {
-                warn!("QUIC connection rejected: max connections reached after wait");
-                metrics::connection_rejected("quic");
-                continue;
-            }
-        };
         tokio::task::spawn(async move {
-            let _permit = permit;
             metrics::quic_connection_opened();
             if let Err(e) = handle_quic_connection(state, incoming).await {
                 error!(error = % e, "QUIC connection error");

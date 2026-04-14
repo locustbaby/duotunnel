@@ -211,12 +211,6 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
     if cfg.server.tunnel_port == 0 {
         errors.push("server.tunnel_port must not be 0".into());
     }
-    if cfg.server.max_connections == 0 {
-        errors.push("server.max_connections must be >= 1".into());
-    }
-    if cfg.server.max_tcp_connections == 0 {
-        errors.push("server.max_tcp_connections must be >= 1".into());
-    }
     if cfg.server.open_stream_timeout_ms == 0 {
         errors.push("server.open_stream_timeout_ms must be >= 1".into());
     }

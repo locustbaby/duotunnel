@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+const EMFILE_BACKOFF_MS: u64 = 100;
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
 use tunnel_lib::RouteTarget;
@@ -23,21 +24,21 @@ pub async fn run_http_accept_loop(
                 info!(addr = %addr, "http listener shutting down");
                 return Ok(());
             }
-            result = listener.accept() => result?,
+            result = listener.accept() => match result {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(24) = e.raw_os_error() {
+                        warn!("http accept: too many open files, backing off");
+                        tokio::time::sleep(Duration::from_millis(EMFILE_BACKOFF_MS)).await;
+                    }
+                    continue;
+                }
+            },
         };
         state.tcp_params.apply(&stream)?;
         debug!(peer_addr = %peer_addr, "new http connection");
-        let permit = match state.tcp_semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                warn!(peer_addr = %peer_addr, "HTTP connection rejected: max connections reached");
-                metrics::connection_rejected("http");
-                continue;
-            }
-        };
         let state = state.clone();
         tokio::task::spawn(async move {
-            let _permit = permit;
             metrics::tcp_connection_opened();
             let result = handle_http_connection(state, stream, port).await;
             if let Err(e) = &result {
