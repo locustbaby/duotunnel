@@ -135,7 +135,7 @@ stack_start_server
 stack_create_token
 stack_start_client
 
-log "Tunnel ready  (ingress: *.localtest.com:8081  egress: 127.0.0.1:8082)"
+log "Tunnel ready  (ingress: *.localtest.com:8081  egress: *.localtest.com:8082)"
 
 CLIENT="$BIN/ci-test-client"
 
@@ -155,7 +155,7 @@ fi
 if should_run 2; then
 hdr "SECTION 2 — HTTP/1.1"
 H="http://wss.localtest.com:8081"
-E="http://127.0.0.1:8082"
+E="http://wss.localtest.com:8082"
 
 run "[HTTP] GET ingress"                  "$CLIENT" http "$H/"
 run "[HTTP] POST + body verify ingress"   "$CLIENT" http "$H/" --method POST \
@@ -172,15 +172,13 @@ for i in $(seq 1 10); do
 done
 [[ "$OK" -ge 8 ]] && _pass || _fail "$OK/10 succeeded"
 
-run "[HTTP] GET egress"                   "$CLIENT" http "$E/" --header "Host: wss.localtest.com"
+run "[HTTP] GET egress"                   "$CLIENT" http "$E/"
 run "[HTTP] POST + body verify egress"    "$CLIENT" http "$E/" --method POST \
-  --header "Host: wss.localtest.com" \
   --body '{"tunnel":"ci","test":"egress-post-456"}' --expect-body "egress-post-456"
 run "[HTTP] DELETE egress"                "$CLIENT" http "$E/" --method DELETE \
-  --header "Host: wss.localtest.com" --expect-body "DELETE"
+  --expect-body "DELETE"
 run "[HTTP] Custom header egress"         "$CLIENT" http "$E/" \
-  --header "Host: wss.localtest.com" --header "X-Egress-Test: forwarded" \
-  --expect-body "x-egress-test"
+  --header "X-Egress-Test: forwarded" --expect-body "x-egress-test"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -189,16 +187,15 @@ fi
 if should_run 3; then
 hdr "SECTION 3 — HTTP/2 h2c"
 H="http://wss.localtest.com:8081"
-E="http://127.0.0.1:8082"
+E="http://wss.localtest.com:8082"
 
 run "[HTTP2] GET h2c ingress"             "$CLIENT" http2 "$H/"
 run "[HTTP2] POST h2c + body ingress"     "$CLIENT" http2 "$H/" --method POST \
   --body '{"h2":"post-test"}' --expect-body "post-test"
 run "[HTTP2] Custom header h2c ingress"   "$CLIENT" http2 "$H/" \
   --header "X-H2-Test: h2c-header" --expect-body "x-h2-test"
-run "[HTTP2] GET h2c egress"              "$CLIENT" http2 "$E/" --header "Host: wss.localtest.com"
+run "[HTTP2] GET h2c egress"              "$CLIENT" http2 "$E/"
 run "[HTTP2] POST h2c + body egress"      "$CLIENT" http2 "$E/" --method POST \
-  --header "Host: wss.localtest.com" \
   --body '{"h2":"egress-post-test"}' --expect-body "egress-post-test"
 fi
 
@@ -245,8 +242,6 @@ run "[Mix] H2c prior GET ingress"     "$CLIENT" h2c-prior "http://wss.localtest.
 run "[Mix] WS echo ingress"           "$CLIENT" ws        "ws://ws.localtest.com:8081" --message "mix-ws"
 run "[Mix] gRPC Health ingress"       "$CLIENT" grpc      "grpc.localtest.com:8081" --service ""
 run "[Mix] gRPC Echo ingress"         "$CLIENT" grpc-echo "grpc.localtest.com:8081" --ping "mix-grpc"
-run "[Mix] H1 GET egress"             "$CLIENT" http      "http://127.0.0.1:8082/" \
-  --header "Host: wss.localtest.com"
-run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://127.0.0.1:8082/" \
-  --header "Host: wss.localtest.com"
+run "[Mix] H1 GET egress"             "$CLIENT" http      "http://wss.localtest.com:8082/"
+run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://wss.localtest.com:8082/"
 fi
