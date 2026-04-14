@@ -24,6 +24,7 @@ impl HttpPeer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
+        let upstream = self.target_host.clone();
         let mut driver = Http1Driver::new(
             send,
             recv,
@@ -36,15 +37,15 @@ impl HttpPeer {
                 match tokio::time::timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
                     Ok(Ok(Some(r))) => r,
                     Ok(Ok(None)) => {
-                        debug!("H1 keep-alive: clean EOF, closing");
+                        debug!(upstream = %upstream, "H1 keep-alive: clean EOF, closing");
                         break;
                     }
                     Ok(Err(e)) => {
-                        debug!(error = % e, "H1 keep-alive: read_request error, closing");
+                        debug!(upstream = %upstream, error = %e, "H1 keep-alive: read_request error, closing");
                         break;
                     }
                     Err(_) => {
-                        debug!("H1 keep-alive: idle timeout, closing");
+                        debug!(upstream = %upstream, "H1 keep-alive: idle timeout, closing");
                         break;
                     }
                 };
@@ -57,26 +58,25 @@ impl HttpPeer {
                 *headers = req.headers;
             }
             let request = builder.body(req.body)?;
-            debug!(uri = % request.uri(), "H1 sending request to upstream");
+            debug!(upstream = %self.target_host, uri = %request.uri(), "H1 sending request to upstream");
             let response = match self.client.request(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    debug!(
-                        error = % e, "H1 upstream request failed, closing connection"
-                    );
+                    debug!(upstream = %self.target_host, error = %e, "H1 upstream request failed, sending 502");
+                    let _ = driver.write_502().await;
                     break;
                 }
             };
-            debug!(status = % response.status(), "H1 received response");
+            debug!(upstream = %self.target_host, status = %response.status(), "H1 received response");
             if let Err(e) = driver.write_response(response).await {
-                debug!(error = % e, "H1 write_response error, closing");
+                debug!(upstream = %self.target_host, error = %e, "H1 write_response error, closing");
                 break;
             }
             if driver.should_close || should_close_after {
-                debug!("H1 keep-alive: Connection: close detected, closing");
+                debug!(upstream = %self.target_host, "H1 keep-alive: Connection: close, closing");
                 break;
             }
-            debug!("H1 keep-alive: request complete, waiting for next");
+            debug!(upstream = %self.target_host, "H1 keep-alive: request complete, waiting for next");
         }
         let _ = driver.finish().await;
         Ok(())

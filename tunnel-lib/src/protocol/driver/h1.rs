@@ -47,6 +47,11 @@ impl Http1Driver {
         self.send.finish()?;
         Ok(())
     }
+    pub async fn write_502(&mut self) -> Result<()> {
+        const RESP: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        self.send.write_all(RESP).await?;
+        Ok(())
+    }
     async fn reclaim_recv(&mut self) -> Result<()> {
         if self.recv.is_some() {
             return Ok(());
