@@ -153,11 +153,11 @@ def main():
     parser.add_argument("extras", nargs="*")
     parser.add_argument("--core-resource", default="")
     parser.add_argument("--core-label", default="ingress_8000qps")
-    known = parser.parse_args()
+    known, unknown = parser.parse_known_args()
 
     core_path = known.core_path
     out_path = known.out_path
-    extras = known.extras
+    extras = known.extras + unknown
 
     with open(core_path, "r", encoding="utf-8") as f:
         core = json.load(f)
