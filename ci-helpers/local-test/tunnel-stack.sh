@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# ci-helpers/tunnel-stack.sh
+# ci-helpers/local-test/tunnel-stack.sh
 #
 # Shared functions for starting and stopping the tunnel stack
 # (backends + ctld + server + client).
 #
 # Source this file, then call the functions:
 #
-#   source ci-helpers/tunnel-stack.sh
+#   source ci-helpers/local-test/tunnel-stack.sh
 #
 #   # Required env vars (set defaults before sourcing if needed):
 #   #   BIN        — directory containing compiled binaries (e.g. ./target/release)
-#   #   CFGDIR     — directory containing yaml configs    (e.g. ./ci-helpers)
+#   #   CFGDIR     — directory containing yaml configs    (e.g. ./ci-helpers/local-test)
 #   #   LOG_PREFIX — prefix for /tmp log files            (default: ci)
 #   #   CLIENT_GROUP — ctld group name                   (default: ci-group)
 #   #   QUIC_CONNECTIONS — value to patch into client.yaml (default: not patched)
@@ -26,7 +26,7 @@
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 : "${BIN:=./target/release}"
-: "${CFGDIR:=./ci-helpers}"
+: "${CFGDIR:=./ci-helpers/local-test}"
 : "${LOG_PREFIX:=ci}"
 : "${CLIENT_GROUP:=ci-group}"
 

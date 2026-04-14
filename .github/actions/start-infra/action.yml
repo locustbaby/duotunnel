@@ -1,0 +1,97 @@
+name: 'Start DuoTunnel Infrastructure'
+description: 'Initialize /etc/hosts, echo backends, and full tunnel system'
+inputs:
+  mode:
+    description: 'ctld or standalone'
+    default: 'ctld'
+  quic_connections:
+    description: 'Number of QUIC connections for client'
+    default: '4'
+  worker_threads:
+    description: 'Tokio worker threads'
+    default: '0'
+  server_cpu_quota:
+    description: 'CPU quota for server systemd scope'
+    default: '50%'
+  client_cpu_quota:
+    description: 'CPU quota for client systemd scope'
+    default: '50%'
+  tun_config_dir:
+    description: 'Directory for configs'
+    default: 'ci-helpers/configs'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure /etc/hosts
+      shell: bash
+      run: |
+        {
+          echo "127.0.0.1  echo.local"
+          echo "127.0.0.1  ws.local"
+          echo "127.0.0.1  grpc.local"
+          echo "127.0.0.1  echo.beeceptor.test"
+          echo "127.0.0.1  ws.ext.test"
+          echo "127.0.0.1  grpc.ext.test"
+          for i in $(seq -w 01 60); do
+            echo "127.0.0.1  echo-${i}.local"
+          done
+        } | sudo tee -a /etc/hosts
+
+    - name: Start echo backends
+      shell: bash
+      run: |
+        ./target/release/http-echo-server 9999  > /tmp/http-echo.log  2>&1 & echo $! > /tmp/http-echo.pid
+        ./target/release/ws-echo-server   8765  > /tmp/ws-echo.log    2>&1 & echo $! > /tmp/ws-echo.pid
+        ./target/release/grpc-echo-server 50051 > /tmp/grpc-echo.log  2>&1 & echo $! > /tmp/grpc-echo.pid
+        for i in $(seq 1 20); do
+          curl -sf --max-time 1 http://127.0.0.1:9999/ > /dev/null && break
+          sleep 0.2
+        done
+        sleep 0.5
+        echo "Backends ready"
+
+    - name: Start Tunnel (ctld mode)
+      if: ${{ inputs.mode == 'ctld' }}
+      shell: bash
+      run: |
+        mkdir -p data
+        ./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
+        echo $! > /tmp/ctld.pid
+        for i in $(seq 1 60); do
+          curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
+          sleep 0.5
+        done
+
+        sudo systemd-run --scope --unit=duotunnel-server --collect \
+          -p CPUQuota=${{ inputs.server_cpu_quota }} -p CPUWeight=1024 -p MemoryMax=2G \
+          -- ./target/release/server --config ${{ inputs.tun_config_dir }}/server.yaml \
+          --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
+        for i in $(seq 1 60); do
+          curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
+          sleep 0.5
+        done
+
+        TOKEN=$(./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
+          client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
+          || ./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
+          client rotate-token ci-group 2>/dev/null | awk '{print $NF}')
+        
+        python3 -c "import re,sys; f='${{ inputs.tun_config_dir }}/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; w=sys.argv[3]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); c=re.sub(r'^(\\s*worker_threads:)\\s*\\d+', r'\\1 '+w, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "${{ inputs.quic_connections }}" "${{ inputs.worker_threads }}"
+        sleep 3
+
+        sudo systemd-run --scope --unit=duotunnel-client --collect \
+          -p CPUQuota=${{ inputs.client_cpu_quota }} -p CPUWeight=1024 -p MemoryMax=2G \
+          -- ./target/release/client --config ${{ inputs.tun_config_dir }}/client.yaml >> /tmp/ci-client.log 2>&1 &
+        for i in $(seq 1 60); do
+          systemctl is-failed duotunnel-client.scope > /dev/null 2>&1 && break
+          curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
+          sleep 0.5
+        done
+
+    - name: Warmup Verification
+      shell: bash
+      run: |
+        WARMUP_PORT=${{ inputs.mode == 'ctld' && '8080' || '8180' }}
+        chmod +x ci-helpers/warmup.sh
+        ./ci-helpers/warmup.sh "${{ inputs.mode }}" "$WARMUP_PORT"

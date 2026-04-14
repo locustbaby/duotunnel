@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ci-helpers/local-integration-test.sh
+# ci-helpers/local-test/test.sh
 # Mirrors CI integration-test job using *.localtest.com domains
 # (localtest.com resolves to 127.0.0.1 — no /etc/hosts sudo needed)
 #
 # Usage (run from repo root):
-#   bash ci-helpers/local-integration-test.sh
-#   bash ci-helpers/local-integration-test.sh --section 2
-#   bash ci-helpers/local-integration-test.sh --keep
+#   bash ci-helpers/local-test/test.sh
+#   bash ci-helpers/local-test/test.sh --section 2
+#   bash ci-helpers/local-test/test.sh --keep
 #
 # Sections:
 #   1 — External (continue-on-error)
@@ -17,15 +17,15 @@
 #   6 — Mixed-protocol smoke tests
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 export BIN="$REPO/target/release"
-export CFGDIR="$REPO/ci-helpers"
+export CFGDIR="$REPO/ci-helpers/local-test"
 export LOG_PREFIX="lt"
 
 # Local-test overrides for tunnel-stack.sh
-export CTLD_CONFIG="$CFGDIR/local-test-ctld.yaml"
-export SERVER_CONFIG="$CFGDIR/local-test-server.yaml"
-export CLIENT_CONFIG="$CFGDIR/local-test-client.yaml"
+export CTLD_CONFIG="$CFGDIR/ctld.yaml"
+export SERVER_CONFIG="$CFGDIR/server.yaml"
+export CLIENT_CONFIG="$CFGDIR/client.yaml"
 export CLIENT_GROUP="local-group"
 export CLIENT_HEALTHZ_PORT="9092"
 
@@ -78,7 +78,7 @@ run() {
 }
 
 # ─── Source shared tunnel-stack functions ────────────────────────────────────
-# shellcheck source=ci-helpers/tunnel-stack.sh
+# shellcheck source=ci-helpers/local-test/tunnel-stack.sh
 source "$CFGDIR/tunnel-stack.sh"
 
 # ─── Cleanup ─────────────────────────────────────────────────────────────────

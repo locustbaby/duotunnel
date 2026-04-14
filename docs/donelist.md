@@ -1,5 +1,28 @@
 # Tunnel Done List
 
+## 🏗️ DuoTunnel 架构改造计划 (REFACTOR_PLAN.md) ✅
+
+> 按 Commit 拆分的架构升级全景已在 2026-04 完成，项目已从单一 Runtime 演进为三层隔离 Runtime 架构。
+
+- **Commit 1 — 运行时基础**: 提取 `build_proxy_runtime` / `build_single_thread_runtime` 到 `tunnel-lib`。
+- **Commit 2 — 指标服务重写**: 使用 `hyper` 重写 metrics server，修复了 512 字节截断 bug 并支持 Keep-alive。
+- **Commit 3 — Runtime 分层隔离**: Server 拆分为 `proxy-worker` (多线程)、`metrics-worker` (单线程)、`bg-worker` (单线程) 三层，互不干扰。
+- **Commit 4 — 核心服务 Trait 化**: `hot_reload` 和 `control_client` 统一实现 `BackgroundService` Trait，支持优雅关机。
+- **Commit 5 — N-accept-loop**: Ingress 监听器实现并发 Accept，共享 `SO_REUSEPORT` fd，彻底消除高并发下的建连瓶颈。
+- **Commit 6 — H2 路径统一**: Client 侧删除特殊 H2 分支，统一通过 `ProxyEngine` 调度，代码量减少且逻辑归一。
+
+---
+
+## 💎 代码质量重构 (CODE_REVIEW.md 已完成项) ✅
+
+- [x] **CR1 — 协议检测枚举化**: `RoutingInfo.protocol` 从 `String` 转为 `Protocol` 枚举，整条链路零字符串转换。
+- [x] **CR2 — Relay 逻辑归一化**: 统一 `relay_inner` / `forward_inner` 核心，全路径升级为 64KB `copy_buf`。
+- [x] **CR3 — URL 解析归一化**: `UpstreamScheme` 统一使用 `transport/addr.rs` 解析，减少冗余扫描，RPS +410。
+- [x] **CR-NEW-A — 消息读取封装**: 实现 `recv_typed_message<T>`，合并 type-byte 与 body 读取，代码更安全。
+- [x] **CR-NEW-D — API 导出梳理**: `lib.rs` 手术级裁剪，隐藏内部细节，核心 relay 函数收进 `pub mod relay`。
+
+---
+
 ## Auth & Config Source Plan
 
 ### [TODO-48] Token-only Client Registration/Login ✅
@@ -23,7 +46,7 @@ Avoids client-side identity spoofing risk and simplifies bootstrap flow.
 Server provides token generation API/CLI: generate long, unique, high-entropy tokens per unique `name`.
 
 **Why it matters**:
-Eliminates weak/manual token creation and ensures uniqueness + entropy baseline.
+Eliminating weak/manual token creation and ensures uniqueness + entropy baseline.
 
 **Implementation notes**:
 1. Token generation: at least 32 random bytes (base64url/hex encoded).
@@ -135,7 +158,7 @@ Change to 1000.
 
 ### Egress 首批字节提前写入 QUIC stream ✅
 
-**根因**：`client/entry.rs` 在 `open_bi` 后只发 `routing_info`，随即进入 `relay_quic_to_tcp` 循环。server 侧 `ProxyEngine::run_stream` 的 `recv.read()` 必须等 client 把本地 TCP 数据读出再通过 QUIC 传过来，多了一个完整的写→传输→唤醒周期，导致 egress avg 比 ingress 高 ~15ms。
+**根因**：`client/entry.rs` 在 `open_bi` 后只发 `routing_info`，随即进入 `relay_quic_to_tcp` 循环。server 侧 `ProxyEngine::run_stream` 的 `recv.read()` 必须等 client 把本地 TCP 数据读出再通过 QUIC传过来，多了一个完整的写→传输→唤醒周期，导致 egress avg 比 ingress 高 ~15ms。
 
 ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forward_with_initial_data` 把已 peek 到的首批字节写进 QUIC stream，对端 `recv.read()` 几乎 0 等待。
 

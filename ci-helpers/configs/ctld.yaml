@@ -2,5 +2,5 @@ database_url: "sqlite://./data/duotunnel-ci.db?mode=rwc"
 watch_addr: "127.0.0.1:7788"
 log_level: "info"
 # Seed routing from server.yaml on first boot (when the routing DB is empty).
-server_config: "ci-helpers/server.yaml"
+server_config: "ci-helpers/configs/server.yaml"
 metrics_port: 9091

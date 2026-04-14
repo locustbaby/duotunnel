@@ -1,0 +1,136 @@
+{
+  "cases": [
+    {
+      "name": "ingress_post_1k",
+      "label": "ingress POST 1 KB @ 30 rps",
+      "exec": "ingressPost1K",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "body_size",
+      "payloadBytes": 1024,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 30,
+        "duration": "20s",
+        "startTime": "35s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 300
+      }
+    },
+    {
+      "name": "ingress_post_10k",
+      "label": "ingress POST 10 KB @ 20 rps",
+      "exec": "ingressPost10K",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "body_size",
+      "payloadBytes": 10240,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 20,
+        "duration": "20s",
+        "startTime": "35s",
+        "preAllocatedVUs": 80,
+        "maxVUs": 250
+      }
+    },
+    {
+      "name": "ingress_post_100k",
+      "label": "ingress POST 100 KB @ 10 rps",
+      "exec": "ingressPost100K",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "body_size",
+      "payloadBytes": 102400,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 10,
+        "duration": "20s",
+        "startTime": "35s",
+        "preAllocatedVUs": 50,
+        "maxVUs": 200
+      }
+    },
+    {
+      "name": "egress_post_10k",
+      "label": "egress POST 10 KB @ 20 rps",
+      "exec": "egressPost10K",
+      "protocol": "HTTP",
+      "direction": "egress",
+      "category": "body_size",
+      "payloadBytes": 10240,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 20,
+        "duration": "20s",
+        "startTime": "37s",
+        "preAllocatedVUs": 80,
+        "maxVUs": 250
+      }
+    },
+    {
+      "name": "ws_multi_msg",
+      "label": "ingress WS burst 20msg @ 5 rps",
+      "exec": "wsMultiMsg",
+      "protocol": "WS",
+      "direction": "ingress",
+      "category": "body_size",
+      "thresholds": {"errCounter": "count<50"},
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 5,
+        "duration": "20s",
+        "startTime": "36s",
+        "preAllocatedVUs": 30,
+        "maxVUs": 100
+      }
+    },
+    {
+      "name": "grpc_large_payload",
+      "label": "ingress gRPC 10 KB @ 15 rps",
+      "exec": "grpcLargePayload",
+      "protocol": "gRPC",
+      "direction": "ingress",
+      "category": "body_size",
+      "payloadBytes": 10240,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 15,
+        "duration": "20s",
+        "startTime": "38s",
+        "maxVUs": 80
+      }
+    },
+    {
+      "name": "grpc_high_qps",
+      "label": "ingress gRPC ramp→100 rps",
+      "exec": "grpcHighQps",
+      "protocol": "gRPC",
+      "direction": "ingress",
+      "category": "body_size",
+      "includeInTotalRps": true,
+      "scenario": {
+        "executor": "ramping-arrival-rate",
+        "startRate": 10,
+        "startTime": "39s",
+        "stages": [
+          {"target": 100, "duration": "5s"},
+          {"target": 100, "duration": "15s"}
+        ],
+        "preAllocatedVUs": 50,
+        "maxVUs": 200
+      }
+    }
+  ],
+  "phases": [
+    {
+      "name": "Body/Payload",
+      "start": 35,
+      "end": 59,
+      "scenarios": [
+        "ingress_post_1k", "ingress_post_10k", "ingress_post_100k", "egress_post_10k",
+        "ws_multi_msg", "grpc_large_payload", "grpc_high_qps"
+      ]
+    }
+  ]
+}

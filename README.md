@@ -424,16 +424,16 @@ Rows 3–7 are hidden when the underlying data is absent (e.g. no network activi
 
 ```
 ci-helpers/
-  collect-resources.py   # psutil-based sampler — 1 s interval, outputs JSONL
-  parse-resources.py     # converts JSONL → per-case resource JSON for the dashboard
-  publish-bench.py       # merges core + 8k results, writes bench/data.js + per-SHA JSON
+  bench-tool.py collect   # psutil-based sampler — 1 s interval, outputs JSONL
+  bench-tool.py parse     # converts JSONL → per-case resource JSON for the dashboard
+  bench-tool.py publish       # merges core + 8k results, writes bench/data.js + per-SHA JSON
 bench/
   index.html             # self-contained dashboard (loaded from gh-pages)
 ```
 
 ### Known gotchas
 
-- `parse-resources.py` crashes → `resource-data.json` not written → `RES_ARG` empty → all resource panels missing from dashboard. Check the **"Parse resource data"** step log in the CI run for tracebacks.
+- `bench-tool.py parse` crashes → `resource-data.json` not written → `RES_ARG` empty → all resource panels missing from dashboard. Check the **"Parse resource data"** step log in the CI run for tracebacks.
 - `bench/index.html` is copied from `main` on every publish, so dashboard UI changes only show after the next successful CI run that pushes to gh-pages.
 - Stale browser cache can show an old dashboard; hard-refresh (`Cmd+Shift+R`) if the page looks outdated.
 

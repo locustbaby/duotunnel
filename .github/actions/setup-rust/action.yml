@@ -1,0 +1,28 @@
+name: Setup Rust
+description: Consolidate toolchain, sccache, and cargo registry caching
+
+inputs:
+  components:
+    description: Rust components to install (e.g. clippy)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      with:
+        components: ${{ inputs.components }}
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+    - name: Cache cargo registry + index
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-registry-

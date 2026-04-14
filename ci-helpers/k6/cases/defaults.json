@@ -1,0 +1,13 @@
+{
+  "scenario": {
+    "timeUnit": "1s",
+    "preAllocatedVUs": 20,
+    "maxVUs": 150
+  },
+  "thresholds": {
+    "httpReqFailed": "rate<0.05",
+    "duration": "p(95)<60000"
+  },
+  "durationSec": 20,
+  "includeInTotalRps": false
+}

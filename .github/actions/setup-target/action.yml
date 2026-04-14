@@ -1,0 +1,31 @@
+name: 'Setup DuoTunnel Binaries'
+description: 'Download artifacts and mark binaries executable'
+inputs:
+  artifact_name:
+    description: 'Name of the artifact to download'
+    required: true
+  target_dir:
+    description: 'Directory to download to'
+    default: 'target/release'
+  binaries:
+    description: 'Comma-separated list of binary names to chmod'
+    default: 'server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server,ci-test-client'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.target_dir }}
+
+    - name: Mark binaries executable
+      shell: bash
+      run: |
+        IFS=',' read -ra BINS <<< "${{ inputs.binaries }}"
+        for bin in "${BINS[@]}"; do
+          if [ -f "${{ inputs.target_dir }}/$bin" ]; then
+            chmod +x "${{ inputs.target_dir }}/$bin"
+          fi
+        done

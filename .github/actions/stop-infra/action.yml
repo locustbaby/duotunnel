@@ -1,0 +1,31 @@
+name: 'Stop DuoTunnel Infrastructure'
+description: 'Kill all tunnel components and echo backends'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Teardown infrastructure
+      shell: bash
+      if: always()
+      run: |
+        # Stop systemd scopes
+        sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
+        sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
+        sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
+        sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
+        sudo systemctl stop frp-client.scope 2>/dev/null || true
+        sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
+        sudo systemctl stop frp-server.scope 2>/dev/null || true
+        sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
+
+        # Kill legacy PIDs
+        kill "$(cat /tmp/ctld.pid 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat /tmp/http-echo.pid 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat /tmp/ws-echo.pid   2>/dev/null)" 2>/dev/null || true
+        kill "$(cat /tmp/grpc-echo.pid 2>/dev/null)" 2>/dev/null || true
+        
+        # Cleanup resource sampling
+        kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
+        pkill -9 -f "bench-tool.py collect" 2>/dev/null || true
+        
+        echo "Infrastructure stopped"

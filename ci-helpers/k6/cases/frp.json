@@ -1,0 +1,82 @@
+{
+  "cases": [
+    {
+      "name": "frp_ingress_3000qps",
+      "label": "frp ingress GET 3000 rps",
+      "exec": "ingressHttpGetKeepalive",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "thresholds": {"httpReqFailed": "rate<0.20"},
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 3000,
+        "duration": "20s",
+        "startTime": "0s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 500
+      }
+    },
+    {
+      "name": "frp_ingress_multihost",
+      "label": "frp ingress multihost 3000 rps",
+      "exec": "ingressMultihost",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "thresholds": {"httpReqFailed": "rate<0.20"},
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 3000,
+        "duration": "20s",
+        "startTime": "25s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 500
+      }
+    },
+    {
+      "name": "frp_ingress_multihost_6000qps",
+      "label": "frp ingress multihost 6000 rps",
+      "exec": "ingressMultihost",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "thresholds": {"httpReqFailed": "rate<0.20"},
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 6000,
+        "duration": "20s",
+        "startTime": "50s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 2000
+      }
+    },
+    {
+      "name": "frp_ingress_multihost_8000qps",
+      "label": "frp ingress multihost 8000 rps",
+      "exec": "ingressMultihost",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "thresholds": {"httpReqFailed": "rate<0.20"},
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 8000,
+        "duration": "20s",
+        "startTime": "75s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 3000
+      }
+    }
+  ],
+  "phases": [
+    { "name": "3K KL (frp)", "start": 0, "end": 20, "scenarios": ["frp_ingress_3000qps"] },
+    { "name": "3K Multihost (frp)", "start": 25, "end": 45, "scenarios": ["frp_ingress_multihost"] },
+    { "name": "6K Multihost (frp)", "start": 50, "end": 70, "scenarios": ["frp_ingress_multihost_6000qps"] },
+    { "name": "8K Multihost (frp)", "start": 75, "end": 95, "scenarios": ["frp_ingress_multihost_8000qps"] }
+  ]
+}

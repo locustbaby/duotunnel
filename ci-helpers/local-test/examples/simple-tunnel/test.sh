@@ -4,7 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$SCRIPT_DIR/../../.."
+ROOT="$SCRIPT_DIR/../../../../"
 
 echo "=== DuoTunnel Bidirectional Test ==="
 echo ""

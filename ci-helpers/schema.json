@@ -1,0 +1,43 @@
+{
+  "categories": [
+    { "id": "basic", "label": "Basic", "description": "Ramping rate with mixed protocols for baseline latency." },
+    { "id": "body_size", "label": "Body Size", "description": "Fixed rate with larger payloads to observe payload scaling." },
+    { "id": "stress", "label": "Stress", "description": "High-QPS stress stages for ingress and egress under pressure." }
+  ],
+  "metrics": [
+    { "id": "cpu", "label": "CPU Usage", "unit": "%" },
+    { "id": "rss", "label": "Memory RSS", "unit": "MB" },
+    { "id": "vms", "label": "Virtual Memory", "unit": "MB" },
+    { "id": "net_rx_kbs", "label": "Network RX", "unit": "KB/s" },
+    { "id": "net_tx_kbs", "label": "Network TX", "unit": "KB/s" },
+    { "id": "tcp_estab", "label": "TCP Established", "unit": "conns" },
+    { "id": "loadavg_1", "label": "Load Average (1m)", "unit": "" },
+    { "id": "psi_cpu_some", "label": "PSI CPU Some", "unit": "%" },
+    { "id": "psi_cpu_full", "label": "PSI CPU Full", "unit": "%" },
+    { "id": "psi_mem_some", "label": "PSI Memory Some", "unit": "%" },
+    { "id": "psi_mem_full", "label": "PSI Memory Full", "unit": "%" },
+    { "id": "psi_io_some", "label": "PSI IO Some", "unit": "%" },
+    { "id": "psi_io_full", "label": "PSI IO Full", "unit": "%" }
+  ],
+  "groups": [
+    { "id": "server", "label": "DuoTunnel Server" },
+    { "id": "client", "label": "DuoTunnel Client" },
+    { "id": "ctld", "label": "DuoTunnel Control" },
+    { "id": "frps", "label": "FRP Server" },
+    { "id": "frpc", "label": "FRP Client" }
+  ],
+  "process_mapping": [
+    { "prefix": "server", "group": "server" },
+    { "prefix": "client", "group": "client" },
+    { "prefix": "http-echo-server", "group": "other" },
+    { "prefix": "http-echo-serve", "group": "other" },
+    { "prefix": "ws-echo-server", "group": "other" },
+    { "prefix": "ws-echo-serve", "group": "other" },
+    { "prefix": "grpc-echo-server", "group": "other" },
+    { "prefix": "grpc-echo-serve", "group": "other" },
+    { "prefix": "k6", "group": "other" },
+    { "prefix": "frps", "group": "frps" },
+    { "prefix": "frpc", "group": "frpc" }
+  ]
+}
+

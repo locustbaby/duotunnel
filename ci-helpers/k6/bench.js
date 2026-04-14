@@ -6,8 +6,8 @@ import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 import {
-  DUOTUNNEL_CASES,
-  DUOTUNNEL_PHASES,
+  ALL_CASES,
+  ALL_PHASES,
   buildCounters,
   buildScenarios,
   buildThresholds,
@@ -17,13 +17,14 @@ import {
 
 function activeProfile() {
   const p = (__ENV.BENCH_PROFILE || 'full').toLowerCase();
-  if (p === '8k' || p === 'core' || p === 'full') return p;
+  if (p === '8k' || p === 'core' || p === 'full' || p === 'frp') return p;
   return 'full';
 }
 
 function filterCases(cases, profile) {
   if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps'));
   if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps'));
+  if (profile === 'frp') return cases.filter((c) => c.name.startsWith('frp_'));
   return cases;
 }
 
@@ -115,16 +116,18 @@ function filterPhases(phases, activeCases) {
 
 const BENCH_PROFILE = activeProfile();
 const FILTERED_CASES = apply8kScenarioOverrides(
-  applyCoreStressRateOverride(filterByCase(filterCases(DUOTUNNEL_CASES, BENCH_PROFILE)))
+  applyCoreStressRateOverride(filterByCase(filterCases(ALL_CASES, BENCH_PROFILE)))
 );
 const { cases: NORMALIZED_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
-const ACTIVE_PHASES = filterPhases(DUOTUNNEL_PHASES, FILTERED_CASES).map((p) => ({
+const ACTIVE_PHASES = filterPhases(ALL_PHASES, FILTERED_CASES).map((p) => ({
   ...p,
   start: Math.max(0, (p.start || 0) - ACTIVE_OFFSET),
   end: Math.max(0, (p.end || 0) - ACTIVE_OFFSET),
 }));
 // Enrich cases with derived display metadata (timeRange, thresholdSpec, phase).
 const ACTIVE_CASES = enrichCaseDefs(NORMALIZED_CASES, ACTIVE_PHASES);
+
+const RESULTS_PATH = __ENV.BENCH_RESULT_PATH || '/tmp/bench-results.json';
 
 const { reqCounters, errCounters } = buildCounters(ACTIVE_CASES, Counter);
 
@@ -135,9 +138,7 @@ const PAYLOAD_100K = 'x'.repeat(102400);
 export const options = {
   discardResponseBodies: true,
   scenarios: buildScenarios(ACTIVE_CASES),
-
   noConnectionReuse: false,
-
   thresholds: buildThresholds(ACTIVE_CASES),
 };
 
@@ -162,7 +163,6 @@ export function ingressHttpGet() {
   track(ok);
 }
 
-
 const MULTIHOST_COUNT = 50;
 
 export function ingressMultihost() {
@@ -170,18 +170,39 @@ export function ingressMultihost() {
   const id = `${__VU}-${__ITER}`;
   const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
-  const res = http.get(`http://${host}:8080/?id=${id}&host=${host}`, {
+  // DuoTunnel uses 8080, FRP uses 18090. Differentiate by scenario name.
+  const port = sn.startsWith('frp_') ? 18090 : 8080;
+  const res = http.get(`http://${host}:${port}/?id=${id}&host=${host}`, {
+    timeout: '10s',
+    tags: { name: sn },
+    responseType: 'text',
+  });
+
+  const checkPrefix = sn.startsWith('frp_') ? 'frp ingress multihost' : 'ingress multihost';
+  const ok = check(res, {
+    [`${checkPrefix} 200`]: (r) => r.status === 200,
+    [`${checkPrefix} host echo`]: (r) => r.body && r.body.includes(host),
+    [`${checkPrefix} id echo`]: (r) => r.body && r.body.includes(id),
+  });
+  track(ok);
+}
+
+// FRP-specific Keepalive function
+export function ingressHttpGetKeepalive() {
+  const sn = exec.scenario.name;
+  const id = `${__VU}-${__ITER}`;
+  const res = http.get(`http://echo.local:18090/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
   });
   const ok = check(res, {
-    'ingress multihost 200': (r) => r.status === 200,
-    'ingress multihost host echo': (r) => r.body && r.body.includes(host),
-    'ingress multihost id echo': (r) => r.body && r.body.includes(id),
+    'frp ingress kl 200': (r) => r.status === 200,
+    'frp ingress kl id echo': (r) => r.body && r.body.includes(id),
   });
   track(ok);
 }
+
 
 export function egressMultihost() {
   const sn = exec.scenario.name;
@@ -496,10 +517,16 @@ export function bidirectional() {
 }
 
 export function handleSummary(data) {
-  const output = buildSummaryOutput(data, ACTIVE_CASES, ACTIVE_PHASES);
+  const extras = { k6_active_offset: ACTIVE_OFFSET };
+  // If all active cases are FRP, tag the summary as FRP
+  if (ACTIVE_CASES.length > 0 && ACTIVE_CASES.every(c => c.name.startsWith('frp_'))) {
+    extras.tunnel = 'frp';
+  }
+
+  const output = buildSummaryOutput(data, ACTIVE_CASES, ACTIVE_PHASES, extras);
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: false }),
-    '/tmp/bench-results.json': JSON.stringify(output, null, 2),
+    [RESULTS_PATH]: JSON.stringify(output, null, 2),
   };
 }
