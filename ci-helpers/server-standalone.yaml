@@ -3,8 +3,8 @@ server:
   metrics_port: 9091
   log_level: "info"
   database_url: "sqlite://./data/duotunnel-ci-standalone.db?mode=rwc"
-  max_connections: 10000
-  max_tcp_connections: 10000
+  http_pool:
+    max_idle_per_host: 128
   quic:
     max_concurrent_streams: 1000
     keepalive_secs: 2

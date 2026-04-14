@@ -7,7 +7,7 @@ use hyper::{header, HeaderMap, Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
 use tracing::debug;
@@ -39,14 +39,18 @@ async fn read_into_bytes_mut(
 }
 #[derive(Debug, Clone)]
 pub struct HttpClientParams {
-    pub pool_idle_timeout_secs: u64,
+    pub pool_idle_timeout_secs: Option<u64>,
     pub pool_max_idle_per_host: usize,
+    /// TCP keepalive interval on upstream connections (seconds).
+    /// Enables OS-level liveness detection so pool can evict dead connections.
+    pub tcp_keepalive_secs: Option<u64>,
 }
 impl Default for HttpClientParams {
     fn default() -> Self {
         Self {
-            pool_idle_timeout_secs: 90,
-            pool_max_idle_per_host: 10,
+            pool_idle_timeout_secs: None,
+            pool_max_idle_per_host: 128,
+            tcp_keepalive_secs: Some(15),
         }
     }
 }
@@ -56,6 +60,7 @@ pub fn create_https_client() -> HttpsClient {
 pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
     let mut http = HttpConnector::new();
     http.set_nodelay(true);
+    http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .unwrap()
@@ -63,10 +68,14 @@ pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
         .enable_http1()
         .enable_http2()
         .wrap_connector(http);
-    Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder
         .pool_max_idle_per_host(params.pool_max_idle_per_host)
-        .build(https)
+        .pool_timer(TokioTimer::new());
+    if let Some(secs) = params.pool_idle_timeout_secs {
+        builder.pool_idle_timeout(Duration::from_secs(secs));
+    }
+    builder.build(https)
 }
 pub fn create_h2c_client() -> H2cClient {
     create_h2c_client_with(&HttpClientParams::default())
@@ -74,11 +83,16 @@ pub fn create_h2c_client() -> H2cClient {
 pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
     let mut http = HttpConnector::new();
     http.set_nodelay(true);
-    Client::builder(TokioExecutor::new())
+    http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder
         .http2_only(true)
-        .pool_idle_timeout(Duration::from_secs(params.pool_idle_timeout_secs))
         .pool_max_idle_per_host(params.pool_max_idle_per_host)
-        .build(http)
+        .pool_timer(TokioTimer::new());
+    if let Some(secs) = params.pool_idle_timeout_secs {
+        builder.pool_idle_timeout(Duration::from_secs(secs));
+    }
+    builder.build(http)
 }
 pub async fn forward_http(
     mut recv: RecvStream,

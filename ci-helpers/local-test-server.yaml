@@ -3,12 +3,12 @@ server:
   metrics_port: 9090
   log_level: "debug"
   database_url: "sqlite://./data/local-test.db?mode=rwc"
-  max_connections: 10000
-  max_tcp_connections: 10000
   quic:
     max_concurrent_streams: 1000
     keepalive_secs: 10
     idle_timeout_secs: 30
+  http_pool:
+    max_idle_per_host: 128
 
 server_egress_upstream:
   upstreams:
