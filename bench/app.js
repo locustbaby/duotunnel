@@ -124,9 +124,13 @@ const Charts = {
       const item = document.createElement('span');
       item.className = 'leg-item';
       item.innerHTML = `<span class="leg-swatch" style="background:${isDash?'transparent':color};border:1.5px ${isDash?'dashed':'solid'} ${color};"></span><span class="leg-label">${ds.label||''}</span>`;
-      item.addEventListener('click', () => {
-        const isSolo = chart.data.datasets.every((d, j) => j === i ? !d.hidden : d.hidden);
-        chart.data.datasets.forEach((d, j) => { d.hidden = isSolo ? false : j !== i; });
+      item.addEventListener('click', (e) => {
+        if (e.metaKey || e.ctrlKey) {
+          chart.data.datasets[i].hidden = !chart.data.datasets[i].hidden;
+        } else {
+          const isSolo = chart.data.datasets.every((d, j) => j === i ? !d.hidden : d.hidden);
+          chart.data.datasets.forEach((d, j) => { d.hidden = isSolo ? false : j !== i; });
+        }
         sync();
       });
       container.appendChild(item);
@@ -330,17 +334,11 @@ function initResourceCharts(rpc, entry) {
   const coreOff = caseOffsets[rpcEntries.findIndex(([k]) => k === 'core')] || 0;
 
   const mergePhases = [];
-  rpcEntries.forEach(([caseName,], idx) => {
-    const chartOff = caseOffsets[idx];
-    if (caseName === 'core' && entry) {
-      for (const p of (entry.phases || []).filter(p => !p.tunnel && !p.resourceCase && !p.name?.includes('(8k-q4)'))) {
-        mergePhases.push({name: p.name, scenarios: p.scenarios||[], start: (p.start||0)+k6off+chartOff, end: (p.end||0)+k6off+chartOff});
-      }
-    } else if (caseName !== 'core') {
-      const short = caseName.replace(/ \(.*?\)$/, '').replace(/_8000qps$/, ' 8k').replace(/_multihost/, ' mh').replace(/_/g,' ');
-      mergePhases.push({name: short, scenarios: [caseName], start: chartOff, end: chartOff + caseMaxTs[idx]});
+  if (entry) {
+    for (const p of (entry.phases || []).filter(p => !p.tunnel && !p.resourceCase && !p.name?.includes('(8k-q4)'))) {
+      mergePhases.push({name: p.name, scenarios: p.scenarios||[], start: (p.start||0)+k6off+coreOff, end: (p.end||0)+k6off+coreOff});
     }
-  });
+  }
 
   const PHASE_COLORS = [
     'rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)',
@@ -360,21 +358,6 @@ function initResourceCharts(rpc, entry) {
     };
     allAnnotations[`phaseLineS${i}`] = {type:'line', xMin:p.start, xMax:p.start, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
     allAnnotations[`phaseLineE${i}`] = {type:'line', xMin:p.end,   xMax:p.end,   borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
-  });
-
-  const CASE_BG = ['rgba(77,166,255,.06)','rgba(52,211,153,.06)','rgba(245,166,35,.06)','rgba(167,139,250,.06)',
-                   'rgba(244,114,182,.06)','rgba(56,189,248,.06)','rgba(251,191,36,.06)','rgba(129,140,248,.06)'];
-  rpcEntries.forEach(([caseName,], idx) => {
-    const xStart = caseOffsets[idx], xEnd = xStart + caseMaxTs[idx];
-    if (caseName !== 'core') {
-      allAnnotations[`caseBg${idx}`] = {
-        type:'box', xMin:xStart, xMax:xEnd, backgroundColor:CASE_BG[idx%CASE_BG.length], borderWidth:0,
-        label:{display:true, content:caseName.replace(/ \(.*?\)$/,'').replace(/_/g,' '), color:'rgba(180,200,220,0.55)', font:{size:11,weight:'bold'}, position:{x:'center',y:'start'}, yAdjust:4},
-      };
-    }
-    if (idx > 0) {
-      allAnnotations[`caseSep${idx}`] = {type:'line', xMin:xStart, xMax:xStart, borderColor:'rgba(255,255,255,0.2)', borderWidth:1.5, borderDash:[5,3]};
-    }
   });
 
   if (entry) {
