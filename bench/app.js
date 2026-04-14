@@ -577,11 +577,11 @@ function initResourceCharts(rpc, entry) {
     Charts.create('res_percore', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, y:{...CO.scales.y, min:0, max:100, title:{display:true,text:'%',color:'#6b7d93'}}}}});
   }
 
-  // Memory RSS
+  // Memory RSS (exclude 'other' — aggregates all system processes, not meaningful)
   if (hasMem) {
     addChart('res_mem', 'Memory RSS (MB)');
     const ds=[];
-    for (const s of PSERIES) { if (memByKey[s.key]?.length) ds.push(linePts(memByKey[s.key], s.color, s.label)); }
+    for (const s of PSERIES) { if (s.key !== 'other' && memByKey[s.key]?.length) ds.push(linePts(memByKey[s.key], s.color, s.label)); }
     Charts.create('res_mem', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('MB')}});
   }
 
@@ -625,20 +625,29 @@ function initResourceCharts(rpc, entry) {
     Charts.create('res_netpkts', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('/s')}});
   }
 
-  // TCP connections
+  // TCP connections — ESTABLISHED left axis, TIME_WAIT right axis (different scale), others left
   if (hasTcp) {
     addChart('res_tcp', 'TCP Connections');
     const ds=[];
-    if (tcpEstab.length)     ds.push(linePts(tcpEstab,     '#4da6ff', 'ESTABLISHED'));
-    if (tcpTimewait.length)  ds.push(linePts(tcpTimewait,  '#f5a623', 'TIME_WAIT'));
-    if (tcpListen.length)    ds.push(linePts(tcpListen,    '#34d399', 'LISTEN',    {borderDash:[4,2], borderWidth:1}));
-    if (tcpCloseWait.length) ds.push(linePts(tcpCloseWait, '#ef5350', 'CLOSE_WAIT',{borderDash:[3,2], borderWidth:1}));
-    if (tcpFinWait1.length)  ds.push(linePts(tcpFinWait1,  '#a78bfa', 'FIN_WAIT1', {borderDash:[3,2], borderWidth:1}));
-    if (tcpFinWait2.length)  ds.push(linePts(tcpFinWait2,  '#f472b6', 'FIN_WAIT2', {borderDash:[3,2], borderWidth:1}));
-    if (tcpSynSent.length)   ds.push(linePts(tcpSynSent,   '#38bdf8', 'SYN_SENT',  {borderDash:[2,2], borderWidth:1}));
-    if (tcpSynRecv.length)   ds.push(linePts(tcpSynRecv,   '#fbbf24', 'SYN_RECV',  {borderDash:[2,2], borderWidth:1}));
-    if (tcpLastAck.length)   ds.push(linePts(tcpLastAck,   '#4a5a6d', 'LAST_ACK',  {borderDash:[2,2], borderWidth:1}));
-    Charts.create('res_tcp', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('connections')}});
+    const yL = 'yConn', yR = 'yTW';
+    if (tcpEstab.length)     ds.push({...linePts(tcpEstab,     '#4da6ff', 'ESTABLISHED'),                            yAxisID:yL});
+    if (tcpTimewait.length)  ds.push({...linePts(tcpTimewait,  '#f5a623', 'TIME_WAIT'),                              yAxisID:yR});
+    if (tcpListen.length)    ds.push({...linePts(tcpListen,    '#34d399', 'LISTEN',    {borderDash:[4,2],borderWidth:1}), yAxisID:yL});
+    if (tcpCloseWait.length) ds.push({...linePts(tcpCloseWait, '#ef5350', 'CLOSE_WAIT',{borderDash:[3,2],borderWidth:1}), yAxisID:yL});
+    if (tcpFinWait1.length)  ds.push({...linePts(tcpFinWait1,  '#a78bfa', 'FIN_WAIT1', {borderDash:[3,2],borderWidth:1}), yAxisID:yL});
+    if (tcpFinWait2.length)  ds.push({...linePts(tcpFinWait2,  '#f472b6', 'FIN_WAIT2', {borderDash:[3,2],borderWidth:1}), yAxisID:yL});
+    if (tcpSynSent.length)   ds.push({...linePts(tcpSynSent,   '#38bdf8', 'SYN_SENT',  {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
+    if (tcpSynRecv.length)   ds.push({...linePts(tcpSynRecv,   '#fbbf24', 'SYN_RECV',  {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
+    if (tcpLastAck.length)   ds.push({...linePts(tcpLastAck,   '#94a3b8', 'LAST_ACK',  {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
+    const tcpOpts = {
+      ...CO,
+      scales: {
+        ...CO.scales,
+        [yL]: {position:'left',  title:{display:true,text:'conns',    color:'#6b7d93'}, ticks:{color:'#6b7d93',font:{size:9}}, grid:{color:'rgba(30,42,58,.5)'}},
+        [yR]: {position:'right', title:{display:true,text:'TIME_WAIT',color:'#f5a623'}, ticks:{color:'#f5a623',font:{size:9}}, grid:{drawOnChartArea:false}},
+      },
+    };
+    Charts.create('res_tcp', {type:'line', data:{datasets:ds}, options:tcpOpts});
   }
 
   // VMS (exclude 'other' — its VMS reflects max across all system processes, not meaningful)
@@ -649,24 +658,40 @@ function initResourceCharts(rpc, entry) {
     Charts.create('res_vms', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('MB')}});
   }
 
-  // Disk I/O
+  // Disk I/O — KB/s left axis, IOPS right axis
   if (hasDisk) {
-    addChart('res_disk', 'Disk I/O (KB/s)');
+    addChart('res_disk', 'Disk I/O');
     const ds=[];
-    if (diskRdKbs.length)  ds.push(linePts(diskRdKbs,  '#34d399', 'read KB/s'));
-    if (diskWrKbs.length)  ds.push(linePts(diskWrKbs,  '#4da6ff', 'write KB/s'));
-    if (diskRdIops.length) ds.push(linePts(diskRdIops, '#a78bfa', 'read IOPS',  {borderDash:[3,2], borderWidth:1}));
-    if (diskWrIops.length) ds.push(linePts(diskWrIops, '#f5a623', 'write IOPS', {borderDash:[3,2], borderWidth:1}));
-    Charts.create('res_disk', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('KB/s')}});
+    if (diskRdKbs.length)  ds.push({...linePts(diskRdKbs,  '#34d399', 'read KB/s'),                        yAxisID:'yDKbs'});
+    if (diskWrKbs.length)  ds.push({...linePts(diskWrKbs,  '#4da6ff', 'write KB/s'),                       yAxisID:'yDKbs'});
+    if (diskRdIops.length) ds.push({...linePts(diskRdIops, '#a78bfa', 'read IOPS', {borderDash:[3,2],borderWidth:1}), yAxisID:'yDIops'});
+    if (diskWrIops.length) ds.push({...linePts(diskWrIops, '#f5a623', 'write IOPS',{borderDash:[3,2],borderWidth:1}), yAxisID:'yDIops'});
+    const diskOpts = {
+      ...CO,
+      scales: {
+        ...CO.scales,
+        yDKbs:  {position:'left',  title:{display:true,text:'KB/s', color:'#6b7d93'}, ticks:{color:'#6b7d93',font:{size:9}}, grid:{color:'rgba(30,42,58,.5)'}},
+        yDIops: {position:'right', title:{display:true,text:'IOPS', color:'#6b7d93'}, ticks:{color:'#6b7d93',font:{size:9}}, grid:{drawOnChartArea:false}},
+      },
+    };
+    Charts.create('res_disk', {type:'line', data:{datasets:ds}, options:diskOpts});
   }
 
-  // Interrupts + ctx switches
+  // Interrupts + ctx switches — dual axis (interrupts >> ctx_switches)
   if (hasIntr) {
-    addChart('res_intr', 'Interrupts / s');
+    addChart('res_intr', 'Interrupts + Context Switches / s');
     const ds=[];
-    if (intrPts.length)  ds.push(linePts(intrPts,  '#f472b6', 'interrupts/s'));
-    if (ctxSwPts.length) ds.push(linePts(ctxSwPts, '#38bdf8', 'ctx_switches/s', {borderDash:[3,2], borderWidth:1}));
-    Charts.create('res_intr', {type:'line', data:{datasets:ds}, options:{...CO, ...withYTitle('/s')}});
+    if (intrPts.length)  ds.push({...linePts(intrPts,  '#f472b6', 'interrupts/s'),                               yAxisID:'yIntr'});
+    if (ctxSwPts.length) ds.push({...linePts(ctxSwPts, '#38bdf8', 'ctx_switches/s',{borderDash:[3,2],borderWidth:1}), yAxisID:'yCtx'});
+    const intrOpts = {
+      ...CO,
+      scales: {
+        ...CO.scales,
+        yIntr: {position:'left',  title:{display:true,text:'interrupts/s',  color:'#f472b6'}, ticks:{color:'#f472b6',font:{size:9}}, grid:{color:'rgba(30,42,58,.5)'}},
+        yCtx:  {position:'right', title:{display:true,text:'ctx_switches/s',color:'#38bdf8'}, ticks:{color:'#38bdf8',font:{size:9}}, grid:{drawOnChartArea:false}},
+      },
+    };
+    Charts.create('res_intr', {type:'line', data:{datasets:ds}, options:intrOpts});
   }
 
   // Context switches per process
