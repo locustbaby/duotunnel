@@ -301,17 +301,15 @@ function renderDetail(entry) {
   });
   html += UI.Panel(`Detailed Metrics — ${s7}`, UI.Table(headers, tableRows));
 
-  const hasCoreRes = !!entry.core_resources;
   const caseResources = allCases.filter(c => c.resources);
-  if (hasCoreRes || caseResources.length) {
+  if (caseResources.length) {
     html += UI.Section('System Resources');
     html += `<div id="res-charts-container"></div>`;
     root.innerHTML = html;
-    if (hasCoreRes) initCoreResourceCharts(entry.core_resources, entry.cases || {});
     if (caseResources.length === 1) {
       const c = caseResources[0];
       renderCaseResources(c.resources, c.label || c.name, (c.perf||{}).timeRange);
-    } else if (caseResources.length > 1) {
+    } else {
       renderSerialCaseResources(caseResources);
     }
   } else {
@@ -576,26 +574,6 @@ function buildResourceCharts(res, annotations, xMax, titlePrefix) {
   }
 }
 
-function initCoreResourceCharts(res, cases) {
-  const k6off = res.k6_offset || 0;
-  const CASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
-  const annotations = {};
-  Object.entries(cases).forEach(([name, c], i) => {
-    const tr = (c.perf || {}).timeRange || {};
-    const xMin = (tr.startSec || 0) + k6off, xMax = (tr.endSec || 0) + k6off;
-    const col = CASE_COLORS[i % CASE_COLORS.length];
-    const yAdj = (i % 2 === 0) ? 10 : 24;
-    const label = c.label || name;
-    annotations[`case${i}`] = {type:'box', xMin, xMax, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
-    annotations[`caseLS${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
-    annotations[`caseLE${i}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
-  });
-
-  const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
-  const xMax = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) + 5 : null;
-  const resNoPc = { ...res, system: { ...res.system, cpu_per_core: undefined } };
-  buildResourceCharts(resNoPc, annotations, xMax, null);
-}
 
 function renderSerialCaseResources(cases) {
   const CASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
