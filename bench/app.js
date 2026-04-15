@@ -365,9 +365,10 @@ function initAllResourceCharts(coreRes, caseResources, phases) {
   const annotations = {};
   let pi = 0;
   const corePhases = Object.entries(phases).filter(([, p]) => {
-    // 8k phases have start=0 and their cases have resources — they live on their own segment
     const hasCaseRes = Object.values(p.cases||{}).some(c => c.resources);
-    return !hasCaseRes;
+    if (hasCaseRes) return false;
+    const isFrp = Object.values(p.cases||{}).some(c => c.tunnel === 'frp');
+    return !isFrp;
   });
   corePhases.forEach(([name, p]) => {
     const xMin = (p.start||0) + k6off + coreOffset;
