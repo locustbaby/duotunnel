@@ -40,62 +40,18 @@ if [ -d bench/traces ]; then
   fi
 fi
 
-FRP_ARG=""
-FRP_OFFSET_ARG=""
 if [ -s /tmp/core/bench-results-frp.json ]; then
-  FRP_ARG="--frp-result /tmp/core/bench-results-frp.json"
-  if [ -f /tmp/core/frp_k6_start_epoch ] && [ -f /tmp/core/sampling_start_epoch ]; then
-    FRP_K6_OFFSET=$(( $(cat /tmp/core/frp_k6_start_epoch) - $(cat /tmp/core/sampling_start_epoch) ))
-    FRP_OFFSET_ARG="--frp-k6-offset $FRP_K6_OFFSET"
-  fi
-fi
-
-RES_ARG=""
-if [ -s /tmp/core/resource-data.json ]; then
-  RES_ARG="--resources /tmp/core/resource-data.json"
-fi
-
-if [ -s /tmp/profile8k/bench-results-8k-combined.json ]; then
-  python3 - <<'PYEOF'
-import json, importlib.util, os
-ws = os.environ.get('GITHUB_WORKSPACE', '')
-spec = importlib.util.spec_from_file_location('mr', os.path.join(ws, 'ci-helpers/merge-results.py'))
-mr = importlib.util.module_from_spec(spec); spec.loader.exec_module(mr)
-
-core_res_path = '/tmp/core/resource-data.json'
-combined_path = '/tmp/profile8k/bench-results-8k-combined.json'
-
-with open(combined_path) as f:
-    combined = json.load(f)
-
-phase_offset = 0
-if os.path.exists(core_res_path):
-    with open(core_res_path) as f:
-        core_res = json.load(f)
-    phase_offset = mr._max_t(core_res) + 10
-    rpc = combined.get('resources_per_case') or {}
-    SKIP = {'catalog', 'nproc', 'k6OffsetSeconds'}
-    for k, v in rpc.items():
-        if k not in SKIP and isinstance(v, dict) and (v.get('system') or v.get('processes')):
-            mr.append_resource_to_core(core_res, v)
-    with open(core_res_path, 'w') as f:
-        json.dump(core_res, f)
-
-for p in combined.get('phases') or []:
-    if isinstance(p, dict):
-        p['start'] = (p.get('start') or 0) + phase_offset
-        p['end']   = (p.get('end')   or 0) + phase_offset
-        p['resourceCase'] = 'core'
-with open(combined_path, 'w') as f:
-    json.dump(combined, f)
-
-print(f'8k: resource appended, phases shifted by {phase_offset}')
-PYEOF
-
   python3 "$GITHUB_WORKSPACE/ci-helpers/merge-results.py" \
     /tmp/bench-results-merged.json \
     /tmp/bench-results-merged.json \
-    /tmp/profile8k/bench-results-8k-combined.json:8k-q4:true
+    /tmp/core/bench-results-frp.json
+fi
+
+if [ -s /tmp/profile8k/bench-results-8k-combined.json ]; then
+  python3 "$GITHUB_WORKSPACE/ci-helpers/merge-results.py" \
+    /tmp/bench-results-merged.json \
+    /tmp/bench-results-merged.json \
+    /tmp/profile8k/bench-results-8k-combined.json
 fi
 
 echo "==> Processing per-case traces"
@@ -150,7 +106,7 @@ python3 "$GITHUB_WORKSPACE/ci-helpers/bench-tool.py" publish \
   --msg     "$(git -C "$GITHUB_WORKSPACE" log -1 --pretty=%s)" \
   --url     "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" \
   --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-  $RES_ARG $FRP_ARG $FRP_OFFSET_ARG $TRACE_CASES_ARG
+  $TRACE_CASES_ARG
 
 echo "==> Committing and pushing to gh-pages"
 git config user.name "github-actions[bot]"

@@ -931,6 +931,12 @@ jobs:
             --k6-offset    "$K6_OFFSET" \
             --output       /tmp/resource-data.json \
             || echo "Resource parsing failed (non-fatal)"
+          if [ -s /tmp/resource-data.json ] && [ -s /tmp/bench-results.json ]; then
+            python3 "${{ github.workspace }}/ci-helpers/bench-tool.py" inject \
+              --result    /tmp/bench-results.json \
+              --resources /tmp/resource-data.json \
+              --core
+          fi
 
       - name: Upload benchmark outputs (core)
         if: always()
@@ -942,7 +948,6 @@ jobs:
           path: |
             /tmp/bench-results.json
             /tmp/bench-results-frp.json
-            /tmp/resource-data.json
             /tmp/sampling_start_epoch
             /tmp/frp_k6_start_epoch
 
@@ -1034,11 +1039,9 @@ jobs:
           python3 ci-helpers/merge-results.py \
             /tmp/trace-ingress_8000qps/bench-results.json \
             /tmp/bench-results-8k-combined.json \
-            --core-resource /tmp/trace-ingress_8000qps/resource-data.json \
-            --core-label ingress_8000qps \
-            /tmp/trace-egress_8000qps/bench-results.json:egress_8000qps:true:/tmp/trace-egress_8000qps/resource-data.json \
-            /tmp/trace-ingress_multihost_8000qps/bench-results.json:ingress_multihost_8000qps:true:/tmp/trace-ingress_multihost_8000qps/resource-data.json \
-            /tmp/trace-egress_multihost_8000qps/bench-results.json:egress_multihost_8000qps:true:/tmp/trace-egress_multihost_8000qps/resource-data.json
+            /tmp/trace-egress_8000qps/bench-results.json \
+            /tmp/trace-ingress_multihost_8000qps/bench-results.json \
+            /tmp/trace-egress_multihost_8000qps/bench-results.json
 
       - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

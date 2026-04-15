@@ -125,6 +125,14 @@ sleep 0.5
 # 8. Parse
 python3 ci-helpers/bench-tool.py parse --input /tmp/collect.jsonl --k6-offset 0 --output "/tmp/resource-data-${CASE_NAME}.json" || true
 
+# 8b. Inject resource into bench-results.json case
+if [ -s "/tmp/resource-data-${CASE_NAME}.json" ] && [ -s /tmp/bench-results.json ]; then
+  python3 ci-helpers/bench-tool.py inject \
+    --result    /tmp/bench-results.json \
+    --resources "/tmp/resource-data-${CASE_NAME}.json" \
+    --case-name "${CASE_NAME}" || true
+fi
+
 # 9. Stop server/client, wait for trace flush
 sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
 sudo systemctl stop duotunnel-server.scope 2>/dev/null || true

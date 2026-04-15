@@ -309,19 +309,40 @@ def run_parse(args):
     if cpu_per_core_series:
         result["system"]["cpu_per_core"] = cpu_per_core_series
 
-    result["k6OffsetSeconds"] = args.k6_offset
+    result["k6_offset"] = args.k6_offset
     result["processes"] = {g: v for g, v in result["processes"].items() if any(v.values())}
     if not result["top_cpu"]: del result["top_cpu"]
     if not result["top_rss"]: del result["top_rss"]
-    result["catalog"] = {
-        "categories": SCHEMA.get("categories", []),
-        "metrics": SCHEMA.get("metrics", []),
-        "groups": SCHEMA.get("groups", [])
-    }
 
     with open(args.output, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Parsed {args.input} -> {args.output}")
+
+# --- Subcommand: Inject (Embed resource-data into bench-results) ---
+
+def run_inject(args):
+    with open(args.result) as f:
+        entry = json.load(f)
+    with open(args.resources) as f:
+        res_data = json.load(f)
+
+    if args.core:
+        entry["core_resources"] = res_data
+        print(f"Injected {args.resources} -> {args.result} as core_resources")
+    else:
+        found = False
+        for phase in entry.get("phases", {}).values():
+            if args.case_name in phase.get("cases", {}):
+                phase["cases"][args.case_name]["resources"] = res_data
+                found = True
+                break
+        if not found:
+            print(f"WARNING: case '{args.case_name}' not found in phases", file=sys.stderr)
+        else:
+            print(f"Injected {args.resources} -> {args.result} case[{args.case_name!r}].resources")
+
+    with open(args.result, "w") as f:
+        json.dump(entry, f, separators=(",", ":"))
 
 # --- Subcommand: Publish (Merge & Update Data.js) ---
 
@@ -333,33 +354,11 @@ def run_publish(args):
     if args.run_url:
         entry["run_url"] = args.run_url
 
-    k6_active_offset = entry.get("k6_active_offset", 0)
-    if args.resources and os.path.exists(args.resources):
-        with open(args.resources) as f:
-            res_data = json.load(f)
-            res_data["k6OffsetSeconds"] = res_data.get("k6OffsetSeconds", 0) + k6_active_offset
-            entry.setdefault("resources_per_case", {})["core"] = res_data
-            if isinstance(res_data.get("catalog"), dict):
-                entry["resources_per_case"]["catalog"] = res_data["catalog"]
-
     if args.trace_cases_file and os.path.exists(args.trace_cases_file):
         with open(args.trace_cases_file) as f:
             trace_cases = json.load(f)
         if isinstance(trace_cases, list) and trace_cases:
             entry.setdefault("artifacts", {})["trace_cases"] = trace_cases
-
-    # Append FRP results if present
-    if args.frp_result and os.path.exists(args.frp_result):
-        with open(args.frp_result) as f:
-            frp = json.load(f)
-        off = args.frp_k6_offset + frp.get("k6_active_offset", 0)
-        for sc in frp.get("scenarios", []):
-            sc["tunnel"] = "frp"
-            entry["scenarios"].append(sc)
-        for ph in frp.get("phases", []):
-            entry.setdefault("phases", []).append({**ph, "tunnel": "frp", "resourceCase": "core",
-                                                  "start": (ph.get("start") or 0) + off,
-                                                  "end": (ph.get("end") or 0) + off})
 
     # Update index data.js
     PREFIX, SUFFIX = "window.BENCHMARK_DATA = ", ";"
@@ -378,8 +377,12 @@ def run_publish(args):
         json.dump(entry, f, separators=(",", ":"))
 
     index_entry = {k: entry.get(k) for k in ["commit", "timestamp", "summary", "catalog", "run_url", "artifacts"]}
-    index_entry["scenarios"] = [{k: s[k] for k in s if k in ["name", "category", "phase", "label", "p50", "p95", "rps", "err", "protocol", "direction", "tunnel"]} 
-                              for s in entry.get("scenarios", [])]
+    index_entry["scenarios"] = [
+        {"name": name, **{k: c.get(k) for k in ["label", "protocol", "direction", "category", "tunnel"]},
+         **{k: (c.get("perf") or {}).get(k) for k in ["p50", "p95", "rps", "err", "requests"]}}
+        for phase in entry.get("phases", {}).values()
+        for name, c in phase.get("cases", {}).items()
+    ]
     entries.append(index_entry)
     entries = entries[-args.max_entries:]
 
@@ -408,18 +411,23 @@ def main():
     b.add_argument("--result", required=True)
     b.add_argument("--data", required=True)
     b.add_argument("--sha", required=True)
-    b.add_argument("--resources", default="")
-    b.add_argument("--frp-result", default="")
-    b.add_argument("--frp-k6-offset", type=int, default=0)
     b.add_argument("--msg", default="")
     b.add_argument("--url", default="")
     b.add_argument("--run-url", default="")
     b.add_argument("--trace-cases-file", default="")
     b.add_argument("--max-entries", type=int, default=50)
 
+    i = sub.add_parser("inject")
+    i.add_argument("--result", required=True)
+    i.add_argument("--resources", required=True)
+    i_group = i.add_mutually_exclusive_group(required=True)
+    i_group.add_argument("--core", action="store_true")
+    i_group.add_argument("--case-name")
+
     args = p.parse_args()
     if args.cmd == "collect": run_collect(args)
     elif args.cmd == "parse": run_parse(args)
+    elif args.cmd == "inject": run_inject(args)
     elif args.cmd == "publish": run_publish(args)
 
 if __name__ == "__main__":

@@ -145,10 +145,16 @@ function resolveCategories(caseDefs) {
 
 export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
   const metrics = data.metrics;
-  const scenarios = [];
+  const phasesOut = {};
   let totalRPS = 0;
   let totalRequests = 0;
   let totalErrors = 0;
+
+  for (const p of phases) {
+    phasesOut[p.name] = { start: p.start, end: p.end, cases: {} };
+  }
+
+  const tunnel = extras.tunnel || 'duotunnel';
 
   for (const c of caseDefs) {
     const metric = c.metric || metricForProtocol(c.protocol);
@@ -167,31 +173,38 @@ export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
     totalErrors += errors;
     if (c.includeInTotalRps) totalRPS += rps;
 
-    scenarios.push({
-      name: c.name, protocol: c.protocol, direction: c.direction, category: c.category,
-      phase: c.phase, label: c.label, payloadBytes: c.payloadBytes,
-      timeRange: c.timeRange, thresholdSpec: c.thresholdSpec,
-      includeInTotalRps: !!c.includeInTotalRps,
-      targetRate: c.targetRate != null ? c.targetRate : (c.scenario?.rate || null),
-      p50: Math.round((values.med || 0) * 100) / 100,
-      p95: Math.round((values['p(95)'] || 0) * 100) / 100,
-      err, rps, requests
-    });
+    const phaseKey = c.phase || '__unphased__';
+    if (!phasesOut[phaseKey]) phasesOut[phaseKey] = { start: 0, end: 0, cases: {} };
+    phasesOut[phaseKey].cases[c.name] = {
+      label: c.label,
+      protocol: c.protocol,
+      direction: c.direction,
+      category: c.category,
+      tunnel,
+      perf: {
+        rps, err, requests,
+        p50: Math.round((values.med || 0) * 100) / 100,
+        p95: Math.round((values['p(95)'] || 0) * 100) / 100,
+        targetRate: c.targetRate != null ? c.targetRate : (c.scenario?.rate || null),
+        thresholdSpec: c.thresholdSpec,
+        includeInTotalRps: !!c.includeInTotalRps,
+        payloadBytes: c.payloadBytes || null,
+        timeRange: c.timeRange,
+      },
+      resources: null,
+    };
   }
 
+  const { tunnel: _t, ...restExtras } = extras;
   return {
     timestamp: new Date().toISOString(),
-    scenarios,
+    phases: phasesOut,
     summary: {
       totalRPS: Math.round(totalRPS * 100) / 100,
       totalErr: totalRequests > 0 ? Math.round((totalErrors / totalRequests) * 10000) / 100 : 0,
       totalRequests
     },
-    phases,
-    catalog: {
-      categories: resolveCategories(caseDefs),
-      caseOrder: caseDefs.map(c => c.name)
-    },
-    ...extras
+    catalog: { categories: resolveCategories(caseDefs) },
+    ...restExtras
   };
 }
