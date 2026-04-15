@@ -69,6 +69,40 @@
       }
     },
     {
+      "name": "ingress_6000qps",
+      "label": "ingress GET 6000 rps",
+      "exec": "ingressHttpGet",
+      "protocol": "HTTP",
+      "direction": "ingress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 6000,
+        "duration": "20s",
+        "startTime": "165s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 2000
+      }
+    },
+    {
+      "name": "egress_6000qps",
+      "label": "egress GET 6000 rps",
+      "exec": "egressHttpGet",
+      "protocol": "HTTP",
+      "direction": "egress",
+      "category": "stress",
+      "includeInTotalRps": true,
+      "scenario": {
+        "executor": "constant-arrival-rate",
+        "rate": 6000,
+        "duration": "20s",
+        "startTime": "190s",
+        "preAllocatedVUs": 100,
+        "maxVUs": 2000
+      }
+    },
+    {
       "name": "ingress_multihost_6000qps",
       "label": "ingress multihost 6000 rps",
       "exec": "ingressMultihost",
