@@ -12,7 +12,7 @@
         "executor": "constant-arrival-rate",
         "rate": 3000,
         "duration": "20s",
-        "startTime": "65s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 500
       }
@@ -29,7 +29,7 @@
         "executor": "constant-arrival-rate",
         "rate": 3000,
         "duration": "20s",
-        "startTime": "90s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 500
       }
@@ -46,7 +46,7 @@
         "executor": "constant-arrival-rate",
         "rate": 3000,
         "duration": "20s",
-        "startTime": "115s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 500
       }
@@ -63,7 +63,7 @@
         "executor": "constant-arrival-rate",
         "rate": 3000,
         "duration": "20s",
-        "startTime": "140s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 500
       }
@@ -80,7 +80,7 @@
         "executor": "constant-arrival-rate",
         "rate": 6000,
         "duration": "20s",
-        "startTime": "165s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 2000
       }
@@ -97,7 +97,7 @@
         "executor": "constant-arrival-rate",
         "rate": 6000,
         "duration": "20s",
-        "startTime": "190s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 2000
       }
@@ -114,7 +114,7 @@
         "executor": "constant-arrival-rate",
         "rate": 6000,
         "duration": "20s",
-        "startTime": "165s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 2000
       }
@@ -131,7 +131,7 @@
         "executor": "constant-arrival-rate",
         "rate": 6000,
         "duration": "20s",
-        "startTime": "190s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 2000
       }
@@ -148,7 +148,7 @@
         "executor": "constant-arrival-rate",
         "rate": 8000,
         "duration": "20s",
-        "startTime": "215s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 3000
       }
@@ -165,7 +165,7 @@
         "executor": "constant-arrival-rate",
         "rate": 8000,
         "duration": "20s",
-        "startTime": "240s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 3000
       }
@@ -182,7 +182,7 @@
         "executor": "constant-arrival-rate",
         "rate": 8000,
         "duration": "20s",
-        "startTime": "265s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 3000
       }
@@ -199,7 +199,7 @@
         "executor": "constant-arrival-rate",
         "rate": 8000,
         "duration": "20s",
-        "startTime": "290s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 3000
       }

@@ -31,7 +31,7 @@
         "executor": "constant-arrival-rate",
         "rate": 3000,
         "duration": "20s",
-        "startTime": "25s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 500
       }
@@ -49,7 +49,7 @@
         "executor": "constant-arrival-rate",
         "rate": 6000,
         "duration": "20s",
-        "startTime": "50s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 2000
       }
@@ -67,7 +67,7 @@
         "executor": "constant-arrival-rate",
         "rate": 8000,
         "duration": "20s",
-        "startTime": "75s",
+        "startTime": "0s",
         "preAllocatedVUs": 100,
         "maxVUs": 3000
       }
