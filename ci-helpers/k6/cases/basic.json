@@ -2,7 +2,7 @@
   "cases": [
     {
       "name": "ingress_http_get",
-      "label": "ingress GET ramp→40 rps",
+      "label": "duotunnel ingress GET ramp→40 rps",
       "exec": "ingressHttpGet",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -21,7 +21,7 @@
     },
     {
       "name": "ingress_http_post",
-      "label": "ingress POST ramp→25 rps",
+      "label": "duotunnel ingress POST ramp→25 rps",
       "exec": "ingressHttpPost",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -40,7 +40,7 @@
     },
     {
       "name": "egress_http_get",
-      "label": "egress GET ramp→50 rps",
+      "label": "duotunnel egress GET ramp→50 rps",
       "exec": "egressHttpGet",
       "protocol": "HTTP",
       "direction": "egress",
@@ -60,7 +60,7 @@
     },
     {
       "name": "egress_http_post",
-      "label": "egress POST ramp→40 rps",
+      "label": "duotunnel egress POST ramp→40 rps",
       "exec": "egressHttpPost",
       "protocol": "HTTP",
       "direction": "egress",
@@ -79,7 +79,7 @@
     },
     {
       "name": "ws_ingress",
-      "label": "ingress WS echo 10 rps",
+      "label": "duotunnel ingress WS echo 10 rps",
       "exec": "wsIngress",
       "protocol": "WS",
       "direction": "ingress",
@@ -95,7 +95,7 @@
     },
     {
       "name": "grpc_health_ingress",
-      "label": "ingress gRPC health 20 rps",
+      "label": "duotunnel ingress gRPC health 20 rps",
       "exec": "grpcHealthIngress",
       "protocol": "gRPC",
       "direction": "ingress",
@@ -110,7 +110,7 @@
     },
     {
       "name": "grpc_echo_ingress",
-      "label": "ingress gRPC echo 20 rps",
+      "label": "duotunnel ingress gRPC echo 20 rps",
       "exec": "grpcEchoIngress",
       "protocol": "gRPC",
       "direction": "ingress",
@@ -125,7 +125,7 @@
     },
     {
       "name": "bidir_mixed",
-      "label": "bidir HTTP ramp→20 rps",
+      "label": "duotunnel bidir HTTP ramp→20 rps",
       "exec": "bidirectional",
       "protocol": "HTTP",
       "direction": "bidir",

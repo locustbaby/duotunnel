@@ -2,7 +2,7 @@
   "cases": [
     {
       "name": "ingress_post_1k",
-      "label": "ingress POST 1 KB @ 30 rps",
+      "label": "duotunnel ingress POST 1 KB @ 30 rps",
       "exec": "ingressPost1K",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -19,7 +19,7 @@
     },
     {
       "name": "ingress_post_10k",
-      "label": "ingress POST 10 KB @ 20 rps",
+      "label": "duotunnel ingress POST 10 KB @ 20 rps",
       "exec": "ingressPost10K",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -36,7 +36,7 @@
     },
     {
       "name": "ingress_post_100k",
-      "label": "ingress POST 100 KB @ 10 rps",
+      "label": "duotunnel ingress POST 100 KB @ 10 rps",
       "exec": "ingressPost100K",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -53,7 +53,7 @@
     },
     {
       "name": "egress_post_10k",
-      "label": "egress POST 10 KB @ 20 rps",
+      "label": "duotunnel egress POST 10 KB @ 20 rps",
       "exec": "egressPost10K",
       "protocol": "HTTP",
       "direction": "egress",
@@ -70,7 +70,7 @@
     },
     {
       "name": "ws_multi_msg",
-      "label": "ingress WS burst 20msg @ 5 rps",
+      "label": "duotunnel ingress WS burst 20msg @ 5 rps",
       "exec": "wsMultiMsg",
       "protocol": "WS",
       "direction": "ingress",
@@ -87,7 +87,7 @@
     },
     {
       "name": "grpc_large_payload",
-      "label": "ingress gRPC 10 KB @ 15 rps",
+      "label": "duotunnel ingress gRPC 10 KB @ 15 rps",
       "exec": "grpcLargePayload",
       "protocol": "gRPC",
       "direction": "ingress",
@@ -103,7 +103,7 @@
     },
     {
       "name": "grpc_high_qps",
-      "label": "ingress gRPC ramp→100 rps",
+      "label": "duotunnel ingress gRPC ramp→100 rps",
       "exec": "grpcHighQps",
       "protocol": "gRPC",
       "direction": "ingress",

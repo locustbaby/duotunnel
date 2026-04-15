@@ -326,15 +326,11 @@ def run_inject(args):
     with open(args.resources) as f:
         res_data = json.load(f)
 
-    if args.core:
-        entry["core_resources"] = res_data
-        print(f"Injected {args.resources} -> {args.result} as core_resources")
-    else:
-        if args.case_name in entry.get("cases", {}):
-            entry["cases"][args.case_name]["resources"] = res_data
-            print(f"Injected {args.resources} -> {args.result} case[{args.case_name!r}].resources")
-        else:
-            print(f"WARNING: case '{args.case_name}' not found in cases", file=sys.stderr)
+    cases = entry.setdefault("cases", {})
+    if args.case_name not in cases:
+        cases[args.case_name] = {"label": args.case_name, "resources": None}
+    cases[args.case_name]["resources"] = res_data
+    print(f"Injected {args.resources} -> {args.result} case[{args.case_name!r}].resources")
 
     with open(args.result, "w") as f:
         json.dump(entry, f, separators=(",", ":"))
@@ -414,9 +410,7 @@ def main():
     i = sub.add_parser("inject")
     i.add_argument("--result", required=True)
     i.add_argument("--resources", required=True)
-    i_group = i.add_mutually_exclusive_group(required=True)
-    i_group.add_argument("--core", action="store_true")
-    i_group.add_argument("--case-name")
+    i.add_argument("--case-name", required=True)
 
     args = p.parse_args()
     if args.cmd == "collect": run_collect(args)

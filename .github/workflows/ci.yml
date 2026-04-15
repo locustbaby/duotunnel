@@ -825,7 +825,7 @@ jobs:
           if [ -s /tmp/resource-basic.json ] && [ -s /tmp/bench-results-basic.json ]; then
             python3 ci-helpers/bench-tool.py inject \
               --result /tmp/bench-results-basic.json \
-              --resources /tmp/resource-basic.json --core
+              --resources /tmp/resource-basic.json --case-name basic
           fi
 
       - name: Bench — body_size
@@ -845,7 +845,7 @@ jobs:
           if [ -s /tmp/resource-body.json ] && [ -s /tmp/bench-results-body.json ]; then
             python3 ci-helpers/bench-tool.py inject \
               --result /tmp/bench-results-body.json \
-              --resources /tmp/resource-body.json --core
+              --resources /tmp/resource-body.json --case-name body_size
           fi
 
       - name: Merge basic + body results

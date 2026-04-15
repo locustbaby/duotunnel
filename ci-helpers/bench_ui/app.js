@@ -301,14 +301,17 @@ function renderDetail(entry) {
   });
   html += UI.Panel(`Detailed Metrics — ${s7}`, UI.Table(headers, tableRows));
 
-  const hasCoreRes = !!entry.core_resources;
   const caseResources = allCases.filter(c => c.resources);
-  if (hasCoreRes || caseResources.length) {
+  if (caseResources.length) {
     html += UI.Section('System Resources');
     html += `<div id="res-charts-container"></div>`;
     root.innerHTML = html;
-    if (hasCoreRes) initCoreResourceCharts(entry.core_resources, entry.cases || {});
-    caseResources.forEach(c => renderCaseResources(c.resources, c.label || c.name, (c.perf||{}).timeRange));
+    if (caseResources.length === 1) {
+      const c = caseResources[0];
+      renderCaseResources(c.resources, c.label || c.name, (c.perf||{}).timeRange);
+    } else {
+      renderSerialCaseResources(caseResources);
+    }
   } else {
     root.innerHTML = html;
   }
@@ -425,13 +428,13 @@ function buildResourceCharts(res, annotations, xMax, titlePrefix) {
   const perCoreSeries = [];
   if (Array.isArray(perCoreRaw) && perCoreRaw.length) {
     const first = perCoreRaw[0];
-    if (Array.isArray(first) && Array.isArray(first[1])) {
-      perCoreRaw.forEach(([t, cores]) => cores.forEach((v, ci) => {
+    if (Array.isArray(first) && first.length >= 2 && Array.isArray(first[0]) && Array.isArray(first[1])) {
+      perCoreRaw.forEach((arr, ci) => { perCoreSeries[ci] = pts(arr); });
+    } else if (Array.isArray(first) && first.length >= 2 && !Array.isArray(first[0])) {
+      perCoreRaw.forEach(([t, cores]) => (cores||[]).forEach((v, ci) => {
         if (!perCoreSeries[ci]) perCoreSeries[ci]=[];
         perCoreSeries[ci].push({x:t, y:v});
       }));
-    } else {
-      perCoreRaw.forEach((arr, ci) => { perCoreSeries[ci] = pts(arr); });
     }
   }
   const hasPerCore = perCoreSeries.length > 0;
@@ -571,24 +574,76 @@ function buildResourceCharts(res, annotations, xMax, titlePrefix) {
   }
 }
 
-function initCoreResourceCharts(res, cases) {
-  const k6off = res.k6_offset || 0;
+
+function renderSerialCaseResources(cases) {
   const CASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
+  const shiftPts = (arr, off) => (arr || []).map(p => [p[0] + off, p[1]]);
+  const shiftTopMap = (map, off) => {
+    if (!map) return {};
+    const out = {};
+    for (const [k, arr] of Object.entries(map)) out[k] = shiftPts(arr, off);
+    return out;
+  };
+
+  const merged = { system: {}, processes: {}, top_cpu: {}, top_rss: {} };
   const annotations = {};
-  Object.entries(cases).forEach(([name, c], i) => {
+  let offset = 0;
+
+  cases.forEach((c, i) => {
+    const res = c.resources;
+    if (!res) return;
+    const k6off = res.k6_offset || 0;
+    const allPts = [...(res.system?.cpu || []), ...Object.values(res.processes || {}).flatMap(p => p.cpu || [])];
+    const caseXMax = allPts.length ? Math.max(...allPts.map(p => p[0] || 0)) : 20;
+    const shift = offset + k6off;
+
+    for (const [key, arr] of Object.entries(res.system || {})) {
+      if (!Array.isArray(arr)) continue;
+      if (key === 'cpu_per_core') {
+        if (!merged.system[key]) merged.system[key] = [];
+        arr.forEach((coreSeries, ci) => {
+          if (!merged.system[key][ci]) merged.system[key][ci] = [];
+          merged.system[key][ci].push(...shiftPts(coreSeries, offset));
+        });
+      } else {
+        if (!merged.system[key]) merged.system[key] = [];
+        merged.system[key].push(...shiftPts(arr, offset));
+      }
+    }
+    for (const [pkey, pval] of Object.entries(res.processes || {})) {
+      if (!merged.processes[pkey]) merged.processes[pkey] = {};
+      for (const [key, arr] of Object.entries(pval)) {
+        if (!Array.isArray(arr)) continue;
+        if (!merged.processes[pkey][key]) merged.processes[pkey][key] = [];
+        merged.processes[pkey][key].push(...shiftPts(arr, offset));
+      }
+    }
+    const topCpu = shiftTopMap(res.top_cpu, offset);
+    const topRss = shiftTopMap(res.top_rss, offset);
+    for (const [k, arr] of Object.entries(topCpu)) {
+      if (!merged.top_cpu[k]) merged.top_cpu[k] = [];
+      merged.top_cpu[k].push(...arr);
+    }
+    for (const [k, arr] of Object.entries(topRss)) {
+      if (!merged.top_rss[k]) merged.top_rss[k] = [];
+      merged.top_rss[k].push(...arr);
+    }
+
     const tr = (c.perf || {}).timeRange || {};
-    const xMin = (tr.startSec || 0) + k6off, xMax = (tr.endSec || 0) + k6off;
+    const xMin = (tr.startSec || 0) + shift;
+    const xMax2 = (tr.endSec || caseXMax) + shift;
     const col = CASE_COLORS[i % CASE_COLORS.length];
-    const yAdj = (i % 2 === 0) ? 10 : 24;
-    const label = c.label || name;
-    annotations[`case${i}`] = {type:'box', xMin, xMax, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
-    annotations[`caseLS${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
-    annotations[`caseLE${i}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
+    const label = c.name || c.label;
+    const yAdj = (i % 4 === 0) ? 8 : (i % 4 === 1) ? 18 : (i % 4 === 2) ? 28 : 38;
+    annotations[`case${i}`] = {type:'box', xMin, xMax:xMax2, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
+    annotations[`caseL${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.4)', borderWidth:1, borderDash:[3,3]};
+
+    offset += caseXMax;
   });
 
-  const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
-  const xMax = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) + 5 : null;
-  buildResourceCharts(res, annotations, xMax, null);
+  const allMergedPts = [...(merged.system?.cpu || []), ...Object.values(merged.processes || {}).flatMap(p => p.cpu || [])];
+  const totalXMax = allMergedPts.length ? Math.max(...allMergedPts.map(p => p[0] || 0)) + 5 : null;
+  buildResourceCharts(merged, annotations, totalXMax, null);
 }
 
 function renderCaseResources(res, label, timeRange) {
@@ -635,6 +690,7 @@ Utils.fmtTimeRange = (tr) => tr ? `${tr.startSec}–${tr.endSec}s` : '—';
 function navigate() {
   const hash = location.hash.replace('#','');
   Charts.destroyAll();
+  _chartIdSeq = 0;
   if (hash && hash !== 'overview') {
     const entry = Data.findEntry(hash);
     if (entry) {

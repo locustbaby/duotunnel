@@ -2,7 +2,7 @@
   "cases": [
     {
       "name": "ingress_3000qps",
-      "label": "ingress GET 3000 rps",
+      "label": "duotunnel ingress GET 3000 rps",
       "exec": "ingressHttpGet",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -19,7 +19,7 @@
     },
     {
       "name": "egress_3000qps",
-      "label": "egress GET 3000 rps",
+      "label": "duotunnel egress GET 3000 rps",
       "exec": "egressHttpGet",
       "protocol": "HTTP",
       "direction": "egress",
@@ -36,7 +36,7 @@
     },
     {
       "name": "ingress_multihost",
-      "label": "ingress multihost 3000 rps",
+      "label": "duotunnel ingress multihost 3000 rps",
       "exec": "ingressMultihost",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -53,7 +53,7 @@
     },
     {
       "name": "egress_multihost",
-      "label": "egress multihost 3000 rps",
+      "label": "duotunnel egress multihost 3000 rps",
       "exec": "egressMultihost",
       "protocol": "HTTP",
       "direction": "egress",
@@ -70,7 +70,7 @@
     },
     {
       "name": "ingress_6000qps",
-      "label": "ingress GET 6000 rps",
+      "label": "duotunnel ingress GET 6000 rps",
       "exec": "ingressHttpGet",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -87,7 +87,7 @@
     },
     {
       "name": "egress_6000qps",
-      "label": "egress GET 6000 rps",
+      "label": "duotunnel egress GET 6000 rps",
       "exec": "egressHttpGet",
       "protocol": "HTTP",
       "direction": "egress",
@@ -104,7 +104,7 @@
     },
     {
       "name": "ingress_multihost_6000qps",
-      "label": "ingress multihost 6000 rps",
+      "label": "duotunnel ingress multihost 6000 rps",
       "exec": "ingressMultihost",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -121,7 +121,7 @@
     },
     {
       "name": "egress_multihost_6000qps",
-      "label": "egress multihost 6000 rps",
+      "label": "duotunnel egress multihost 6000 rps",
       "exec": "egressMultihost",
       "protocol": "HTTP",
       "direction": "egress",
@@ -138,7 +138,7 @@
     },
     {
       "name": "ingress_8000qps",
-      "label": "ingress GET 8000 rps",
+      "label": "duotunnel ingress GET 8000 rps",
       "exec": "ingressHttpGet",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -155,7 +155,7 @@
     },
     {
       "name": "egress_8000qps",
-      "label": "egress GET 8000 rps",
+      "label": "duotunnel egress GET 8000 rps",
       "exec": "egressHttpGet",
       "protocol": "HTTP",
       "direction": "egress",
@@ -172,7 +172,7 @@
     },
     {
       "name": "ingress_multihost_8000qps",
-      "label": "ingress multihost 8000 rps",
+      "label": "duotunnel ingress multihost 8000 rps",
       "exec": "ingressMultihost",
       "protocol": "HTTP",
       "direction": "ingress",
@@ -189,7 +189,7 @@
     },
     {
       "name": "egress_multihost_8000qps",
-      "label": "egress multihost 8000 rps",
+      "label": "duotunnel egress multihost 8000 rps",
       "exec": "egressMultihost",
       "protocol": "HTTP",
       "direction": "egress",
