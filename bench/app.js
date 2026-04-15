@@ -601,7 +601,10 @@ function renderSerialCaseResources(cases) {
       if (!Array.isArray(arr)) continue;
       if (key === 'cpu_per_core') {
         if (!merged.system[key]) merged.system[key] = [];
-        merged.system[key].push(...arr.map(p => [p[0] + offset, p[1]]));
+        arr.forEach((coreSeries, ci) => {
+          if (!merged.system[key][ci]) merged.system[key][ci] = [];
+          merged.system[key][ci].push(...shiftPts(coreSeries, offset));
+        });
       } else {
         if (!merged.system[key]) merged.system[key] = [];
         merged.system[key].push(...shiftPts(arr, offset));
