@@ -633,8 +633,8 @@ function renderSerialCaseResources(cases) {
     const xMin = (tr.startSec || 0) + shift;
     const xMax2 = (tr.endSec || caseXMax) + shift;
     const col = CASE_COLORS[i % CASE_COLORS.length];
-    const label = c.label || c.name;
-    const yAdj = (i % 2 === 0) ? 10 : 24;
+    const label = c.name || c.label;
+    const yAdj = (i % 4 === 0) ? 8 : (i % 4 === 1) ? 18 : (i % 4 === 2) ? 28 : 38;
     annotations[`case${i}`] = {type:'box', xMin, xMax:xMax2, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
     annotations[`caseL${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.4)', borderWidth:1, borderDash:[3,3]};
 
