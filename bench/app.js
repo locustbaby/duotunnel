@@ -593,7 +593,8 @@ function initCoreResourceCharts(res, cases) {
 
   const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
   const xMax = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) + 5 : null;
-  buildResourceCharts(res, annotations, xMax, null);
+  const resNoPc = { ...res, system: { ...res.system, cpu_per_core: undefined } };
+  buildResourceCharts(resNoPc, annotations, xMax, null);
 }
 
 function renderSerialCaseResources(cases) {
@@ -620,8 +621,13 @@ function renderSerialCaseResources(cases) {
 
     for (const [key, arr] of Object.entries(res.system || {})) {
       if (!Array.isArray(arr)) continue;
-      if (!merged.system[key]) merged.system[key] = [];
-      merged.system[key].push(...shiftPts(arr, offset));
+      if (key === 'cpu_per_core') {
+        if (!merged.system[key]) merged.system[key] = [];
+        merged.system[key].push(...arr.map(p => [p[0] + offset, p[1]]));
+      } else {
+        if (!merged.system[key]) merged.system[key] = [];
+        merged.system[key].push(...shiftPts(arr, offset));
+      }
     }
     for (const [pkey, pval] of Object.entries(res.processes || {})) {
       if (!merged.processes[pkey]) merged.processes[pkey] = {};
@@ -703,6 +709,7 @@ Utils.fmtTimeRange = (tr) => tr ? `${tr.startSec}–${tr.endSec}s` : '—';
 function navigate() {
   const hash = location.hash.replace('#','');
   Charts.destroyAll();
+  _chartIdSeq = 0;
   if (hash && hash !== 'overview') {
     const entry = Data.findEntry(hash);
     if (entry) {
