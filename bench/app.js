@@ -337,42 +337,79 @@ const CPU_BREAKDOWN = [
 ];
 
 function initAllResourceCharts(coreRes, caseResources, phases) {
-  const CASE_GAP = 10;
+  const PHASE_GAP = 5;
 
-  // build time segments: core first, then 8k cases appended
+  // Each phase is a segment appended in order.
+  // Phases backed by core_resources share one resource segment (offset by k6_offset within it).
+  // Phases with per-case resources (8k) get their own segment.
+  // frp phases have no resources but still get an annotation block.
+
+  const k6off = coreRes ? (coreRes.k6_offset || 0) : 0;
+  const PHASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
+
+  // segments: resource data blocks to stitch together on the x axis
+  // core is one block; each 8k case is its own block appended after
   const segments = [];
   if (coreRes) {
     const allPts = [...(coreRes.system?.cpu||[]), ...Object.values(coreRes.processes||{}).flatMap(p=>p.cpu||[])];
     const maxT = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) : 0;
-    segments.push({res: coreRes, offset: 0, maxT, label: null, isCore: true});
+    segments.push({res: coreRes, offset: 0, maxT, isCore: true});
   }
   for (const c of caseResources) {
     const res = c.resources;
     const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
     const maxT = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) : 0;
     const prevEnd = segments.length ? segments[segments.length-1].offset + segments[segments.length-1].maxT : 0;
-    segments.push({res, offset: prevEnd + CASE_GAP, maxT, label: c.label || c.name, isCore: false});
+    segments.push({res, offset: prevEnd + PHASE_GAP, maxT, isCore: false, label: c.label || c.name});
   }
   if (!segments.length) return;
 
   const totalXMax = segments[segments.length-1].offset + segments[segments.length-1].maxT + 5;
-  const k6off = coreRes ? (coreRes.k6_offset || 0) : 0;
-  const coreOffset = segments.find(s => s.isCore)?.offset || 0;
+  const coreOffset = segments.find(s => s.isCore)?.offset ?? 0;
+  const coreSeg = segments.find(s => s.isCore);
 
-  // phase annotations — only phases that sit on the core timeline (have k6-relative start/end)
-  // frp phases are also on core timeline (same machine, same k6 run)
-  const PHASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
+  // Build annotations for every phase in append order.
+  // Each phase occupies (end - start) seconds on the axis, positioned after the previous one.
+  // Phases backed by core_resources are placed using k6off + coreOffset.
+  // 8k per-case phases are placed at their segment offset.
+  // frp phases have no resources — they are appended after the core segment as label-only blocks.
   const annotations = {};
   let pi = 0;
-  const corePhases = Object.entries(phases).filter(([, p]) => {
-    const hasCaseRes = Object.values(p.cases||{}).some(c => c.resources);
-    if (hasCaseRes) return false;
-    const isFrp = Object.values(p.cases||{}).some(c => c.tunnel === 'frp');
-    return !isFrp;
+
+  // frp phases are appended sequentially after core data ends
+  const coreMaxX = coreSeg ? coreSeg.offset + coreSeg.maxT : 0;
+  let frpCursor = coreMaxX + PHASE_GAP;
+  // also track max x reached by frp blocks for totalXMax adjustment
+  let frpMaxX = coreMaxX;
+
+  // caseRes segment lookup by case name
+  const caseSegByName = {};
+  caseResources.forEach(c => {
+    const seg = segments.find(s => !s.isCore && s.label === (c.label || c.name));
+    if (seg) caseSegByName[c.name] = seg;
   });
-  corePhases.forEach(([name, p]) => {
-    const xMin = (p.start||0) + k6off + coreOffset;
-    const xMax = (p.end||0)   + k6off + coreOffset;
+
+  Object.entries(phases).forEach(([name, p]) => {
+    const hasCaseRes = Object.values(p.cases||{}).some(c => c.resources);
+    const isFrp = Object.values(p.cases||{}).some(c => c.tunnel === 'frp');
+    let xMin, xMax;
+    if (hasCaseRes) {
+      const caseName = Object.keys(p.cases||{}).find(n => p.cases[n].resources);
+      const seg = caseName ? caseSegByName[caseName] : null;
+      if (!seg) return;
+      xMin = seg.offset;
+      xMax = seg.offset + seg.maxT;
+    } else if (isFrp) {
+      const dur = (p.end||0) - (p.start||0);
+      xMin = frpCursor;
+      xMax = frpCursor + dur;
+      frpCursor = xMax + PHASE_GAP;
+      frpMaxX = xMax;
+    } else {
+      if (!coreSeg) return;
+      xMin = (p.start||0) + k6off + coreOffset;
+      xMax = (p.end||0)   + k6off + coreOffset;
+    }
     const col  = PHASE_COLORS[pi % PHASE_COLORS.length];
     const yAdj = (pi % 2 === 0) ? 10 : 24;
     const nCases = Object.keys(p.cases||{}).length;
@@ -382,15 +419,10 @@ function initAllResourceCharts(coreRes, caseResources, phases) {
     annotations[`phE${pi}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
     pi++;
   });
-  // case segment annotations for 8k cases
-  const CASE_BG = ['rgba(77,166,255,.06)','rgba(52,211,153,.06)','rgba(245,166,35,.06)','rgba(167,139,250,.06)','rgba(244,114,182,.06)','rgba(56,189,248,.06)','rgba(251,191,36,.06)','rgba(129,140,248,.06)'];
-  segments.filter(s => !s.isCore).forEach((s, ci) => {
-    const xMin = s.offset, xMax = s.offset + s.maxT;
-    annotations[`cs${ci}`]  = {type:'box', xMin, xMax, backgroundColor:CASE_BG[ci%CASE_BG.length], borderWidth:0, label:{display:true,content:s.label||'', color:'rgba(180,200,220,0.55)',font:{size:11,weight:'bold'},position:{x:'center',y:'start'},yAdjust:4}};
-    annotations[`csS${ci}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(255,255,255,0.2)', borderWidth:1.5, borderDash:[5,3]};
-  });
 
-  buildResourceCharts(segments, annotations, totalXMax);
+  const effectiveXMax = Math.max(totalXMax, frpMaxX + 5);
+
+  buildResourceCharts(segments, annotations, effectiveXMax);
 }
 
 let _chartIdSeq = 0;
