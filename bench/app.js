@@ -308,7 +308,7 @@ function renderDetail(entry) {
     html += UI.Section('System Resources');
     html += `<div id="res-charts-container"></div>`;
     root.innerHTML = html;
-    casesWithRes.forEach(c => buildResourceCharts(c.resources, c.label || c.name));
+    buildResourceCharts(casesWithRes);
   } else {
     root.innerHTML = html;
   }
@@ -336,103 +336,137 @@ const CPU_BREAKDOWN = [
 ];
 
 let _chartIdSeq = 0;
-function buildResourceCharts(res, label) {
+function buildResourceCharts(cases) {
   const pfx = 'rc' + (++_chartIdSeq) + '_';
-  const pts = (arr) => (arr||[]).map(p => ({x: p[0]||0, y: p[1]}));
+  const CASE_COLORS = ['#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24','#a3e635','#fb923c'];
+  const GAP = 5;
 
-  const cProc = res.processes || {};
-  const cSys  = res.system || {};
+  // compute per-case x offset: each case starts after the previous case's max t + GAP
+  const offsets = [];
+  let cursor = 0;
+  for (const c of cases) {
+    offsets.push(cursor);
+    const cSys = c.resources.system || {};
+    const cProc = c.resources.processes || {};
+    const allPts = [...(cSys.cpu||[]), ...Object.values(cProc).flatMap(p => p.cpu||[])];
+    const maxT = allPts.length ? Math.max(...allPts.map(p => p[0]||0)) : 0;
+    cursor += maxT + GAP;
+  }
 
+  const pts = (arr, off) => (arr||[]).map(p => ({x: (p[0]||0) + off, y: p[1]}));
+
+  // per-PSERIES datasets keyed by series key, value = array of {label, data, color}
   const cpuByKey={}, memByKey={}, vmsByKey={}, csVolByKey={}, csInvolByKey={};
   let hasCpu=false, hasMem=false, hasVms=false, hasCs=false;
-  const sysCpuArr=[], sysBd={};
-  const tcpEstab=[], tcpTimewait=[], tcpListen=[], tcpCW=[], tcpFW1=[], tcpFW2=[], tcpSS=[], tcpSR=[], tcpLA=[];
+  // system-level datasets
+  const sysCpuDs=[], sysBdDs={};
+  const tcpEstabDs=[], tcpTwDs=[], tcpOtherDs=[];
   let hasTcp=false;
-  const diskRdKbs=[], diskWrKbs=[], diskRdIops=[], diskWrIops=[];
+  const diskDs=[];
   let hasDisk=false;
-  const intrPts=[], ctxSwPts=[];
+  const intrDs=[], ctxDs=[];
   let hasIntr=false;
-  const udpRx=[], udpBuf=[];
+  const udpDs=[];
   let hasUdp=false;
-  const rxKbs=[], txKbs=[], rxPkts=[], txPkts=[], dropIn=[], dropOut=[];
+  const netDs=[], netPktDs=[];
   let hasNet=false, hasNetPkts=false;
-  const load1=[], load5=[], load15=[], swap=[], memMb=[];
+  const loadDs=[], memMbDs=[];
   let hasLoad=false;
-  const topCpuData={}, topRssData={};
+  const topCpuDs=[], topRssDs=[];
   let hasTopCpu=false, hasTopRss=false;
-  const perCoreSeries=[];
+  // per-core: keyed by core index, value = array of points across all cases
+  const perCoreByIdx={};
   let hasPerCore=false;
 
-  for (const s of PSERIES) {
-    const p = cProc[s.key];
-    if (p?.cpu?.length)     { cpuByKey[s.key]     = pts(p.cpu);     hasCpu=true; }
-    if (p?.rss?.length)     { memByKey[s.key]     = pts(p.rss);     hasMem=true; }
-    if (p?.vms?.length)     { vmsByKey[s.key]     = pts(p.vms);     hasVms=true; }
-    if (p?.cswch?.length)   { csVolByKey[s.key]   = pts(p.cswch);   hasCs=true; }
-    if (p?.nvcswch?.length) { csInvolByKey[s.key] = pts(p.nvcswch); hasCs=true; }
-  }
+  for (const s of PSERIES) { cpuByKey[s.key]=[]; memByKey[s.key]=[]; vmsByKey[s.key]=[]; csVolByKey[s.key]=[]; csInvolByKey[s.key]=[]; }
 
-  if (cSys.cpu?.length) sysCpuArr.push(...pts(cSys.cpu));
-  for (const bd of CPU_BREAKDOWN) {
-    if (cSys[bd.key]?.length) sysBd[bd.key] = pts(cSys[bd.key]);
-  }
+  cases.forEach((c, ci) => {
+    const off = offsets[ci];
+    const color = CASE_COLORS[ci % CASE_COLORS.length];
+    const caseName = c.label || c.name;
+    const res = c.resources;
+    const cProc = res.processes || {};
+    const cSys  = res.system || {};
+    const g = (arr) => [...pts(arr, off), {x: off + (arr.length ? (arr[arr.length-1][0]||0) : 0) + 0.01, y: null}];
 
-  const estab = cSys.tcp_ESTABLISHED || cSys.tcp_estab || [];
-  const tw    = cSys.tcp_TIME_WAIT   || cSys.tcp_timewait || [];
-  if (estab.length) { tcpEstab.push(...pts(estab));   hasTcp=true; }
-  if (tw.length)    { tcpTimewait.push(...pts(tw));   hasTcp=true; }
-  if (cSys.tcp_LISTEN?.length)     tcpListen.push(...pts(cSys.tcp_LISTEN));
-  if (cSys.tcp_CLOSE_WAIT?.length) tcpCW.push(...pts(cSys.tcp_CLOSE_WAIT));
-  if (cSys.tcp_FIN_WAIT1?.length)  tcpFW1.push(...pts(cSys.tcp_FIN_WAIT1));
-  if (cSys.tcp_FIN_WAIT2?.length)  tcpFW2.push(...pts(cSys.tcp_FIN_WAIT2));
-  if (cSys.tcp_SYN_SENT?.length)   tcpSS.push(...pts(cSys.tcp_SYN_SENT));
-  if (cSys.tcp_SYN_RECV?.length)   tcpSR.push(...pts(cSys.tcp_SYN_RECV));
-  if (cSys.tcp_LAST_ACK?.length)   tcpLA.push(...pts(cSys.tcp_LAST_ACK));
-
-  if (cSys.disk_read_kbs?.length)   { diskRdKbs.push(...pts(cSys.disk_read_kbs));   hasDisk=true; }
-  if (cSys.disk_write_kbs?.length)  { diskWrKbs.push(...pts(cSys.disk_write_kbs));  hasDisk=true; }
-  if (cSys.disk_read_iops?.length)  diskRdIops.push(...pts(cSys.disk_read_iops));
-  if (cSys.disk_write_iops?.length) diskWrIops.push(...pts(cSys.disk_write_iops));
-
-  if (cSys.interrupts?.length)    { intrPts.push(...pts(cSys.interrupts));   hasIntr=true; }
-  if (cSys.ctx_switches?.length)    ctxSwPts.push(...pts(cSys.ctx_switches));
-
-  if (cSys.udp_rx_err?.length)  { udpRx.push(...pts(cSys.udp_rx_err));  hasUdp=true; }
-  if (cSys.udp_buf_err?.length)   udpBuf.push(...pts(cSys.udp_buf_err));
-
-  if (cSys.net_rx_kbs?.length)  { rxKbs.push(...pts(cSys.net_rx_kbs));   hasNet=true; }
-  if (cSys.net_tx_kbs?.length)  { txKbs.push(...pts(cSys.net_tx_kbs));   hasNet=true; }
-  if (cSys.net_rx_pkts?.length) { rxPkts.push(...pts(cSys.net_rx_pkts)); hasNetPkts=true; }
-  if (cSys.net_tx_pkts?.length) { txPkts.push(...pts(cSys.net_tx_pkts)); hasNetPkts=true; }
-  if (cSys.net_drop_in?.length)   dropIn.push(...pts(cSys.net_drop_in));
-  if (cSys.net_drop_out?.length)  dropOut.push(...pts(cSys.net_drop_out));
-
-  if (cSys.loadavg_1?.length)   { load1.push(...pts(cSys.loadavg_1));   hasLoad=true; }
-  if (cSys.loadavg_5?.length)     load5.push(...pts(cSys.loadavg_5));
-  if (cSys.loadavg_15?.length)    load15.push(...pts(cSys.loadavg_15));
-  if (cSys.swap_used_mb?.length)  swap.push(...pts(cSys.swap_used_mb));
-  if (cSys.mem_used_mb?.length) { memMb.push(...pts(cSys.mem_used_mb)); hasLoad=true; }
-
-  for (const [name, arr] of Object.entries(res.top_cpu || {})) {
-    topCpuData[name] = pts(arr); hasTopCpu=true;
-  }
-  for (const [name, arr] of Object.entries(res.top_rss || {})) {
-    topRssData[name] = pts(arr); hasTopRss=true;
-  }
-
-  const perCoreRaw = cSys.cpu_per_core;
-  if (Array.isArray(perCoreRaw) && perCoreRaw.length) {
-    const first = perCoreRaw[0];
-    if (Array.isArray(first) && Array.isArray(first[0])) {
-      perCoreRaw.forEach((arr, ci) => { perCoreSeries[ci] = pts(arr); });
-    } else {
-      perCoreRaw.forEach(([t, cores]) => cores.forEach((v, ci) => {
-        if (!perCoreSeries[ci]) perCoreSeries[ci]=[];
-        perCoreSeries[ci].push({x: t||0, y: v});
-      }));
+    for (const s of PSERIES) {
+      const p = cProc[s.key];
+      if (p?.cpu?.length)     { cpuByKey[s.key].push({label:`${caseName}`, data:g(p.cpu), color}); hasCpu=true; }
+      if (p?.rss?.length)     { memByKey[s.key].push({label:`${caseName}`, data:g(p.rss), color}); hasMem=true; }
+      if (p?.vms?.length)     { vmsByKey[s.key].push({label:`${caseName}`, data:g(p.vms), color}); hasVms=true; }
+      if (p?.cswch?.length)   { csVolByKey[s.key].push({label:`${caseName}`,   data:g(p.cswch),   color}); hasCs=true; }
+      if (p?.nvcswch?.length) { csInvolByKey[s.key].push({label:`${caseName}`, data:g(p.nvcswch), color}); hasCs=true; }
     }
-    hasPerCore = perCoreSeries.length > 0;
-  }
+
+    if (cSys.cpu?.length) sysCpuDs.push({label:`${caseName}`, data:g(cSys.cpu), color});
+    for (const bd of CPU_BREAKDOWN) {
+      if (cSys[bd.key]?.length) {
+        if (!sysBdDs[bd.key]) sysBdDs[bd.key]=[];
+        sysBdDs[bd.key].push({label:`${caseName}`, data:g(cSys[bd.key]), color});
+      }
+    }
+
+    const estab = cSys.tcp_ESTABLISHED || cSys.tcp_estab || [];
+    const tw    = cSys.tcp_TIME_WAIT   || cSys.tcp_timewait || [];
+    if (estab.length) { tcpEstabDs.push({label:`${caseName}`, data:g(estab), color}); hasTcp=true; }
+    if (tw.length)    { tcpTwDs.push({label:`${caseName}`,    data:g(tw),    color}); hasTcp=true; }
+    for (const [k, lbl] of [['tcp_LISTEN','LISTEN'],['tcp_CLOSE_WAIT','CLOSE_WAIT'],['tcp_FIN_WAIT1','FIN_WAIT1'],['tcp_FIN_WAIT2','FIN_WAIT2'],['tcp_SYN_SENT','SYN_SENT'],['tcp_SYN_RECV','SYN_RECV'],['tcp_LAST_ACK','LAST_ACK']]) {
+      if (cSys[k]?.length) tcpOtherDs.push({label:`${caseName} ${lbl}`, data:g(cSys[k]), color});
+    }
+
+    if (cSys.disk_read_kbs?.length)   { diskDs.push({label:`${caseName} read KB/s`,  data:g(cSys.disk_read_kbs),   color, axis:'yDKbs'}); hasDisk=true; }
+    if (cSys.disk_write_kbs?.length)  { diskDs.push({label:`${caseName} write KB/s`, data:g(cSys.disk_write_kbs),  color, axis:'yDKbs'}); hasDisk=true; }
+    if (cSys.disk_read_iops?.length)   diskDs.push({label:`${caseName} read IOPS`,   data:g(cSys.disk_read_iops),  color, axis:'yDIops', dash:[3,2]});
+    if (cSys.disk_write_iops?.length)  diskDs.push({label:`${caseName} write IOPS`,  data:g(cSys.disk_write_iops), color, axis:'yDIops', dash:[3,2]});
+
+    if (cSys.interrupts?.length)   { intrDs.push({label:`${caseName}`, data:g(cSys.interrupts),   color, axis:'yIntr'}); hasIntr=true; }
+    if (cSys.ctx_switches?.length)   ctxDs.push({label:`${caseName}`,  data:g(cSys.ctx_switches), color, axis:'yCtx', dash:[3,2]});
+
+    if (cSys.udp_rx_err?.length)  { udpDs.push({label:`${caseName} InErrors/s`,   data:g(cSys.udp_rx_err),  color}); hasUdp=true; }
+    if (cSys.udp_buf_err?.length)   udpDs.push({label:`${caseName} RcvbufErr/s`,  data:g(cSys.udp_buf_err), color, dash:[3,2]});
+
+    if (cSys.net_rx_kbs?.length)  { netDs.push({label:`${caseName} RX KB/s`, data:g(cSys.net_rx_kbs),  color}); hasNet=true; }
+    if (cSys.net_tx_kbs?.length)  { netDs.push({label:`${caseName} TX KB/s`, data:g(cSys.net_tx_kbs),  color}); hasNet=true; }
+    if (cSys.net_rx_pkts?.length) { netPktDs.push({label:`${caseName} RX pkts/s`, data:g(cSys.net_rx_pkts), color}); hasNetPkts=true; }
+    if (cSys.net_tx_pkts?.length) { netPktDs.push({label:`${caseName} TX pkts/s`, data:g(cSys.net_tx_pkts), color}); hasNetPkts=true; }
+    if (cSys.net_drop_in?.length)   netPktDs.push({label:`${caseName} drop_in/s`,  data:g(cSys.net_drop_in),  color, dash:[3,2]});
+    if (cSys.net_drop_out?.length)  netPktDs.push({label:`${caseName} drop_out/s`, data:g(cSys.net_drop_out), color, dash:[3,2]});
+
+    if (cSys.loadavg_1?.length)   { loadDs.push({label:`${caseName} load 1m`,  data:g(cSys.loadavg_1),  color}); hasLoad=true; }
+    if (cSys.loadavg_5?.length)     loadDs.push({label:`${caseName} load 5m`,  data:g(cSys.loadavg_5),  color, dash:[4,2]});
+    if (cSys.loadavg_15?.length)    loadDs.push({label:`${caseName} load 15m`, data:g(cSys.loadavg_15), color, dash:[4,2]});
+    if (cSys.mem_used_mb?.length) { memMbDs.push({label:`${caseName} mem MB`,  data:g(cSys.mem_used_mb), color}); hasLoad=true; }
+    if (cSys.swap_used_mb?.length)  memMbDs.push({label:`${caseName} swap MB`, data:g(cSys.swap_used_mb), color, dash:[2,2]});
+
+    for (const [name, arr] of Object.entries(res.top_cpu || {})) {
+      topCpuDs.push({label:`${caseName} ${name}`, data:g(arr), color}); hasTopCpu=true;
+    }
+    for (const [name, arr] of Object.entries(res.top_rss || {})) {
+      topRssDs.push({label:`${caseName} ${name}`, data:g(arr), color}); hasTopRss=true;
+    }
+
+    const perCoreRaw = cSys.cpu_per_core;
+    if (Array.isArray(perCoreRaw) && perCoreRaw.length) {
+      const first = perCoreRaw[0];
+      if (Array.isArray(first) && Array.isArray(first[0])) {
+        perCoreRaw.forEach((arr, ki) => {
+          if (!perCoreByIdx[ki]) perCoreByIdx[ki] = {label:`Core ${ki}`, data:[], color: CASE_COLORS[ki % CASE_COLORS.length]};
+          perCoreByIdx[ki].data.push(...g(arr));
+        });
+      } else {
+        const byCi = {};
+        perCoreRaw.forEach(([t, cores]) => cores.forEach((v, ki) => {
+          if (!byCi[ki]) byCi[ki]=[];
+          byCi[ki].push([t, v]);
+        }));
+        Object.entries(byCi).forEach(([ki, arr]) => {
+          if (!perCoreByIdx[ki]) perCoreByIdx[ki] = {label:`Core ${ki}`, data:[], color: CASE_COLORS[ki % CASE_COLORS.length]};
+          perCoreByIdx[ki].data.push(...g(arr));
+        });
+      }
+      hasPerCore = true;
+    }
+  });
 
   const CO = {
     ...Charts.DEFAULT_OPTS, showLine: true,
@@ -443,145 +477,102 @@ function buildResourceCharts(res, label) {
     },
   };
   const withY = (text) => ({scales: {...CO.scales, y: {...CO.scales.y, title:{display:true, text, color:'#6b7d93'}}}});
-  const lp = (d, color, lbl, extra={}) => ({label:lbl, data:d, borderColor:color, backgroundColor:'transparent', tension:.3, pointRadius:0, borderWidth:1.5, ...extra});
+  const mkDs = (d, extra={}) => ({label:d.label, data:d.data, borderColor:d.color, backgroundColor:'transparent', tension:.3, pointRadius:0, borderWidth:1.5, ...(d.dash ? {borderDash:d.dash} : {}), ...extra});
 
   const container = document.getElementById('res-charts-container');
   const addChart = (id, title) => {
-    container.insertAdjacentHTML('beforeend', `<div class="row full"><div class="panel tall"><h3>${Utils.esc(label)} — ${title}</h3><div class="chart-area"><canvas id="${id}"></canvas></div><div id="${id}-leg" class="leg-wrap"></div></div></div>`);
+    container.insertAdjacentHTML('beforeend', `<div class="row full"><div class="panel tall"><h3>${title}</h3><div class="chart-area"><canvas id="${id}"></canvas></div><div id="${id}-leg" class="leg-wrap"></div></div></div>`);
   };
 
   {
     addChart(pfx+'cpu', 'CPU Usage (% of machine)');
     const ds=[];
     for (const s of PSERIES) {
-      if (!cpuByKey[s.key]?.length) continue;
-      ds.push({label:s.label, data:cpuByKey[s.key], borderColor:s.color, backgroundColor:s.color+'28', fill:true, tension:.3, pointRadius:0, borderWidth:1.5});
+      cpuByKey[s.key].forEach(d => ds.push({...mkDs(d), backgroundColor:d.color+'28', fill:true}));
     }
     for (const bd of CPU_BREAKDOWN) {
-      if (sysBd[bd.key]?.length)
-        ds.push({label:bd.label, data:sysBd[bd.key], borderColor:bd.color, backgroundColor:'transparent', fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,2], hidden:true});
+      (sysBdDs[bd.key]||[]).forEach(d => ds.push({...mkDs(d), borderDash:[3,2], borderWidth:1, hidden:true}));
     }
-    if (sysCpuArr.length)
-      ds.push({label:'System total', data:sysCpuArr, borderColor:'#ffffff', backgroundColor:'transparent', fill:false, tension:.3, pointRadius:0, borderWidth:1, borderDash:[4,3]});
+    sysCpuDs.forEach(d => ds.push({...mkDs(d), borderDash:[4,3], borderWidth:1}));
     Charts.create(pfx+'cpu', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, y:{...CO.scales.y, stacked:false, min:0, max:100, title:{display:true,text:'% of machine',color:'#6b7d93'}}}}});
   }
 
   if (hasPerCore) {
     addChart(pfx+'percore', 'Per-core CPU (%)');
-    const CC=['#4da6ff','#34d399','#f5a623','#ef5350','#a78bfa','#f472b6','#38bdf8','#fbbf24','#818cf8','#fb923c','#22d3ee','#a3e635','#e879f9','#94a3b8','#fb7185','#4ade80'];
-    const ds = perCoreSeries.map((d,i)=>({label:`Core ${i}`, data:d, borderColor:CC[i%CC.length], backgroundColor:'transparent', tension:.3, pointRadius:0, borderWidth:1}));
+    const ds = Object.values(perCoreByIdx).map(d => mkDs(d));
     Charts.create(pfx+'percore', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, y:{...CO.scales.y, min:0, max:100, title:{display:true,text:'%',color:'#6b7d93'}}}}});
   }
 
   if (hasMem) {
     addChart(pfx+'mem', 'Memory RSS (MB)');
     const ds=[];
-    for (const s of PSERIES) { if (s.key !== 'other' && memByKey[s.key]?.length) ds.push(lp(memByKey[s.key], s.color, s.label)); }
+    for (const s of PSERIES) { if (s.key !== 'other') memByKey[s.key].forEach(d => ds.push(mkDs(d))); }
     Charts.create(pfx+'mem', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('MB')}});
   }
 
   if (hasLoad) {
     addChart(pfx+'load', 'Load Average + Memory + Swap');
-    const ds=[];
-    if (load1.length)  ds.push({...lp(load1,  '#4da6ff', 'load 1m'),               yAxisID:'yLoad'});
-    if (load5.length)  ds.push({...lp(load5,  '#f5a623', 'load 5m'),               yAxisID:'yLoad'});
-    if (load15.length) ds.push({...lp(load15, '#a78bfa', 'load 15m', {borderDash:[4,2]}), yAxisID:'yLoad'});
-    if (memMb.length)  ds.push({...lp(memMb,  '#34d399', 'mem MB',   {borderDash:[3,1]}), yAxisID:'yMem'});
-    if (swap.length)   ds.push({...lp(swap,   '#ef5350', 'swap MB',  {borderDash:[2,2]}), yAxisID:'yMem'});
+    const ds = [...loadDs.map(d=>({...mkDs(d),yAxisID:'yLoad'})), ...memMbDs.map(d=>({...mkDs(d),yAxisID:'yMem'}))];
     Charts.create(pfx+'load', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, yLoad:{position:'left',title:{display:true,text:'load',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yMem:{position:'right',title:{display:true,text:'MB',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{drawOnChartArea:false}}}}});
   }
 
   if (hasNet) {
     addChart(pfx+'net', 'Network Throughput (KB/s)');
-    const ds=[];
-    if (rxKbs.length) ds.push(lp(rxKbs, '#34d399', 'RX KB/s'));
-    if (txKbs.length) ds.push(lp(txKbs, '#4da6ff', 'TX KB/s'));
-    Charts.create(pfx+'net', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('KB/s')}});
+    Charts.create(pfx+'net', {type:'line', data:{datasets:netDs.map(mkDs)}, options:{...CO, ...withY('KB/s')}});
   }
 
   if (hasNetPkts) {
     addChart(pfx+'netpkts', 'Network Packets/s + Drops');
-    const ds=[];
-    if (rxPkts.length)  ds.push(lp(rxPkts,  '#34d399', 'RX pkts/s'));
-    if (txPkts.length)  ds.push(lp(txPkts,  '#4da6ff', 'TX pkts/s'));
-    if (dropIn.length)  ds.push(lp(dropIn,  '#ef5350', 'drop_in/s',  {borderDash:[3,2]}));
-    if (dropOut.length) ds.push(lp(dropOut, '#f5a623', 'drop_out/s', {borderDash:[3,2]}));
-    Charts.create(pfx+'netpkts', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('/s')}});
+    Charts.create(pfx+'netpkts', {type:'line', data:{datasets:netPktDs.map(mkDs)}, options:{...CO, ...withY('/s')}});
   }
 
   if (hasTcp) {
     addChart(pfx+'tcp', 'TCP Connections');
-    const ds=[];
-    const yL='yConn', yR='yTW';
-    if (tcpEstab.length)   ds.push({...lp(tcpEstab,   '#4da6ff', 'ESTABLISHED'),                             yAxisID:yL});
-    if (tcpTimewait.length)ds.push({...lp(tcpTimewait,'#f5a623', 'TIME_WAIT'),                               yAxisID:yR});
-    if (tcpListen.length)  ds.push({...lp(tcpListen,  '#34d399', 'LISTEN',     {borderDash:[4,2],borderWidth:1}), yAxisID:yL});
-    if (tcpCW.length)      ds.push({...lp(tcpCW,      '#ef5350', 'CLOSE_WAIT', {borderDash:[3,2],borderWidth:1}), yAxisID:yL});
-    if (tcpFW1.length)     ds.push({...lp(tcpFW1,     '#a78bfa', 'FIN_WAIT1',  {borderDash:[3,2],borderWidth:1}), yAxisID:yL});
-    if (tcpFW2.length)     ds.push({...lp(tcpFW2,     '#f472b6', 'FIN_WAIT2',  {borderDash:[3,2],borderWidth:1}), yAxisID:yL});
-    if (tcpSS.length)      ds.push({...lp(tcpSS,      '#38bdf8', 'SYN_SENT',   {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
-    if (tcpSR.length)      ds.push({...lp(tcpSR,      '#fbbf24', 'SYN_RECV',   {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
-    if (tcpLA.length)      ds.push({...lp(tcpLA,      '#94a3b8', 'LAST_ACK',   {borderDash:[2,2],borderWidth:1}), yAxisID:yL});
-    Charts.create(pfx+'tcp', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, [yL]:{position:'left',title:{display:true,text:'conns',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, [yR]:{position:'right',title:{display:true,text:'TIME_WAIT',color:'#f5a623'},ticks:{color:'#f5a623',font:{size:9}},grid:{drawOnChartArea:false}}}}});
+    const ds = [...tcpEstabDs.map(d=>({...mkDs(d),yAxisID:'yConn'})), ...tcpTwDs.map(d=>({...mkDs(d),yAxisID:'yTW'})), ...tcpOtherDs.map(d=>({...mkDs(d),borderDash:[3,2],borderWidth:1,yAxisID:'yConn'}))];
+    Charts.create(pfx+'tcp', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, yConn:{position:'left',title:{display:true,text:'conns',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yTW:{position:'right',title:{display:true,text:'TIME_WAIT',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{drawOnChartArea:false}}}}});
   }
 
   if (hasVms) {
     addChart(pfx+'vms', 'Virtual Memory Size (MB)');
     const ds=[];
-    for (const s of PSERIES) { if (s.key !== 'other' && vmsByKey[s.key]?.length) ds.push(lp(vmsByKey[s.key], s.color, s.label)); }
+    for (const s of PSERIES) { if (s.key !== 'other') vmsByKey[s.key].forEach(d => ds.push(mkDs(d))); }
     Charts.create(pfx+'vms', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('MB')}});
   }
 
   if (hasDisk) {
     addChart(pfx+'disk', 'Disk I/O');
-    const ds=[];
-    if (diskRdKbs.length)  ds.push({...lp(diskRdKbs,  '#34d399', 'read KB/s'),                         yAxisID:'yDKbs'});
-    if (diskWrKbs.length)  ds.push({...lp(diskWrKbs,  '#4da6ff', 'write KB/s'),                        yAxisID:'yDKbs'});
-    if (diskRdIops.length) ds.push({...lp(diskRdIops, '#a78bfa', 'read IOPS',  {borderDash:[3,2],borderWidth:1}), yAxisID:'yDIops'});
-    if (diskWrIops.length) ds.push({...lp(diskWrIops, '#f5a623', 'write IOPS', {borderDash:[3,2],borderWidth:1}), yAxisID:'yDIops'});
-    Charts.create(pfx+'disk', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, yDKbs:{position:'left',title:{display:true,text:'KB/s',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yDIops:{position:'right',title:{display:true,text:'IOPS',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{drawOnChartArea:false}}}}});
+    Charts.create(pfx+'disk', {type:'line', data:{datasets:diskDs.map(d=>({...mkDs(d),yAxisID:d.axis}))}, options:{...CO, scales:{...CO.scales, yDKbs:{position:'left',title:{display:true,text:'KB/s',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yDIops:{position:'right',title:{display:true,text:'IOPS',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{drawOnChartArea:false}}}}});
   }
 
   if (hasIntr) {
     addChart(pfx+'intr', 'Interrupts + Context Switches / s');
-    const ds=[];
-    if (intrPts.length)  ds.push({...lp(intrPts,  '#f472b6', 'interrupts/s'),                                yAxisID:'yIntr'});
-    if (ctxSwPts.length) ds.push({...lp(ctxSwPts, '#38bdf8', 'ctx_switches/s', {borderDash:[3,2],borderWidth:1}), yAxisID:'yCtx'});
-    Charts.create(pfx+'intr', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, yIntr:{position:'left',title:{display:true,text:'interrupts/s',color:'#f472b6'},ticks:{color:'#f472b6',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yCtx:{position:'right',title:{display:true,text:'ctx_switches/s',color:'#38bdf8'},ticks:{color:'#38bdf8',font:{size:9}},grid:{drawOnChartArea:false}}}}});
+    const ds = [...intrDs.map(d=>({...mkDs(d),yAxisID:d.axis})), ...ctxDs.map(d=>({...mkDs(d),yAxisID:d.axis}))];
+    Charts.create(pfx+'intr', {type:'line', data:{datasets:ds}, options:{...CO, scales:{...CO.scales, yIntr:{position:'left',title:{display:true,text:'interrupts/s',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{color:'rgba(30,42,58,.5)'}}, yCtx:{position:'right',title:{display:true,text:'ctx_switches/s',color:'#6b7d93'},ticks:{color:'#6b7d93',font:{size:9}},grid:{drawOnChartArea:false}}}}});
   }
 
   if (hasCs) {
     addChart(pfx+'ctxsw', 'Context Switches / s');
     const ds=[];
     for (const s of PSERIES) {
-      if (csVolByKey[s.key]?.length)   ds.push(lp(csVolByKey[s.key],   s.color, `${s.label} vol`));
-      if (csInvolByKey[s.key]?.length) ds.push(lp(csInvolByKey[s.key], s.color, `${s.label} invol`, {borderDash:[3,2], borderWidth:1}));
+      csVolByKey[s.key].forEach(d => ds.push(mkDs(d)));
+      csInvolByKey[s.key].forEach(d => ds.push({...mkDs(d), borderDash:[3,2], borderWidth:1}));
     }
     Charts.create(pfx+'ctxsw', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('/s')}});
   }
 
   if (hasUdp) {
     addChart(pfx+'udp', 'UDP Errors / s');
-    const ds=[];
-    if (udpRx.length)  ds.push(lp(udpRx,  '#ef5350', 'InErrors/s'));
-    if (udpBuf.length) ds.push(lp(udpBuf, '#f5a623', 'RcvbufErr/s', {borderDash:[3,2]}));
-    Charts.create(pfx+'udp', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('/s')}});
+    Charts.create(pfx+'udp', {type:'line', data:{datasets:udpDs.map(mkDs)}, options:{...CO, ...withY('/s')}});
   }
 
   if (hasTopCpu) {
-    addChart(pfx+'topcpu', 'Top 10 CPU (% of machine)');
-    const ds = Object.entries(topCpuData).map(([name, d], i) => ({
-      label:name, data:d, borderColor:COLORS.palette[i%COLORS.palette.length], backgroundColor:'transparent', tension:.3, pointRadius:0, borderWidth:1.5,
-    }));
-    Charts.create(pfx+'topcpu', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('% of machine')}});
+    addChart(pfx+'topcpu', 'Top CPU (% of machine)');
+    Charts.create(pfx+'topcpu', {type:'line', data:{datasets:topCpuDs.map(mkDs)}, options:{...CO, ...withY('% of machine')}});
   }
 
   if (hasTopRss) {
-    addChart(pfx+'toprss', 'Top 10 RSS (MB)');
-    const ds = Object.entries(topRssData).map(([name, d], i) => ({
-      label:name, data:d, borderColor:COLORS.palette[i%COLORS.palette.length], backgroundColor:'transparent', tension:.3, pointRadius:0, borderWidth:1.5,
-    }));
-    Charts.create(pfx+'toprss', {type:'line', data:{datasets:ds}, options:{...CO, ...withY('MB')}});
+    addChart(pfx+'toprss', 'Top RSS (MB)');
+    Charts.create(pfx+'toprss', {type:'line', data:{datasets:topRssDs.map(mkDs)}, options:{...CO, ...withY('MB')}});
   }
 }
 
