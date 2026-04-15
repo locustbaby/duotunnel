@@ -428,13 +428,13 @@ function buildResourceCharts(res, annotations, xMax, titlePrefix) {
   const perCoreSeries = [];
   if (Array.isArray(perCoreRaw) && perCoreRaw.length) {
     const first = perCoreRaw[0];
-    if (Array.isArray(first) && Array.isArray(first[1])) {
-      perCoreRaw.forEach(([t, cores]) => cores.forEach((v, ci) => {
+    if (Array.isArray(first) && first.length >= 2 && Array.isArray(first[0]) && Array.isArray(first[1])) {
+      perCoreRaw.forEach((arr, ci) => { perCoreSeries[ci] = pts(arr); });
+    } else if (Array.isArray(first) && first.length >= 2 && !Array.isArray(first[0])) {
+      perCoreRaw.forEach(([t, cores]) => (cores||[]).forEach((v, ci) => {
         if (!perCoreSeries[ci]) perCoreSeries[ci]=[];
         perCoreSeries[ci].push({x:t, y:v});
       }));
-    } else {
-      perCoreRaw.forEach((arr, ci) => { perCoreSeries[ci] = pts(arr); });
     }
   }
   const hasPerCore = perCoreSeries.length > 0;
