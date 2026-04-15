@@ -780,13 +780,13 @@ jobs:
   # Thresholds: p99 < 500ms, error rate < 5%  (fail CI if exceeded)
   # Resource usage (CPU/RSS) sampled before + after via /proc
   # ─────────────────────────────────────────────────────────────────────────────
-  stress-test:
-    name: Stress Test (k6 multi-protocol)
+  bench-basic:
+    name: Bench — Basic & Body
     runs-on: ubuntu-latest
     needs: [build]
     if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -798,7 +798,6 @@ jobs:
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
-
       - name: Tune kernel parameters
         if: ${{ inputs.tune_kernel != 'false' }}
         run: sudo bash scripts/tune-os.sh
@@ -809,24 +808,107 @@ jobs:
           mode: 'ctld'
           quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
 
-      - name: Metrics — before benchmark
+      - name: Bench — basic
         run: |
-          echo "── Server metrics before k6 ──"
-          curl -sf http://127.0.0.1:9090/metrics || echo "(metrics endpoint not available)"
+          python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-basic.jsonl 2>/dev/null &
+          echo $! > /tmp/collect-basic.pid
+          date +%s > /tmp/basic_sampling_start
+          date +%s > /tmp/basic_k6_start
+          cd ci-helpers/k6
+          k6 run -e BENCH_PROFILE=basic -e BENCH_RESULT_PATH=/tmp/bench-results-basic.json bench.js
+          cd "${{ github.workspace }}"
+          kill -9 "$(cat /tmp/collect-basic.pid 2>/dev/null)" 2>/dev/null || true
+          S=$(cat /tmp/basic_sampling_start); K=$(cat /tmp/basic_k6_start)
+          python3 ci-helpers/bench-tool.py parse \
+            --input /tmp/collect-basic.jsonl --k6-offset $(( K - S )) \
+            --output /tmp/resource-basic.json || true
+          if [ -s /tmp/resource-basic.json ] && [ -s /tmp/bench-results-basic.json ]; then
+            python3 ci-helpers/bench-tool.py inject \
+              --result /tmp/bench-results-basic.json \
+              --resources /tmp/resource-basic.json --core
+          fi
 
-      - name: Collect machine info
+      - name: Bench — body_size
         run: |
-          echo "$(nproc) $(grep MemTotal /proc/meminfo | awk '{print $2}')" > /tmp/machine-info
+          python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-body.jsonl 2>/dev/null &
+          echo $! > /tmp/collect-body.pid
+          date +%s > /tmp/body_sampling_start
+          date +%s > /tmp/body_k6_start
+          cd ci-helpers/k6
+          k6 run -e BENCH_PROFILE=body_size -e BENCH_RESULT_PATH=/tmp/bench-results-body.json bench.js
+          cd "${{ github.workspace }}"
+          kill -9 "$(cat /tmp/collect-body.pid 2>/dev/null)" 2>/dev/null || true
+          S=$(cat /tmp/body_sampling_start); K=$(cat /tmp/body_k6_start)
+          python3 ci-helpers/bench-tool.py parse \
+            --input /tmp/collect-body.jsonl --k6-offset $(( K - S )) \
+            --output /tmp/resource-body.json || true
+          if [ -s /tmp/resource-body.json ] && [ -s /tmp/bench-results-body.json ]; then
+            python3 ci-helpers/bench-tool.py inject \
+              --result /tmp/bench-results-body.json \
+              --resources /tmp/resource-body.json --core
+          fi
 
-      - name: Start resource sampling
+      - name: Merge basic + body results
         run: |
-          python3 "${{ github.workspace }}/ci-helpers/bench-tool.py" collect 1 \
-            > /tmp/collect.jsonl 2>/tmp/collect-resources-err.log &
-          echo $! > /tmp/collect-resources.pid
-          date +%s > /tmp/sampling_start_epoch
+          python3 ci-helpers/merge-results.py \
+            /tmp/bench-results-basic.json \
+            /tmp/bench-results-basic-merged.json \
+            /tmp/bench-results-body.json || \
+          cp /tmp/bench-results-basic.json /tmp/bench-results-basic-merged.json
+
+      - name: Upload benchmark outputs (basic)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-basic-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: /tmp/bench-results-basic-merged.json
+
+      - name: Dump error logs
+        if: always()
+        run: |
+          echo "=== server ===" && grep -iE 'error|warn|panic' /tmp/ci-server.log | tail -30 || true
+          echo "=== client ===" && grep -iE 'error|warn|panic' /tmp/ci-client.log | tail -30 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-basic-logs-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/http-echo.log
+
+      - name: Stop DuoTunnel infra
+        if: always()
+        uses: ./.github/actions/stop-infra
+
+  bench-3k:
+    name: Bench — 3K stress
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup DuoTunnel binaries
+        uses: ./.github/actions/setup-target
+        with:
+          artifact_name: release-bins-${{ github.run_id }}
+          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+
+      - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Tune kernel parameters
+        if: ${{ inputs.tune_kernel != 'false' }}
+        run: sudo bash scripts/tune-os.sh
 
       - name: Install frp
-        if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -834,134 +916,61 @@ jobs:
           sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
           sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
 
-      - name: Start frp and run frp benchmark
-        if: (github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      - name: Start DuoTunnel infra
+        uses: ./.github/actions/start-infra
+        with:
+          mode: 'ctld'
+          quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+
+      - name: Bench — ingress_3000qps
+        run: bash ci-helpers/run-bench-case.sh ingress_3000qps "${{ github.sha }}"
+
+      - name: Bench — egress_3000qps
+        run: bash ci-helpers/run-bench-case.sh egress_3000qps "${{ github.sha }}"
+
+      - name: Bench — ingress_multihost
+        run: bash ci-helpers/run-bench-case.sh ingress_multihost "${{ github.sha }}"
+
+      - name: Bench — egress_multihost
+        run: bash ci-helpers/run-bench-case.sh egress_multihost "${{ github.sha }}"
+
+      - name: Bench — frp_ingress_3000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_3000qps "${{ github.sha }}"
+
+      - name: Bench — frp_ingress_multihost
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost "${{ github.sha }}"
+
+      - name: Merge 3k results
         run: |
-          sudo systemd-run --scope --unit=frp-server --collect \
-            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
-            -- frps -c ci-helpers/configs/frps.toml >> /tmp/frps.log 2>&1 &
-          sleep 1
-          sudo systemd-run --scope --unit=frp-client --collect \
-            -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
-            -- frpc -c ci-helpers/configs/frpc.toml >> /tmp/frpc.log 2>&1 &
-          FRP_READY=0
-          for i in $(seq 1 20); do
-            curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
-            sleep 0.5
-          done
-          if [ "$FRP_READY" -eq 0 ]; then
-            echo "WARNING: frp did not become ready, skipping benchmark"
-            echo "=== frps ===" && cat /tmp/frps.log || true
-            echo "=== frpc ===" && cat /tmp/frpc.log || true
-            exit 0
-          fi
-          echo "frp ready, running benchmark..."
-          date +%s > /tmp/frp_k6_start_epoch
-          cd ci-helpers/k6
-          k6 run -e GITHUB_SHA=${{ github.sha }} -e BENCH_PROFILE=frp -e BENCH_RESULT_PATH=/tmp/bench-results-frp.json bench.js || true
+          python3 ci-helpers/merge-results.py \
+            /tmp/bench-results-ingress_3000qps.json \
+            /tmp/bench-results-3k.json \
+            /tmp/bench-results-egress_3000qps.json \
+            /tmp/bench-results-ingress_multihost.json \
+            /tmp/bench-results-egress_multihost.json \
+            /tmp/bench-results-frp_ingress_3000qps.json \
+            /tmp/bench-results-frp_ingress_multihost.json
 
-
-      - name: Stop frp
-        if: always() && ((github.event_name == 'workflow_dispatch' && inputs.run_frp != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        run: |
-          sudo systemctl stop frp-client.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
-          sudo systemctl stop frp-server.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
-
-      - name: Run k6 stress test
-        working-directory: ci-helpers/k6
-        run: |
-          CORE_RATE="${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate || '0' }}"
-          date +%s > /tmp/k6_start_epoch
-          k6 run \
-            -e GITHUB_SHA=${{ github.sha }} \
-            -e BENCH_PROFILE=core \
-            ${CORE_RATE:+$([ "$CORE_RATE" -gt 0 ] && echo "-e K6_CORE_STRESS_RATE=$CORE_RATE" || true)} \
-            bench.js &
-          echo $! > /tmp/k6.pid
-          wait "$(cat /tmp/k6.pid)"
-
-      - name: Stop duotunnel server and client
-        if: always()
-        run: |
-          sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
-          sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
-
-      - name: Stop resource sampling
-        if: always()
-        run: |
-          kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
-          pkill -9 -f "bench-tool.py collect" 2>/dev/null || true
-          sleep 0.5
-
-      - name: Resource report — collect-resources
-        if: always()
-        run: |
-          echo "── bench-tool.py collect errors (if any) ──"
-          cat /tmp/collect-resources-err.log || echo "(no data)"
-          echo "── sample lines from collect.jsonl ──"
-          head -5 /tmp/collect.jsonl || echo "(no data)"
-
-      - name: Resource report — system (vmstat)
-        if: always()
-        run: |
-          echo "── System overview during k6 (vmstat 2s interval) ──"
-          cat /tmp/vmstat.log || echo "(no data)"
-
-      - name: Metrics — after benchmark
-        if: always()
-        run: |
-          echo "── Server metrics after k6 ──"
-          curl -sf http://127.0.0.1:9090/metrics || echo "(metrics endpoint not available)"
-
-      - name: Parse resource data
-        if: always()
-        run: |
-          K6_OFFSET=0
-          if [ -f /tmp/sampling_start_epoch ] && [ -f /tmp/k6_start_epoch ]; then
-            S=$(cat /tmp/sampling_start_epoch)
-            K=$(cat /tmp/k6_start_epoch)
-            K6_OFFSET=$(( K - S ))
-          fi
-          python3 "${{ github.workspace }}/ci-helpers/bench-tool.py" parse \
-            --input        /tmp/collect.jsonl \
-            --k6-offset    "$K6_OFFSET" \
-            --output       /tmp/resource-data.json \
-            || echo "Resource parsing failed (non-fatal)"
-          if [ -s /tmp/resource-data.json ] && [ -s /tmp/bench-results.json ]; then
-            python3 "${{ github.workspace }}/ci-helpers/bench-tool.py" inject \
-              --result    /tmp/bench-results.json \
-              --resources /tmp/resource-data.json \
-              --core
-          fi
-
-      - name: Upload benchmark outputs (core)
+      - name: Upload benchmark outputs (3k)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-core-results-${{ github.run_id }}
+          name: bench-3k-results-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
-          path: |
-            /tmp/bench-results.json
-            /tmp/bench-results-frp.json
-            /tmp/sampling_start_epoch
-            /tmp/frp_k6_start_epoch
+          path: /tmp/bench-results-3k.json
 
-      - name: Dump tunnel error logs
+      - name: Dump error logs
         if: always()
         run: |
-          echo "=== server errors ===" && grep -iE 'error|warn|panic' /tmp/ci-server.log | tail -50 || true
-          echo "=== client errors ===" && grep -iE 'error|warn|panic' /tmp/ci-client.log | tail -50 || true
+          echo "=== server ===" && grep -iE 'error|warn|panic' /tmp/ci-server.log | tail -30 || true
+          echo "=== client ===" && grep -iE 'error|warn|panic' /tmp/ci-client.log | tail -30 || true
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-test-logs-${{ github.run_id }}
+          name: bench-3k-logs-${{ github.run_id }}
           retention-days: 7
           path: |
             /tmp/ci-server.log
@@ -974,11 +983,96 @@ jobs:
         if: always()
         uses: ./.github/actions/stop-infra
 
-  stress-trace-8k:
-    name: Stress Trace 8K (dial9)
+  bench-6k:
+    name: Bench — 6K stress
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup DuoTunnel binaries
+        uses: ./.github/actions/setup-target
+        with:
+          artifact_name: release-bins-${{ github.run_id }}
+          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+
+      - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
+
+      - name: Tune kernel parameters
+        if: ${{ inputs.tune_kernel != 'false' }}
+        run: sudo bash scripts/tune-os.sh
+
+      - name: Install frp
+        run: |
+          FRP_VER=0.61.0
+          wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
+          tar -xzf /tmp/frp.tar.gz -C /tmp
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
+
+      - name: Start DuoTunnel infra
+        uses: ./.github/actions/start-infra
+        with:
+          mode: 'ctld'
+          quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+
+      - name: Bench — ingress_multihost_6000qps
+        run: bash ci-helpers/run-bench-case.sh ingress_multihost_6000qps "${{ github.sha }}"
+
+      - name: Bench — egress_multihost_6000qps
+        run: bash ci-helpers/run-bench-case.sh egress_multihost_6000qps "${{ github.sha }}"
+
+      - name: Bench — frp_ingress_multihost_6000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_6000qps "${{ github.sha }}"
+
+      - name: Merge 6k results
+        run: |
+          python3 ci-helpers/merge-results.py \
+            /tmp/bench-results-ingress_multihost_6000qps.json \
+            /tmp/bench-results-6k.json \
+            /tmp/bench-results-egress_multihost_6000qps.json \
+            /tmp/bench-results-frp_ingress_multihost_6000qps.json
+
+      - name: Upload benchmark outputs (6k)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-6k-results-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: /tmp/bench-results-6k.json
+
+      - name: Dump error logs
+        if: always()
+        run: |
+          echo "=== server ===" && grep -iE 'error|warn|panic' /tmp/ci-server.log | tail -30 || true
+          echo "=== client ===" && grep -iE 'error|warn|panic' /tmp/ci-client.log | tail -30 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-6k-logs-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/http-echo.log
+            /tmp/frps.log
+            /tmp/frpc.log
+
+      - name: Stop DuoTunnel infra
+        if: always()
+        uses: ./.github/actions/stop-infra
+
+  bench-8k:
+    name: Bench — 8K stress + dial9 trace
     runs-on: ubuntu-latest
     needs: [build, build-dial9]
-    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && inputs.run_stress_trace != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
       contents: read
     outputs:
@@ -1012,6 +1106,14 @@ jobs:
         if: ${{ inputs.tune_kernel != 'false' }}
         run: sudo bash scripts/tune-os.sh
 
+      - name: Install frp
+        run: |
+          FRP_VER=0.61.0
+          wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
+          tar -xzf /tmp/frp.tar.gz -C /tmp
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frps" /usr/local/bin/frps
+          sudo cp "/tmp/frp_${FRP_VER}_linux_amd64/frpc" /usr/local/bin/frpc
+
       - name: Configure /etc/hosts
         shell: bash
         run: |
@@ -1022,7 +1124,7 @@ jobs:
             for i in $(seq -w 01 60); do echo "127.0.0.1  echo-${i}.local"; done
           } | sudo tee -a /etc/hosts
 
-      - name: Run dial9 trace sequence
+      - name: Run 8k trace sequence
         timeout-minutes: 25
         shell: bash
         run: |
@@ -1033,24 +1135,27 @@ jobs:
             ./ci-helpers/run-trace-8k.sh "$CASE" "${{ github.sha }}" "$Q" "$P"
           done
 
-      - name: Combine 8k results
+      - name: Bench — frp_ingress_multihost_8000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_8000qps "${{ github.sha }}"
+
+      - name: Merge 8k results
         shell: bash
         run: |
           python3 ci-helpers/merge-results.py \
             /tmp/trace-ingress_8000qps/bench-results.json \
-            /tmp/bench-results-8k-combined.json \
+            /tmp/bench-results-8k.json \
             /tmp/trace-egress_8000qps/bench-results.json \
             /tmp/trace-ingress_multihost_8000qps/bench-results.json \
-            /tmp/trace-egress_multihost_8000qps/bench-results.json
+            /tmp/trace-egress_multihost_8000qps/bench-results.json \
+            /tmp/bench-results-frp_ingress_multihost_8000qps.json
 
       - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-profile-8k-results-${{ github.run_id }}
+          name: bench-8k-results-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
-          path: |
-            /tmp/bench-results-8k-combined.json
+          path: /tmp/bench-results-8k.json
 
       - name: Upload dial9 trace (8k ingress server)
         id: upload-trace-ingress-8000qps-server
@@ -1132,18 +1237,21 @@ jobs:
           if-no-files-found: warn
           path: /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
 
-
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: stress-trace-8k-logs-${{ github.run_id }}
+          name: bench-8k-logs-${{ github.run_id }}
           retention-days: 7
           path: |
             /tmp/trace-ingress_8000qps/
             /tmp/trace-egress_8000qps/
             /tmp/trace-ingress_multihost_8000qps/
             /tmp/trace-egress_multihost_8000qps/
+            /tmp/ci-server.log
+            /tmp/ci-client.log
+            /tmp/frps.log
+            /tmp/frpc.log
 
       - name: Stop DuoTunnel infra
         if: always()
@@ -1153,29 +1261,46 @@ jobs:
     name: Publish Benchmark (merged)
     if: |
       always() &&
-      needs.stress-test.result == 'success' &&
-      (needs.stress-trace-8k.result == 'success' || needs.stress-trace-8k.result == 'skipped') &&
-      (needs.stress-test.result == 'success' || needs.stress-trace-8k.result == 'success') &&
+      (needs.bench-basic.result == 'success' || needs.bench-basic.result == 'skipped') &&
+      (needs.bench-3k.result == 'success' || needs.bench-3k.result == 'skipped') &&
+      (needs.bench-6k.result == 'success' || needs.bench-6k.result == 'skipped') &&
+      (needs.bench-8k.result == 'success' || needs.bench-8k.result == 'skipped') &&
+      (needs.bench-basic.result == 'success' || needs.bench-3k.result == 'success' || needs.bench-6k.result == 'success' || needs.bench-8k.result == 'success') &&
       (github.ref == 'refs/heads/main' || inputs.publish_pages == true)
     runs-on: ubuntu-latest
-    needs: [stress-test, stress-trace-8k]
+    needs: [bench-basic, bench-3k, bench-6k, bench-8k]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download core benchmark outputs
+      - name: Download basic benchmark outputs
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: stress-core-results-${{ github.run_id }}
-          path: /tmp/core
+          name: bench-basic-results-${{ github.run_id }}
+          path: /tmp/bench-basic
+
+      - name: Download 3k benchmark outputs
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-3k-results-${{ github.run_id }}
+          path: /tmp/bench-3k
+
+      - name: Download 6k benchmark outputs
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-6k-results-${{ github.run_id }}
+          path: /tmp/bench-6k
 
       - name: Download 8k benchmark outputs
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: stress-profile-8k-results-${{ github.run_id }}
-          path: /tmp/profile8k
+          name: bench-8k-results-${{ github.run_id }}
+          path: /tmp/bench-8k
 
       - name: Download dial9 trace (8k ingress server)
         continue-on-error: true
@@ -1235,22 +1360,38 @@ jobs:
 
       - name: Merge benchmark outputs
         run: |
-          if [ ! -s /tmp/core/bench-results.json ]; then
-            echo "ERROR: missing core benchmark output"
+          FIRST=""
+          for f in \
+            /tmp/bench-basic/bench-results-basic-merged.json \
+            /tmp/bench-3k/bench-results-3k.json \
+            /tmp/bench-6k/bench-results-6k.json \
+            /tmp/bench-8k/bench-results-8k.json; do
+            [ -s "$f" ] || continue
+            if [ -z "$FIRST" ]; then
+              cp "$f" /tmp/bench-results-merged.json
+              FIRST=1
+            else
+              python3 ci-helpers/merge-results.py \
+                /tmp/bench-results-merged.json \
+                /tmp/bench-results-merged.json \
+                "$f"
+            fi
+          done
+          if [ ! -s /tmp/bench-results-merged.json ]; then
+            echo "ERROR: no benchmark outputs found"
             exit 1
           fi
-          cp /tmp/core/bench-results.json /tmp/bench-results-merged.json
 
       - name: Publish benchmark to gh-pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"
-          TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_8000qps_client_url }}"
-          TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_egress_8000qps_server_url }}"
-          TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_egress_8000qps_client_url }}"
-          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_multihost_8000qps_server_url }}"
-          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_ingress_multihost_8000qps_client_url }}"
-          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_egress_multihost_8000qps_server_url }}"
-          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.stress-trace-8k.outputs.trace_artifact_egress_multihost_8000qps_client_url }}"
+          TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"
+          TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_client_url }}"
+          TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_server_url }}"
+          TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_client_url }}"
+          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_server_url }}"
+          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_client_url }}"
+          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_server_url }}"
+          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_client_url }}"
         run: |
           bash "${{ github.workspace }}/ci-helpers/bench_ui/publish-gh-pages.sh"

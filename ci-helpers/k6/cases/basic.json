@@ -140,16 +140,5 @@
         ]
       }
     }
-  ],
-  "phases": [
-    {
-      "name": "Basic",
-      "start": 0,
-      "end": 29,
-      "scenarios": [
-        "ingress_http_get", "ingress_http_post", "egress_http_get", "egress_http_post",
-        "ws_ingress", "grpc_health_ingress", "grpc_echo_ingress", "bidir_mixed"
-      ]
-    }
   ]
 }

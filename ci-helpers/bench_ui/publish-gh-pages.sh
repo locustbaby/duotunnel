@@ -40,20 +40,6 @@ if [ -d bench/traces ]; then
   fi
 fi
 
-if [ -s /tmp/core/bench-results-frp.json ]; then
-  python3 "$GITHUB_WORKSPACE/ci-helpers/merge-results.py" \
-    /tmp/bench-results-merged.json \
-    /tmp/bench-results-merged.json \
-    /tmp/core/bench-results-frp.json
-fi
-
-if [ -s /tmp/profile8k/bench-results-8k-combined.json ]; then
-  python3 "$GITHUB_WORKSPACE/ci-helpers/merge-results.py" \
-    /tmp/bench-results-merged.json \
-    /tmp/bench-results-merged.json \
-    /tmp/profile8k/bench-results-8k-combined.json
-fi
-
 echo "==> Processing per-case traces"
 SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
 REPO_NAME="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f2)"

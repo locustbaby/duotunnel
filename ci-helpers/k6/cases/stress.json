@@ -170,17 +170,5 @@
         "maxVUs": 3000
       }
     }
-  ],
-  "phases": [
-    { "name": "Ingress 3K", "start": 65, "end": 85, "scenarios": ["ingress_3000qps"] },
-    { "name": "Egress 3K", "start": 90, "end": 110, "scenarios": ["egress_3000qps"] },
-    { "name": "Ingress multihost 3K", "start": 115, "end": 135, "scenarios": ["ingress_multihost"] },
-    { "name": "Egress multihost 3K", "start": 140, "end": 160, "scenarios": ["egress_multihost"] },
-    { "name": "Ingress multihost 6K", "start": 165, "end": 185, "scenarios": ["ingress_multihost_6000qps"] },
-    { "name": "Egress multihost 6K", "start": 190, "end": 210, "scenarios": ["egress_multihost_6000qps"] },
-    { "name": "Ingress 8K", "start": 215, "end": 235, "scenarios": ["ingress_8000qps"] },
-    { "name": "Egress 8K", "start": 240, "end": 260, "scenarios": ["egress_8000qps"] },
-    { "name": "Ingress multihost 8K", "start": 265, "end": 285, "scenarios": ["ingress_multihost_8000qps"] },
-    { "name": "Egress multihost 8K", "start": 290, "end": 310, "scenarios": ["egress_multihost_8000qps"] }
   ]
 }

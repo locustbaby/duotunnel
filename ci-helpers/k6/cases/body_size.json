@@ -121,16 +121,5 @@
         "maxVUs": 200
       }
     }
-  ],
-  "phases": [
-    {
-      "name": "Body/Payload",
-      "start": 35,
-      "end": 59,
-      "scenarios": [
-        "ingress_post_1k", "ingress_post_10k", "ingress_post_100k", "egress_post_10k",
-        "ws_multi_msg", "grpc_large_payload", "grpc_high_qps"
-      ]
-    }
   ]
 }

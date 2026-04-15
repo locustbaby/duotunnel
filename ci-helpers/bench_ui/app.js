@@ -240,8 +240,8 @@ function renderDetail(entry) {
 
   metaEl.innerHTML = `<a href="${Utils.commitUrl(entry)}" target="_blank">${s7}</a> ${runUrl ? `<a href="${Utils.esc(runUrl)}" target="_blank" style="font-size:11px;color:var(--text2)">[CI run]</a>` : ''} ${Utils.esc(Utils.commitMsg(entry))}`;
 
-  const allCases = Object.values(entry.phases || {})
-    .flatMap(p => Object.entries(p.cases || {}).map(([name, c]) => ({name, ...c})));
+  const allCases = Object.entries(entry.cases || {})
+    .map(([name, c]) => ({name, ...c}));
 
   let html = UI.Breadcrumb(s7);
   html += `<div class="cards">
@@ -266,11 +266,9 @@ function renderDetail(entry) {
   const maxP95 = Math.max(...allCases.map(c => (c.perf||{}).p95 || 0), 1);
   const prevCaseMap = {};
   if (prev) {
-    Object.values(prev.phases || {}).forEach(p =>
-      Object.entries(p.cases || {}).forEach(([name, c]) => {
-        prevCaseMap[(c.tunnel||'duotunnel')+':'+name] = c;
-      })
-    );
+    Object.entries(prev.cases || {}).forEach(([name, c]) => {
+      prevCaseMap[(c.tunnel||'duotunnel')+':'+name] = c;
+    });
   }
 
   html += UI.Section('Scenario Results');
@@ -309,8 +307,8 @@ function renderDetail(entry) {
     html += UI.Section('System Resources');
     html += `<div id="res-charts-container"></div>`;
     root.innerHTML = html;
-    if (hasCoreRes) initCoreResourceCharts(entry.core_resources, entry.phases || {});
-    caseResources.forEach(c => renderCaseResources(c.resources, c.label || c.name));
+    if (hasCoreRes) initCoreResourceCharts(entry.core_resources, entry.cases || {});
+    caseResources.forEach(c => renderCaseResources(c.resources, c.label || c.name, (c.perf||{}).timeRange));
   } else {
     root.innerHTML = html;
   }
@@ -573,19 +571,19 @@ function buildResourceCharts(res, annotations, xMax, titlePrefix) {
   }
 }
 
-function initCoreResourceCharts(res, phases) {
+function initCoreResourceCharts(res, cases) {
   const k6off = res.k6_offset || 0;
-  const PHASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
+  const CASE_COLORS = ['rgba(77,166,255,.08)','rgba(52,211,153,.08)','rgba(245,166,35,.08)','rgba(239,83,80,.08)','rgba(167,139,250,.08)','rgba(244,114,182,.08)','rgba(56,189,248,.08)','rgba(251,191,36,.08)','rgba(132,204,22,.08)','rgba(168,85,247,.08)'];
   const annotations = {};
-  Object.entries(phases).forEach(([name, p], i) => {
-    const xMin = (p.start || 0) + k6off, xMax = (p.end || 0) + k6off;
-    const col = PHASE_COLORS[i % PHASE_COLORS.length];
+  Object.entries(cases).forEach(([name, c], i) => {
+    const tr = (c.perf || {}).timeRange || {};
+    const xMin = (tr.startSec || 0) + k6off, xMax = (tr.endSec || 0) + k6off;
+    const col = CASE_COLORS[i % CASE_COLORS.length];
     const yAdj = (i % 2 === 0) ? 10 : 24;
-    const nCases = Object.keys(p.cases || {}).length;
-    const label = nCases ? `${name} (${nCases})` : name;
-    annotations[`phase${i}`] = {type:'box', xMin, xMax, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
-    annotations[`phaseLS${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
-    annotations[`phaseLE${i}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
+    const label = c.label || name;
+    annotations[`case${i}`] = {type:'box', xMin, xMax, backgroundColor:col, borderWidth:0, label:{display:true,content:label,color:'rgba(180,200,220,0.75)',font:{size:8,weight:'bold'},position:{x:'center',y:'start'},yAdjust:yAdj}};
+    annotations[`caseLS${i}`] = {type:'line', xMin, xMax:xMin, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
+    annotations[`caseLE${i}`] = {type:'line', xMin:xMax, xMax, borderColor:'rgba(74,90,109,.3)', borderWidth:1, borderDash:[3,3]};
   });
 
   const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
@@ -593,10 +591,19 @@ function initCoreResourceCharts(res, phases) {
   buildResourceCharts(res, annotations, xMax, null);
 }
 
-function renderCaseResources(res, label) {
+function renderCaseResources(res, label, timeRange) {
+  const k6off = res.k6_offset || 0;
+  const annotations = {};
+  if (timeRange) {
+    annotations['active'] = {type:'box',
+      xMin: (timeRange.startSec || 0) + k6off,
+      xMax: (timeRange.endSec   || 0) + k6off,
+      backgroundColor:'rgba(77,166,255,.10)', borderWidth:0,
+      label:{display:true, content:'active', color:'rgba(180,200,220,0.75)', font:{size:8,weight:'bold'}, position:{x:'center',y:'start'}}};
+  }
   const allPts = [...(res.system?.cpu||[]), ...Object.values(res.processes||{}).flatMap(p=>p.cpu||[])];
   const xMax = allPts.length ? Math.max(...allPts.map(p=>p[0]||0)) + 5 : null;
-  buildResourceCharts(res, {}, xMax, label);
+  buildResourceCharts(res, annotations, xMax, label);
 }
 
 // --- Helper Data Mappers ---

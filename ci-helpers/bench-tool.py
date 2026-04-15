@@ -330,16 +330,11 @@ def run_inject(args):
         entry["core_resources"] = res_data
         print(f"Injected {args.resources} -> {args.result} as core_resources")
     else:
-        found = False
-        for phase in entry.get("phases", {}).values():
-            if args.case_name in phase.get("cases", {}):
-                phase["cases"][args.case_name]["resources"] = res_data
-                found = True
-                break
-        if not found:
-            print(f"WARNING: case '{args.case_name}' not found in phases", file=sys.stderr)
-        else:
+        if args.case_name in entry.get("cases", {}):
+            entry["cases"][args.case_name]["resources"] = res_data
             print(f"Injected {args.resources} -> {args.result} case[{args.case_name!r}].resources")
+        else:
+            print(f"WARNING: case '{args.case_name}' not found in cases", file=sys.stderr)
 
     with open(args.result, "w") as f:
         json.dump(entry, f, separators=(",", ":"))
@@ -380,8 +375,7 @@ def run_publish(args):
     index_entry["scenarios"] = [
         {"name": name, **{k: c.get(k) for k in ["label", "protocol", "direction", "category", "tunnel"]},
          **{k: (c.get("perf") or {}).get(k) for k in ["p50", "p95", "rps", "err", "requests"]}}
-        for phase in entry.get("phases", {}).values()
-        for name, c in phase.get("cases", {}).items()
+        for name, c in entry.get("cases", {}).items()
     ]
     entries.append(index_entry)
     entries = entries[-args.max_entries:]

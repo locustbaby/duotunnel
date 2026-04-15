@@ -7,7 +7,6 @@ import { Counter } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 import {
   ALL_CASES,
-  ALL_PHASES,
   buildCounters,
   buildScenarios,
   buildThresholds,
@@ -17,14 +16,16 @@ import {
 
 function activeProfile() {
   const p = (__ENV.BENCH_PROFILE || 'full').toLowerCase();
-  if (p === '8k' || p === 'core' || p === 'full' || p === 'frp') return p;
+  if (['8k', 'core', 'full', 'frp', 'basic', 'body_size'].includes(p)) return p;
   return 'full';
 }
 
 function filterCases(cases, profile) {
-  if (profile === '8k') return cases.filter((c) => c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
-  if (profile === 'core') return cases.filter((c) => !c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
-  if (profile === 'frp') return cases.filter((c) => c.name.startsWith('frp_'));
+  if (profile === '8k')        return cases.filter((c) => c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
+  if (profile === 'core')      return cases.filter((c) => !c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
+  if (profile === 'frp')       return cases.filter((c) => c.name.startsWith('frp_'));
+  if (profile === 'basic')     return cases.filter((c) => c.category === 'basic');
+  if (profile === 'body_size') return cases.filter((c) => c.category === 'body_size');
   return cases;
 }
 
@@ -83,49 +84,12 @@ function applyCoreStressRateOverride(cases) {
   });
 }
 
-function parseSeconds(v) {
-  if (v === undefined || v === null) return 0;
-  if (typeof v === 'number') return v;
-  const s = String(v).trim();
-  if (s.endsWith('s')) return Number(s.slice(0, -1)) || 0;
-  return Number(s) || 0;
-}
-
-function formatSeconds(v) {
-  const n = Math.max(0, Number(v) || 0);
-  const s = Number.isInteger(n) ? String(n) : String(Number(n.toFixed(3)));
-  return `${s}s`;
-}
-
-function normalizeCaseStartTimes(cases) {
-  const cloned = cases.map((c) => ({ ...c, scenario: { ...(c.scenario || {}) } }));
-  if (!cloned.length) return { cases: cloned, offset: 0 };
-  const minStart = Math.min(...cloned.map((c) => parseSeconds(c.scenario.startTime || 0)));
-  if (minStart <= 0) return { cases: cloned, offset: 0 };
-  for (const c of cloned) {
-    const shifted = parseSeconds(c.scenario.startTime || 0) - minStart;
-    c.scenario.startTime = formatSeconds(shifted);
-  }
-  return { cases: cloned, offset: minStart };
-}
-
-function filterPhases(phases, activeCases) {
-  const active = new Set(activeCases.map((c) => c.name));
-  return phases.filter((p) => (p.scenarios || []).some((s) => active.has(s)));
-}
-
 const BENCH_PROFILE = activeProfile();
-const FILTERED_CASES = apply8kScenarioOverrides(
-  applyCoreStressRateOverride(filterByCase(filterCases(ALL_CASES, BENCH_PROFILE)))
+const ACTIVE_CASES = enrichCaseDefs(
+  apply8kScenarioOverrides(
+    applyCoreStressRateOverride(filterByCase(filterCases(ALL_CASES, BENCH_PROFILE)))
+  )
 );
-const { cases: NORMALIZED_CASES, offset: ACTIVE_OFFSET } = normalizeCaseStartTimes(FILTERED_CASES);
-const ACTIVE_PHASES = filterPhases(ALL_PHASES, FILTERED_CASES).map((p) => ({
-  ...p,
-  start: Math.max(0, (p.start || 0) - ACTIVE_OFFSET),
-  end: Math.max(0, (p.end || 0) - ACTIVE_OFFSET),
-}));
-// Enrich cases with derived display metadata (timeRange, thresholdSpec, phase).
-const ACTIVE_CASES = enrichCaseDefs(NORMALIZED_CASES, ACTIVE_PHASES);
 
 const RESULTS_PATH = __ENV.BENCH_RESULT_PATH || '/tmp/bench-results.json';
 
@@ -517,13 +481,12 @@ export function bidirectional() {
 }
 
 export function handleSummary(data) {
-  const extras = { k6_active_offset: ACTIVE_OFFSET };
-  // If all active cases are FRP, tag the summary as FRP
+  const extras = {};
   if (ACTIVE_CASES.length > 0 && ACTIVE_CASES.every(c => c.name.startsWith('frp_'))) {
     extras.tunnel = 'frp';
   }
 
-  const output = buildSummaryOutput(data, ACTIVE_CASES, ACTIVE_PHASES, extras);
+  const output = buildSummaryOutput(data, ACTIVE_CASES, extras);
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: false }),

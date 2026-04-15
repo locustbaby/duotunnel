@@ -32,13 +32,6 @@ export const ALL_CASES = [
   ...processCases(FRP),
 ];
 
-export const ALL_PHASES = [
-  ...BASIC.phases,
-  ...BODY_SIZE.phases,
-  ...STRESS.phases,
-  ...FRP.phases,
-];
-
 // --- Helpers ---
 
 function parseSeconds(v) {
@@ -58,26 +51,14 @@ function buildThresholdSpec(c) {
   return parts.join(', ');
 }
 
-function buildPhaseMap(phases) {
-  const map = {};
-  for (const p of phases) {
-    for (const s of (p.scenarios || [])) {
-      map[s] = p.name;
-    }
-  }
-  return map;
-}
-
-export function enrichCaseDefs(caseDefs, phases) {
-  const phaseMap = buildPhaseMap(phases);
+export function enrichCaseDefs(caseDefs) {
   return caseDefs.map((c) => {
     const startSec = parseSeconds(c.scenario && c.scenario.startTime);
-    const endSec = startSec + (c.durationSec || 0);
+    const endSec = startSec + (c.durationSec || parseSeconds(c.scenario && c.scenario.duration));
     return {
       ...c,
       timeRange: { startSec, endSec },
       thresholdSpec: buildThresholdSpec(c),
-      phase: phaseMap[c.name] || null,
     };
   });
 }
@@ -143,16 +124,12 @@ function resolveCategories(caseDefs) {
   return cats;
 }
 
-export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
+export function buildSummaryOutput(data, caseDefs, extras = {}) {
   const metrics = data.metrics;
-  const phasesOut = {};
+  const casesOut = {};
   let totalRPS = 0;
   let totalRequests = 0;
   let totalErrors = 0;
-
-  for (const p of phases) {
-    phasesOut[p.name] = { start: p.start, end: p.end, cases: {} };
-  }
 
   const tunnel = extras.tunnel || 'duotunnel';
 
@@ -173,9 +150,7 @@ export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
     totalErrors += errors;
     if (c.includeInTotalRps) totalRPS += rps;
 
-    const phaseKey = c.phase || '__unphased__';
-    if (!phasesOut[phaseKey]) phasesOut[phaseKey] = { start: 0, end: 0, cases: {} };
-    phasesOut[phaseKey].cases[c.name] = {
+    casesOut[c.name] = {
       label: c.label,
       protocol: c.protocol,
       direction: c.direction,
@@ -198,7 +173,7 @@ export function buildSummaryOutput(data, caseDefs, phases, extras = {}) {
   const { tunnel: _t, ...restExtras } = extras;
   return {
     timestamp: new Date().toISOString(),
-    phases: phasesOut,
+    cases: casesOut,
     summary: {
       totalRPS: Math.round(totalRPS * 100) / 100,
       totalErr: totalRequests > 0 ? Math.round((totalErrors / totalRequests) * 10000) / 100 : 0,

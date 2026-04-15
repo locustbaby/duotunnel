@@ -72,11 +72,5 @@
         "maxVUs": 3000
       }
     }
-  ],
-  "phases": [
-    { "name": "3K KL (frp)", "start": 0, "end": 20, "scenarios": ["frp_ingress_3000qps"] },
-    { "name": "3K Multihost (frp)", "start": 25, "end": 45, "scenarios": ["frp_ingress_multihost"] },
-    { "name": "6K Multihost (frp)", "start": 50, "end": 70, "scenarios": ["frp_ingress_multihost_6000qps"] },
-    { "name": "8K Multihost (frp)", "start": 75, "end": 95, "scenarios": ["frp_ingress_multihost_8000qps"] }
   ]
 }
