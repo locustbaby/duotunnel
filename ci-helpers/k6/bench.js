@@ -32,7 +32,9 @@ function filterCases(cases, profile) {
 function filterByCase(cases) {
   const name = (__ENV.BENCH_CASE || '').trim();
   if (!name) return cases;
-  return cases.filter((c) => c.name === name);
+  return cases
+    .filter((c) => c.name === name)
+    .map((c) => ({ ...c, scenario: { ...(c.scenario || {}), startTime: '0s' } }));
 }
 
 function parseEnvPositiveInt(v) {
