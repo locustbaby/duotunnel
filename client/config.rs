@@ -75,6 +75,34 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
         }
     }
 }
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadMode {
+    #[default]
+    InflightSlowpath,
+    Burst,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OverloadConfig {
+    pub mode: OverloadMode,
+    pub inflight_yield_threshold: usize,
+    pub inflight_sleep_threshold: usize,
+    pub inflight_sleep_ms: u64,
+}
+
+impl Default for OverloadConfig {
+    fn default() -> Self {
+        Self {
+            mode: OverloadMode::InflightSlowpath,
+            inflight_yield_threshold: 800,
+            inflight_sleep_threshold: 950,
+            inflight_sleep_ms: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ReconnectConfig {
@@ -136,6 +164,8 @@ pub struct ClientConfigFile {
     pub proxy_buffers: ProxyBufferConfig,
     #[serde(default)]
     pub reconnect: ReconnectConfig,
+    #[serde(default)]
+    pub overload: OverloadConfig,
 }
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {

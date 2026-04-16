@@ -1,4 +1,5 @@
-use crate::conn_pool::EntryConnPool;
+use crate::config::{OverloadConfig, OverloadMode};
+use crate::conn_pool::{EntryConnPool, PooledConnection};
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +18,18 @@ const EMFILE_BACKOFF_MS: u64 = 100;
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
+async fn maybe_slow_path(conn: &PooledConnection, cfg: &OverloadConfig) {
+    if cfg.mode == OverloadMode::Burst {
+        return;
+    }
+    let inflight = conn.inflight();
+    if inflight >= cfg.inflight_sleep_threshold {
+        tokio::time::sleep(Duration::from_millis(cfg.inflight_sleep_ms)).await;
+    } else if inflight >= cfg.inflight_yield_threshold {
+        tokio::task::yield_now().await;
+    }
+}
+
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
     port: u16,
@@ -25,6 +38,7 @@ pub async fn start_entry_listener(
     peek_buf_size: usize,
     open_stream_timeout: Duration,
     accept_workers: usize,
+    overload: Arc<OverloadConfig>,
 ) -> Result<()> {
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
@@ -37,6 +51,7 @@ pub async fn start_entry_listener(
         let pool = pool.clone();
         let tcp_params = tcp_params.clone();
         let cancel_token = cancel_token.clone();
+        let overload = overload.clone();
         handles.push(crate::spawn_task(async move {
             loop {
                 tokio::select! {
@@ -60,8 +75,9 @@ pub async fn start_entry_listener(
                         debug!(peer_addr = %peer_addr, "new entry connection");
                         let pool = pool.clone();
                         let tcp_params = tcp_params.clone();
+                        let overload = overload.clone();
                         crate::spawn_task(async move {
-                            if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout).await {
+                            if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout, &overload).await {
                                 debug!(error = %e, "entry connection error");
                             }
                         });
@@ -81,6 +97,7 @@ async fn handle_entry_connection(
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
+    overload: &OverloadConfig,
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
@@ -101,7 +118,9 @@ async fn handle_entry_connection(
             Some(c) => c,
             None => break,
         };
-        match tokio::time::timeout(open_stream_timeout, conn.open_bi()).await {
+        maybe_slow_path(&conn, overload).await;
+        let _inflight_guard = conn.begin_inflight();
+        match tokio::time::timeout(open_stream_timeout, conn.conn.open_bi()).await {
             Ok(Ok((mut send, recv))) => {
                 let routing_info = RoutingInfo {
                     proxy_name: "entry".to_string(),
