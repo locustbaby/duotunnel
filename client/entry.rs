@@ -18,6 +18,15 @@ const EMFILE_BACKOFF_MS: u64 = 100;
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
+pub struct EntryListenerConfig {
+    pub port: u16,
+    pub tcp_params: TcpParams,
+    pub peek_buf_size: usize,
+    pub open_stream_timeout: Duration,
+    pub accept_workers: usize,
+    pub overload: Arc<OverloadConfig>,
+}
+
 async fn maybe_slow_path(conn: &PooledConnection, cfg: &OverloadConfig) {
     if cfg.mode == OverloadMode::Burst {
         return;
@@ -32,17 +41,17 @@ async fn maybe_slow_path(conn: &PooledConnection, cfg: &OverloadConfig) {
 
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
-    port: u16,
     cancel_token: CancellationToken,
-    tcp_params: TcpParams,
-    peek_buf_size: usize,
-    open_stream_timeout: Duration,
-    accept_workers: usize,
-    overload: Arc<OverloadConfig>,
+    cfg: EntryListenerConfig,
 ) -> Result<()> {
+    let port = cfg.port;
+    let peek_buf_size = cfg.peek_buf_size;
+    let open_stream_timeout = cfg.open_stream_timeout;
+    let accept_workers = cfg.accept_workers;
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
-    let tcp_params = Arc::new(tcp_params);
+    let tcp_params = Arc::new(cfg.tcp_params);
+    let overload = cfg.overload;
     info!(addr = %addr, accept_workers = %accept_workers, "client entry listener started");
 
     let mut handles = Vec::with_capacity(accept_workers);
