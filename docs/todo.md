@@ -58,52 +58,6 @@ After `dial9-tokio-telemetry` publishes a crate version that includes commit `64
 
 > `open_bi()` 是当前最主要的延迟来源，三条优化路线各自独立，按收益/代价排序如下。
 
-### [TODO-56] H2 跨 ingress 连接 sender 复用 ★ 最高优先级
-
-**Files**: `tunnel-lib/src/proxy/h2_proxy.rs`, `tunnel-lib/src/models/msg.rs`, `server/handlers/http.rs`, `server/registry.rs`
-**Priority**: High
-**预期收益**: `open_bi()` 调用次数从 O(ingress 并发数) 降到 O(proxy_name × client 数)，高并发短连接场景效果最显著。
-**代价**: 引入 H2 framing 开销约 +0.15~0.3ms（已在 TODO-61 量化），可接受。
-
-**Goal**: 把 H2Sender 从 per-ingress-TCP-connection 提升到 per-`(Connection, proxy_name)` 全局缓存，N 条 ingress TCP 连接共用同一条 QUIC H2 stream。
-
-**当前状态**: sender 在同一 ingress TCP 连接内复用（已实现），跨连接未复用。
-
-**必须解决的障碍（按依赖顺序）**:
-
-1. **A. 请求语义分层设计（前置，最根本）**
-
-   当前 `RoutingInfo` 是**连接级**元数据，在 `open_bi` 时一次性发送，绑定了来源 IP、协议、host。H2 复用后一条 QUIC stream 承载多个请求，这套设计不再成立。需要把语义分两层：
-
-   - **Stream 级**（建连时发送，不变）：`proxy_name`、`protocol` — 决定 client 路由到哪个 upstream
-   - **Request 级**（每个 H2 请求的 header 携带）：`src_addr`、`src_port`、`host` — 每请求独立溯源
-
-   具体做法：`src_addr`/`src_port` 改写入 `X-Forwarded-For`/`X-Real-Port` header，client 侧从 header 读取，`RoutingInfo` 只保留 stream 级字段。**此项必须先完成，其余障碍依赖它。**
-
-2. **B. 复用 key 设计** — 同 group 不同 vhost 有不同 `proxy_name`，不能共用同一 stream。
-   → 复用 key 为 `(Connection stable_id, proxy_name)`。
-
-3. **C. Connection 断开清理** — Connection 死亡时需清理 SenderMap 残留条目。
-   → 在 `ClientRegistry.unregister()` 时同步清理。
-
-4. **D. cache miss 初始化竞争** — 多个 ingress 连接并发 miss 时争锁建连。
-   → `DashMap` 分片 + `tokio::sync::OnceCell` 保证单次 handshake。
-
-**实现方案**:
-```rust
-type SenderKey = (quinn::Connection, Arc<str>);  // (conn, proxy_name)
-type GlobalSenderMap = DashMap<SenderKey, H2Sender>;
-// 存放在 ServerState 或 ClientRegistry
-```
-
-**场景兼容性**:
-- 同 group 不同 vhost → 不同 SenderKey ✅
-- 同 group 多 client 实例 → Connection 不同，SenderKey 自然隔离 ✅
-- h2_single_authority=true → 兼容现有逻辑 ✅
-- h2_single_authority=false → route_cache 的 OnceLock 需改为每请求 lookup ⚠️
-
----
-
 ### [TODO-24] Multi-Endpoint + Thread-per-Core 架构 ★ 中期架构优化
 
 **Priority**: Medium

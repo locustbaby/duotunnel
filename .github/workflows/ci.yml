@@ -922,6 +922,12 @@ jobs:
           mode: 'ctld'
           quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
 
+      - name: Bench — frp_ingress_3000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_3000qps "${{ github.sha }}"
+
+      - name: Bench — frp_ingress_multihost
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost "${{ github.sha }}"
+
       - name: Bench — ingress_3000qps
         run: bash ci-helpers/run-bench-case.sh ingress_3000qps "${{ github.sha }}"
 
@@ -933,12 +939,6 @@ jobs:
 
       - name: Bench — egress_multihost
         run: bash ci-helpers/run-bench-case.sh egress_multihost "${{ github.sha }}"
-
-      - name: Bench — frp_ingress_3000qps
-        run: bash ci-helpers/run-bench-case.sh frp_ingress_3000qps "${{ github.sha }}"
-
-      - name: Bench — frp_ingress_multihost
-        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost "${{ github.sha }}"
 
       - name: Merge 3k results
         run: |
@@ -1019,6 +1019,9 @@ jobs:
           mode: 'ctld'
           quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
 
+      - name: Bench — frp_ingress_multihost_6000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_6000qps "${{ github.sha }}"
+
       - name: Bench — ingress_6000qps
         run: bash ci-helpers/run-bench-case.sh ingress_6000qps "${{ github.sha }}"
 
@@ -1030,9 +1033,6 @@ jobs:
 
       - name: Bench — egress_multihost_6000qps
         run: bash ci-helpers/run-bench-case.sh egress_multihost_6000qps "${{ github.sha }}"
-
-      - name: Bench — frp_ingress_multihost_6000qps
-        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_6000qps "${{ github.sha }}"
 
       - name: Merge 6k results
         run: |
@@ -1132,6 +1132,9 @@ jobs:
             for i in $(seq -w 01 60); do echo "127.0.0.1  echo-${i}.local"; done
           } | sudo tee -a /etc/hosts
 
+      - name: Bench — frp_ingress_multihost_8000qps
+        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_8000qps "${{ github.sha }}"
+
       - name: Bench — ingress_8000qps
         timeout-minutes: 8
         run: |
@@ -1159,9 +1162,6 @@ jobs:
           bash ci-helpers/run-trace-8k.sh egress_multihost_8000qps "${{ github.sha }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}"
-
-      - name: Bench — frp_ingress_multihost_8000qps
-        run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_8000qps "${{ github.sha }}"
 
       - name: Merge 8k results
         shell: bash

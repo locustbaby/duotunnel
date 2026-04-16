@@ -7,11 +7,58 @@ use hyper::Request;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use pin_project_lite::pin_project;
 use quinn::{RecvStream, SendStream};
-use std::time::Duration;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 use tracing::debug;
 type HttpsClient = Client<HttpsConnector<HttpConnector>, BoxBody<Bytes, std::io::Error>>;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pin_project! {
+    struct LazyTimeout<F> {
+        #[pin]
+        future: F,
+        deadline: Instant,
+        #[pin]
+        timer: Option<tokio::time::Sleep>,
+    }
+}
+
+impl<F, T> Future for LazyTimeout<F>
+where
+    F: Future<Output = T>,
+{
+    type Output = Result<T, ()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        if let Poll::Ready(v) = this.future.poll(cx) {
+            return Poll::Ready(Ok(v));
+        }
+        if this.timer.as_ref().as_pin_ref().is_none() {
+            this.timer.set(Some(tokio::time::sleep_until(
+                tokio::time::Instant::from_std(*this.deadline),
+            )));
+        }
+        if let Some(timer) = this.timer.as_mut().as_pin_mut() {
+            if timer.poll(cx).is_ready() {
+                return Poll::Ready(Err(()));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+fn lazy_timeout<F: Future>(duration: Duration, future: F) -> LazyTimeout<F> {
+    LazyTimeout {
+        future,
+        deadline: Instant::now() + duration,
+        timer: None,
+    }
+}
 pub struct HttpPeer {
     pub client: HttpsClient,
     pub target_host: String,
@@ -34,7 +81,7 @@ impl HttpPeer {
         );
         loop {
             let req =
-                match tokio::time::timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
+                match lazy_timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
                     Ok(Ok(Some(r))) => r,
                     Ok(Ok(None)) => {
                         debug!(upstream = %upstream, "H1 keep-alive: clean EOF, closing");
@@ -44,7 +91,7 @@ impl HttpPeer {
                         debug!(upstream = %upstream, error = %e, "H1 keep-alive: read_request error, closing");
                         break;
                     }
-                    Err(_) => {
+                    Err(()) => {
                         debug!(upstream = %upstream, "H1 keep-alive: idle timeout, closing");
                         break;
                     }

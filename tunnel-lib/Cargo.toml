@@ -31,6 +31,7 @@ webpki-roots = "0.26"
 hpack = "0.3"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
+pin-project-lite = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
