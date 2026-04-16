@@ -12,6 +12,8 @@ if [ "$IS_FRP" -eq 1 ]; then
   sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
   sudo systemctl stop frp-server.scope 2>/dev/null || true
   sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
+  sudo fuser -k 17000/tcp 2>/dev/null || true
+  sudo fuser -k 18090/tcp 2>/dev/null || true
   for i in $(seq 1 20); do
     ss -tlnp | grep -qE ':17000|:18090' || break
     sleep 0.5
