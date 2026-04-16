@@ -84,7 +84,17 @@ const UI = {
   LinkGroup: (links) => `
     <div style="font-size:13px;display:flex;gap:16px;flex-wrap:wrap">
       ${links.map(l => `<a href="${Utils.esc(l.url)}" target="_blank" style="${l.style || ''}">${l.label}</a>`).join('')}
-    </div>`
+    </div>`,
+
+  NavArrows: (prev, next) => {
+    const prevHtml = prev
+      ? `<a class="nav-arrow nav-prev" href="#${Utils.sha7(prev)}" title="${Utils.esc(Utils.commitMsg(prev))}">← ${Utils.sha7(prev)}</a>`
+      : `<span class="nav-arrow nav-prev nav-disabled">← older</span>`;
+    const nextHtml = next
+      ? `<a class="nav-arrow nav-next" href="#${Utils.sha7(next)}" title="${Utils.esc(Utils.commitMsg(next))}">${Utils.sha7(next)} →</a>`
+      : `<span class="nav-arrow nav-next nav-disabled">newer →</span>`;
+    return `<div class="nav-arrows">${prevHtml}${nextHtml}</div>`;
+  }
 };
 
 // --- Chart Logic ---
@@ -145,6 +155,11 @@ const Data = {
     const s = Utils.sha7(entry);
     const idx = entries.findIndex(e => Utils.sha7(e) === s);
     return idx > 0 ? entries[idx - 1] : null;
+  },
+  nextOf: (entry) => {
+    const s = Utils.sha7(entry);
+    const idx = entries.findIndex(e => Utils.sha7(e) === s);
+    return idx >= 0 && idx < entries.length - 1 ? entries[idx + 1] : null;
   },
   loadDetail: async (entry) => {
     const s7 = Utils.sha7(entry);
@@ -230,13 +245,16 @@ function renderOverview() {
   document.getElementById('histTable').addEventListener('click', e => { const tr = e.target.closest('tr.clickable'); if (tr) location.hash = tr.dataset.sha; });
 }
 
-function renderDetail(entry) {
-  const prev = Data.prevOf(entry);
+async function renderDetail(entry) {
+  const prevEntry = Data.prevOf(entry);
+  const nextEntry = Data.nextOf(entry);
   const s7 = Utils.sha7(entry);
   const sum = entry.summary || {};
-  const prevSum = prev ? (prev.summary || {}) : {};
+  const prevSum = prevEntry ? (prevEntry.summary || {}) : {};
   const artifacts = entry.artifacts || {};
   const runUrl = entry.run_url || artifacts.run_url || '';
+
+  const prevDetail = prevEntry ? await Data.loadDetail(prevEntry) : null;
 
   metaEl.innerHTML = `<a href="${Utils.commitUrl(entry)}" target="_blank">${s7}</a> ${runUrl ? `<a href="${Utils.esc(runUrl)}" target="_blank" style="font-size:11px;color:var(--text2)">[CI run]</a>` : ''} ${Utils.esc(Utils.commitMsg(entry))}`;
 
@@ -244,11 +262,12 @@ function renderDetail(entry) {
     .map(([name, c]) => ({name, ...c}));
 
   let html = UI.Breadcrumb(s7);
+  html += UI.NavArrows(prevEntry, nextEntry);
   html += `<div class="cards">
     ${UI.Card('Total RPS', Utils.fmt(sum.totalRPS), Utils.delta(sum.totalRPS||0, prevSum.totalRPS, false), 'req/s')}
     ${UI.Card('Error Rate', (sum.totalErr??0)+'%', Utils.delta(sum.totalErr||0, prevSum.totalErr, true))}
     ${UI.Card('Total Requests', Utils.fmt(sum.totalRequests), Utils.delta(sum.totalRequests||0, prevSum.totalRequests, false))}
-    ${UI.Card('Scenarios', allCases.length, `<span class="d d-flat">${prev ? 'vs ' + Utils.sha7(prev) : 'first run'}</span>`)}
+    ${UI.Card('Scenarios', allCases.length, `<span class="d d-flat">${prevEntry ? 'vs ' + Utils.sha7(prevEntry) : 'first run'}</span>`)}
   </div>`;
 
   if (artifacts.trace_server || artifacts.trace_client || (artifacts.trace_cases||[]).length) {
@@ -265,8 +284,8 @@ function renderDetail(entry) {
   const categoryDefs = categoryDefsFromEntry(entry);
   const maxP95 = Math.max(...allCases.map(c => (c.perf||{}).p95 || 0), 1);
   const prevCaseMap = {};
-  if (prev) {
-    Object.entries(prev.cases || {}).forEach(([name, c]) => {
+  if (prevDetail) {
+    Object.entries(prevDetail.cases || {}).forEach(([name, c]) => {
       prevCaseMap[(c.tunnel||'duotunnel')+':'+name] = c;
     });
   }
@@ -274,7 +293,7 @@ function renderDetail(entry) {
   html += UI.Section('Scenario Results');
   let tableRows = [];
   const base = ['Scenario', 'Proto', 'Dir', 'Time', 'Target', 'Threshold', 'p50', 'p95', 'Latency', 'RPS', 'Reqs', 'Err %'];
-  const headers = prev ? [...base, 'Δ p50', 'Δ p95', 'Δ RPS'] : base;
+  const headers = prevDetail ? [...base, 'Δ p50', 'Δ p95', 'Δ RPS'] : base;
 
   categoryDefs.forEach(cat => {
     const group = allCases.filter(c => c.category === cat.id);
@@ -291,7 +310,7 @@ function renderDetail(entry) {
         perf.p50+' ms', perf.p95+' ms', Utils.latencyBar(perf.p95, maxP95, c.protocol)+perf.p95+' ms',
         Utils.fmt(perf.rps), Utils.fmt(perf.requests), `<span class="${perf.err>0?'c-bad':'c-dim'}">${perf.err}%</span>`
       ];
-      if (prev) {
+      if (prevDetail) {
         cells.push(pp ? Utils.deltaVal(perf.p50, pp.p50, true) : '—');
         cells.push(pp ? Utils.deltaVal(perf.p95, pp.p95, true) : '—');
         cells.push(pp ? Utils.deltaVal(perf.rps, pp.rps, false) : '—');

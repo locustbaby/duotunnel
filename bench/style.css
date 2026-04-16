@@ -59,3 +59,7 @@ tr.clickable:hover{background:rgba(77,166,255,.08)}
 .leg-item.leg-active{color:var(--text)}
 .leg-swatch{display:inline-block;width:14px;height:10px;border-radius:2px;flex-shrink:0}
 .leg-label{white-space:nowrap}
+.nav-arrows{display:flex;justify-content:space-between;margin-bottom:20px}
+.nav-arrow{font-size:12px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;padding:4px 10px;border:1px solid var(--border);border-radius:6px;color:var(--blue);background:var(--surface)}
+.nav-arrow:hover{border-color:var(--blue);text-decoration:none}
+.nav-disabled{color:var(--text3);cursor:default}
