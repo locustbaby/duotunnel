@@ -8,6 +8,15 @@ IS_FRP=0
 [[ "$CASE_NAME" == frp_* ]] && IS_FRP=1
 
 if [ "$IS_FRP" -eq 1 ]; then
+  sudo systemctl stop frp-client.scope 2>/dev/null || true
+  sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
+  sudo systemctl stop frp-server.scope 2>/dev/null || true
+  sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
+  for i in $(seq 1 20); do
+    ss -tlnp | grep -qE ':17000|:18090' || break
+    sleep 0.5
+  done
+
   sudo systemd-run --scope --unit=frp-server --collect \
     -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frps -c ci-helpers/configs/frps.toml >> /tmp/frps.log 2>&1 &
@@ -17,7 +26,8 @@ if [ "$IS_FRP" -eq 1 ]; then
     -- frpc -c ci-helpers/configs/frpc.toml >> /tmp/frpc.log 2>&1 &
   FRP_READY=0
   for i in $(seq 1 20); do
-    curl -sf --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ > /dev/null 2>&1 && FRP_READY=1 && break
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ 2>/dev/null || true)
+    [[ "$STATUS" =~ ^[0-9]+$ ]] && [ "$STATUS" -ge 200 ] && FRP_READY=1 && break
     sleep 0.5
   done
   if [ "$FRP_READY" -eq 0 ]; then
@@ -57,4 +67,8 @@ if [ "$IS_FRP" -eq 1 ]; then
   sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
   sudo systemctl stop frp-server.scope 2>/dev/null || true
   sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
+  for i in $(seq 1 20); do
+    ss -tlnp | grep -qE ':17000|:18090' || break
+    sleep 0.5
+  done
 fi
