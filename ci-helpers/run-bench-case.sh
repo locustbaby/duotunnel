@@ -12,10 +12,10 @@ if [ "$IS_FRP" -eq 1 ]; then
   sudo systemctl kill -s KILL frp-client.scope 2>/dev/null || true
   sudo systemctl stop frp-server.scope 2>/dev/null || true
   sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
-  sudo fuser -k 17000/tcp 2>/dev/null || true
-  sudo fuser -k 18090/tcp 2>/dev/null || true
+  sudo fuser -k 7700/tcp 2>/dev/null || true
+  sudo fuser -k 7800/tcp 2>/dev/null || true
   for i in $(seq 1 20); do
-    ss -tlnp | grep -qE ':17000|:18090' || break
+    ss -tlnp | grep -qE ':7700|:7800' || break
     sleep 0.5
   done
 
@@ -28,7 +28,7 @@ if [ "$IS_FRP" -eq 1 ]; then
     -- frpc -c ci-helpers/configs/frpc.toml >> /tmp/frpc.log 2>&1 &
   FRP_READY=0
   for i in $(seq 1 20); do
-    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 -H "Host: echo.local" http://127.0.0.1:18090/ 2>/dev/null || true)
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 -H "Host: echo.local" http://127.0.0.1:7800/ 2>/dev/null || true)
     [[ "$STATUS" =~ ^[0-9]+$ ]] && [ "$STATUS" -ge 200 ] && FRP_READY=1 && break
     sleep 0.5
   done
@@ -70,7 +70,7 @@ if [ "$IS_FRP" -eq 1 ]; then
   sudo systemctl stop frp-server.scope 2>/dev/null || true
   sudo systemctl kill -s KILL frp-server.scope 2>/dev/null || true
   for i in $(seq 1 20); do
-    ss -tlnp | grep -qE ':17000|:18090' || break
+    ss -tlnp | grep -qE ':7700|:7800' || break
     sleep 0.5
   done
 fi

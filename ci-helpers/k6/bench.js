@@ -134,8 +134,8 @@ export function ingressMultihost() {
   const id = `${__VU}-${__ITER}`;
   const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
-  // DuoTunnel uses 8080, FRP uses 18090. Differentiate by scenario name.
-  const port = sn.startsWith('frp_') ? 18090 : 8080;
+  // DuoTunnel uses 8080, FRP uses 7800. Differentiate by scenario name.
+  const port = sn.startsWith('frp_') ? 7800 : 8080;
   const res = http.get(`http://${host}:${port}/?id=${id}&host=${host}`, {
     timeout: '10s',
     tags: { name: sn },
@@ -155,7 +155,7 @@ export function ingressMultihost() {
 export function ingressHttpGetKeepalive() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://echo.local:18090/?id=${id}`, {
+  const res = http.get(`http://echo.local:7800/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',

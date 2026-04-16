@@ -1,2 +1,2 @@
-bindPort = 17000
-vhostHTTPPort = 18090
+bindPort = 7700
+vhostHTTPPort = 7800

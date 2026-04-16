@@ -1,5 +1,5 @@
 serverAddr = "127.0.0.1"
-serverPort = 17000
+serverPort = 7700
 
 [[proxies]]
 name = "echo-ingress"
