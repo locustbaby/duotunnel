@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 pub mod h1;
 pub mod h2;
@@ -10,7 +10,7 @@ pub struct ProxyRequest {
     pub uri: http::Uri,
     pub headers: http::HeaderMap,
     pub version: http::Version,
-    pub body: UnsyncBoxBody<Bytes, std::io::Error>,
+    pub body: BoxBody<Bytes, std::io::Error>,
 }
 #[async_trait]
 pub trait ProtocolDriver {

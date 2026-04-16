@@ -2,7 +2,7 @@ use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::combinators::BoxBody;
 use hyper::Request;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -10,7 +10,7 @@ use hyper_util::client::legacy::Client;
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
 use tracing::debug;
-type HttpsClient = Client<HttpsConnector<HttpConnector>, UnsyncBoxBody<Bytes, std::io::Error>>;
+type HttpsClient = Client<HttpsConnector<HttpConnector>, BoxBody<Bytes, std::io::Error>>;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct HttpPeer {
     pub client: HttpsClient,

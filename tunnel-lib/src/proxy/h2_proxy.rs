@@ -1,19 +1,20 @@
 use crate::{send_routing_info, QuinnStream, RoutingInfo};
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::client::conn::http2::{Builder as H2ClientBuilder, SendRequest};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use quinn::Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
-type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>;
+pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
 
 pub struct H2SenderCache {
-    sender: Mutex<Option<SendRequest<BoxBody>>>,
+    sender: ArcSwap<Option<SendRequest<BoxBody>>>,
     rebuild_mu: AsyncMutex<()>,
 }
 
@@ -21,14 +22,13 @@ pub type H2Sender = Arc<H2SenderCache>;
 
 pub fn new_h2_sender() -> H2Sender {
     Arc::new(H2SenderCache {
-        sender: Mutex::new(None),
+        sender: ArcSwap::new(Arc::new(None)),
         rebuild_mu: AsyncMutex::new(()),
     })
 }
 
 fn try_get_sender(cache: &H2SenderCache) -> Option<SendRequest<BoxBody>> {
-    let guard = cache.sender.lock().unwrap();
-    match guard.as_ref() {
+    match cache.sender.load().as_ref() {
         Some(s) if s.is_ready() => Some(s.clone()),
         _ => None,
     }
@@ -41,7 +41,7 @@ pub async fn forward_h2_request<B>(
     request: Request<B>,
 ) -> Result<Response<BoxBody>>
 where
-    B: hyper::body::Body + Send + 'static,
+    B: hyper::body::Body + Send + Sync + 'static,
     B::Data: Into<Bytes> + Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
@@ -73,14 +73,14 @@ where
                             .await?;
 
                     let sender = new_sender.clone();
-                    *sender_cache.sender.lock().unwrap() = Some(new_sender);
+                    sender_cache.sender.store(Arc::new(Some(new_sender)));
 
                     let cache = sender_cache.clone();
                     tokio::spawn(async move {
                         if let Err(e) = conn_driver.await {
                             debug!(error = %e, "H2 connection driver exited");
                         }
-                        *cache.sender.lock().unwrap() = None;
+                        cache.sender.store(Arc::new(None));
                     });
 
                     sender
@@ -97,7 +97,7 @@ async fn send_via<B>(
     request: Request<B>,
 ) -> Result<Response<BoxBody>>
 where
-    B: hyper::body::Body + Send + 'static,
+    B: hyper::body::Body + Send + Sync + 'static,
     B::Data: Into<Bytes> + Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
@@ -105,13 +105,13 @@ where
     let boxed_body = body
         .map_frame(|f| f.map_data(Into::into))
         .map_err(|e| std::io::Error::other(e.into()))
-        .boxed_unsync();
+        .boxed();
     let req = Request::from_parts(parts, boxed_body);
     debug!("H2 forwarding request: {} {}", req.method(), req.uri());
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
     Ok(Response::from_parts(
         parts,
-        body.map_err(std::io::Error::other).boxed_unsync(),
+        body.map_err(std::io::Error::other).boxed(),
     ))
 }

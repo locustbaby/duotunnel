@@ -45,7 +45,7 @@ where
                 parts.headers.insert(hyper::header::HOST, hv);
             }
             debug!("H2 forward: {} {}", parts.method, parts.uri);
-            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+            let boxed_body = body.map_err(std::io::Error::other).boxed();
             let upstream_req = Request::from_parts(parts, boxed_body);
             let result = if use_h2c {
                 h2c_client.request(upstream_req).await
@@ -55,7 +55,7 @@ where
             match result {
                 Ok(resp) => {
                     let (parts, body) = resp.into_parts();
-                    let boxed = body.map_err(std::io::Error::other).boxed_unsync();
+                    let boxed = body.map_err(std::io::Error::other).boxed();
                     Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
                 }
                 Err(e) => {
@@ -65,7 +65,7 @@ where
                         .body(
                             http_body_util::Full::new(Bytes::from("Bad Gateway"))
                                 .map_err(|_| unreachable!())
-                                .boxed_unsync(),
+                                .boxed(),
                         )
                         .unwrap())
                 }

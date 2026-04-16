@@ -190,7 +190,7 @@ impl ProtocolDriver for Http1Driver {
             self.recv = Some(recv);
             http_body_util::Empty::new()
                 .map_err(|e| match e {})
-                .boxed_unsync()
+                .boxed()
         } else if body_remaining == 0 {
             self.recv = Some(recv);
             let prefix = body_prefix;
@@ -202,7 +202,7 @@ impl ProtocolDriver for Http1Driver {
                 }
                 Ok(None)
             });
-            http_body_util::StreamBody::new(stream).boxed_unsync()
+            http_body_util::StreamBody::new(stream).boxed()
         } else {
             let (reclaim_tx, reclaim_rx) = oneshot::channel::<Reclaim>();
             self.inflight_reclaim = Some(reclaim_rx);
@@ -256,7 +256,7 @@ impl ProtocolDriver for Http1Driver {
                     }
                 },
             );
-            http_body_util::StreamBody::new(stream).boxed_unsync()
+            http_body_util::StreamBody::new(stream).boxed()
         };
         Ok(Some(ProxyRequest {
             method,

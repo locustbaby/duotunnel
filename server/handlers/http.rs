@@ -162,7 +162,7 @@ async fn handle_tls_connection(
                 protocol: tunnel_lib::proxy::core::Protocol::H2,
                 host: Some(target_host),
             };
-            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+            let boxed_body = body.map_err(std::io::Error::other).boxed();
             let upstream_req = Request::from_parts(parts, boxed_body);
             match tunnel_lib::forward_h2_request(&client_conn, &sender_cache, routing_info, upstream_req).await {
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
@@ -173,7 +173,7 @@ async fn handle_tls_connection(
                         .body(
                             Full::new(bytes::Bytes::from("Bad Gateway"))
                                 .map_err(|_| unreachable!())
-                                .boxed_unsync(),
+                                .boxed(),
                         )
                         .unwrap())
                 }
@@ -230,7 +230,7 @@ async fn handle_plaintext_h2_connection(
                         .body(
                             Full::new(bytes::Bytes::from("Missing authority"))
                                 .map_err(|_| unreachable!())
-                                .boxed_unsync(),
+                                .boxed(),
                         )
                         .unwrap());
                 }
@@ -246,7 +246,7 @@ async fn handle_plaintext_h2_connection(
                             .body(
                                 Full::new(bytes::Bytes::from("Misdirected Request"))
                                     .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
+                                    .boxed(),
                             )
                             .unwrap());
                     }
@@ -269,7 +269,7 @@ async fn handle_plaintext_h2_connection(
                             .body(
                                 Full::new(bytes::Bytes::from("No route"))
                                     .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
+                                    .boxed(),
                             )
                             .unwrap(),
                     );
@@ -293,7 +293,7 @@ async fn handle_plaintext_h2_connection(
                             .body(
                                 Full::new(bytes::Bytes::from("No client available"))
                                     .map_err(|_| unreachable!())
-                                    .boxed_unsync(),
+                                    .boxed(),
                             )
                             .unwrap());
                     }
@@ -311,7 +311,7 @@ async fn handle_plaintext_h2_connection(
                 protocol: tunnel_lib::proxy::core::Protocol::H2,
                 host: Some(host),
             };
-            let boxed_body = body.map_err(std::io::Error::other).boxed_unsync();
+            let boxed_body = body.map_err(std::io::Error::other).boxed();
             let upstream_req = Request::from_parts(parts, boxed_body);
             match tunnel_lib::forward_h2_request(&client_conn, &h2_sender, routing_info, upstream_req).await {
                 Ok(resp) => Ok::<_, hyper::Error>(resp),
@@ -323,7 +323,7 @@ async fn handle_plaintext_h2_connection(
                         .body(
                             Full::new(bytes::Bytes::from("Bad Gateway"))
                                 .map_err(|_| unreachable!())
-                                .boxed_unsync(),
+                                .boxed(),
                         )
                         .unwrap())
                 }

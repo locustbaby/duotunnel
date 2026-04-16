@@ -13,10 +13,10 @@ use std::time::Duration;
 use tracing::debug;
 pub type HttpsClient = Client<
     hyper_rustls::HttpsConnector<HttpConnector>,
-    http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>,
+    http_body_util::combinators::BoxBody<Bytes, std::io::Error>,
 >;
 pub type H2cClient =
-    Client<HttpConnector, http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Error>>;
+    Client<HttpConnector, http_body_util::combinators::BoxBody<Bytes, std::io::Error>>;
 
 async fn read_into_bytes_mut(
     recv: &mut RecvStream,
@@ -175,7 +175,8 @@ pub async fn forward_http(
     let req_body_stream: std::pin::Pin<
         Box<
             dyn futures_util::Stream<Item = Result<hyper::body::Frame<Bytes>, std::io::Error>>
-                + Send,
+                + Send
+                + Sync,
         >,
     > = if content_length > 0 {
         let stream = futures_util::stream::try_unfold(
@@ -221,7 +222,7 @@ pub async fn forward_http(
         Box::pin(futures_util::stream::empty())
     };
     let req_body = http_body_util::StreamBody::new(req_body_stream);
-    let req_body = http_body_util::combinators::UnsyncBoxBody::new(req_body);
+    let req_body = http_body_util::BodyExt::boxed(req_body);
     let mut request_builder = Request::builder().method(hyper_method).uri(uri);
     if let Some(headers) = request_builder.headers_mut() {
         *headers = hyper_headers;
