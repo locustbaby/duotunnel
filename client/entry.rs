@@ -114,7 +114,7 @@ async fn handle_entry_connection(
             Some(c) => c,
             None => break,
         };
-        maybe_slow_path(conn.inflight(), overload).await;
+        maybe_slow_path(|| conn.inflight(), overload).await;
         let _inflight_guard = conn.begin_inflight();
         match tokio::time::timeout(open_stream_timeout, conn.conn.open_bi()).await {
             Ok(Ok((mut send, recv))) => {

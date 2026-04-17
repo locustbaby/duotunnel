@@ -49,6 +49,25 @@ impl From<OverloadMode> for tunnel_lib::SharedOverloadMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackoffStrategy {
+    None,
+    Fixed,
+    #[default]
+    Exponential,
+}
+
+impl From<BackoffStrategy> for tunnel_lib::BackoffStrategy {
+    fn from(s: BackoffStrategy) -> Self {
+        match s {
+            BackoffStrategy::None => tunnel_lib::BackoffStrategy::None,
+            BackoffStrategy::Fixed => tunnel_lib::BackoffStrategy::Fixed,
+            BackoffStrategy::Exponential => tunnel_lib::BackoffStrategy::Exponential,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OverloadConfig {
@@ -56,6 +75,9 @@ pub struct OverloadConfig {
     pub emfile_backoff_ms: u64,
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
+    /// Total time budget for the slow-path wait, in milliseconds.
+    /// For `exponential` strategy the loop backs off within this budget;
+    /// for `fixed` it sleeps the full budget once.
     pub inflight_sleep_ms: u64,
     /// When set, overrides `inflight_yield_threshold` as a fraction of
     /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
@@ -63,6 +85,8 @@ pub struct OverloadConfig {
     /// When set, overrides `inflight_sleep_threshold` as a fraction of
     /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
     pub inflight_sleep_pct: Option<f32>,
+    /// How to wait when inflight ≥ sleep threshold.  Defaults to `exponential`.
+    pub backoff_strategy: BackoffStrategy,
 }
 
 impl Default for OverloadConfig {
@@ -75,6 +99,7 @@ impl Default for OverloadConfig {
             inflight_sleep_ms: 2,
             inflight_yield_pct: Some(0.80),
             inflight_sleep_pct: Some(0.95),
+            backoff_strategy: BackoffStrategy::default(),
         }
     }
 }
@@ -89,6 +114,7 @@ impl OverloadConfig {
             self.inflight_yield_pct,
             self.inflight_sleep_pct,
             self.inflight_sleep_ms,
+            self.backoff_strategy.into(),
         )
     }
 }

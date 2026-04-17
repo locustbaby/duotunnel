@@ -35,8 +35,9 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **overload.mode** | `client/entry.rs:31` `maybe_slow_path`; `server/handlers/mod.rs:12` 同名 | `inflight_slowpath` / `burst` | `overload.mode` | `burst` 直接 bypass 阻塞逻辑，任由 QUIC 层排队或 `open_bi` 超时 | 搜代码路径 `OverloadMode::Burst` |
 | **overload.inflight_yield_threshold** | 同上 `maybe_slow_path` inflight 比较 | 800 (两侧一致) | `overload.inflight_yield_threshold` | 在途流 ≥ 该值时每次 `open_bi` 前 `tokio::task::yield_now()`；值过低会频繁让出 runtime 拉低吞吐 | 指标: `inflight` / `max_concurrent_streams` 占比 |
-| **overload.inflight_sleep_threshold** | 同上 `maybe_slow_path` inflight 比较 | 950 (两侧一致) | `overload.inflight_sleep_threshold` | 在途流 ≥ 该值时 sleep `inflight_sleep_ms`；直接拉高 p99 尾延迟 | 指标: p99 latency 与 inflight 曲线同步上抬 |
-| **overload.inflight_sleep_ms** | 同上 `maybe_slow_path` sleep 时长 | 2ms (两侧一致) | `overload.inflight_sleep_ms` | 单次请求的最小阻塞时长；偏高会显著拖尾 | tracing span 中 `maybe_slow_path` 前后时间差 |
+| **overload.inflight_sleep_threshold** | 同上 `maybe_slow_path` inflight 比较 | 950 (两侧一致) | `overload.inflight_sleep_threshold` | 在途流 ≥ 该值时进入 backoff 循环（具体由 `backoff_strategy` 决定） | 指标: p99 latency 与 inflight 曲线同步上抬 |
+| **overload.inflight_sleep_ms** | 同上 `maybe_slow_path` 总时长预算 | 2ms (两侧一致) | `overload.inflight_sleep_ms` | backoff 循环的**总超时预算**；超过后放行到 `open_bi`（与 `backoff_strategy` 配合） | tracing span 中 `maybe_slow_path` 前后时间差 |
+| **overload.backoff_strategy** | `tunnel-lib/src/overload.rs` `maybe_slow_path` | `exponential` (默认) / `fixed` / `none` | `overload.backoff_strategy` | `exponential`: 每轮重查 inflight，从 `budget/16` 翻倍到 `budget/4`，槽位一空立刻返回；`fixed`: 直接 sleep 一整个 budget；`none`: 不等，交给 QUIC 背压 | 代码见 `exponential_backoff` |
 | **overload.emfile_backoff_ms** (仅 server) | `server/handlers/tcp.rs:19` 与 `http.rs:19` accept 循环 | 100ms | `overload.emfile_backoff_ms` | EMFILE 时暂停 accept 的时长；偏低会 CPU 打满，偏高丢连接 | 日志: `too many open files, backing off` |
 
 ---
@@ -60,21 +61,6 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **Initial Data Copy** | `ProxyEngine::run_stream` | `copy_from_slice` | 请求到达频率 | **内存毛刺**: 每请求一次额外分配；虽量小但并发高时影响 GC/RSS | 代码见 `core.rs:52` |
 | **Server Overload** | `server/handlers/mod.rs:11` `maybe_slow_path` + 对称的 `client/entry.rs:30` | yield/sleep 逻辑 | In-flight 总数 vs. 阈值 `overload.inflight_{yield,sleep}_threshold` (§2.5) | **延迟突增**: 触发过载保护时系统主动挂起请求 | 指标: `inflight_requests`; `system_overload_count` |
 | **Logging Latency** | `relay.rs`: `debug!` / `tracing` | 同步阻塞写入 | `log_level: info` | **吞吐硬封顶**: 同步日志写磁盘导致 Worker 线程挂起，QUIC 会发生 Idle Timeout | 火焰图见 `std::io::Write` 阻塞热点 |
-
----
-
-## Known Issues
-
-### Overload 阈值默认值与 `max_concurrent_streams` 不匹配
-`overload.inflight_{yield,sleep}_threshold` 默认值 (800/950) 按绝对数设置，而 client 默认 `max_concurrent_streams = 100`（见 `client/config.rs:43`），因此 **client 默认配置下 slow-path 永远不会触发**。Server 默认 `max_concurrent_streams = 1000`（见 `tunnel-store/src/server_config.rs`），阈值可以触发。
-- **影响**: 默认部署下 client 侧的 `maybe_slow_path` 形同死码；只有把 `quic.max_concurrent_streams` 升到 ≥1000（CI/bench 配置就是如此）时才生效。
-- **规避**: 显式把 `overload.inflight_yield_threshold`/`inflight_sleep_threshold` 调成 `max_concurrent_streams` 的 ~80%/95%。
-- **长期修复**: 阈值改成百分比，由 transport params 推导绝对值。
-
-### Client 侧 slow-path 基于 round-robin 选中的单条连接判断
-`client/entry.rs:126-130` 先走 `EntryConnPool::next_conn()`（round-robin）拿到一条连接，然后对**这一条**做 inflight 阈值判断。当池内其它连接还闲时，仍可能因为轮到热连接而 sleep 2ms。Server 侧（`registry.rs:104 select_healthy`）已是 least-inflight 选择，不存在该问题。
-- **影响**: 多 QUIC 连接（`quic.connections > 1`）场景下尾延迟比预期差。
-- **长期修复**: 把 client `next_conn` 对齐 server 的 `min_by_key(inflight)` 语义。
 
 ---
 
