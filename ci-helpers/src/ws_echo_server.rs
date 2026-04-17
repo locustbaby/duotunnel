@@ -27,14 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(mut ws) => {
                     eprintln!("WS client connected: {}", peer);
                     while let Some(msg) = ws.next().await {
-                        match msg {
-                            Ok(m) if m.is_text() || m.is_binary() => {
-                                if ws.send(m).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Ok(m) if m.is_close() => break,
-                            _ => {}
+                        let Ok(m) = msg else { continue };
+                        if m.is_close() {
+                            break;
+                        }
+                        if (m.is_text() || m.is_binary()) && ws.send(m).await.is_err() {
+                            break;
                         }
                     }
                 }
