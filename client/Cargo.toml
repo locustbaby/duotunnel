@@ -25,7 +25,6 @@ serde_yaml = "0.9"
 anyhow = "1.0"
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-bincode = "1.3"
 clap = { version = "4.5", features = ["derive"] }
 dashmap = "6.1"
 bytes = "1.9"

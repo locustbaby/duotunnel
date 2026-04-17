@@ -1,7 +1,17 @@
 use crate::proxy::core::Protocol;
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
+use rkyv::{
+    api::high::{HighDeserializer, HighSerializer, HighValidator},
+    bytecheck::CheckBytes,
+    rancor,
+    ser::allocator::ArenaHandle,
+    util::AlignedVec,
+    Archive, Deserialize, Serialize,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -25,11 +35,11 @@ impl MessageType {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct Login {
     pub token: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct LoginResp {
     pub success: bool,
     pub error: Option<String>,
@@ -54,23 +64,23 @@ impl LoginResp {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, Archive, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub config_version: String,
     pub upstreams: Vec<UpstreamConfig>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub name: String,
     pub servers: Vec<UpstreamServer>,
     pub lb_policy: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct UpstreamServer {
     pub address: String,
     pub resolve: bool,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct RoutingInfo {
     pub proxy_name: String,
     pub src_addr: String,
@@ -78,13 +88,15 @@ pub struct RoutingInfo {
     pub protocol: Protocol,
     pub host: Option<String>,
 }
+
 pub async fn send_message<W, M>(writer: &mut W, msg_type: MessageType, msg: &M) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
-    M: Serialize,
+    M: for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, rancor::Error>>,
 {
-    let payload = bincode::serialize(msg)?;
-    if payload.len() > 10 * 1024 * 1024 {
+    let payload = rkyv::to_bytes::<rancor::Error>(msg)
+        .map_err(|e| anyhow!("rkyv serialize failed: {e}"))?;
+    if payload.len() > MAX_MESSAGE_BYTES {
         return Err(anyhow!(
             "Message too large to send: {} bytes",
             payload.len()
@@ -107,20 +119,29 @@ where
 pub async fn recv_message<R, M>(reader: &mut R) -> Result<M>
 where
     R: AsyncReadExt + Unpin,
-    M: for<'de> Deserialize<'de>,
+    M: Archive,
+    M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
+        + Deserialize<M, HighDeserializer<rancor::Error>>,
 {
     let len = reader.read_u32().await? as usize;
-    if len > 10 * 1024 * 1024 {
+    if len > MAX_MESSAGE_BYTES {
         return Err(anyhow!("Message too large: {} bytes", len));
     }
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
-    Ok(bincode::deserialize(&buf)?)
+    let mut buf = AlignedVec::<16>::with_capacity(len);
+    buf.resize(len, 0);
+    reader.read_exact(&mut buf[..]).await?;
+    let archived = rkyv::access::<M::Archived, rancor::Error>(&buf[..])
+        .map_err(|e| anyhow!("rkyv access failed: {e}"))?;
+    let value = rkyv::deserialize::<M, rancor::Error>(archived)
+        .map_err(|e| anyhow!("rkyv deserialize failed: {e}"))?;
+    Ok(value)
 }
 pub async fn recv_typed_message<R, M>(reader: &mut R, expected: MessageType) -> Result<M>
 where
     R: AsyncReadExt + Unpin,
-    M: for<'de> Deserialize<'de>,
+    M: Archive,
+    M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
+        + Deserialize<M, HighDeserializer<rancor::Error>>,
 {
     let msg_type = recv_message_type(reader).await?;
     if msg_type != expected {
@@ -143,13 +164,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn encode<T>(value: &T) -> AlignedVec
+    where
+        T: for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, rancor::Error>>,
+    {
+        rkyv::to_bytes::<rancor::Error>(value).unwrap()
+    }
+    fn decode<T>(bytes: &[u8]) -> T
+    where
+        T: Archive,
+        T::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
+            + Deserialize<T, HighDeserializer<rancor::Error>>,
+    {
+        rkyv::from_bytes::<T, rancor::Error>(bytes).unwrap()
+    }
     #[test]
     fn test_login_serialize() {
         let login = Login {
             token: "dt_test123".to_string(),
         };
-        let encoded = bincode::serialize(&login).unwrap();
-        let decoded: Login = bincode::deserialize(&encoded).unwrap();
+        let encoded = encode(&login);
+        let decoded: Login = decode(&encoded);
         assert_eq!(login.token, decoded.token);
     }
     #[test]
@@ -161,8 +196,8 @@ mod tests {
             protocol: Protocol::H1,
             host: Some("example.com".to_string()),
         };
-        let encoded = bincode::serialize(&info).unwrap();
-        let decoded: RoutingInfo = bincode::deserialize(&encoded).unwrap();
+        let encoded = encode(&info);
+        let decoded: RoutingInfo = decode(&encoded);
         assert_eq!(info.proxy_name, decoded.proxy_name);
         assert_eq!(info.host, decoded.host);
     }
@@ -200,8 +235,8 @@ mod tests {
             protocol: Protocol::Tcp,
             host: None,
         };
-        let encoded = bincode::serialize(&info).unwrap();
-        let decoded: RoutingInfo = bincode::deserialize(&encoded).unwrap();
+        let encoded = encode(&info);
+        let decoded: RoutingInfo = decode(&encoded);
         assert_eq!(decoded.host, None);
         assert_eq!(decoded.protocol, Protocol::Tcp);
     }

@@ -10,23 +10,23 @@
 ///      ctld responds with a full Snapshot again (simplest correct behaviour; diffs are
 ///      a future optimisation).
 ///
-/// Wire framing: reuses the existing tunnel-lib send_message/recv_message bincode framing.
-///   [msg_type: u8 = 0x06 ConfigPush][len: u32 BE][bincode(WatchEvent)]
+/// Wire framing: reuses the existing tunnel-lib send_message/recv_message rkyv framing.
+///   [msg_type: u8 = 0x06 ConfigPush][len: u32 BE][rkyv(WatchEvent)]
 ///
 /// All types here are self-contained (no tunnel_store dependency) so this module
 /// can live in tunnel-lib and be used by both tunnel-service and server.
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 // ── Ingress routing ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoIngressVhostRule {
     pub match_host: String,
     pub group_id: String,
     pub proxy_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub enum ProtoIngressListenerMode {
     Http {
         vhost: Vec<ProtoIngressVhostRule>,
@@ -37,7 +37,7 @@ pub enum ProtoIngressListenerMode {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoIngressListener {
     pub port: u16,
     pub mode: ProtoIngressListenerMode,
@@ -45,20 +45,20 @@ pub struct ProtoIngressListener {
 
 // ── Client groups & upstreams ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoUpstreamServer {
     pub address: String,
     pub resolve: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoClientUpstream {
     pub name: String,
     pub lb_policy: String,
     pub servers: Vec<ProtoUpstreamServer>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoClientGroup {
     pub group_id: String,
     pub config_version: String,
@@ -67,13 +67,13 @@ pub struct ProtoClientGroup {
 
 // ── Egress ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoEgressVhostRule {
     pub match_host: String,
     pub action_upstream: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ProtoEgressUpstreamDef {
     pub name: String,
     pub lb_policy: String,
@@ -83,7 +83,7 @@ pub struct ProtoEgressUpstreamDef {
 // ── Token cache ───────────────────────────────────────────────────────────────
 
 /// A single token entry in the in-memory cache sent to server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct TokenCacheEntry {
     /// Full 64-char hex SHA-256 of the raw token.
     pub hash_hex: String,
@@ -98,7 +98,7 @@ pub struct TokenCacheEntry {
 // ── Watch protocol ────────────────────────────────────────────────────────────
 
 /// Sent by the server to initiate (or resume) a watch session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct WatchRequest {
     /// The last resource_version the server has seen.
     /// 0 means "I have nothing; send me the full snapshot".
@@ -107,7 +107,7 @@ pub struct WatchRequest {
 
 /// The full config snapshot pushed by ctld as the list response,
 /// and also after each mutation (no delta in v1 for simplicity).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     /// Monotonically increasing. Incremented on every write to ctld.
     pub resource_version: u64,
@@ -120,7 +120,7 @@ pub struct ConfigSnapshot {
 }
 
 /// Message envelope pushed from ctld → server over the watch stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub enum WatchEvent {
     /// Full state snapshot (response to WatchRequest or post-reconnect).
     Snapshot(ConfigSnapshot),

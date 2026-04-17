@@ -12,7 +12,7 @@ tokio = { version = "1.49", features = ["full"] }
 tokio-util = { version = "0.7" }
 tracing = { version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }
-bincode = "1.3"
+rkyv = { version = "0.8.15", default-features = false, features = ["std", "bytecheck", "alloc"] }
 anyhow = "1.0"
 bytes = "1.9"
 httparse = "1.9"
