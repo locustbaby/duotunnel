@@ -115,6 +115,7 @@ pub struct ServerState {
     /// Present when running in ctld-managed mode; None in standalone mode.
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
+    pub overload_limits: tunnel_lib::OverloadLimits,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
@@ -370,6 +371,15 @@ async fn build_server_state(
     let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
     let proxy_buffer_params = tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers);
+    let max_streams = tunnel_lib::QuicTransportParams::from(&config.server.quic).max_concurrent_streams;
+    let overload_limits = config.server.overload.resolve(max_streams);
+    info!(
+        mode = ?overload_limits.mode,
+        yield_threshold = overload_limits.inflight_yield_threshold,
+        sleep_threshold = overload_limits.inflight_sleep_threshold,
+        max_concurrent_streams = max_streams,
+        "overload protection resolved"
+    );
     Ok(Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
@@ -383,6 +393,7 @@ async fn build_server_state(
         revocation_tx,
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
+        overload_limits,
     }))
 }
 

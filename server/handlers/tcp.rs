@@ -71,7 +71,7 @@ async fn handle_tcp_connection(
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-    crate::handlers::maybe_slow_path(&selected, &state.config.server.overload).await;
+    crate::handlers::maybe_slow_path(&selected, &state.overload_limits).await;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name,
         src_addr: peer_addr.ip().to_string(),

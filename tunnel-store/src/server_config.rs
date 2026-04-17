@@ -40,6 +40,15 @@ pub enum OverloadMode {
     Burst,
 }
 
+impl From<OverloadMode> for tunnel_lib::SharedOverloadMode {
+    fn from(m: OverloadMode) -> Self {
+        match m {
+            OverloadMode::InflightSlowpath => tunnel_lib::SharedOverloadMode::InflightSlowpath,
+            OverloadMode::Burst => tunnel_lib::SharedOverloadMode::Burst,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OverloadConfig {
@@ -48,6 +57,12 @@ pub struct OverloadConfig {
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
     pub inflight_sleep_ms: u64,
+    /// When set, overrides `inflight_yield_threshold` as a fraction of
+    /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
+    pub inflight_yield_pct: Option<f32>,
+    /// When set, overrides `inflight_sleep_threshold` as a fraction of
+    /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
+    pub inflight_sleep_pct: Option<f32>,
 }
 
 impl Default for OverloadConfig {
@@ -58,7 +73,23 @@ impl Default for OverloadConfig {
             inflight_yield_threshold: 800,
             inflight_sleep_threshold: 950,
             inflight_sleep_ms: 2,
+            inflight_yield_pct: Some(0.80),
+            inflight_sleep_pct: Some(0.95),
         }
+    }
+}
+
+impl OverloadConfig {
+    pub fn resolve(&self, max_concurrent_streams: u32) -> tunnel_lib::OverloadLimits {
+        tunnel_lib::OverloadLimits::resolve(
+            self.mode.clone().into(),
+            max_concurrent_streams,
+            self.inflight_yield_threshold,
+            self.inflight_sleep_threshold,
+            self.inflight_yield_pct,
+            self.inflight_sleep_pct,
+            self.inflight_sleep_ms,
+        )
     }
 }
 

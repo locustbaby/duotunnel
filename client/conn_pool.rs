@@ -31,7 +31,6 @@ impl PooledConnection {
 pub struct EntryConnPool {
     snapshot: ArcSwap<Vec<Arc<PooledConnection>>>,
     mu: Mutex<Vec<Arc<PooledConnection>>>,
-    counter: AtomicUsize,
 }
 
 impl EntryConnPool {
@@ -39,12 +38,14 @@ impl EntryConnPool {
         Arc::new(Self {
             snapshot: ArcSwap::from_pointee(Vec::new()),
             mu: Mutex::new(Vec::new()),
-            counter: AtomicUsize::new(0),
         })
     }
 
     pub fn push(&self, conn: Connection) {
         let mut g = self.mu.lock().unwrap();
+        if g.iter().any(|c| c.conn.stable_id() == conn.stable_id()) {
+            return;
+        }
         g.push(Arc::new(PooledConnection {
             conn,
             inflight: Arc::new(CachePadded::new(AtomicUsize::new(0))),
@@ -60,18 +61,10 @@ impl EntryConnPool {
 
     pub fn next_conn(&self) -> Option<Arc<PooledConnection>> {
         let snap = self.snapshot.load();
-        let len = snap.len();
-        if len == 0 {
-            return None;
-        }
-        let start = self.counter.fetch_add(1, Ordering::Relaxed);
-        for i in 0..len {
-            let c = &snap[(start + i) % len];
-            if c.conn.close_reason().is_none() {
-                return Some(c.clone());
-            }
-        }
-        None
+        snap.iter()
+            .filter(|c| c.conn.close_reason().is_none())
+            .min_by_key(|c| c.inflight.load(Ordering::Relaxed))
+            .cloned()
     }
 
     pub fn pool_size(&self) -> usize {

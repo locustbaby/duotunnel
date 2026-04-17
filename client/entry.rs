@@ -1,5 +1,4 @@
-use crate::config::{OverloadConfig, OverloadMode};
-use crate::conn_pool::{EntryConnPool, PooledConnection};
+use crate::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,8 +9,8 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, relay_quic_to_tcp, send_routing_info, PeekBufPool, RoutingInfo,
-    TcpParams,
+    detect_protocol_and_host, maybe_slow_path, relay_quic_to_tcp, send_routing_info, OverloadLimits,
+    PeekBufPool, RoutingInfo, TcpParams,
 };
 
 const EMFILE_BACKOFF_MS: u64 = 100;
@@ -24,19 +23,7 @@ pub struct EntryListenerConfig {
     pub peek_buf_size: usize,
     pub open_stream_timeout: Duration,
     pub accept_workers: usize,
-    pub overload: Arc<OverloadConfig>,
-}
-
-async fn maybe_slow_path(conn: &PooledConnection, cfg: &OverloadConfig) {
-    if cfg.mode == OverloadMode::Burst {
-        return;
-    }
-    let inflight = conn.inflight();
-    if inflight >= cfg.inflight_sleep_threshold {
-        tokio::time::sleep(Duration::from_millis(cfg.inflight_sleep_ms)).await;
-    } else if inflight >= cfg.inflight_yield_threshold {
-        tokio::task::yield_now().await;
-    }
+    pub overload: Arc<OverloadLimits>,
 }
 
 pub async fn start_entry_listener(
@@ -106,7 +93,7 @@ async fn handle_entry_connection(
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
-    overload: &OverloadConfig,
+    overload: &OverloadLimits,
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
@@ -127,7 +114,7 @@ async fn handle_entry_connection(
             Some(c) => c,
             None => break,
         };
-        maybe_slow_path(&conn, overload).await;
+        maybe_slow_path(conn.inflight(), overload).await;
         let _inflight_guard = conn.begin_inflight();
         match tokio::time::timeout(open_stream_timeout, conn.conn.open_bi()).await {
             Ok(Ok((mut send, recv))) => {

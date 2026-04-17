@@ -4,10 +4,12 @@ pub mod egress;
 pub mod engine;
 pub mod infra;
 pub mod models;
+pub mod overload;
 pub mod protocol;
 pub mod proxy;
 pub mod transport;
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
+pub use overload::{maybe_slow_path, OverloadLimits, OverloadMode as SharedOverloadMode};
 pub use egress::http::{
     create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
     forward_http, H2cClient, HttpClientParams,

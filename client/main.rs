@@ -135,13 +135,23 @@ async fn async_main() -> Result<()> {
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
+        let overload_limits = config
+            .overload
+            .resolve(config.quic.max_concurrent_streams);
+        info!(
+            mode = ?overload_limits.mode,
+            yield_threshold = overload_limits.inflight_yield_threshold,
+            sleep_threshold = overload_limits.inflight_sleep_threshold,
+            max_concurrent_streams = config.quic.max_concurrent_streams,
+            "overload protection resolved"
+        );
         let entry_cfg = entry::EntryListenerConfig {
             port: entry_port,
             tcp_params: entry_tcp_params,
             peek_buf_size,
             open_stream_timeout,
             accept_workers: config.entry.accept_workers.max(1),
-            overload: Arc::new(config.overload.clone()),
+            overload: Arc::new(overload_limits),
         };
         crate::spawn_task(async move {
             if let Err(e) = entry::start_entry_listener(pool, token, entry_cfg).await {
