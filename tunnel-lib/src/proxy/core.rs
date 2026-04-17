@@ -4,7 +4,9 @@ use crate::models::msg::RoutingInfo;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub enum Protocol {
     H1,
     H2,
