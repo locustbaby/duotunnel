@@ -1,11 +1,11 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use tunnel_lib::{proxy, run_accept_worker};
+use tunnel_lib::{open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -65,7 +65,6 @@ async fn handle_tcp_connection(
         .registry
         .select_client_for_group(&group_id)
         .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-    crate::handlers::maybe_slow_path(&selected, &state.overload_limits).await;
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name,
         src_addr: peer_addr.ip().to_string(),
@@ -75,23 +74,22 @@ async fn handle_tcp_connection(
     };
     let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
     let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
-    let _inflight_guard = selected.begin_inflight();
-    let wait_started = Instant::now();
-    let (mut send, recv) = match tokio::time::timeout(open_timeout, selected.conn.open_bi()).await {
-        Ok(Ok(streams)) => {
-            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
-            streams
-        }
-        Ok(Err(e)) => {
-            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
-            return Err(e.into());
-        }
-        Err(_) => {
-            metrics::open_bi_observe_wait_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
-            metrics::open_bi_timeout();
-            return Err(anyhow::anyhow!("open_bi timed out after {:?}", open_timeout));
-        }
-    };
+    let opened = open_bi_guarded(
+        &selected.conn,
+        &selected.inflight,
+        &state.overload_limits,
+        open_timeout,
+        |elapsed, outcome| {
+            metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
+            if matches!(outcome, OpenBiOutcome::Timeout) {
+                metrics::open_bi_timeout();
+            }
+        },
+    )
+    .await?;
+    let mut send = opened.send;
+    let recv = opened.recv;
+    let _inflight_guard = opened.inflight;
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
     proxy::forward_to_client(send, recv, stream, state.proxy_buffer_params.relay_buf_size).await
 }

@@ -2,12 +2,10 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use quinn::Connection;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::{
-    begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard,
-};
+use tunnel_lib::{new_inflight_counter, pick_least_inflight, InflightCounter};
 
 struct ClientInfo {
     group_id: String,
@@ -23,12 +21,6 @@ pub struct SelectedConnection {
     pub inflight: InflightCounter,
 }
 
-impl SelectedConnection {
-    /// Increment inflight and return a guard that decrements on drop.
-    pub fn begin_inflight(&self) -> InflightGuard {
-        begin_inflight(&self.inflight)
-    }
-}
 
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
 ///

@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, maybe_slow_path, relay_quic_to_tcp, run_accept_worker,
+    detect_protocol_and_host, open_bi_guarded, relay_quic_to_tcp, run_accept_worker,
     send_routing_info, OverloadLimits, PeekBufPool, RoutingInfo, TcpParams,
 };
 
@@ -108,10 +108,19 @@ async fn handle_entry_connection(
             Some(c) => c,
             None => break,
         };
-        maybe_slow_path(|| conn.inflight(), overload).await;
-        let _inflight_guard = conn.begin_inflight();
-        match tokio::time::timeout(open_stream_timeout, conn.conn.open_bi()).await {
-            Ok(Ok((mut send, recv))) => {
+        match open_bi_guarded(
+            &conn.conn,
+            &conn.inflight,
+            overload,
+            open_stream_timeout,
+            |_elapsed, _outcome| {},
+        )
+        .await
+        {
+            Ok(opened) => {
+                let mut send = opened.send;
+                let recv = opened.recv;
+                let _inflight_guard = opened.inflight;
                 let routing_info = RoutingInfo {
                     proxy_name: "entry".to_string(),
                     src_addr: peer_addr.ip().to_string(),
@@ -132,13 +141,9 @@ async fn handle_entry_connection(
                 );
                 return Ok(());
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 warn!(error = %e, "open_bi failed, trying next connection");
-                last_err = e.into();
-            }
-            Err(_) => {
-                warn!(timeout_ms = open_stream_timeout.as_millis(), "open_bi timed out, trying next connection");
-                last_err = anyhow::anyhow!("open_bi timed out after {:?}", open_stream_timeout);
+                last_err = e;
             }
         }
     }

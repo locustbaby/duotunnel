@@ -6,6 +6,7 @@ pub mod engine;
 pub mod inflight;
 pub mod infra;
 pub mod models;
+pub mod open_bi;
 pub mod overload;
 pub mod protocol;
 pub mod proxy;
@@ -13,6 +14,7 @@ pub mod transport;
 pub use accept::run_accept_worker;
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 pub use inflight::{begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard};
+pub use open_bi::{open_bi_guarded, OpenBiOutcome, OpenedStream};
 pub use overload::{
     maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
 };

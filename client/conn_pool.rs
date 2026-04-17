@@ -2,23 +2,11 @@ use arc_swap::ArcSwap;
 use quinn::Connection;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use tunnel_lib::{
-    begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard,
-};
+use tunnel_lib::{new_inflight_counter, pick_least_inflight, InflightCounter};
 
 pub struct PooledConnection {
     pub conn: Connection,
     pub inflight: InflightCounter,
-}
-
-impl PooledConnection {
-    pub fn begin_inflight(&self) -> InflightGuard {
-        begin_inflight(&self.inflight)
-    }
-
-    pub fn inflight(&self) -> usize {
-        self.inflight.load(Ordering::Relaxed)
-    }
 }
 
 pub struct EntryConnPool {
@@ -57,7 +45,7 @@ impl EntryConnPool {
         pick_least_inflight(
             snap.as_slice(),
             |c| c.conn.close_reason().is_none(),
-            |c| c.inflight(),
+            |c| c.inflight.load(Ordering::Relaxed),
         )
         .cloned()
     }
