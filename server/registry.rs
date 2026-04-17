@@ -1,11 +1,13 @@
 use arc_swap::ArcSwap;
-use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use quinn::Connection;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
+use tunnel_lib::{
+    begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard,
+};
 
 struct ClientInfo {
     group_id: String,
@@ -18,23 +20,13 @@ pub struct SelectedConnection {
     pub conn: Connection,
     /// Shared inflight counter for this specific connection slot.
     /// Incremented by the caller before `open_bi`, decremented on drop via `InflightGuard`.
-    pub inflight: Arc<CachePadded<AtomicUsize>>,
-}
-
-/// RAII guard: decrements the per-connection inflight counter on drop.
-pub struct InflightGuard(Arc<CachePadded<AtomicUsize>>);
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
+    pub inflight: InflightCounter,
 }
 
 impl SelectedConnection {
     /// Increment inflight and return a guard that decrements on drop.
     pub fn begin_inflight(&self) -> InflightGuard {
-        self.inflight.fetch_add(1, Ordering::Relaxed);
-        InflightGuard(self.inflight.clone())
+        begin_inflight(&self.inflight)
     }
 }
 
@@ -46,7 +38,7 @@ impl SelectedConnection {
 ///
 /// This replaces the previous `DashMap<String, Connection>` pattern that caused
 /// a heap allocation + many Arc reference-count bumps on *every* routing lookup.
-type ClientIndex = std::collections::HashMap<String, (Connection, Arc<CachePadded<AtomicUsize>>)>;
+type ClientIndex = std::collections::HashMap<String, (Connection, InflightCounter)>;
 
 pub struct ClientGroup {
     /// Mutable index: client_id → (Connection, inflight counter).  Only touched by writers.
@@ -79,7 +71,7 @@ impl ClientGroup {
         let inflight = idx
             .get(&client_id)
             .map(|(_, c)| c.clone())
-            .unwrap_or_else(|| Arc::new(CachePadded::new(AtomicUsize::new(0))));
+            .unwrap_or_else(new_inflight_counter);
         idx.insert(client_id, (conn, inflight));
         self.snapshot.store(Arc::new(Self::build_snapshot(&idx)));
     }
@@ -103,14 +95,12 @@ impl ClientGroup {
     /// then a linear scan over healthy connections comparing `AtomicUsize` inflight counts.
     pub fn select_healthy(&self) -> Option<SelectedConnection> {
         let conns = self.snapshot.load();
-        if conns.is_empty() {
-            return None;
-        }
-        conns
-            .iter()
-            .filter(|c| c.conn.close_reason().is_none())
-            .min_by_key(|c| c.inflight.load(Ordering::Relaxed))
-            .cloned()
+        pick_least_inflight(
+            conns.as_slice(),
+            |c| c.conn.close_reason().is_none(),
+            |c| c.inflight.load(Ordering::Relaxed),
+        )
+        .cloned()
     }
 }
 

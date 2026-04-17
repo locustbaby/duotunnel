@@ -1,26 +1,19 @@
 use arc_swap::ArcSwap;
-use crossbeam_utils::CachePadded;
 use quinn::Connection;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use tunnel_lib::{
+    begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard,
+};
 
 pub struct PooledConnection {
     pub conn: Connection,
-    pub inflight: Arc<CachePadded<AtomicUsize>>,
-}
-
-pub struct InflightGuard(Arc<CachePadded<AtomicUsize>>);
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
+    pub inflight: InflightCounter,
 }
 
 impl PooledConnection {
     pub fn begin_inflight(&self) -> InflightGuard {
-        self.inflight.fetch_add(1, Ordering::Relaxed);
-        InflightGuard(self.inflight.clone())
+        begin_inflight(&self.inflight)
     }
 
     pub fn inflight(&self) -> usize {
@@ -48,7 +41,7 @@ impl EntryConnPool {
         }
         g.push(Arc::new(PooledConnection {
             conn,
-            inflight: Arc::new(CachePadded::new(AtomicUsize::new(0))),
+            inflight: new_inflight_counter(),
         }));
         self.snapshot.store(Arc::new(g.clone()));
     }
@@ -61,10 +54,12 @@ impl EntryConnPool {
 
     pub fn next_conn(&self) -> Option<Arc<PooledConnection>> {
         let snap = self.snapshot.load();
-        snap.iter()
-            .filter(|c| c.conn.close_reason().is_none())
-            .min_by_key(|c| c.inflight.load(Ordering::Relaxed))
-            .cloned()
+        pick_least_inflight(
+            snap.as_slice(),
+            |c| c.conn.close_reason().is_none(),
+            |c| c.inflight(),
+        )
+        .cloned()
     }
 
     pub fn pool_size(&self) -> usize {

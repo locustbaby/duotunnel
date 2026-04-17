@@ -9,11 +9,11 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, maybe_slow_path, relay_quic_to_tcp, send_routing_info, OverloadLimits,
-    PeekBufPool, RoutingInfo, TcpParams,
+    detect_protocol_and_host, maybe_slow_path, relay_quic_to_tcp, run_accept_worker,
+    send_routing_info, OverloadLimits, PeekBufPool, RoutingInfo, TcpParams,
 };
 
-const EMFILE_BACKOFF_MS: u64 = 100;
+const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
 
@@ -31,11 +31,10 @@ pub async fn start_entry_listener(
     cancel_token: CancellationToken,
     cfg: EntryListenerConfig,
 ) -> Result<()> {
-    let port = cfg.port;
     let peek_buf_size = cfg.peek_buf_size;
     let open_stream_timeout = cfg.open_stream_timeout;
     let accept_workers = cfg.accept_workers;
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
     let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
     let tcp_params = Arc::new(cfg.tcp_params);
     let overload = cfg.overload;
@@ -49,37 +48,32 @@ pub async fn start_entry_listener(
         let cancel_token = cancel_token.clone();
         let overload = overload.clone();
         handles.push(crate::spawn_task(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!(port = port, "entry listener cancelled");
-                        break;
-                    }
-                    result = listener.accept() => {
-                        let (stream, peer_addr) = match result {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if let Some(24) = e.raw_os_error() {
-                                    warn!("entry accept: too many open files, backing off");
-                                    tokio::time::sleep(Duration::from_millis(EMFILE_BACKOFF_MS)).await;
-                                } else {
-                                    warn!(error = %e, "entry accept error");
-                                }
-                                continue;
-                            }
-                        };
-                        debug!(peer_addr = %peer_addr, "new entry connection");
-                        let pool = pool.clone();
-                        let tcp_params = tcp_params.clone();
-                        let overload = overload.clone();
-                        crate::spawn_task(async move {
-                            if let Err(e) = handle_entry_connection(pool, stream, peek_buf_size, tcp_params, open_stream_timeout, &overload).await {
-                                debug!(error = %e, "entry connection error");
-                            }
-                        });
-                    }
-                }
-            }
+            run_accept_worker(
+                listener,
+                cancel_token,
+                EMFILE_BACKOFF,
+                "entry",
+                move |stream, _peer_addr| {
+                    let pool = pool.clone();
+                    let tcp_params = tcp_params.clone();
+                    let overload = overload.clone();
+                    crate::spawn_task(async move {
+                        if let Err(e) = handle_entry_connection(
+                            pool,
+                            stream,
+                            peek_buf_size,
+                            tcp_params,
+                            open_stream_timeout,
+                            &overload,
+                        )
+                        .await
+                        {
+                            debug!(error = %e, "entry connection error");
+                        }
+                    });
+                },
+            )
+            .await;
         }));
     }
 

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
-use tunnel_lib::proxy;
+use tracing::{debug, info};
+use tunnel_lib::{proxy, run_accept_worker};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -18,40 +18,34 @@ pub async fn run_tcp_accept_loop(
     let addr = listener.local_addr()?;
     let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
-    loop {
-        let (stream, peer_addr) = tokio::select! {
-            _ = cancel.cancelled() => {
-                info!(addr = %addr, "TCP listener shutting down");
-                return Ok(());
-            }
-            result = listener.accept() => match result {
-                Ok(v) => v,
-                Err(e) => {
-                    if let Some(24) = e.raw_os_error() {
-                        warn!("tcp accept: too many open files, backing off");
-                        tokio::time::sleep(emfile_backoff).await;
-                    }
-                    continue;
+    run_accept_worker(
+        listener,
+        cancel,
+        emfile_backoff,
+        "tcp",
+        move |stream, _peer_addr| {
+            let state = state.clone();
+            let proxy_name = proxy_name.clone();
+            let group_id = group_id.clone();
+            tokio::task::spawn(async move {
+                if let Err(e) = state.tcp_params.apply(&stream) {
+                    debug!(error = %e, "tcp_params.apply failed");
+                    return;
                 }
-            },
-        };
-        state.tcp_params.apply(&stream)?;
-        debug!(peer_addr = % peer_addr, "new TCP connection");
-        let state = state.clone();
-        let proxy_name = proxy_name.clone();
-        let group_id = group_id.clone();
-        tokio::task::spawn(async move {
-            metrics::tcp_connection_opened();
-            let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
-            if let Err(e) = &result {
-                debug!(error = % e, "TCP connection error");
-                metrics::request_completed("tcp", "error");
-            } else {
-                metrics::request_completed("tcp", "success");
-            }
-            metrics::tcp_connection_closed();
-        });
-    }
+                metrics::tcp_connection_opened();
+                let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
+                if let Err(e) = &result {
+                    debug!(error = %e, "TCP connection error");
+                    metrics::request_completed("tcp", "error");
+                } else {
+                    metrics::request_completed("tcp", "success");
+                }
+                metrics::tcp_connection_closed();
+            });
+        },
+    )
+    .await;
+    Ok(())
 }
 async fn handle_tcp_connection(
     state: Arc<ServerState>,

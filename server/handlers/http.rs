@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use tunnel_lib::extract_host_from_http;
 use tunnel_lib::proxy;
+use tunnel_lib::run_accept_worker;
 use tunnel_lib::RouteTarget;
 
 pub async fn run_http_accept_loop(
@@ -18,38 +19,32 @@ pub async fn run_http_accept_loop(
     let addr = listener.local_addr()?;
     let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, "http accept loop started");
-    loop {
-        let (stream, peer_addr) = tokio::select! {
-            _ = cancel.cancelled() => {
-                info!(addr = %addr, "http listener shutting down");
-                return Ok(());
-            }
-            result = listener.accept() => match result {
-                Ok(v) => v,
-                Err(e) => {
-                    if let Some(24) = e.raw_os_error() {
-                        warn!("http accept: too many open files, backing off");
-                        tokio::time::sleep(emfile_backoff).await;
-                    }
-                    continue;
+    run_accept_worker(
+        listener,
+        cancel,
+        emfile_backoff,
+        "http",
+        move |stream, _peer_addr| {
+            let state = state.clone();
+            tokio::task::spawn(async move {
+                if let Err(e) = state.tcp_params.apply(&stream) {
+                    debug!(error = %e, "tcp_params.apply failed");
+                    return;
                 }
-            },
-        };
-        state.tcp_params.apply(&stream)?;
-        debug!(peer_addr = %peer_addr, "new http connection");
-        let state = state.clone();
-        tokio::task::spawn(async move {
-            metrics::tcp_connection_opened();
-            let result = handle_http_connection(state, stream, port).await;
-            if let Err(e) = &result {
-                debug!(error = %e, "entry connection error");
-                metrics::request_completed("http", "error");
-            } else {
-                metrics::request_completed("http", "success");
-            }
-            metrics::tcp_connection_closed();
-        });
-    }
+                metrics::tcp_connection_opened();
+                let result = handle_http_connection(state, stream, port).await;
+                if let Err(e) = &result {
+                    debug!(error = %e, "entry connection error");
+                    metrics::request_completed("http", "error");
+                } else {
+                    metrics::request_completed("http", "success");
+                }
+                metrics::tcp_connection_closed();
+            });
+        },
+    )
+    .await;
+    Ok(())
 }
 async fn handle_http_connection(
     state: Arc<ServerState>,
