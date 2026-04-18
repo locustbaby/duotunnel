@@ -19,7 +19,7 @@ tokio-util = { version = "0.7", features = ["io", "codec"] }
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 anyhow = "1.0"
