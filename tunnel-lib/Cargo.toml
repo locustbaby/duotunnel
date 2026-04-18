@@ -8,7 +8,7 @@ license = "Apache-2.0"
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 rcgen = "0.14"
-tokio = { version = "1.49", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7" }
 tracing = { version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }
@@ -16,7 +16,7 @@ rkyv = { version = "0.8.15", default-features = false, features = ["std", "bytec
 anyhow = "1.0"
 bytes = "1.9"
 httparse = "1.9"
-hyper = { version = "1.8", features = ["client", "server", "http1", "http2"] }
+hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper-rustls = { version = "0.27", features = ["http2", "aws-lc-rs"] }
 http-body-util = "0.1"
@@ -24,7 +24,7 @@ futures-util = "0.3"
 async-trait = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 http = "1.0"
-arc-swap = "1"
+arc-swap = "1.9"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
 parking_lot = "0.12"

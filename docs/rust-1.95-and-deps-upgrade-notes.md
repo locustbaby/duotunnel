@@ -1,6 +1,22 @@
 # Rust 1.95 And Dependency Upgrade Notes
 
-Last checked: 2026-04-17
+Last checked: 2026-04-18
+
+## Progress (2026-04-18)
+
+- Toolchain pinned to 1.95.0 via `rust-toolchain.toml`.
+- Batch A landed: `tokio 1.49 → 1.52`, `hyper 1.8 → 1.9`, `clap 4.5 → 4.6`,
+  `arc-swap` normalised to `1.9` across workspace. `rustls`/`hyper-rustls`/
+  `tracing-subscriber`/`rand` caret constraints already resolve to the
+  recommended patch versions via `Cargo.lock`.
+- Rust 1.95 idioms applied:
+  - `Vec::push_mut` in `tunnel-store/src/sqlite_rules.rs`
+    (egress upstream + client upstream build paths).
+  - `if let` guards in `server/hot_reload.rs` (notify event filter).
+- `bincode` path is obsolete — moved to `rkyv 0.8.15` in PR #25. The
+  "Batch C: bincode" row below is now historical.
+- Remaining: Batch B (tonic/prost, notify, metrics-exporter-prometheus,
+  tokio-tungstenite, webpki-roots, socket2).
 
 ## Scope
 
