@@ -41,7 +41,7 @@ tokio-rustls = "0.26"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 arc-swap = "1.9"
-notify = { version = "6.1", features = ["macos_kqueue"] }
+notify = { version = "8.2", features = ["macos_kqueue"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
