@@ -24,4 +24,4 @@ figment = { version = "0.10", features = ["yaml", "env"] }
 arc-swap = "1.9"
 subtle = "2"
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"

@@ -12,7 +12,7 @@ server-config = ["figment", "tunnel-lib"]
 [dependencies]
 async-trait = "0.1"
 anyhow = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2"
 hex = "0.4"
 base64 = "0.22"
