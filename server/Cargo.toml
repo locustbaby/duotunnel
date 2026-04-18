@@ -21,7 +21,7 @@ tokio = { version = "1.52", features = ["full", "io-util"] }
 tokio-util = "0.7"
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 serde_yaml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
@@ -39,9 +39,9 @@ http-body-util = "0.1"
 async-trait = "0.1"
 tokio-rustls = "0.26"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 arc-swap = "1.9"
-notify = { version = "6.1", features = ["macos_kqueue"] }
+notify = { version = "8.2", features = ["macos_kqueue"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }

@@ -21,12 +21,16 @@ path = "src/http_echo_server.rs"
 name = "ci-test-client"
 path = "src/ci_test_client.rs"
 
+[build-dependencies]
+tonic-prost-build = "0.14"
+
 [dependencies]
-tonic = { version = "0.12", features = ["tls", "tls-roots", "tls-native-roots"] }
-tonic-health = "0.12"
-prost = "0.13"
+tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "tls-webpki-roots"] }
+tonic-health = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 hyper = { version = "1", features = ["http1", "http2", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1", "http2"] }

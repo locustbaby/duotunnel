@@ -417,7 +417,7 @@ async fn run_ws(url: &str, args: &[String]) -> Result<String, String> {
     .map_err(|_| format!("WebSocket connect timeout to {url}"))?
     .map_err(|e| format!("WebSocket connect error: {e}"))?;
 
-    ws.send(Message::Text(message.clone()))
+    ws.send(Message::Text(message.clone().into()))
         .await
         .map_err(|e| format!("ws send error: {e}"))?;
 
@@ -511,34 +511,14 @@ async fn run_grpc(addr: &str, args: &[String]) -> Result<String, String> {
 // Sends a ping message and validates the response body echoes it back.
 // Supports TLS (--tls).
 //
-// EchoRequest  { ping: string (tag 1) }
-// EchoResponse { headers: map<string,string> (tag 1), body: string (tag 2), remote_addr: string (tag 3) }
-//
 // Validates that the response body field contains the sent ping text.
 
-#[derive(Clone, prost::Message)]
-struct EchoRequest {
-    #[prost(string, tag = "1")]
-    pub ping: String,
+mod grpc_echo {
+    tonic::include_proto!("grpc_echo.v1");
 }
 
-#[derive(Clone, prost::Message)]
-struct StreamEchoRequest {
-    #[prost(string, tag = "1")]
-    pub ping: String,
-    #[prost(int32, tag = "2")]
-    pub count: i32,
-}
-
-#[derive(Clone, prost::Message)]
-struct EchoResponse {
-    #[prost(map = "string, string", tag = "1")]
-    pub headers: std::collections::HashMap<String, String>,
-    #[prost(string, tag = "2")]
-    pub body: String,
-    #[prost(string, tag = "3")]
-    pub remote_addr: String,
-}
+use grpc_echo::echo_service_client::EchoServiceClient;
+use grpc_echo::{EchoRequest, StreamEchoRequest};
 
 async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
     let mut use_tls = false;
@@ -559,20 +539,13 @@ async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
     }
 
     let channel = connect_grpc_channel(addr, use_tls).await?;
-
-    let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready()
-        .await
-        .map_err(|e| format!("gRPC echo not ready: {e}"))?;
+    let mut client = EchoServiceClient::new(channel);
 
     let request = tonic::Request::new(EchoRequest {
         ping: ping_text.clone(),
     });
-    let codec = tonic::codec::ProstCodec::<EchoRequest, EchoResponse>::new();
-    let path =
-        tonic::codegen::http::uri::PathAndQuery::from_static("/grpc_echo.v1.EchoService/Echo");
 
-    let resp = tokio::time::timeout(Duration::from_secs(15), grpc.unary(request, path, codec))
+    let resp = tokio::time::timeout(Duration::from_secs(15), client.echo(request))
         .await
         .map_err(|_| "gRPC Echo timeout".to_string())?
         .map_err(|e| {
@@ -585,7 +558,6 @@ async fn run_grpc_echo(addr: &str, args: &[String]) -> Result<String, String> {
 
     let echo_resp = resp.into_inner();
 
-    // Validate: the echoed body must contain the ping text we sent.
     if !echo_resp.body.contains(&ping_text) {
         return Err(format!(
             "EchoService/Echo body mismatch: sent {:?}, got body={:?}",
@@ -631,24 +603,16 @@ async fn run_grpc_server_stream(addr: &str, args: &[String]) -> Result<String, S
     }
 
     let channel = connect_grpc_channel(addr, use_tls).await?;
-
-    let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready()
-        .await
-        .map_err(|e| format!("gRPC not ready: {e}"))?;
+    let mut client = EchoServiceClient::new(channel);
 
     let request = tonic::Request::new(StreamEchoRequest {
         ping: ping_text.clone(),
         count,
     });
-    let codec = tonic::codec::ProstCodec::<StreamEchoRequest, EchoResponse>::new();
-    let path = tonic::codegen::http::uri::PathAndQuery::from_static(
-        "/grpc_echo.v1.EchoService/ServerStreamEcho",
-    );
 
     let resp = tokio::time::timeout(
         Duration::from_secs(15),
-        grpc.server_streaming(request, path, codec),
+        client.server_stream_echo(request),
     )
     .await
     .map_err(|_| "gRPC ServerStreamEcho timeout".to_string())?
@@ -719,13 +683,8 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
     }
 
     let channel = connect_grpc_channel(addr, use_tls).await?;
+    let mut client = EchoServiceClient::new(channel);
 
-    let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready()
-        .await
-        .map_err(|e| format!("gRPC not ready: {e}"))?;
-
-    // Build the outbound stream
     let pings: Vec<EchoRequest> = (0..count)
         .map(|i| EchoRequest {
             ping: format!("{}:{}", ping_text, i),
@@ -734,14 +693,10 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
     let outbound = futures_util::stream::iter(pings);
 
     let request = tonic::Request::new(outbound);
-    let codec = tonic::codec::ProstCodec::<EchoRequest, EchoResponse>::new();
-    let path = tonic::codegen::http::uri::PathAndQuery::from_static(
-        "/grpc_echo.v1.EchoService/BidiStreamEcho",
-    );
 
     let resp = tokio::time::timeout(
         Duration::from_secs(15),
-        grpc.streaming(request, path, codec),
+        client.bidi_stream_echo(request),
     )
     .await
     .map_err(|_| "gRPC BidiStreamEcho timeout".to_string())?
