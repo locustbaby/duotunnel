@@ -15,8 +15,21 @@ Last checked: 2026-04-18
   - `if let` guards in `server/hot_reload.rs` (notify event filter).
 - `bincode` path is obsolete — moved to `rkyv 0.8.15` in PR #25. The
   "Batch C: bincode" row below is now historical.
-- Remaining: Batch B (tonic/prost, notify, metrics-exporter-prometheus,
-  tokio-tungstenite, webpki-roots, socket2).
+- Batch B landed as a single branch (5 commits):
+  - `socket2 0.5 → 0.6`, `tokio-tungstenite 0.24 → 0.29`
+    (Message::Text now carries `Utf8Bytes`; updated ci-test-client).
+  - `metrics-exporter-prometheus 0.16 → 0.18` (API compatible).
+  - `notify 6.1 → 8.2` (cross-major; our usage in
+    `server/hot_reload.rs` stayed source-compatible).
+  - `webpki-roots 0.26 → 1.0` (cross-major; `TLS_SERVER_ROOTS` still
+    iterable; all three crate declarations moved together).
+  - `tonic 0.12 → 0.14`, `prost 0.13 → 0.14`, `tonic-health 0.14`:
+    replaced 250 lines of hand-written gRPC glue in ci-helpers with
+    `tonic-prost-build` + `tonic::include_proto!`, since tonic 0.14
+    made `tonic::body::BoxBody` private and moved prost integration
+    into `tonic-prost` / `tonic-prost-build`.
+- Only Batch C item remaining is `sha2 0.10 → 0.11`, which the notes
+  already recommended deferring.
 
 ## Scope
 
