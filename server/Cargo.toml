@@ -39,7 +39,7 @@ http-body-util = "0.1"
 async-trait = "0.1"
 tokio-rustls = "0.26"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 arc-swap = "1.9"
 notify = { version = "6.1", features = ["macos_kqueue"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
