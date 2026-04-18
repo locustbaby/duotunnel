@@ -42,14 +42,12 @@ async fn watch_loop(
     let (tx, mut rx) = mpsc::channel::<()>(1);
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                use notify::EventKind::*;
-                match event.kind {
-                    Create(_) | Modify(_) | Remove(_) => {
-                        let _ = tx.try_send(());
-                    }
-                    _ => {}
+            use notify::EventKind::*;
+            match res {
+                Ok(event) if let Create(_) | Modify(_) | Remove(_) = event.kind => {
+                    let _ = tx.try_send(());
                 }
+                _ => {}
             }
         },
         notify::Config::default(),

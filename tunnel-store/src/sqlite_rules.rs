@@ -184,27 +184,26 @@ impl RuleStore for SqliteRuleStore {
                         let address: Option<String> = row.try_get("address").ok();
                         if let Some(addr) = address {
                             let resolve: i64 = row.get("resolve");
-                            if let Some(upstream) = last_group.upstreams.iter_mut().find(|u| {
-                                let upstream_name: String = row.get("upstream_name");
-                                u.name == upstream_name
-                            }) {
-                                upstream.servers.push(UpstreamServer {
-                                    address: addr,
-                                    resolve: resolve != 0,
-                                });
-                            } else {
-                                let upstream_name: String = row.get("upstream_name");
-                                let lb_policy: String = row.get("lb_policy");
-                                let resolve: i64 = row.get("resolve");
-                                last_group.upstreams.push(ClientUpstream {
-                                    name: upstream_name,
-                                    lb_policy,
-                                    servers: vec![UpstreamServer {
-                                        address: addr,
-                                        resolve: resolve != 0,
-                                    }],
-                                });
-                            }
+                            let upstream_name: String = row.get("upstream_name");
+                            let upstream = match last_group
+                                .upstreams
+                                .iter_mut()
+                                .position(|u| u.name == upstream_name)
+                            {
+                                Some(idx) => &mut last_group.upstreams[idx],
+                                None => {
+                                    let lb_policy: String = row.get("lb_policy");
+                                    last_group.upstreams.push_mut(ClientUpstream {
+                                        name: upstream_name,
+                                        lb_policy,
+                                        servers: Vec::new(),
+                                    })
+                                }
+                            };
+                            upstream.servers.push(UpstreamServer {
+                                address: addr,
+                                resolve: resolve != 0,
+                            });
                             let _ = uid;
                         }
                     }
@@ -261,19 +260,18 @@ impl RuleStore for SqliteRuleStore {
                 }
             }
             let lb_policy: String = row.get("lb_policy");
-            let mut servers = Vec::new();
+            let def = egress_upstreams.push_mut(EgressUpstreamDef {
+                name,
+                lb_policy,
+                servers: Vec::new(),
+            });
             if let Some(addr) = address {
                 let resolve: i64 = row.get("resolve");
-                servers.push(UpstreamServer {
+                def.servers.push(UpstreamServer {
                     address: addr,
                     resolve: resolve != 0,
                 });
             }
-            egress_upstreams.push(EgressUpstreamDef {
-                name,
-                lb_policy,
-                servers,
-            });
         }
         let vhost_rows =
             sqlx::query("SELECT match_host, action_upstream FROM egress_vhost_rules ORDER BY id")

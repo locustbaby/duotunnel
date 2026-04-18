@@ -17,7 +17,7 @@ tunnel-lib = { path = "../tunnel-lib" }
 tunnel-store = { path = "../tunnel-store", features = ["server-config"] }
 subtle = "2"
 hex = "0.4"
-tokio = { version = "1.49", features = ["full", "io-util"] }
+tokio = { version = "1.52", features = ["full", "io-util"] }
 tokio-util = "0.7"
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
@@ -27,12 +27,12 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 dashmap = "6.1"
 bytes = "1.9"
 httparse = "1.9"
 rcgen = "0.14"
-hyper = { version = "1.8", features = ["client", "server", "http1", "http2"] }
+hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper-rustls = { version = "0.27", features = ["http2", "aws-lc-rs"] }
 http-body-util = "0.1"
@@ -40,7 +40,7 @@ async-trait = "0.1"
 tokio-rustls = "0.26"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
-arc-swap = "1.7"
+arc-swap = "1.9"
 notify = { version = "6.1", features = ["macos_kqueue"] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 parking_lot = "0.12"
