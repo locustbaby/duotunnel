@@ -23,6 +23,7 @@ path = "src/ci_test_client.rs"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
+protox = "0.9"
 
 [dependencies]
 tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "tls-webpki-roots"] }
