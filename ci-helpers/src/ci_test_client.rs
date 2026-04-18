@@ -417,7 +417,7 @@ async fn run_ws(url: &str, args: &[String]) -> Result<String, String> {
     .map_err(|_| format!("WebSocket connect timeout to {url}"))?
     .map_err(|e| format!("WebSocket connect error: {e}"))?;
 
-    ws.send(Message::Text(message.clone()))
+    ws.send(Message::Text(message.clone().into()))
         .await
         .map_err(|e| format!("ws send error: {e}"))?;
 
