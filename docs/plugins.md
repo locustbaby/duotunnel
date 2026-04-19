@@ -81,13 +81,14 @@
 
 ## 4. 插件化架构
 
-### 4.1 选型:Rust trait + cargo feature
+### 4.1 选型:Rust trait + 运行时注册表
 
-拒绝动态加载(dlopen、WASM runtime、external plugin registry)。理由:
+**所有 plugin 都编进二进制**,启动时由配置决定"用哪几个、什么顺序"。不走 cargo feature 做编译期裁剪 —— 那是 embedded / 多形态部署才值得引入的复杂度,本仓不需要。
 
-- 本仓编译期就知道要哪些 plugin。
-- 不需要热加载、不需要跨语言。
-- feature gate 天然帮我们做"不用就不编"。
+- 抽象形态:`Vec<Arc<dyn IngressProtocolHandler>>` 这类运行时注册表。
+- 启动流程:读配置 → 按名字从注册表里取 plugin → 组装 `IngressStack` / `EgressStack`。
+- 好处:加新 plugin 只改配置,不重新编译;测试可以替换任何一个 plugin;灵活扩展。
+- 拒绝动态加载(dlopen / WASM / 外部 plugin registry),本仓不需要热加载也不需要跨语言。
 - 已有 6 个 trait(`BackgroundService` / `ConfigSource` / ...)证明这个模式在本仓可行。
 
 ### 4.2 新增的三类扩展点
@@ -128,14 +129,14 @@ pub trait AdmissionController: Send + Sync + 'static {
 
 现有代码映射为插件:
 
-| 现有代码 | 插件名 | 默认启用? |
+| 现有代码 | 插件名 | 默认组装? |
 |---|---|---|
-| `H1Handler`(字节透传)—— 由 `handlers/http.rs:335-389` 抽出 | `ingress-h1` | 是(CORE 保底之一) |
-| `PassthroughTcpHandler`—— `handlers/tcp.rs` 抽出 | `ingress-tcp` | 是(CORE 保底之一) |
+| `H1Handler`(字节透传)—— 由 `handlers/http.rs:335-389` 抽出 | `ingress-h1` | 是 |
+| `PassthroughTcpHandler`—— `handlers/tcp.rs` 抽出 | `ingress-tcp` | 是 |
 | `TlsHandler`(SNI + 解密 + H2/H1 分发)—— `handlers/http.rs:104-184` | `ingress-tls` | 是 |
 | `H2cHandler`(明文 H2 升级)—— `handlers/http.rs:185-334` | `ingress-h2c` | 是 |
-| `VhostResolver`—— `transport/listener.rs:63-150` | `route-vhost` | 是;关掉退化为 `StaticPortResolver`(CORE 保底) |
-| `PrometheusSink`—— `server/metrics.rs` + 内联调用 | `metrics-prometheus` | 是;关掉用 no-op sink |
+| `VhostResolver`—— `transport/listener.rs:63-150` | `route-vhost` | 是;配置里去掉时退化为 `StaticPortResolver`(CORE 保底) |
+| `PrometheusSink`—— `server/metrics.rs` + 内联调用 | `metrics-prometheus` | 是;配置里去掉时用 no-op sink |
 | `TokenAdmission`—— 目前的 AuthStore 套进来 | `admission-token` | 是 |
 
 #### B. Egress(client 侧)
@@ -159,20 +160,20 @@ pub trait Resolver: Send + Sync + 'static {
 
 现有代码映射为插件:
 
-| 现有代码 | 插件名 | 默认启用? |
+| 现有代码 | 插件名 | 默认组装? |
 |---|---|---|
-| RR LB(`proxy/upstream.rs:13-24`) | `lb-round-robin` | 是(CORE 保底) |
-| Least-inflight LB(`conn_pool.rs:45-49` 的算法可以复用) | `lb-least-inflight` | 否 |
-| Weighted LB(将来) | `lb-weighted` | 否 |
-| `TcpDialer`(`proxy/tcp.rs` TcpPeer) | `egress-tcp` | 是(CORE 保底) |
+| RR LB(`proxy/upstream.rs:13-24`) | `lb-round-robin` | 是 |
+| Least-inflight LB(`conn_pool.rs:45-49` 的算法可以复用) | `lb-least-inflight` | 否(已编入,按配置启用) |
+| Weighted LB(将来) | `lb-weighted` | 否(已编入,按配置启用) |
+| `TcpDialer`(`proxy/tcp.rs` TcpPeer) | `egress-tcp` | 是 |
 | `TlsTcpDialer`(`proxy/tcp.rs` 的 TLS 分支) | `egress-tls` | 是 |
 | `H1Dialer`(`proxy/http.rs` HttpPeer) | `egress-h1` | 是 |
 | `H2Dialer`(`proxy/h2.rs` H2Peer) | `egress-h2` | 是 |
-| `MitmH2Dialer`(`client/app.rs:145-151`) | `egress-mitm-h2` | 否 |
+| `MitmH2Dialer`(`client/app.rs:145-151`) | `egress-mitm-h2` | 否(已编入,按配置启用) |
 | H2SenderCache(`proxy/h2_proxy.rs:23-91`) | `egress-h2-mux` | 是 |
 | `SystemResolver`(std::net) | CORE | 是 |
 | `CachedResolver`(`client/app.rs:47-77` 的 30s TTL 缓存) | `resolver-cached` | 是 |
-| `HostsFileResolver` / DoH 等 | `resolver-xxx` | 否 |
+| `HostsFileResolver` / DoH 等 | `resolver-xxx` | 否(已编入,按配置启用) |
 
 #### C. 控制面已经是 trait 的不动
 
@@ -184,26 +185,25 @@ pub trait Resolver: Send + Sync + 'static {
 tunnel-lib/
   src/
     plugin/
-      mod.rs            ← 新:trait 定义聚合
-      registry.rs       ← 新:组装 & (可选)热重载
-    ...
+      mod.rs            ← 新:trait 定义聚合(IngressProtocolHandler 等)
+      registry.rs       ← 新:按 name → Arc<dyn _> 的注册表
 
 server/
-  plugins/              ← 新目录
-    tls/                ← 可选 ingress-tls
-    h2c/                ← 可选 ingress-h2c
-    vhost/              ← 可选 route-vhost
-    prometheus/         ← 可选 metrics-prometheus
+  plugins/              ← 新目录,每个 plugin 独立一个 module
+    tls/                ← ingress-tls
+    h2c/                ← ingress-h2c
+    vhost/              ← route-vhost
+    prometheus/         ← metrics-prometheus
 
 client/
   plugins/
-    lb_rr/              ← CORE(保底)
-    lb_least/           ← 可选
-    h2_mux/             ← 可选 egress-h2-mux
-    dns_cached/         ← 可选
+    lb_rr/
+    lb_least/
+    h2_mux/             ← egress-h2-mux
+    dns_cached/
 ```
 
-每个可选 plugin 一个 cargo feature flag。默认启用"常用组合"(生产部署的集合),`--no-default-features` 跑最小 CORE。
+所有 plugin 模块都**无条件编进二进制**,不加 cargo feature。启动时由配置决定启用哪些。
 
 ### 4.4 配置驱动组装(草案)
 
@@ -229,16 +229,15 @@ egress_plugins:
   - resolver-cached
 ```
 
-未在 feature 中编进来的 plugin,在配置里引用即报 `unknown plugin "xxx"` 启动错误;不静默忽略。
+配置里引用了注册表中不存在的 plugin 名 → 启动时**报错** `unknown plugin "xxx"`,不静默忽略。
 
 ## 5. 验证标准
 
-1. `cargo build --no-default-features -p server -p client` 编译通过。
-2. 关掉所有 OPTIONAL 后,server 能启动、接受 1 个纯 TCP listener、把流量正确代理到 client 的 upstream(端到端 E2E)。
-3. 关掉 `egress-h2-mux` 后,client 依然能跑 H2 upstream(退化成每次新开 H2 连接)。
-4. 关掉 `admission-token` 后,启动时**明确报错** "no admission plugin installed" —— 不允许裸奔。
-5. 每个 plugin 有独立 integration test;CORE 有 smoke test。
-6. Criterion benchmark 对比 CORE-only vs full-stack 的吞吐,证明 plugin 抽象的额外开销 <1% 或有明确解释。
+1. 配置里只列 `[ingress-h1, ingress-tcp]` + `[egress-tcp]` 这组最小 plugin 时,server 能启动、接受 1 个纯 TCP listener、把流量正确代理到 client 的 upstream(端到端 E2E)。
+2. 配置里去掉 `egress-h2-mux` 后,client 依然能跑 H2 upstream(退化成每次新开 H2 连接)。
+3. 配置里没有任何 admission plugin 时,启动**明确报错** "no admission plugin installed" —— 不允许裸奔。
+4. 每个 plugin 有独立 integration test;CORE 有 smoke test。
+5. Criterion benchmark 对比"最小 plugin 集"vs"全量 plugin"的吞吐,证明注册表抽象(Arc + dyn dispatch)的额外开销 <1% 或有明确解释。
 
 ## 6. 实施节奏(建议后续 PR)
 
@@ -256,6 +255,7 @@ egress_plugins:
 ## 7. 非目标
 
 - 不做 WASM / dlopen / shared library 式动态加载。
+- 不走 cargo feature 做编译期裁剪 —— 所有 plugin 都编进二进制,运行时组装就够用。
 - 不引入 libp2p 风格的 plugin registry / handshake。
 - 不重构已经是 trait 的部分(`ConfigSource` 等)。
 - 不改 wire protocol。
