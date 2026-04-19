@@ -1,36 +1,80 @@
-# Ingress / Egress 核心 vs 插件化设计
+# Ingress / Egress 插件化设计(v2)
 
-> 状态:**设计稿**(仅文档,未实施)。落地拆分到后续独立 PR。
+> 状态:**进行中** — PR ① 已合入(trait 骨架),PR ②–⑥ 待实施。
 > 最后更新:2026-04-19
+> v2 变更:参考 Cloudflare Pingora 架构重新设计,改"probe 竞争"为"phase 串行",拆 PluginCtx 为 Server/Egress 两个上下文,补全 phase 短路语义。
+>
+> **实施进度**
+> | PR | 内容 | 状态 |
+> |---|---|---|
+> | ① | `tunnel-lib/src/plugin/` trait 骨架(9 个文件,7 个 smoke tests) | ✅ 已合入 |
+> | ② | Ingress handler 插件化 + `IngressDispatcher`(影子迁移) | 🔜 待实施 |
+> | ③ | `RouteResolver` 插件化(VhostResolver + StaticPortResolver) | 🔜 待实施 |
+> | ④ | `MetricsSink` 插件化(PrometheusSink + NoopSink)+ 删 legacy 分支 | 🔜 待实施 |
+> | ⑤ | Egress 侧插件化(LoadBalancer + UpstreamDialer + Resolver) | 🔜 待实施 |
+> | ⑥ | 配置层接入 `ingress_plugins`/`egress_plugins` + 最终清理 | 🔜 待实施 |
+
+---
 
 ## 1. 动机
 
-目前 `server/handlers/{http,tcp,quic}.rs` 与 `client/app.rs` **直接 import 具体符号**来拼装功能:
+目前 `server/handlers/{http,tcp,quic}.rs` 与 `client/app.rs` **直接 import 具体符号**拼装功能。入口文件每一行 `use` 都把自己绑死到一个具体实现,编译时就定死。
 
-```rust
-// server/handlers/http.rs 开头 —— 这就是今天的现实
-use crate::{metrics, ServerState};
-use tunnel_lib::extract_host_from_http;
-use tunnel_lib::proxy;
-use tunnel_lib::RouteTarget;
-```
+后果:
 
-handler 直接 call `metrics::open_bi_begin()`、直接访问 `ServerState::routing` 的具体字段、直接调 `proxy::forward_h2_request` 这种自由函数。**调用方和被调用方的绑定发生在 `use` 这一行**,编译时就定死。
+1. **改动半径大**:改一个 TLS 逻辑要碰 4 个 handler;改指标名要改 4 处;改 vhost 查找要改 `main.rs` + `handlers/http.rs` + `listener.rs`。
+2. **新增能力要动入口**:加协议 / LB / 鉴权 → 必须改主干文件,冲突概率高。
+3. **测试要起真家伙**:依赖是具体 struct,单测时只能起真 TLS / 真 QUIC / 真 registry。
+4. **依赖升级牵一发动全身**:PR #27 升 tonic 时 250 行胶水全重写,根源就是上下游都用具体类型握手。
 
-后果(按影响程度排序):
-
-1. **改动半径大**:改个 TLS 逻辑要碰 `handlers/http.rs`;改个指标名要碰 4 个 handler;改个 vhost 查找要碰 `main.rs` + `handlers/http.rs` + `listener.rs`。"谁影响谁"没法一眼看出。
-2. **新增能力要动入口**:加一种协议、一种 LB、一种鉴权 → 必须改主干文件,冲突概率高。
-3. **测试要起真家伙**:handler 里的依赖是具体 struct,测试时只能起真 TLS、真 QUIC、真 registry。
-4. **依赖升级牵一发动全身**:PR #27 升 tonic 0.14 时,250 行手写胶水全重写,原因就是上下游都用**具体类型**相互握手。
-
-目标:**把调用依赖从"具体符号"换成"trait 方法"**。入口模块只认抽象接口,具体实现通过注册表在运行时注入。所谓"plugin"只是这个思路的自然产物 —— 每个具体实现就是一个 plugin。
+目标:**把调用依赖从"具体符号"换成"trait 方法"**。入口只认抽象,具体实现通过注册表在运行时注入。
 
 > 本文不谈 cargo feature 裁剪、不谈动态加载、不谈跨语言。只谈**代码内部模块之间的调用依赖怎么从硬编码换成 trait 依赖**。
 
-## 2. 能力分类(基于代码事实)
+---
 
-### 2.1 Ingress(server 侧)
+## 2. 从 Pingora 学到的核心设计原则
+
+Pingora (`pingora-proxy`) 是本设计的主要参照。其关键设计决策值得直接采纳:
+
+### 2.1 Phase 串行模型,而非 probe 竞争
+
+Pingora 定义 ~15 个固定 phase(early_request_filter → request_filter → upstream_peer → upstream_response_filter → response_filter → logging …),每个 phase 挂若干 handler **串行执行**,前一个 phase 的输出是后一个的输入。协议识别在最底层(TLS/ALPN/H2 negotiation)完成,上层 handler 收到的已经是已知协议的 session。
+
+**v1 设计的问题**:让多个 `IngressProtocolHandler` 竞争 `probe()`,第一个 `Matches` 拿走连接。这会引入:
+- 注册顺序依赖(先注册的先匹配)
+- `NeedMore` 循环让所有 handler 重跑,成本随 handler 数量线性增长
+- 协议识别逻辑散落在各 plugin 里,无法集中优化
+
+**v2 做法**:协议嗅探提升为独立 phase,输出 `ProtocolHint`;后续 handler 按 hint 精确 dispatch,不再竞争。
+
+### 2.2 双层扩展,职责分离
+
+Pingora 有两层扩展点:
+- `ProxyHttp` trait:服务级,一个 proxy 服务一个实现,控制整体路由/鉴权/转发策略
+- `HttpModule` trait:连接级,可组合、有优先级,每 connection 独立 ctx
+
+**v2 做法**:对应拆成 `TunnelService` trait(服务级策略,类比 `ProxyHttp`)+ `ConnectionModule` trait(横切关注点,类比 `HttpModule`)。
+
+### 2.3 Phase 短路语义
+
+Pingora 的 `request_filter` 返回 `Result<bool>`,`true` = 短路并直接向 downstream 发响应。每个 phase 都能早退。
+
+**v2 做法**:每个 phase 返回 `PhaseResult` 枚举,支持 `Continue` / `Respond(Response)` / `Reject(status, body)` 三种语义。
+
+### 2.4 Server ctx / Egress ctx 分离
+
+Pingora 的 `ProxyHttp::CTX` 是 per-request 独立 struct,服务端和 egress 完全隔离。
+
+**v1 的问题**:`PluginCtx` 把 `client_registry`(server 专用)和 `lb`/`dialer`(client 专用)全装进同一个 struct,server 侧 plugin 能看到 client 侧字段,没有最小权限。
+
+**v2 做法**:拆成 `ServerCtx` 和 `EgressCtx`,各自只暴露本侧需要的字段。
+
+---
+
+## 3. 能力分类(基于代码事实)
+
+### 3.1 Ingress(server 侧)
 
 | 类别 | 能力 | 位置 |
 |---|---|---|
@@ -38,7 +82,7 @@ handler 直接 call `metrics::open_bi_begin()`、直接访问 `ServerState::rout
 | **CORE** | 客户端组注册 / 选择(最少 inflight) | `server/registry.rs:99-177` |
 | **CORE** | bi 流打开 + 背压护栏 | `tunnel-lib/src/open_bi.rs:33-67` |
 | **CORE** | 字节级 relay(H1 / WS / TCP 直通) | `tunnel-lib/src/proxy/base.rs:8-55`、`engine/bridge.rs:61-93` |
-| **CORE** | 协议嗅探 *基础档*(TLS / H2 / H1 三分支) | `tunnel-lib/src/protocol/detect.rs:5-43`、`proxy/core.rs:77-103` |
+| **CORE** | 协议嗅探 **基础档**(TLS / H2 / H1 三分支) | `tunnel-lib/src/protocol/detect.rs:5-43`、`proxy/core.rs:77-103` |
 | OPTIONAL | TLS 终止 + SNI 提取 | `server/handlers/http.rs:104-184`、`protocol/detect.rs:45-98` |
 | OPTIONAL | Plaintext H2(h2c)服务 + authority rewrite | `server/handlers/http.rs:185-334` |
 | OPTIONAL | Vhost 路由(exact + wildcard) | `tunnel-lib/src/transport/listener.rs:63-150` |
@@ -48,7 +92,7 @@ handler 直接 call `metrics::open_bi_begin()`、直接访问 `ServerState::rout
 | OPTIONAL | Overload / slow-path | `tunnel-lib/src/overload.rs`、`open_bi.rs` |
 | OPTIONAL | Token 热吊销广播 | `server/handlers/quic.rs:144-166` |
 
-### 2.2 Egress(client 侧 + `tunnel-lib/src/proxy/`)
+### 3.2 Egress(client 侧)
 
 | 类别 | 能力 | 位置 |
 |---|---|---|
@@ -62,11 +106,11 @@ handler 直接 call `metrics::open_bi_begin()`、直接访问 `ServerState::rout
 | OPTIONAL | H2 sender cache(upstream H2 多路复用) | `tunnel-lib/src/proxy/h2_proxy.rs:23-91` |
 | OPTIONAL | TLS 配置池 + system roots | `tunnel-lib/src/proxy/tcp.rs:75-87` |
 | OPTIONAL | egress vhost 规则(scheme / SNI) | `client/app.rs:100-210` |
-| OPTIONAL | 针对 opaque TLS 的 MITM H2 upstream | `client/app.rs:145-151`(inline impl) |
+| OPTIONAL | 针对 opaque TLS 的 MITM H2 upstream | `client/app.rs:145-151` |
 | OPTIONAL | TCP 参数调优(NODELAY / keepalive / buffer) | `tunnel-lib/src/transport/tcp_params.rs` |
-| CROSS | Timeouts(open_stream / login / connect / resolve) | `client/main.rs:137,266,354,383`、`client/connect.rs:55-84` |
+| CROSS | Timeouts | `client/main.rs:137,266,354,383`、`client/connect.rs:55-84` |
 
-### 2.3 已经是插件形态的抽象(直接复用,不另起炉灶)
+### 3.3 已经是插件形态的抽象(直接复用,不另起炉灶)
 
 | Trait | 位置 | 已有实现 |
 |---|---|---|
@@ -78,135 +122,242 @@ handler 直接 call `metrics::open_bi_begin()`、直接访问 `ServerState::rout
 | `UpstreamPeer` | `tunnel-lib/src/proxy/peers.rs:29` | Tcp / Http / H2 / Dyn(MitmH2) |
 | `ProtocolDriver`(async) | `tunnel-lib/src/protocol/driver/mod.rs:16` | Http1Driver |
 
-## 3. 最小可跑隧道(CORE 判定)
+---
 
-一条 TCP over QUIC 隧道能跑起来**真正必需**的只有:
+## 4. 调用依赖解耦设计(v2)
 
-1. **Tunnel control plane**:`Login` / `LoginResp` / `Ping` —— 不需要 vhost、不需要 TLS、不需要认证插件,就是 token 比对。
-2. **QUIC accept + bi-stream open**:`server/handlers/quic.rs` + `tunnel-lib/src/open_bi.rs`。
-3. **客户端注册 / 选择**:`server/registry.rs`(按 group_id 选一条活的客户端连接)。
-4. **双向字节 relay**:`tunnel-lib/src/engine/bridge.rs`。
-5. **RoutingInfo 传递**:`tunnel-lib/src/models/msg.rs`。
-6. **Egress 侧 TCP dial + relay**:`tunnel-lib/src/proxy/tcp.rs` 的 `TcpPeer`(不带 TLS / LB / pool)。
+### 4.0 核心命题:从"符号耦合"到"phase trait 耦合"
 
-其他一切 —— 包括 vhost、TLS、H2C、H2 多路复用、LB、DNS 缓存、Prometheus —— 都是"要不要"的问题,不该进 CORE。
-
-## 4. 调用依赖解耦设计
-
-### 4.0 核心命题:从"符号耦合"到"trait 耦合"
-
-一切设计从这一条出发。
-
-**今天(AS-IS)—— 入口模块对具体符号的依赖**:
+**今天(AS-IS)**:
 
 ```
 server/handlers/http.rs
-├── use crate::metrics               ← 具体 module(内含自由函数)
+├── use crate::metrics               ← 具体 module
 ├── use crate::ServerState           ← 具体 struct,字段硬访问
 ├── use tunnel_lib::RouteTarget      ← 具体 struct
-├── use tunnel_lib::proxy            ← 具体 module(含 forward_h2_request 等)
-└── use tunnel_lib::extract_host_from_http  ← 具体自由函数
-
-  调用 → metrics::open_bi_begin(...)
-  调用 → state.routing.load().get(...)
-  调用 → proxy::forward_h2_request(...)
+└── use tunnel_lib::proxy            ← 具体 module
 ```
 
-入口文件里每一行 `use` 都把自己绑死到一个具体实现上。换掉任何一个都要改 `use` 和所有调用点。
-
-**目标(TO-BE)—— 入口模块只依赖 trait**:
+**目标(TO-BE)**:
 
 ```
-server/handlers/http.rs (或任何入口)
-├── use tunnel_lib::plugin::{IngressProtocolHandler, RouteResolver, MetricsSink};
-└── 参数:stack: &IngressStack, ctx: &PluginCtx
+server/handlers/http.rs
+├── use tunnel_lib::plugin::{ServerCtx, PhaseResult}
+└── 参数: svc: &dyn TunnelService, ctx: &mut ServerCtx
 
-  调用 → ctx.metrics.incr("open_bi_total", ...)
-  调用 → ctx.route_resolver.resolve(port, &route_ctx).await
-  调用 → stack.accept(stream, ctx).await
+  调用 → svc.sniff_protocol(&peek_buf)   ← phase 1
+  调用 → svc.admission(&ctx).await        ← phase 2
+  调用 → svc.resolve_route(&ctx).await    ← phase 3
+  调用 → svc.open_tunnel(&ctx).await      ← phase 4
+  调用 → svc.logging(&ctx)               ← phase 5
 ```
 
-入口文件**不 import 任何具体实现**。`stack` 里装的是什么 handler、`ctx.metrics` 后面是 Prometheus 还是 no-op,入口不知道也不关心。换一个实现 = 换一个传进来的对象,入口代码一行不改。
+入口文件**不 import 任何具体实现**。
 
 ### 4.1 解耦的 4 条硬规则(review 时可检查)
 
 | # | 规则 | 违反的信号 |
 |---|---|---|
-| R1 | **入口模块(`handlers/*.rs` / `client/app.rs` / `client/proxy.rs`)禁止 `use` 任何具体 plugin 实现** | 出现 `use crate::plugins::tls::...` |
+| R1 | **入口模块(`handlers/*.rs` / `client/app.rs`)禁止 `use` 任何具体 plugin 实现** | 出现 `use crate::plugins::tls::...` |
 | R2 | **plugin 之间不互相 `use` 具体符号**,要协作就通过 trait | 出现 `use crate::plugins::vhost::VhostResolver` |
 | R3 | **基础设施层(`tunnel-lib`)禁止 `use` server / client 的 plugin** | 出现 `use server::plugins::...` |
-| R4 | **新增一个 plugin 不应该改任何入口模块**(入口只知道 trait,不知道 plugin 名) | 新 plugin 的 PR 里出现 handler 文件 diff |
-
-这 4 条是"是否真解耦"的硬检验。一旦通过,新增能力就只是新建一个 module + 在注册表里 `insert()` 一行。
+| R4 | **新增一个 plugin 不应该改任何入口模块** | 新 plugin 的 PR 里出现 handler 文件 diff |
 
 ### 4.2 选型:Rust trait + 运行时注册表
 
-**所有 plugin 都编进二进制**,启动时由配置决定"用哪几个、什么顺序"。不走 cargo feature 做编译期裁剪 —— 那是 embedded / 多形态部署才值得引入的复杂度,本仓不需要。
+**所有 plugin 都编进二进制**,启动时由配置决定"用哪几个、什么顺序"。不走 cargo feature 编译期裁剪。
 
-- 抽象形态:`Vec<Arc<dyn IngressProtocolHandler>>` 这类运行时注册表。
-- 启动流程:读配置 → 按名字从注册表里取 plugin → 组装 `IngressStack` / `EgressStack`。
-- 好处:加新 plugin 只改配置,不重新编译;测试可以替换任何一个 plugin;灵活扩展。
-- 拒绝动态加载(dlopen / WASM / 外部 plugin registry),本仓不需要热加载也不需要跨语言。
-- 已有 6 个 trait(`BackgroundService` / `ConfigSource` / ...)证明这个模式在本仓可行。
+- 服务级策略:`dyn TunnelService`(类比 Pingora `ProxyHttp`)
+- 横切关注点:`Vec<Box<dyn ConnectionModule>>`(类比 Pingora `HttpModules`)
+- 注册表:`PluginRegistry` 按 name 映射 builder
 
-### 4.3 新增的三类扩展点
+### 4.3 Phase 模型(v2 核心)
 
-#### A. Ingress(server 侧)
+#### Server 侧 — 5 个 phase
+
+```
+TCP 连接
+  │
+  ▼  Phase 1: ProtocolSniff
+  │  输入:peek_buf(最多 256 字节)
+  │  输出:ProtocolHint { kind, sni, h2_preface, ... }
+  │  实现:tunnel-lib/protocol/detect.rs(CORE,不抽象)
+  │
+  ▼  Phase 2: Admission
+  │  输入:AdmissionCtx { peer_addr, hint, token }
+  │  输出:PhaseResult::Continue | Reject(status, body)
+  │  plugin:admission-token(默认)/ admission-jwt / admission-noop
+  │
+  ▼  Phase 3: RouteResolve
+  │  输入:RouteCtx { port, hint, peer_addr }
+  │  输出:PhaseResult::Continue(Route) | Reject
+  │  plugin:route-vhost(默认) / route-static(CORE 保底)
+  │
+  ▼  Phase 4: TunnelOpen
+  │  输入:Route + ProtocolHint + TcpStream
+  │  输出:PhaseResult::Continue | Respond(early_resp) | Reject
+  │  plugin:ingress-tls / ingress-h2c / ingress-h1 / ingress-tcp
+  │  (按 hint.kind 精确 dispatch,无竞争)
+  │
+  ▼  Phase 5: Logging
+     输入:ServerCtx(含 phase 1-4 的结果和 timing)
+     输出:void
+     plugin:metrics-prometheus / metrics-noop
+```
+
+#### Egress 侧 — 4 个 phase
+
+```
+work stream 收到 RoutingInfo
+  │
+  ▼  Phase 1: TargetResolve
+  │  输入:RoutingInfo { host, port, scheme }
+  │  输出:Vec<Target>
+  │  plugin:resolver-cached(默认) / resolver-plain(CORE)
+  │
+  ▼  Phase 2: LoadBalance
+  │  输入:Vec<Target> + PickCtx
+  │  输出:&Target
+  │  plugin:lb-round-robin(默认) / lb-least-inflight
+  │
+  ▼  Phase 3: Dial
+  │  输入:&Target + DialCtx
+  │  输出:Connected(impl UpstreamPeer)
+  │  plugin:egress-tcp / egress-tls / egress-h1 / egress-h2 / egress-mitm-h2
+  │  (按 Target.scheme 精确 dispatch)
+  │
+  ▼  Phase 4: Logging
+     输入:EgressCtx(含 timing + 错误)
+     输出:void
+     plugin:metrics-prometheus / metrics-noop
+```
+
+### 4.4 Trait 定义
+
+#### 4.4.1 服务级 trait(类比 Pingora `ProxyHttp`)
 
 ```rust
+// tunnel-lib/src/plugin/service.rs
+
+/// 每个 TunnelService 实现对应一类服务部署(如 server 侧 / client 侧)。
+/// 框架按固定 phase 顺序调用,实现可以选择性 override。
 #[async_trait]
-pub trait IngressProtocolHandler: Send + Sync + 'static {
-    /// 仅看首批字节决定这条连接归不归自己管
-    fn probe(&self, first_bytes: &[u8]) -> ProbeResult;
-    async fn handle(&self, conn: TcpStream, route: Route) -> Result<()>;
-}
+pub trait TunnelService: Send + Sync + 'static {
+    type Ctx: Send + 'static;
 
-pub enum ProbeResult {
-    Matches,
-    NotMine,
-    NeedMore(usize), // 告诉上层再多读 N 字节
-}
+    fn new_ctx(&self) -> Self::Ctx;
 
-#[async_trait]
-pub trait RouteResolver: Send + Sync + 'static {
-    async fn resolve(&self, listener_port: u16, ctx: &RouteCtx) -> Option<Route>;
-}
+    // ── Server 侧 phases ─────────────────────────────────────────
 
-pub trait MetricsSink: Send + Sync + 'static {
-    fn incr(&self, name: &'static str, labels: &[(&str, &str)]);
-    fn observe(&self, name: &'static str, value: f64, labels: &[(&str, &str)]);
-}
+    /// Phase 2: 鉴权/准入。返回 Reject 则直接关闭连接,不再进入后续 phase。
+    async fn admission(
+        &self,
+        ctx: &mut Self::Ctx,
+        req: &AdmissionReq,
+    ) -> Result<PhaseResult>;
 
-#[async_trait]
-pub trait AdmissionController: Send + Sync + 'static {
-    async fn admit(&self, ctx: &AdmissionCtx) -> AdmitDecision;
+    /// Phase 3: 路由查找。返回 Reject 则发 RST 或 TCP close。
+    async fn resolve_route(
+        &self,
+        ctx: &mut Self::Ctx,
+        route_ctx: &RouteCtx,
+    ) -> Result<PhaseResult<Route>>;
+
+    /// Phase 5: 访问日志 / 指标,不允许失败传播。
+    fn logging(&self, ctx: &Self::Ctx, result: &PhaseOutcome);
 }
 ```
 
-组装形式:`IngressStack { handlers: Vec<Arc<dyn IngressProtocolHandler>>, ... }` —— 按 probe 顺序匹配,第一个 `Matches` 拿走连接。
-
-现有代码映射为插件:
-
-| 现有代码 | 插件名 | 默认组装? |
-|---|---|---|
-| `H1Handler`(字节透传)—— 由 `handlers/http.rs:335-389` 抽出 | `ingress-h1` | 是 |
-| `PassthroughTcpHandler`—— `handlers/tcp.rs` 抽出 | `ingress-tcp` | 是 |
-| `TlsHandler`(SNI + 解密 + H2/H1 分发)—— `handlers/http.rs:104-184` | `ingress-tls` | 是 |
-| `H2cHandler`(明文 H2 升级)—— `handlers/http.rs:185-334` | `ingress-h2c` | 是 |
-| `VhostResolver`—— `transport/listener.rs:63-150` | `route-vhost` | 是;配置里去掉时退化为 `StaticPortResolver`(CORE 保底) |
-| `PrometheusSink`—— `server/metrics.rs` + 内联调用 | `metrics-prometheus` | 是;配置里去掉时用 no-op sink |
-| `TokenAdmission`—— 目前的 AuthStore 套进来 | `admission-token` | 是 |
-
-#### B. Egress(client 侧)
+#### 4.4.2 连接级横切 trait(类比 Pingora `HttpModule`)
 
 ```rust
+// tunnel-lib/src/plugin/module.rs
+
+/// ConnectionModule 挂在 phase 边界上,做横切关注点。
+/// 每条连接独立一个 ctx,框架按 order() 串行执行。
+#[async_trait]
+pub trait ConnectionModule: Send + Sync + 'static {
+    type Ctx: Send + 'static;
+
+    fn order(&self) -> i32 { 0 }  // 数字越小越先执行
+
+    fn new_ctx(&self) -> Self::Ctx;
+
+    /// Phase 2 admission 之前执行(如 rate-limit、IP 黑名单)
+    async fn pre_admission(
+        &self,
+        ctx: &mut Self::Ctx,
+        req: &AdmissionReq,
+    ) -> Result<PhaseResult> {
+        Ok(PhaseResult::Continue)
+    }
+
+    /// Phase 5 logging 阶段执行(如写 access log、上报 metrics)
+    async fn on_complete(
+        &self,
+        ctx: &mut Self::Ctx,
+        outcome: &PhaseOutcome,
+    ) {}
+}
+```
+
+#### 4.4.3 Ingress Protocol Handler(v2 —— 无 probe 竞争)
+
+```rust
+// tunnel-lib/src/plugin/ingress.rs
+
+/// Phase 1 协议嗅探完成后,由框架按 ProtocolHint::kind 精确 dispatch 到对应 handler。
+/// handler 不再需要 probe(),因为框架已经确定协议。
+#[async_trait]
+pub trait IngressProtocolHandler: Send + Sync + 'static {
+    /// 声明自己处理哪种协议,框架用这个做 dispatch key。
+    fn protocol_kind(&self) -> ProtocolKind;
+
+    /// 处理连接。route 已由 Phase 3 确定,stream 是原始 TcpStream(尚未消耗)。
+    async fn handle(
+        &self,
+        stream: TcpStream,
+        route: Route,
+        ctx: &ServerCtx,
+    ) -> Result<()>;
+}
+
+/// 协议嗅探结果(Phase 1 输出),由 tunnel-lib/protocol/detect.rs 产出,不走 plugin。
+#[derive(Debug, Clone)]
+pub struct ProtocolHint {
+    pub kind: ProtocolKind,
+    pub sni: Option<String>,         // TLS ClientHello 里的 SNI
+    pub authority: Option<String>,   // HTTP/1.1 Host 或 H2 :authority
+    pub raw_preface: Bytes,          // peek 缓冲区原始字节,传给 handler 重放
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProtocolKind {
+    Tls,
+    H2c,       // HTTP/2 cleartext(PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n)
+    Http1,
+    Tcp,       // 无法识别 → 透传
+}
+```
+
+**为什么去掉 `probe()`**:
+
+协议识别是 `tunnel-lib/src/protocol/detect.rs` 里的一次性 peek(`peek_exact` + `detect_protocol_and_host`),不需要多轮迭代。Pingora 的做法是 ALPN 在 TLS 握手时由 rustls/openssl 给出,HTTP preface 在第一次 read 时给出。我们对应地让 `detect_protocol_and_host` 一次 peek 最多 256 字节输出 `ProtocolHint`,之后按 `ProtocolKind` 查注册表取 handler,O(1) dispatch,消除竞争。
+
+#### 4.4.4 Egress Traits
+
+```rust
+// tunnel-lib/src/plugin/egress.rs
+
 pub trait LoadBalancer: Send + Sync + 'static {
     fn pick<'a>(&self, targets: &'a [Target], ctx: &PickCtx) -> Option<&'a Target>;
 }
 
 #[async_trait]
 pub trait UpstreamDialer: Send + Sync + 'static {
-    fn matches(&self, target: &Target) -> bool;
+    /// 声明自己处理哪些 scheme,框架按 Target::scheme 精确 dispatch。
+    fn matches_scheme(&self, scheme: &UpstreamScheme) -> bool;
+
     async fn dial(&self, target: &Target, ctx: &DialCtx) -> Result<Connected>;
 }
 
@@ -216,582 +367,358 @@ pub trait Resolver: Send + Sync + 'static {
 }
 ```
 
-现有代码映射为插件:
+#### 4.4.5 MetricsSink(横切,不绑 phase)
 
-| 现有代码 | 插件名 | 默认组装? |
-|---|---|---|
-| RR LB(`proxy/upstream.rs:13-24`) | `lb-round-robin` | 是 |
-| Least-inflight LB(`conn_pool.rs:45-49` 的算法可以复用) | `lb-least-inflight` | 否(已编入,按配置启用) |
-| Weighted LB(将来) | `lb-weighted` | 否(已编入,按配置启用) |
-| `TcpDialer`(`proxy/tcp.rs` TcpPeer) | `egress-tcp` | 是 |
-| `TlsTcpDialer`(`proxy/tcp.rs` 的 TLS 分支) | `egress-tls` | 是 |
-| `H1Dialer`(`proxy/http.rs` HttpPeer) | `egress-h1` | 是 |
-| `H2Dialer`(`proxy/h2.rs` H2Peer) | `egress-h2` | 是 |
-| `MitmH2Dialer`(`client/app.rs:145-151`) | `egress-mitm-h2` | 否(已编入,按配置启用) |
-| H2SenderCache(`proxy/h2_proxy.rs:23-91`) | `egress-h2-mux` | 是 |
-| `SystemResolver`(std::net) | CORE | 是 |
-| `CachedResolver`(`client/app.rs:47-77` 的 30s TTL 缓存) | `resolver-cached` | 是 |
-| `HostsFileResolver` / DoH 等 | `resolver-xxx` | 否(已编入,按配置启用) |
+```rust
+// tunnel-lib/src/plugin/metrics.rs
 
-#### C. 控制面已经是 trait 的不动
-
-`ConfigSource` / `RuleStore` / `AuthStore` / `BackgroundService` / `UpstreamResolver` / `UpstreamPeer` / `ProtocolDriver` 继续沿用。新 plugin 挂到它们上面即可。
-
-### 4.4 crate 布局
-
-```
-tunnel-lib/
-  src/
-    plugin/
-      mod.rs            ← 新:trait 定义聚合(IngressProtocolHandler 等)
-      registry.rs       ← 新:按 name → Arc<dyn _> 的注册表
-
-server/
-  plugins/              ← 新目录,每个 plugin 独立一个 module
-    tls/                ← ingress-tls
-    h2c/                ← ingress-h2c
-    vhost/              ← route-vhost
-    prometheus/         ← metrics-prometheus
-
-client/
-  plugins/
-    lb_rr/
-    lb_least/
-    h2_mux/             ← egress-h2-mux
-    dns_cached/
+pub trait MetricsSink: Send + Sync + 'static {
+    fn incr(&self, name: &'static str, labels: &[(&str, &str)]);
+    fn observe(&self, name: &'static str, value: f64, labels: &[(&str, &str)]);
+}
 ```
 
-所有 plugin 模块都**无条件编进二进制**,不加 cargo feature。启动时由配置决定启用哪些。
+`MetricsSink` 注入进 `ServerCtx` / `EgressCtx`,由各 phase 调用。不再是 `ConnectionModule`(Pingora 把 metrics 放在 `logging` phase 回调里,我们也一样 —— `TunnelService::logging()` 里调 `ctx.metrics`。)
 
-### 4.5 配置驱动组装(草案)
+### 4.5 ServerCtx 与 EgressCtx(拆分 v1 的 PluginCtx)
 
-```yaml
-# server config
-ingress_plugins:
-  - ingress-h1            # CORE 保底
-  - ingress-tcp           # CORE 保底
-  - ingress-tls
-  - ingress-h2c
-  - route-vhost
-  - admission-token
-  - metrics-prometheus
+#### ServerCtx
 
-# client config
-egress_plugins:
-  - egress-tcp            # CORE 保底
-  - egress-tls
-  - egress-h1
-  - egress-h2
-  - egress-h2-mux
-  - lb-round-robin
-  - resolver-cached
+```rust
+pub struct ServerCtx {
+    // ── 抽象能力(trait objects,由注册表注入)──
+    pub metrics: Arc<dyn MetricsSink>,
+
+    // ── Phase 输出(随 phase 推进逐步填充)──
+    pub hint:    Option<ProtocolHint>,  // 填充于 Phase 1
+    pub route:   Option<Route>,         // 填充于 Phase 3
+    pub admitted: bool,                 // Phase 2 通过后置 true
+
+    // ── 不值得抽象的共享只读配置 ──
+    pub tcp_params: Arc<TcpParams>,
+    pub overload:   OverloadLimits,
+    pub timeouts:   Timeouts,
+    pub peer_addr:  SocketAddr,
+
+    // ── Timing(供 logging phase 使用)──
+    pub timing: PhaseTiming,
+}
 ```
 
-配置里引用了注册表中不存在的 plugin 名 → 启动时**报错** `unknown plugin "xxx"`,不静默忽略。
+#### EgressCtx
 
-### 4.6 具体怎么抽象 —— 从现在的代码里拆出来
+```rust
+pub struct EgressCtx {
+    // ── 抽象能力 ──
+    pub metrics: Arc<dyn MetricsSink>,
 
-"抽象"不是空话 —— 它落到代码上就是 **3 个具体动作**:定义 trait、搬家实现、把调用点换成注册表查找。下面把每个动作展开。
+    // ── Phase 输出 ──
+    pub resolved: Vec<SocketAddr>,      // Phase 1
+    pub selected: Option<Target>,       // Phase 2
+    pub connected: Option<ConnectInfo>, // Phase 3
 
-#### 4.6.1 新 trait 与现有 trait 的分工(避免叠床架屋)
+    // ── 只读配置 ──
+    pub tcp_params: Arc<TcpParams>,
+    pub timeouts:   Timeouts,
 
-现有 6 个 trait 已经覆盖了**控制面 + 上游 peer 抽象**,新 trait 只补"入口调度"和"横切关注点"这两块空白:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Server side                                                  │
-│                                                              │
-│  TcpListener 收到连接                                         │
-│    │                                                         │
-│    ▼                                                         │
-│  ┌─────────────────┐   new ── 入口调度(Ingress)              │
-│  │ IngressStack    │   替换 handlers/http.rs:49-95 的大 if/else │
-│  │  .handlers[]    │                                         │
-│  └────┬────────────┘                                         │
-│       │ probe() 命中的 IngressProtocolHandler                 │
-│       ▼                                                      │
-│  ┌─────────────────┐   new ── 路由查找                        │
-│  │ RouteResolver   │   替换 main.rs:453-485 + VhostRouter     │
-│  └────┬────────────┘                                         │
-│       │ Route { client_group, proxy_name }                   │
-│       ▼                                                      │
-│  ┌─────────────────┐   existing                              │
-│  │ ClientRegistry  │   server/registry.rs:99-177 不动         │
-│  └────┬────────────┘                                         │
-│       │ quinn::Connection                                    │
-│       ▼ open_bi + send_routing_info                          │
-│     隧道                                                      │
-│                                                              │
-│  横切:MetricsSink(new) + AdmissionController(new) 从入口     │
-│        注入,贯穿到所有 handler                                │
-└──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│ Client side                                                  │
-│                                                              │
-│  work stream 收到 RoutingInfo                                 │
-│    │                                                         │
-│    ▼                                                         │
-│  ┌─────────────────┐   existing                              │
-│  │ UpstreamResolver│   ClientApp 不动,但内部实现替换          │
-│  └────┬────────────┘                                         │
-│       │ Target                                               │
-│       ▼                                                      │
-│  ┌─────────────────┐   new ── LB                             │
-│  │ LoadBalancer    │   替换 proxy/upstream.rs:13-24 硬编码 RR │
-│  └────┬────────────┘                                         │
-│       │ &Target                                              │
-│       ▼                                                      │
-│  ┌─────────────────┐   new ── DNS                            │
-│  │ Resolver        │   替换 client/app.rs:47-77 内联缓存      │
-│  └────┬────────────┘                                         │
-│       │ Vec<SocketAddr>                                      │
-│       ▼                                                      │
-│  ┌─────────────────┐   new ── 拨号                           │
-│  │ UpstreamDialer  │   替换 proxy/{tcp,http,h2}.rs 的         │
-│  └────┬────────────┘   connect_inner + app.rs 里的协议分派    │
-│       │ Connected                                            │
-│       ▼                                                      │
-│  ┌─────────────────┐   existing                              │
-│  │ UpstreamPeer    │   Dialer 返回的东西实现这个,不动 trait   │
-│  └─────────────────┘                                         │
-└──────────────────────────────────────────────────────────────┘
+    // ── Timing ──
+    pub timing: PhaseTiming,
+}
 ```
 
 **分工规则**:
-- `UpstreamResolver` / `UpstreamPeer` / `ProtocolDriver` 保留,作为 **plugin 产物的统一出口类型**。新 `UpstreamDialer::dial()` 返回的东西最终要满足 `UpstreamPeer`。
-- 新 trait 只做 **"哪条路 / 选哪个目标 / 怎么去"** 的分派,不替代 peer 本身。
-- 不搞平行世界:一个能力要么用新 trait,要么用老 trait,文档里明确规定,避免两套都写。
+- **有多种实现可能**的 → `Arc<dyn Trait>`(如 `MetricsSink`)。
+- **只有一种实现,或纯配置值** → 直接放 struct 字段(如 `TcpParams`、`Timeouts`)。
+- **server 专用**(如 `client_registry`) → 只在 `ServerCtx` 里,不进 `EgressCtx`。
+- **egress 专用**(如 `lb`、`dialer`) → 只在 `EgressCtx` 里,不进 `ServerCtx`。
 
-#### 4.6.2 注册表的数据结构
+`ServerCtx` 构造在每条连接进来时;`EgressCtx` 构造在 work stream 收到 `RoutingInfo` 时。两者都不是全局单例。
+
+### 4.6 注册表数据结构
 
 ```rust
 // tunnel-lib/src/plugin/registry.rs
 
 pub struct PluginRegistry {
-    ingress_handlers: HashMap<&'static str, IngressBuilder>,
-    route_resolvers:  HashMap<&'static str, RouteBuilder>,
-    metrics_sinks:    HashMap<&'static str, MetricsBuilder>,
-    admissions:       HashMap<&'static str, AdmissionBuilder>,
-    lbs:              HashMap<&'static str, LbBuilder>,
-    dialers:          HashMap<&'static str, DialerBuilder>,
-    resolvers:        HashMap<&'static str, ResolverBuilder>,
+    ingress_handlers: HashMap<ProtocolKind, Arc<dyn IngressProtocolHandler>>,
+    admission_modules: Vec<Arc<dyn ConnectionModule>>,       // 按 order() 排序
+    route_resolvers:   HashMap<&'static str, RouteBuilder>,
+    metrics_sinks:     HashMap<&'static str, MetricsBuilder>,
+    lbs:               HashMap<&'static str, LbBuilder>,
+    dialers:           Vec<Arc<dyn UpstreamDialer>>,         // 按 scheme 匹配
+    resolvers:         HashMap<&'static str, ResolverBuilder>,
 }
 
-// 每个 Builder 是 "(plugin 配置 json) -> Arc<dyn Trait>"
-type IngressBuilder =
-    Box<dyn Fn(&PluginConfig, &PluginCtx) -> Result<Arc<dyn IngressProtocolHandler>> + Send + Sync>;
+type RouteBuilder =
+    Box<dyn Fn(&PluginConfig) -> Result<Arc<dyn RouteResolver>> + Send + Sync>;
 ```
 
-启动流程 (`server/main.rs` 里):
+注意 `ingress_handlers` 的 key 是 `ProtocolKind` 而不是字符串:dispatch 是 O(1) HashMap 查找,消除 v1 的 probe 循环。
+
+启动流程 (`server/main.rs`):
 
 ```rust
 let mut reg = PluginRegistry::new();
-plugins::register_builtin_ingress(&mut reg);  // 调 reg.ingress_handlers.insert("ingress-tls", Box::new(|cfg, ctx| ...));
-plugins::register_builtin_egress(&mut reg);
+server_plugins::register_builtin(&mut reg);
+egress_plugins::register_builtin(&mut reg);
 
-let stack = IngressStack::from_config(&reg, &config.ingress_plugins, &ctx)?;
-// config.ingress_plugins 是 Vec<{name, params}>
+let svc = Arc::new(DefaultTunnelService::from_registry(&reg, &config)?);
+// svc 里持有 Arc<dyn MetricsSink>、Arc<dyn RouteResolver>、
+// HashMap<ProtocolKind, Arc<dyn IngressProtocolHandler>> 等
 ```
 
-**关键点**:
-- plugin 的**配置 schema 由 plugin 自己声明**(plugin 自己的 `Deserialize` struct),注册表只负责把一段不透明的 YAML 子树交给 builder。新增 plugin 不用改全局 config struct。
-- plugin 之间共享的东西走 `PluginCtx`(里面是 `Arc<TcpParams>`、`Arc<dyn MetricsSink>` 等),不用 `static`。
-- Plugin init 错误(如 TLS 证书文件不存在)→ 启动时直接 fail-fast;plugin 运行时错误(如单次 handle 失败)→ 返回 `Result`,上层记指标,连接关闭。
+### 4.7 配置驱动组装
 
-#### 4.6.3 AS-IS → TO-BE:以 `server/handlers/http.rs` 为例
+```yaml
+# server config
+ingress_plugins:
+  - kind: ingress-h1
+  - kind: ingress-tcp
+  - kind: ingress-tls
+  - kind: ingress-h2c
+route_plugin: route-vhost
+admission_plugin: admission-token
+metrics_plugin: metrics-prometheus
 
-**现在**(摘要,行号对照 `handlers/http.rs:49-95`):
-
-```rust
-pub async fn handle_http_connection(stream: TcpStream, state: Arc<ServerState>, port: u16) {
-    let first_byte = peek(&stream).await?;
-    if first_byte == 0x16 {
-        handle_tls_connection(stream, state, port).await  // -> line 104
-    } else if is_h2_preface(&peek_buf) {
-        handle_plaintext_h2_connection(stream, state, port).await  // -> line 185
-    } else {
-        handle_plaintext_h1_connection(stream, state, port).await  // -> line 335
-    }
-}
+# client config
+egress_dialers:
+  - egress-tcp
+  - egress-tls
+  - egress-h1
+  - egress-h2
+  - egress-h2-mux
+lb_plugin: lb-round-robin
+resolver_plugin: resolver-cached
 ```
 
-**抽完之后**:
+配置里引用注册表中不存在的 plugin 名 → 启动时 **fail-fast** `unknown plugin "xxx"`,不静默忽略。
 
-```rust
-// server/handlers/http.rs 变成这么简单
-pub async fn handle_http_connection(
-    stream: TcpStream,
-    stack: &IngressStack,
-    ctx: &PluginCtx,
-    port: u16,
-) -> Result<()> {
-    stack.accept(stream, port, ctx).await
-}
+### 4.8 一条连接的完整调用链(AS-IS vs TO-BE)
 
-// tunnel-lib/src/plugin/ingress.rs
-impl IngressStack {
-    pub async fn accept(&self, mut stream: TcpStream, port: u16, ctx: &PluginCtx) -> Result<()> {
-        let mut peek_buf = [0u8; 1024];
-        let mut needed = 1;
-        loop {
-            let n = peek_exact(&mut stream, &mut peek_buf[..needed]).await?;
-            for handler in &self.handlers {
-                match handler.probe(&peek_buf[..n]) {
-                    ProbeResult::Matches => {
-                        let route = self.resolver.resolve(port, &RouteCtx { ... }).await
-                            .ok_or_else(|| anyhow!("no route"))?;
-                        return handler.handle(stream, route, ctx).await;
-                    }
-                    ProbeResult::NotMine => continue,
-                    ProbeResult::NeedMore(want) => { needed = want; break; }
-                }
-            }
-        }
-    }
-}
-```
+#### AS-IS(HTTPS 入站连接)
 
-`handle_tls_connection` / `handle_plaintext_h2_connection` / `handle_plaintext_h1_connection` 被搬到 `server/plugins/{tls,h2c,h1}/` 各自的 module 里,各自实现 `IngressProtocolHandler`。`probe()` 分别认 `0x16` / H2 preface / 兜底 `NotMine`。
+| # | 位置 | 动作 | 依赖形式 |
+|---|---|---|---|
+| 1 | `handlers/http.rs` | accept TCP | `run_accept_worker`(具体函数) |
+| 2 | 同上 | `state.tcp_params.apply(&stream)` | `ServerState` 字段(具体 struct) |
+| 3 | `handle_http_connection` | peek 首字节判断 TLS/H2/H1 | 内联 `if first == 0x16` (硬编码) |
+| 4 | `handle_tls_connection` | 查 vhost | `state.routing.load().get(port)` + `VhostRouter::match_host`(具体) |
+| 5 | 同上 | 选 client | `state.registry.select_healthy(group)`(具体) |
+| 6 | 同上 | 记指标 | `metrics::open_bi_begin(...)`(具体自由函数) |
+| 7 | 同上 | 打开 QUIC stream | `open_bi_guarded(...)`(具体自由函数) |
+| 8 | 同上 | 发送 RoutingInfo | `send_routing_info(...)`(具体自由函数) |
+| 9 | 同上 | 双向 relay | `proxy::forward_h2_request(...)`(具体自由函数) |
 
-#### 4.6.4 迁移策略:怎么保证"行为等价"
+9 步,至少 7 个具体符号。
 
-PR ② 把 handler 搬家时,**并行保留旧路径 1 个版本**:
+#### TO-BE(同一条连接)
 
-1. 在 `ServerState` 加开关 `use_plugin_stack: bool`,默认 `false`。
-2. `handle_http_connection` 写成 `if state.use_plugin_stack { stack.accept(...) } else { legacy_dispatch(...) }`。
-3. 集成测试跑两遍(`use_plugin_stack=false` 和 `=true`),断言结果一致。
-4. 下一个 PR 翻默认值、再下一个删 legacy 分支。
+| # | 位置 | 动作 | 依赖形式 |
+|---|---|---|---|
+| 1 | `handlers/http.rs` | accept TCP | `run_accept_worker`(基础层工具,保留) |
+| 2 | 同上 | 应用 TCP 参数 | `ctx.tcp_params.apply(...)` (`ServerCtx` 字段) |
+| 3 | `IngressDispatcher::dispatch` | peek 256B → `detect_protocol_and_host` | CORE 函数,不抽象,一次调用 |
+| 4 | 同上 | 按 `hint.kind` 查注册表 → `TlsHandler` | `HashMap<ProtocolKind, Arc<dyn _>>` O(1) |
+| 5 | `svc.admission(&ctx, &req).await` | 鉴权 | `trait TunnelService::admission`(trait 方法) |
+| 6 | `svc.resolve_route(&ctx, &rctx).await` | 路由 | `trait TunnelService::resolve_route`(trait 方法) |
+| 7 | `TlsHandler::handle(stream, route, &ctx)` | TLS 终止 + 选 client + open bi + relay | plugin 内部,入口不感知 |
+| 8 | `svc.logging(&ctx, &outcome)` | 记指标 | `trait TunnelService::logging`(trait 方法) |
 
-这是标准的影子迁移,防止"重构的时候把协议细节搞丢了"。
+步骤 7 以后的逻辑(选 client、open_bi_guarded、send_routing_info、relay)仍是调具体基础层函数 —— **这没问题**,它们是无状态工具,不需要抽象。
 
-#### 4.6.5 `probe()` 的协议细节
+> 注意:#8 `send_routing_info`、`engine::bridge::relay_with_first_data` 仍直接 call 自由函数 —— 这是**故意的**。过度抽象无益:基础层函数无状态、在任何部署下语义相同,不需要换掉。只抽"有多种可能实现"的东西。
 
-`ProbeResult::NeedMore(usize)` 的语义:
-
-- plugin 返回 `NeedMore(N)` = "至少再让我看 N 字节才能决定"。
-- `IngressStack::accept()` 负责循环 `peek`,累计到 N 字节再把所有 handler 重跑一遍 probe。
-- 设硬上限(默认 256 字节),超过还没有任何 handler `Matches` → 拒绝连接 + 记指标。
-- 注意 `peek` 是 MSG_PEEK,不消耗数据;真正 `handle()` 里 plugin 自己读。
-
-这块是 plugin 协议最容易出 bug 的地方,本文档作为唯一真源。
-
-### 4.7 模块分层调用依赖(AS-IS vs TO-BE)
-
-这不是 crate 依赖图,是**代码模块之间谁调谁**。
-
-#### AS-IS(当前事实,2026-04)
+### 4.9 crate 布局
 
 ```
-                      ┌─────────────────────────────────────────┐
-                      │ server/main.rs                          │
-                      │  - 直接 use: config, metrics,            │
-                      │    registry, handlers, listener_mgr,    │
-                      │    hot_reload, control_client, service  │
-                      └────────┬────────────────────────────────┘
-                               │ 直接实例化 + 直接调方法
-        ┌──────────────────────┼──────────────────────┐
-        ▼                      ▼                      ▼
-┌───────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│ handlers/http.rs  │  │ handlers/tcp.rs  │  │ handlers/quic.rs │
-│                   │  │                  │  │                  │
-│ use crate::       │  │ use crate::      │  │ use crate::      │
-│   metrics         │←─┼─ metrics         │←─│  metrics         │  ◀── 指标耦合
-│   ServerState     │  │  ServerState     │  │  ServerState     │
-│   (.routing,      │  │                  │  │  (.registry,     │  ◀── 状态字段硬访问
-│    .tcp_params,   │  │                  │  │   .auth_store)   │
-│    .config)       │  │                  │  │                  │
-│                   │  │                  │  │                  │
-│ use tunnel_lib::  │  │ use tunnel_lib:: │  │ use tunnel_lib:: │
-│   proxy           │  │   proxy          │  │   (msg types)    │
-│   RouteTarget     │  │   open_bi_guarded│  │                  │
-│   extract_host_…  │  │                  │  │                  │
-└───────────────────┘  └──────────────────┘  └──────────────────┘
-        │                      │                      │
-        └──────────────────────┴──────────────────────┘
-                               │ 同一个 proxy module 被多方直接 call
-                               ▼
-                    ┌─────────────────────────┐
-                    │ tunnel-lib/src/proxy/   │
-                    │  forward_h2_request     │
-                    │  forward_with_initial_  │
-                    │  open_bi_guarded        │
-                    │  ...                    │
-                    └─────────────────────────┘
+tunnel-lib/
+  src/
+    plugin/
+      mod.rs          ← trait 定义聚合
+      registry.rs     ← PluginRegistry
+      service.rs      ← TunnelService trait
+      module.rs       ← ConnectionModule trait
+      ingress.rs      ← IngressProtocolHandler + ProtocolHint + ProtocolKind
+      egress.rs       ← LoadBalancer + UpstreamDialer + Resolver
+      metrics.rs      ← MetricsSink
+      ctx.rs          ← ServerCtx + EgressCtx
+
+server/
+  plugins/
+    tls/              ← ingress-tls  (impl IngressProtocolHandler, ProtocolKind::Tls)
+    h2c/              ← ingress-h2c  (impl IngressProtocolHandler, ProtocolKind::H2c)
+    h1/               ← ingress-h1   (impl IngressProtocolHandler, ProtocolKind::Http1)
+    tcp/              ← ingress-tcp  (impl IngressProtocolHandler, ProtocolKind::Tcp)
+    vhost/            ← route-vhost  (impl RouteResolver)
+    prometheus/       ← metrics-prometheus (impl MetricsSink)
+    token/            ← admission-token (impl ConnectionModule::pre_admission)
+
+client/
+  plugins/
+    lb_rr/            ← lb-round-robin   (impl LoadBalancer)
+    lb_least/         ← lb-least-inflight(impl LoadBalancer)
+    h2_mux/           ← egress-h2-mux    (impl UpstreamDialer, scheme H2)
+    dns_cached/       ← resolver-cached  (impl Resolver)
+    tls_dialer/       ← egress-tls       (impl UpstreamDialer, scheme Https)
 ```
 
-**红色信号**:
-- 每个 handler 都 `use crate::metrics` —— 4 处调用都是具体自由函数。
-- `ServerState` 被当成**上下文背包**,handler 直接伸手取字段(`state.routing`、`state.tcp_params`、`state.config.server.open_stream_timeout_ms`)。任何 `ServerState` 字段的重构都要扫全部 handler。
-- `tunnel-lib::proxy` 模块导出的自由函数被 server 直接 call,**server 和 tunnel-lib 之间没有 trait 边界**。
+所有 plugin 模块无条件编进二进制,不加 cargo feature。
 
-#### TO-BE(抽完后的目标拓扑)
+### 4.10 模块分层调用依赖(TO-BE)
 
 ```
 入口层(Entry)
  ┌──────────────────────────────────────────────────────────┐
  │ server/handlers/http.rs / tcp.rs / quic.rs               │
  │                                                          │
- │ 只 use 这些抽象:                                          │
- │   tunnel_lib::plugin::{IngressStack, PluginCtx}          │
- │   tunnel_lib::plugin::traits::IngressProtocolHandler     │
+ │ 只 use:                                                  │
+ │   tunnel_lib::plugin::{ServerCtx, IngressDispatcher}     │
+ │   tunnel_lib::plugin::service::TunnelService             │
  │                                                          │
- │ 传参方式:                                                 │
- │   async fn handle(stack: &IngressStack, ctx: &PluginCtx) │
- │                                                          │
- │ 禁止出现的符号:                                           │
+ │ 禁止出现:                                                 │
  │   ✗ crate::metrics                                        │
  │   ✗ crate::plugins::tls                                   │
  │   ✗ state.routing / state.tcp_params(直接字段访问)        │
  └───────────────────┬──────────────────────────────────────┘
-                     │ 只调 trait 方法
+                     │ 只调 trait 方法 + IngressDispatcher
                      ▼
-抽象层(Abstractions)—— 定义在 tunnel-lib/src/plugin/
+抽象层(Abstractions)— tunnel-lib/src/plugin/
  ┌──────────────────────────────────────────────────────────┐
- │ trait IngressProtocolHandler                             │
- │ trait RouteResolver                                      │
- │ trait MetricsSink                                        │
- │ trait AdmissionController                                │
- │ trait LoadBalancer / UpstreamDialer / Resolver (egress)  │
+ │ TunnelService / ConnectionModule                         │
+ │ IngressProtocolHandler / ProtocolHint / ProtocolKind     │
+ │ LoadBalancer / UpstreamDialer / Resolver                 │
+ │ MetricsSink                                              │
+ │ ServerCtx / EgressCtx                                    │
  │                                                          │
  │ 已有 trait(不动):                                        │
  │   UpstreamResolver / UpstreamPeer / ProtocolDriver       │
  │   ConfigSource / RuleStore / AuthStore                   │
  └───────────────────┬──────────────────────────────────────┘
-                     │ 由具体实现"向上"满足
                      ▼
-实现层(Plugins)—— server/plugins/* 和 client/plugins/*
+实现层(Plugins)— server/plugins/* / client/plugins/*
  ┌──────────────────────────────────────────────────────────┐
- │ plugins/tls/       impl IngressProtocolHandler          │
- │ plugins/h2c/       impl IngressProtocolHandler          │
- │ plugins/h1/        impl IngressProtocolHandler          │
- │ plugins/vhost/     impl RouteResolver                   │
- │ plugins/prometheus/ impl MetricsSink                    │
- │ plugins/token/     impl AdmissionController             │
+ │ plugins/tls/    impl IngressProtocolHandler              │
+ │ plugins/h2c/    impl IngressProtocolHandler              │
+ │ plugins/vhost/  impl RouteResolver                       │
+ │ plugins/token/  impl ConnectionModule                    │
+ │ plugins/prometheus/ impl MetricsSink                     │
  │                                                          │
- │ plugin 互相之间 禁止 use 具体 plugin 符号。              │
- │ 要用对方能力 → 通过 PluginCtx 里的 trait object。        │
+ │ plugin 间禁止 use 对方具体符号。                          │
+ │ 要协作 → 通过 ServerCtx / EgressCtx 里的 trait object。  │
  └───────────────────┬──────────────────────────────────────┘
-                     │ 只调基础库的纯工具函数
                      ▼
-基础层(Primitives)—— tunnel-lib/src/{engine,transport,open_bi,...}
+基础层(Primitives)— tunnel-lib/src/{engine,transport,open_bi,...}
  ┌──────────────────────────────────────────────────────────┐
  │ engine::bridge::relay_with_first_data  ← 纯 I/O 工具      │
  │ open_bi::open_bi_guarded               ← 纯控制工具       │
+ │ protocol::detect::detect_protocol_and_host ← 无副作用     │
  │ transport::listener::VhostRouter       ← 数据结构         │
- │ protocol::detect::*                    ← 无副作用函数     │
  │                                                          │
  │ 这一层无状态、不依赖 plugin、不依赖 server/client 身份。 │
  └──────────────────────────────────────────────────────────┘
 ```
 
-**分层 3 条硬规则**:
+**3 条硬规则**:
 
 1. **调用方向单一**:入口 → 抽象 → 实现 → 基础。不允许反向。
-2. **跨层只能通过 trait**:实现层不能被入口层直接 `use`(入口只看 trait)。
-3. **同层禁止横向 `use` 具体符号**:同是 plugin,要互通就走 PluginCtx 里的 trait。
+2. **跨层只能通过 trait**:实现层不能被入口层直接 `use`。
+3. **同层禁止横向 `use` 具体符号**:同是 plugin,互通走 ctx 里的 trait object。
 
-这三条和 §4.1 的 R1-R4 是一回事,换角度描述,方便从"拓扑图"和"文件 `use` 列表"两个侧面做 review。
+### 4.11 迁移策略:行为等价保证
 
-### 4.8 一条连接的完整调用链(AS-IS vs TO-BE)
+PR ② 搬家时**并行保留旧路径 1 个版本**:
 
-看一条 HTTPS 入站连接从 accept 到进入隧道的全程,每一步标注"谁"和"调的具体符号 / 调的 trait 方法"。
+1. `ServerState` 加开关 `use_plugin_stack: bool`,默认 `false`。
+2. `handle_http_connection` 写成:
+   ```rust
+   if state.use_plugin_stack {
+       dispatcher.dispatch(stream, &svc, &mut ctx).await
+   } else {
+       legacy_dispatch(stream, &state, port).await
+   }
+   ```
+3. 集成测试跑两遍(`use_plugin_stack=false` 和 `=true`),断言结果一致。
+4. 下一个 PR 翻默认值,再下一个删 legacy 分支。
 
-#### AS-IS
+### 4.12 新旧 trait 分工(避免叠床架屋)
 
-| # | 位置 | 动作 | 对谁的依赖 |
-|---|---|---|---|
-| 1 | `handlers/http.rs:run_http_accept_loop` | accept TCP | `tunnel_lib::run_accept_worker`(具体函数) |
-| 2 | 同上 | `state.tcp_params.apply(&stream)` | `ServerState` 字段(具体 struct) |
-| 3 | `handlers/http.rs:handle_http_connection` | peek 首字节判断 TLS / H2 / H1 | 内联 `if first == 0x16 { ... }`(硬编码) |
-| 4 | `handle_tls_connection` | 查 vhost | `state.routing.load().get(port)`(字段) + `VhostRouter::match_host`(具体方法) |
-| 5 | 同上 | 选 client | `state.registry.select_healthy(group)`(具体方法) |
-| 6 | 同上 | 记指标 | `metrics::open_bi_begin(...)`(具体自由函数) |
-| 7 | 同上 | 打开 QUIC stream | `open_bi_guarded(...)`(具体自由函数) |
-| 8 | 同上 | 发送 RoutingInfo | `tunnel_lib::send_routing_info(...)`(具体自由函数) |
-| 9 | 同上 | 双向 relay | `proxy::forward_h2_request(...)`(具体自由函数) |
-
-**9 个步骤、至少 7 个具体符号直接调用**。任何一个要换,都要改入口。
-
-#### TO-BE
-
-| # | 位置 | 动作 | 对谁的依赖 |
-|---|---|---|---|
-| 1 | `handlers/http.rs` | accept TCP | `tunnel_lib::run_accept_worker`(基础层工具,保留) |
-| 2 | 同上 | 应用 TCP 参数 | `ctx.tcp_params.apply(...)`(`PluginCtx` 方法) |
-| 3 | `IngressStack::accept` | `probe()` 循环选 handler | `trait IngressProtocolHandler::probe`(trait 方法) |
-| 4 | 命中的 TlsHandler | 查路由 | `ctx.route_resolver.resolve(port, &rctx).await`(trait 方法) |
-| 5 | 同上 | 选 client | `ctx.client_registry.select(group)`(trait 方法) |
-| 6 | 同上 | 记指标 | `ctx.metrics.incr("open_bi_total", &[...])`(trait 方法) |
-| 7 | 同上 | 打开 QUIC stream | `ctx.stream_opener.open_bi_guarded(...).await`(trait 方法) |
-| 8 | 同上 | 发 RoutingInfo | 仍是 `send_routing_info`(基础层,因为 wire 协议是跨方共同依赖,不需要抽象) |
-| 9 | 同上 | 双向 relay | 仍是 `engine::bridge::relay_with_first_data`(基础层) |
-
-**入口模块不 `use` 任何具体 plugin**。换 TLS 实现 / 换指标后端 / 换路由策略 = 配置层换一个名字,入口文件一行不改。
-
-> 注意 #8 #9 仍是"直接 call 自由函数"—— 这**没问题**,因为它们是基础层、无状态、在任何部署下语义都一样,不需要抽象。**过度抽象本身就是反模式**。本设计只抽"有多种可能实现"的东西。
-
-### 4.9 数据依赖与生命周期
-
-#### PluginCtx 的内容
-
-`PluginCtx` 是入口层和 plugin 层之间**唯一的共享数据管道**,它取代现在的 `Arc<ServerState>` 广撒网。
-
-```rust
-pub struct PluginCtx {
-    // 抽象能力(trait objects)
-    pub metrics:         Arc<dyn MetricsSink>,
-    pub route_resolver:  Arc<dyn RouteResolver>,
-    pub admission:       Arc<dyn AdmissionController>,
-    pub stream_opener:   Arc<dyn StreamOpener>,
-    pub client_registry: Arc<dyn ClientRegistry>,  // server 专用
-    pub lb:              Arc<dyn LoadBalancer>,    // client 专用
-    pub dialer:          Arc<dyn UpstreamDialer>,  // client 专用
-    pub resolver:        Arc<dyn Resolver>,        // client 专用
-
-    // 不值得抽象的共享只读配置(直接放)
-    pub tcp_params: Arc<TcpParams>,
-    pub overload:   OverloadLimits,
-    pub timeouts:   Timeouts,
-}
-```
-
-规则:
-- **有多种实现可能**的 → `Arc<dyn Trait>`。
-- **纯配置值、跨所有实现不变**的 → 直接放 struct / Arc<T>,不抽象。过度抽象有害。
-- `PluginCtx` 构造一次(`main.rs` 组装 registry 时),然后 `Arc` 到处传。**不存在**"第二个 PluginCtx"。
-
-#### 生命周期
-
-```
-main.rs 启动
-  1. 读 config
-  2. PluginRegistry::new() + register_builtin_*
-  3. 按 config.ingress_plugins / egress_plugins 调 builder → 实例化具体 plugin
-  4. 组装 PluginCtx(把具体 plugin Arc<dyn> 填进来)
-  5. 把 PluginCtx 传给 handler 入口 / 客户端 worker
-  6. 跑直到 shutdown
-  7. 关闭:按反序让 plugin 释放资源
-```
-
-热重载(PR ⑥ 再做,不在首批 PR):
-- `PluginCtx` 里的 `Arc<dyn _>` 用 `ArcSwap<dyn _>` 包一层 → 配置变更时整体换一份 PluginCtx,handler 下次调用就看到新的。
-- 现存连接不受影响(已经持有旧 Arc)。
-
-#### plugin 间协作
-
-两条 plugin A / B 的协作,**不准**通过 `use plugins::b::B;` 直接抓 B 的具体类型。走**两种**合规路径:
-
-1. B 提供的是已有 trait(如 `MetricsSink`)→ A 通过 `PluginCtx` 拿 `Arc<dyn MetricsSink>`。
-2. B 是 A 特有的协作对象 → 在 PluginCtx 里新增一个 trait(或者 A 把 B 的 `Arc<dyn XxxTrait>` 作为 A 自己的**构造参数**传进去,由 registry 负责组装时把 B 注入给 A)。
-
-路径 2 的例子:TLS handler 可能需要调用 admission controller 做额外检查,那 TlsHandler 的 builder 签名里就要求 `admission: Arc<dyn AdmissionController>`,registry 组装时从 PluginCtx 里取出传入。**TlsHandler 永远不知道** admission 背后是 token 实现还是 JWT 实现。
-
----
-
-## 5. 抽象完之后的收益
-
-"抽象"不是为了好看,是为了**让具体角色在具体场景里干得更快**。下面按**角色 × 场景**列,每条都可以验证:
-
-### 5.1 给未来加新协议的人
-
-**场景**:要加一个 `proxy-protocol v2` 入口(HAProxy PROXY protocol header),现在和将来的对比。
-
-| 步骤 | 现在(AS-IS) | 抽完之后(TO-BE) |
+| 能力 | 用哪个 trait | 备注 |
 |---|---|---|
-| 1. 新建 module | 改 `handlers/http.rs`,在 `handle_http_connection` 大 if/else 里加一支 | 新建 `server/plugins/proxy_protocol/mod.rs`,impl `IngressProtocolHandler` |
-| 2. 协议嗅探 | 改 `protocol/detect.rs` 加 magic bytes | plugin 自己 `probe()` 返回 `Matches` if `data.starts_with(b"PROXY ")` |
-| 3. 路由联动 | 顺手改 `main.rs:453-485` 确保新协议能走 vhost | 不用动,plugin 从 `route` 参数拿路由 |
-| 4. 加指标 | 在 4 个 handler 里插 `metrics::counter!(...)` | plugin 内部用 `ctx.metrics`,统一收口 |
-| 5. 加 config 字段 | 改 `server/config.rs` 全局 struct | plugin 自己定 `ProxyProtoConfig: Deserialize`,注册表路由 |
-| 6. 测试 | 起真 QUIC + TLS 拿通路 | 单测里 `handler.handle(fake_stream, fake_route, &ctx)` |
-
-**量化**:改动文件从 5 个(`handlers/http.rs` + `detect.rs` + `main.rs` + `config.rs` + `metrics.rs`)降到 1 个独立 module。
-
-### 5.2 给升级 `tonic` / `hyper` / `rustls` 的人
-
-**场景**:就是刚合完的 PR #27 —— tonic 0.12→0.14 让 `tonic::body::BoxBody` 变 private,250 行手写 gRPC 胶水全部要重写。
-
-| 现在 | 抽完之后 |
-|---|---|
-| tonic 改动影响 `ci_test_client.rs` + `grpc_echo_server.rs` 两个文件的业务逻辑;TLS 改动影响 `handlers/http.rs` 的 TLS 分支;hyper 改动影响 H2 dispatcher;**重构范围不可预测** | TLS 改动只在 `server/plugins/tls/`;gRPC 改动只在 `ci-helpers/plugins/grpc/`(如果抽出);hyper H2 ingress 改动只在 `server/plugins/h2c/`。**单 plugin 闭环** |
-
-**量化**:PR #27 改了 4 个文件;同等改动在抽完之后预计 1-2 个文件。
-
-### 5.3 给 profile / 压测的人
-
-**场景**:压测想看纯转发性能,不要 Prometheus 指标的干扰。
-
-- **现在**:`server/metrics.rs` + 4 个 handler 里几十处 `metrics::counter!()` / `gauge!()` / `histogram!()` 内联。想关掉 = 满仓库改代码,或者整个 crate 去掉 `metrics` feature(牵连太广)。
-- **抽完之后**:配置里把 `metrics-prometheus` 换成 `metrics-noop`。`Arc<dyn MetricsSink>` 变成空实现,**所有调用点**走一次间接分派、直接 return。一行 config 修改。
-
-**量化**:Criterion benchmark 对比有意义,指标开关成了一等公民。
-
-### 5.4 给测试的人
-
-**场景**:要测"vhost 命中 H2 upstream 时的 authority rewrite"。
-
-- **现在**:`tests/` 里起真 TLS + 真 QUIC server + 真 client + H2 upstream 模拟,网络栈全开,测试慢且易 flaky。
-- **抽完之后**:Mock `RouteResolver` 返回固定 `Route`,Mock `UpstreamDialer` 返回 `MemoryStream`,直接测 `plugins/h2c` handler 的 authority rewrite 逻辑。
-
-**量化**:从 integration test(秒级、起进程)降到 unit test(毫秒、纯内存)。
-
-### 5.5 给部署 / 运维的人
-
-**场景**:同一份二进制要跑 3 种部署 —— dev(本地、无 TLS、无 metrics)、canary(灰度、加 shadow LB、带 admission dry-run)、prod(全量)。
-
-- **现在**:要么三套 build feature 组合,要么代码里写 `if env == "dev"` 散落各处。
-- **抽完之后**:三份 YAML 配置,差别就是 `ingress_plugins` / `egress_plugins` 列表不同。二进制同一份。
-
-**量化**:CI 里不再需要 matrix build,节约构建时间。
-
-### 5.6 给 review PR 的人
-
-**场景**:有人交一个"加 WebSocket Ping/Pong 心跳"的 PR。
-
-- **现在**:这个改动可能碰 detect、handler、proxy/tcp、config 多处,review 时要在大脑里把"这改动会不会搞坏 TLS / H2 / vhost"全跑一遍。
-- **抽完之后**:改动大概率就在 `server/plugins/ws/`(或单独新建 plugin),review 认知负担从"隧道整体"降到"这个 plugin 自己"。
-
-### 5.7 给"我不想跑某个功能"的人
-
-**场景**:边缘节点不想背 Prometheus / vhost / admission 的代码路径。
-
-- **现在**:代码还是会跑,只是数据走空逻辑。占 CPU 占分支预测缓存。
-- **抽完之后**:不在 config 里列出来,就不实例化,也不在热路径上出现。
-
-### 收益对照 = 验证标准
-
-表里每一条"抽完之后",都对应第 5 章验证标准里的某条具体测试:
-
-| 收益 | 对应验证 |
-|---|---|
-| 5.1 加新协议只改 1 module | "每个 plugin 有独立 integration test"(5 章第 4 条) |
-| 5.3 压测能剥离 metrics | "最小 plugin 集"跑通 E2E(5 章第 1 条) |
-| 5.5 同一二进制多部署 | 配置里去掉 egress-h2-mux 仍工作(5 章第 2 条) |
-| 5.7 不配就不跑 | 没 admission 要 fail-fast(6 章第 3 条) |
+| 协议嗅探 | **不抽象**(CORE 函数) | `detect_protocol_and_host` 只有一种实现 |
+| 鉴权 / 准入 | `ConnectionModule::pre_admission` | 可叠加多个(IP黑名单 + token) |
+| 路由查找 | `TunnelService::resolve_route` | 服务级,一个 svc 一个实现 |
+| Ingress 协议处理 | `IngressProtocolHandler` | 按 `ProtocolKind` dispatch |
+| DNS 解析 | `Resolver` | 可替换为缓存 / DoH |
+| LB | `LoadBalancer` | 可替换算法 |
+| Upstream 拨号 | `UpstreamDialer` | 按 scheme dispatch |
+| Upstream Peer | `UpstreamPeer`(已有) | Dialer 产出此类型,不动 |
+| 指标 | `MetricsSink` | 注入进 ctx,logging phase 调用 |
+| 配置源 | `ConfigSource`(已有) | 不动 |
+| 规则存储 | `RuleStore`(已有) | 不动 |
+| 认证存储 | `AuthStore`(已有) | 不动 |
+| 后台服务 | `BackgroundService`(已有) | 不动 |
 
 ---
 
-## 6. 验证标准
+## 5. 验证标准
 
 1. 配置里只列 `[ingress-h1, ingress-tcp]` + `[egress-tcp]` 这组最小 plugin 时,server 能启动、接受 1 个纯 TCP listener、把流量正确代理到 client 的 upstream(端到端 E2E)。
 2. 配置里去掉 `egress-h2-mux` 后,client 依然能跑 H2 upstream(退化成每次新开 H2 连接)。
-3. 配置里没有任何 admission plugin 时,启动**明确报错** "no admission plugin installed" —— 不允许裸奔。
+3. 配置里没有任何 admission plugin 时,启动**明确报错** "no admission plugin installed"(不允许裸奔)。
 4. 每个 plugin 有独立 integration test;CORE 有 smoke test。
-5. Criterion benchmark 对比"最小 plugin 集"vs"全量 plugin"的吞吐,证明注册表抽象(Arc + dyn dispatch)的额外开销 <1% 或有明确解释。
+5. Criterion benchmark 对比"最小 plugin 集"vs"全量 plugin"的吞吐,证明注册表抽象(Arc + dyn dispatch)额外开销 <1% 或有明确解释。
+6. **v2 新增**:协议嗅探 phase 与 ingress handler dispatch 之间没有 `probe()` 循环,单条连接的 phase 1→4 全程最多一次 `peek_exact` 调用。
+
+---
+
+## 6. 收益
+
+### 6.1 给未来加新协议的人
+
+要加 `proxy-protocol v2`(HAProxy PROXY header):
+
+| 步骤 | AS-IS | TO-BE |
+|---|---|---|
+| 1. 协议识别 | 改 `detect.rs` 加 magic bytes | 改 `detect.rs` 加 `ProtocolKind::ProxyProtocol`(CORE,合理) |
+| 2. 新建 handler | 改 `handlers/http.rs` 大 if/else | 新建 `server/plugins/proxy_proto/mod.rs`,impl `IngressProtocolHandler` |
+| 3. 注册表 | 无 | 在 `register_builtin()` 里 `insert(ProtocolKind::ProxyProtocol, Arc::new(ProxyProtoHandler))` |
+| 4. 指标 | 4 处内联 `metrics::counter!()` | plugin 内部用 `ctx.metrics` |
+| 5. 配置 | 改全局 `config.rs` struct | plugin 自己定 `Deserialize` struct |
+
+改动文件:5 个 → 1 个(`detect.rs` + 1 个新 plugin module)。
+
+### 6.2 给升级 tonic / hyper / rustls 的人
+
+TLS 改动只在 `server/plugins/tls/`。PR #27 那类 250 行胶水全重写的情况,下次只改 1 个 plugin module。
+
+### 6.3 给压测 / profile 的人
+
+`metrics_plugin: metrics-noop` 一行配置。`Arc<dyn MetricsSink>` 变空实现,所有调用点一次间接分派直接 return。
+
+### 6.4 给测试的人
+
+Mock `ServerCtx`(替换 `metrics` 为 `NoopSink`),Mock `RouteResolver` 返回固定 `Route`,直接测 `TlsHandler::handle(fake_stream, route, &ctx)`,从 integration test(秒级)降到 unit test(毫秒)。
+
+### 6.5 给部署 / 运维的人
+
+dev / canary / prod 三份 YAML,差别只是 plugin 列表。二进制同一份,CI 不需要 matrix build。
+
+---
 
 ## 7. 实施节奏(建议后续 PR)
 
-推荐分成 4-6 个独立 PR,每个都可以独立 review / revert:
+推荐分成 5-6 个独立 PR,每个都可独立 review / revert:
 
-1. **PR ①**:定义 `IngressProtocolHandler` / `RouteResolver` / `MetricsSink` / `AdmissionController` 四个 trait 和 `IngressStack` 骨架,**不改现有代码**,仅添加 + 一个最小 smoke test。
-2. **PR ②**:把 `H1Handler` / `PassthroughTcpHandler` / `TlsHandler` / `H2cHandler` 从 `server/handlers/http.rs` 抽出到 `server/plugins/*`,实现 trait;`IngressStack` 替换旧的 if-else dispatcher。行为等价。
-3. **PR ③**:`VhostResolver` vs `StaticPortResolver`,把 vhost 相关从 `main.rs:453-485` / `listener.rs:63-150` 封装成 plugin。
-4. **PR ④**:`MetricsSink` trait 化 `server/metrics.rs` 所有调用点;`PrometheusSink` 作为 default plugin,no-op sink 作为 CORE 保底。
-5. **PR ⑤**:egress 侧的 `LoadBalancer` / `UpstreamDialer` / `Resolver` trait,把 `proxy/{tcp,http,h2}.rs`、`proxy/upstream.rs`、`client/app.rs:47-210` 的决策分支抽出。
-6. **PR ⑥**:配置层接 `ingress_plugins` / `egress_plugins` 两个列表,支持动态组装。
+1. **PR ①**:在 `tunnel-lib/src/plugin/` 定义所有 trait(`TunnelService`、`ConnectionModule`、`IngressProtocolHandler`、`ProtocolHint`、`ProtocolKind`、`MetricsSink`、`LoadBalancer`、`UpstreamDialer`、`Resolver`)和 `ServerCtx` / `EgressCtx` 骨架,**不改现有代码**,加一个最小 smoke test(确认 trait object 能构造)。
+2. **PR ②**:把 `H1Handler` / `PassthroughTcpHandler` / `TlsHandler` / `H2cHandler` 从 `handlers/http.rs` 抽出到 `server/plugins/*`,实现 `IngressProtocolHandler`;`IngressDispatcher` 替换旧的 if-else;影子迁移开关默认 `false`。行为等价验证。
+3. **PR ③**:`VhostResolver` 插件化;把 `main.rs:453-485` / `listener.rs:63-150` 封装成 `route-vhost` plugin;`StaticPortResolver` 作为 CORE 保底。
+4. **PR ④**:`MetricsSink` trait 化所有调用点;`PrometheusSink` 作为 default,no-op sink 作为 CORE 保底;翻影子开关默认值。
+5. **PR ⑤**:egress 侧 `LoadBalancer` / `UpstreamDialer` / `Resolver` trait 化;`proxy/{tcp,http,h2}.rs`、`proxy/upstream.rs`、`client/app.rs:47-210` 的决策分支抽成 plugin。
+6. **PR ⑥**:配置层接 `ingress_plugins` / `egress_plugins` 列表,支持动态组装;删 legacy 分支。
 
 每个 PR 走完 `cargo check / test / clippy -D warnings` 再进下一步。
+
+---
 
 ## 8. 非目标
 
@@ -801,6 +728,8 @@ main.rs 启动
 - 不重构已经是 trait 的部分(`ConfigSource` 等)。
 - 不改 wire protocol。
 - 不在本设计中承诺"未来所有协议都能加"—— 只证明现有能力可以被这套 seam 覆盖。
+
+---
 
 ## 9. 相关文件清单(仅引用,不在本设计中修改)
 
@@ -821,7 +750,7 @@ main.rs 启动
 | `tunnel-lib/src/proxy/tcp.rs:13-165` | TcpPeer + UpstreamScheme |
 | `tunnel-lib/src/proxy/h2_proxy.rs:23-91` | H2SenderCache |
 | `tunnel-lib/src/proxy/upstream.rs:13-24` | 硬编码的 RR LB(→ PR ⑤) |
-| `tunnel-lib/src/protocol/detect.rs:5-98` | 协议嗅探 |
+| `tunnel-lib/src/protocol/detect.rs:5-98` | 协议嗅探(CORE,不抽象) |
 | `tunnel-lib/src/overload.rs`、`open_bi.rs` | 背压 |
 | `tunnel-lib/src/engine/bridge.rs:61-93` | relay(CORE) |
 | `tunnel-lib/src/models/msg.rs` | wire 消息(CORE) |
