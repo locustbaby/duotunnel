@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod config;
+pub mod plugin;
 pub mod ctld_proto;
 pub mod egress;
 pub mod engine;
