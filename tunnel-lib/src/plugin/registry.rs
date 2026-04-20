@@ -27,6 +27,10 @@ pub struct PluginRegistry {
     /// Active route resolver.  Defaults to `NoRouteResolver` (fail-fast).
     pub route_resolver: Arc<dyn RouteResolver>,
 
+    /// Whether a real resolver has been installed via `set_route_resolver`.
+    /// Used by `validate_for_ingress` to detect misconfigured servers.
+    route_resolver_installed: bool,
+
     /// Egress dialers tried in registration order until `matches_scheme` returns true.
     pub dialers: Vec<Arc<dyn UpstreamDialer>>,
 
@@ -45,6 +49,7 @@ impl PluginRegistry {
             modules: Vec::new(),
             metrics_sink: Arc::new(NoopSink),
             route_resolver: Arc::new(NoRouteResolver),
+            route_resolver_installed: false,
             dialers: Vec::new(),
             lb: None,
             resolver: Arc::new(SystemResolver),
@@ -68,6 +73,7 @@ impl PluginRegistry {
 
     pub fn set_route_resolver(&mut self, resolver: Arc<dyn RouteResolver>) {
         self.route_resolver = resolver;
+        self.route_resolver_installed = true;
     }
 
     pub fn add_dialer(&mut self, dialer: Arc<dyn UpstreamDialer>) {
@@ -80,6 +86,25 @@ impl PluginRegistry {
 
     pub fn set_resolver(&mut self, resolver: Arc<dyn Resolver>) {
         self.resolver = resolver;
+    }
+
+    /// Assert that the registry is usable for server-side ingress dispatch.
+    ///
+    /// Fails fast at startup if critical pieces (ingress handlers or a real
+    /// route resolver) are missing — without this, a misconfigured server
+    /// would compile, start, and fail per-connection at runtime.
+    pub fn validate_for_ingress(&self) -> anyhow::Result<()> {
+        if self.ingress_handlers.is_empty() {
+            anyhow::bail!(
+                "PluginRegistry has no ingress handlers; register at least one via register_ingress_handler"
+            );
+        }
+        if !self.route_resolver_installed {
+            anyhow::bail!(
+                "PluginRegistry has no route resolver installed; call set_route_resolver before serving"
+            );
+        }
+        Ok(())
     }
 }
 

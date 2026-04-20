@@ -134,8 +134,11 @@ pub struct AdmissionReq {
 /// Input to the route-resolve phase (Phase 3).
 #[derive(Debug, Clone)]
 pub struct RouteCtx {
+    /// Port the server accepted this connection on (the listener's local port,
+    /// not the ephemeral remote port).
     pub listener_port: u16,
-    pub peer_addr: SocketAddr,
+    /// Remote peer that opened the connection.
+    pub client_addr: SocketAddr,
     pub hint: ProtocolHint,
 }
 

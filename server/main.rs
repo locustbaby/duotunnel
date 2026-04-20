@@ -412,6 +412,7 @@ async fn build_server_state(
             routing: routing.clone(),
         }));
         reg.set_metrics_sink(Arc::new(plugins::prometheus::PrometheusSink));
+        reg.validate_for_ingress()?;
         Arc::new(reg)
     };
 

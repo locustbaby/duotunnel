@@ -1,28 +1,30 @@
+use metrics::{counter, histogram, Label};
+
 use tunnel_lib::plugin::MetricsSink;
 
-/// `MetricsSink` implementation backed by the `metrics` crate, which the
-/// server already uses via `metrics_exporter_prometheus` (see
-/// `server/metrics.rs`).
+/// `MetricsSink` implementation backed by the `metrics` crate.
 ///
-/// Runtime-computed label values are forwarded by cloning the string — this
-/// matches how `server/metrics.rs` already does it for `group_id` / `status`
-/// labels. The metric name is `&'static str`, so no allocation on the name.
+/// Label keys arrive as `&'static str` and pass through `Label::new` without
+/// allocation (the crate's `SharedString` can hold a static borrow via
+/// `const_str`). Values are borrowed `&str` so each runtime-computed value
+/// costs one `String` allocation. The `metrics` crate internally materialises
+/// labels into a `Vec<Label>` no matter what we pass in, so no upstream
+/// zero-alloc path exists for dynamic labels.
 pub struct PrometheusSink;
 
+fn build_labels(labels: &[(&'static str, &str)]) -> Vec<Label> {
+    labels
+        .iter()
+        .map(|(k, v)| Label::new(*k, v.to_string()))
+        .collect()
+}
+
 impl MetricsSink for PrometheusSink {
-    fn incr(&self, name: &'static str, labels: &[(&str, &str)]) {
-        let owned: Vec<(String, String)> = labels
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        metrics::counter!(name, &owned).increment(1);
+    fn incr(&self, name: &'static str, labels: &[(&'static str, &str)]) {
+        counter!(name, build_labels(labels)).increment(1);
     }
 
-    fn observe(&self, name: &'static str, value: f64, labels: &[(&str, &str)]) {
-        let owned: Vec<(String, String)> = labels
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        metrics::histogram!(name, &owned).record(value);
+    fn observe(&self, name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
+        histogram!(name, build_labels(labels)).record(value);
     }
 }

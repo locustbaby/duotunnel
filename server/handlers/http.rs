@@ -37,9 +37,7 @@ pub async fn run_http_accept_loop(
                 }
                 metrics::tcp_connection_opened();
 
-                let svc = crate::tunnel_service::DefaultTunnelService {
-                    metrics: metrics_sink.clone(),
-                };
+                let svc = crate::tunnel_service::DefaultTunnelService;
                 let timeouts = Timeouts {
                     open_stream_ms: state.config.server.open_stream_timeout_ms,
                     ..Timeouts::default()

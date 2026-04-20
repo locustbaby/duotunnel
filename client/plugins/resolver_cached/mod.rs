@@ -7,18 +7,22 @@ use std::time::{Duration, Instant};
 use tunnel_lib::plugin::Resolver;
 
 const DNS_CACHE_TTL: Duration = Duration::from_secs(30);
+const MAX_CACHE_ENTRIES: usize = 1024;
 
-struct CachedAddr {
-    addr: SocketAddr,
+struct CachedAddrs {
+    addrs: Vec<SocketAddr>,
     cached_at: Instant,
 }
 
 /// DNS resolver with a lazy 30-second cache.
 ///
-/// Wraps `tokio::net::lookup_host`. An IP literal bypasses the cache. On a
-/// miss or expiry, the first resolved address is stored.
+/// Wraps `tokio::net::lookup_host`. IP literals bypass the cache. On a miss
+/// or expiry all resolved addresses are stored so callers can do happy-eyeballs
+/// or retry across A/AAAA records. The cache is bounded at
+/// `MAX_CACHE_ENTRIES`; past the bound, a miss triggers eviction of every
+/// entry older than `DNS_CACHE_TTL` before the insert.
 pub struct CachedResolver {
-    cache: DashMap<String, CachedAddr>,
+    cache: DashMap<String, CachedAddrs>,
 }
 
 impl CachedResolver {
@@ -26,6 +30,12 @@ impl CachedResolver {
         Self {
             cache: DashMap::new(),
         }
+    }
+
+    fn evict_expired(&self) {
+        let now = Instant::now();
+        self.cache
+            .retain(|_, v| now.duration_since(v.cached_at) < DNS_CACHE_TTL);
     }
 }
 
@@ -38,7 +48,6 @@ impl Default for CachedResolver {
 #[async_trait]
 impl Resolver for CachedResolver {
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        // IP literals bypass the cache entirely.
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
             return Ok(vec![SocketAddr::new(addr, port)]);
         }
@@ -46,26 +55,29 @@ impl Resolver for CachedResolver {
         let cache_key = format!("{}:{}", host, port);
         if let Some(cached) = self.cache.get(&cache_key) {
             if cached.cached_at.elapsed() < DNS_CACHE_TTL {
-                return Ok(vec![cached.addr]);
+                return Ok(cached.addrs.clone());
             }
         }
 
-        let addr = {
-            let mut addrs = tokio::net::lookup_host(cache_key.as_str())
-                .await
-                .map_err(|e| anyhow!("failed to resolve {}: {}", cache_key, e))?;
-            addrs
-                .next()
-                .ok_or_else(|| anyhow!("no resolved IP for {}", cache_key))?
-        };
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host(cache_key.as_str())
+            .await
+            .map_err(|e| anyhow!("failed to resolve {}: {}", cache_key, e))?
+            .collect();
+        if addrs.is_empty() {
+            return Err(anyhow!("no resolved IP for {}", cache_key));
+        }
+
+        if self.cache.len() >= MAX_CACHE_ENTRIES {
+            self.evict_expired();
+        }
         self.cache.insert(
             cache_key,
-            CachedAddr {
-                addr,
+            CachedAddrs {
+                addrs: addrs.clone(),
                 cached_at: Instant::now(),
             },
         );
-        Ok(vec![addr])
+        Ok(addrs)
     }
 }
 
@@ -79,7 +91,6 @@ mod tests {
         let out = resolver.resolve("127.0.0.1", 8080).await.unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].port(), 8080);
-        // No cache entry recorded for IP literals.
         assert!(resolver.cache.is_empty());
     }
 }

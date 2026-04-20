@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
+use tracing::error;
 
 use super::ctx::{AdmissionReq, PhaseOutcome, PhaseTiming, PhaseResult, RouteCtx, ServerCtx};
 use super::ingress::{ProtocolHint, ProtocolKind};
@@ -9,6 +11,16 @@ use super::registry::PluginRegistry;
 use super::service::TunnelService;
 use crate::protocol::detect::{detect_protocol_and_host, extract_tls_sni};
 use crate::proxy::core::Protocol;
+
+/// Call `svc.logging` inside `catch_unwind` so a broken implementation can't
+/// tear down the accept worker. Emission errors are dropped — this is the
+/// logging path, nothing above it can recover from a panic here.
+fn safe_logging(svc: &dyn TunnelService, ctx: &ServerCtx, outcome: &PhaseOutcome) {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| svc.logging(ctx, outcome)));
+    if result.is_err() {
+        error!("TunnelService::logging panicked — metrics/logs dropped for this connection");
+    }
+}
 
 const SNIFF_LIMIT: usize = 256;
 
@@ -112,7 +124,7 @@ impl IngressDispatcher {
                             String::from_utf8_lossy(&message)
                         )),
                     };
-                    svc.logging(&outcome);
+                    safe_logging(svc, ctx, &outcome);
                     return Err(anyhow!("connection rejected at pre_admission (status={})", status));
                 }
                 PhaseResult::Continue(()) => {}
@@ -133,7 +145,7 @@ impl IngressDispatcher {
                         String::from_utf8_lossy(&message)
                     )),
                 };
-                svc.logging(&outcome);
+                safe_logging(svc, ctx, &outcome);
                 return Err(anyhow!("connection rejected at admission (status={})", status));
             }
             PhaseResult::Continue(()) => {
@@ -145,7 +157,7 @@ impl IngressDispatcher {
         // ── Phase 4: RouteResolver::resolve (from registry) ───────────────────
         let route_ctx = RouteCtx {
             listener_port: self.listener_port,
-            peer_addr: ctx.peer_addr,
+            client_addr: ctx.peer_addr,
             hint: hint.clone(),
         };
         let route = match self.registry.route_resolver.resolve(&route_ctx).await? {
@@ -164,7 +176,7 @@ impl IngressDispatcher {
                         String::from_utf8_lossy(&message)
                     )),
                 };
-                svc.logging(&outcome);
+                safe_logging(svc, ctx, &outcome);
                 return Err(anyhow!("no route found (status={})", status));
             }
         };
@@ -190,7 +202,7 @@ impl IngressDispatcher {
             bytes_recv: 0,
             error: handle_result.as_ref().err().map(|e| e.to_string()),
         };
-        svc.logging(&outcome);
+        safe_logging(svc, ctx, &outcome);
 
         handle_result
     }

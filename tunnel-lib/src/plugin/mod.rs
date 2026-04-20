@@ -58,7 +58,7 @@ mod tests {
             Ok(PhaseResult::Continue(()))
         }
 
-        fn logging(&self, _outcome: &PhaseOutcome) {}
+        fn logging(&self, _ctx: &ServerCtx, _outcome: &PhaseOutcome) {}
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────
@@ -124,13 +124,41 @@ mod tests {
         assert!(result.is_continue());
     }
 
+    #[test]
+    fn validate_for_ingress_rejects_empty_registry() {
+        let reg = PluginRegistry::new();
+        let err = reg.validate_for_ingress().unwrap_err().to_string();
+        assert!(err.contains("no ingress handlers"), "actual: {err}");
+    }
+
+    #[test]
+    fn validate_for_ingress_rejects_missing_route_resolver() {
+        let mut reg = PluginRegistry::new();
+
+        struct DummyHandler;
+        #[async_trait]
+        impl IngressProtocolHandler for DummyHandler {
+            fn protocol_kind(&self) -> ProtocolKind { ProtocolKind::Tcp }
+            async fn handle(
+                &self,
+                _stream: tokio::net::TcpStream,
+                _route: Route,
+                _ctx: &ServerCtx,
+            ) -> Result<()> { Ok(()) }
+        }
+        reg.register_ingress_handler(Arc::new(DummyHandler));
+
+        let err = reg.validate_for_ingress().unwrap_err().to_string();
+        assert!(err.contains("no route resolver"), "actual: {err}");
+    }
+
     #[tokio::test]
     async fn no_route_resolver_rejects_with_404() {
         let resolver = NoRouteResolver;
         let hint = ProtocolHint::new(ProtocolKind::Http1, bytes::Bytes::new());
         let ctx = RouteCtx {
             listener_port: 8080,
-            peer_addr: "127.0.0.1:1234".parse().unwrap(),
+            client_addr: "127.0.0.1:1234".parse().unwrap(),
             hint,
         };
         let result = resolver.resolve(&ctx).await.unwrap();

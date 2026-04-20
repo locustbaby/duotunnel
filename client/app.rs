@@ -11,16 +11,18 @@ use tunnel_lib::proxy::peers::PeerKind;
 use tunnel_lib::proxy::tcp::UpstreamScheme;
 use tunnel_lib::{ClientConfig, HttpClientParams};
 
-/// One named upstream group: a list of pre-parsed `Target`s plus the
-/// `LoadBalancer` plugin that picks from them.
-struct UpstreamGroupPlugin {
-    targets: Vec<Target>,
+/// One named upstream group. `raw` is the source-of-truth address list in
+/// `scheme://host:port` form. `targets` is a parallel view built at config
+/// load time for the `LoadBalancer` plugin; the LB returns an index into the
+/// slice which we use directly into `raw`.
+struct UpstreamGroup {
     raw: Vec<String>,
+    targets: Vec<Target>,
     lb: Arc<dyn LoadBalancer>,
 }
 
 pub struct LocalProxyMap {
-    upstreams: HashMap<String, UpstreamGroupPlugin>,
+    upstreams: HashMap<String, UpstreamGroup>,
     resolver: Arc<dyn Resolver>,
     pub https_client: HttpsClient,
     pub h2c_client: H2cClient,
@@ -39,16 +41,20 @@ impl LocalProxyMap {
             let targets: Vec<Target> = raw
                 .iter()
                 .map(|addr| {
-                    let (scheme, connect_addr, _tls_host) = UpstreamScheme::from_address(addr);
-                    let (host, port) = split_host_port(&connect_addr);
-                    Target { host, port, scheme }
+                    let (scheme, _connect_addr, _tls_host) = UpstreamScheme::from_address(addr);
+                    let parsed = tunnel_lib::transport::addr::parse_upstream(addr);
+                    Target {
+                        host: parsed.host,
+                        port: parsed.port,
+                        scheme,
+                    }
                 })
                 .collect();
             upstreams.insert(
                 upstream.name.clone(),
-                UpstreamGroupPlugin {
-                    targets,
+                UpstreamGroup {
                     raw,
+                    targets,
                     lb: lb.clone(),
                 },
             );
@@ -68,38 +74,25 @@ impl LocalProxyMap {
     pub fn get_local_address(&self, proxy_name: &str, client_addr: SocketAddr) -> Option<String> {
         let group = self.upstreams.get(proxy_name)?;
         let ctx = PickCtx { client_addr };
-        let target = group.lb.pick(&group.targets, &ctx)?;
-        let idx = group
-            .targets
-            .iter()
-            .position(|t| std::ptr::eq(t, target))?;
+        let idx = group.lb.pick(&group.targets, &ctx)?;
         let addr = group.raw.get(idx).cloned()?;
         debug!(proxy_name = %proxy_name, server = %addr, "upstream selected");
         Some(addr)
     }
 
-    /// Resolve `connect_addr_str` (host:port) to a single `SocketAddr` via
-    /// the `Resolver` plugin.
+    /// Resolve `connect_addr_str` (either an IP literal `host:port` or a
+    /// hostname `host:port`) to a single `SocketAddr` via the `Resolver`
+    /// plugin.
     pub async fn resolve_addr(&self, connect_addr_str: &str) -> Result<SocketAddr> {
         if let Ok(addr) = connect_addr_str.parse::<SocketAddr>() {
             return Ok(addr);
         }
-        let (host, port) = split_host_port(connect_addr_str);
-        let addrs = self.resolver.resolve(&host, port).await?;
+        let parsed = tunnel_lib::transport::addr::parse_upstream(connect_addr_str);
+        let addrs = self.resolver.resolve(&parsed.host, parsed.port).await?;
         addrs
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))
-    }
-}
-
-fn split_host_port(addr: &str) -> (String, u16) {
-    match addr.rsplit_once(':') {
-        Some((host, port_str)) => {
-            let port = port_str.parse::<u16>().unwrap_or(0);
-            (host.to_string(), port)
-        }
-        None => (addr.to_string(), 0),
     }
 }
 

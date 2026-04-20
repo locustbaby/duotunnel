@@ -5,8 +5,7 @@ use tunnel_lib::plugin::{LoadBalancer, PickCtx, Target};
 /// Round-robin load balancer.
 ///
 /// Stateful — holds a per-instance counter. Power-of-two list lengths use a
-/// bitmask; other sizes fall back to modulo. Matches the behaviour of the
-/// now-removed `UpstreamGroup::next`.
+/// bitmask; other sizes fall back to modulo.
 pub struct RoundRobinLb {
     counter: AtomicUsize,
 }
@@ -26,7 +25,7 @@ impl Default for RoundRobinLb {
 }
 
 impl LoadBalancer for RoundRobinLb {
-    fn pick<'a>(&self, targets: &'a [Target], _ctx: &PickCtx) -> Option<&'a Target> {
+    fn pick(&self, targets: &[Target], _ctx: &PickCtx) -> Option<usize> {
         if targets.is_empty() {
             return None;
         }
@@ -37,7 +36,7 @@ impl LoadBalancer for RoundRobinLb {
         } else {
             raw % len
         };
-        targets.get(idx)
+        Some(idx)
     }
 }
 
@@ -61,10 +60,10 @@ mod tests {
         let ctx = PickCtx {
             client_addr: "127.0.0.1:1".parse().unwrap(),
         };
-        let picks: Vec<&str> = (0..6)
-            .map(|_| lb.pick(&targets, &ctx).unwrap().host.as_str())
+        let idxs: Vec<usize> = (0..6)
+            .map(|_| lb.pick(&targets, &ctx).unwrap())
             .collect();
-        assert_eq!(picks, vec!["a", "b", "c", "a", "b", "c"]);
+        assert_eq!(idxs, vec![0, 1, 2, 0, 1, 2]);
     }
 
     #[test]
