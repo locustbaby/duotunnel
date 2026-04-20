@@ -23,7 +23,13 @@ impl IngressProtocolHandler for H1Handler {
         ProtocolKind::Http1
     }
 
-    async fn handle(&self, mut stream: TcpStream, route: Route, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(
+        &self,
+        mut stream: TcpStream,
+        route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()> {
+        let route = route.ok_or_else(|| anyhow::anyhow!("H1Handler: missing Route"))?;
         let hint = ctx
             .hint
             .as_ref()
@@ -35,19 +41,11 @@ impl IngressProtocolHandler for H1Handler {
             .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
 
         let initial_data: Vec<u8> = hint.raw_preface.to_vec();
-        let protocol = {
-            use tunnel_lib::proxy::core::Protocol;
-            // WebSocket detection: raw_preface already parsed by dispatcher;
-            // hint.authority presence is enough — use H1 as default, WS if preface
-            // contains Upgrade header (detect_protocol_and_host already handled this).
-            if initial_data
-                .windows(9)
-                .any(|w| w.eq_ignore_ascii_case(b"websocket"))
-            {
-                Protocol::WebSocket
-            } else {
-                Protocol::H1
+        let protocol = match hint.protocol {
+            tunnel_lib::proxy::core::Protocol::WebSocket => {
+                tunnel_lib::proxy::core::Protocol::WebSocket
             }
+            _ => tunnel_lib::proxy::core::Protocol::H1,
         };
 
         debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, byte-level forwarding");
@@ -89,7 +87,7 @@ impl IngressProtocolHandler for H1Handler {
             recv,
             stream,
             &initial_data,
-            tunnel_lib::proxy::ProxyBufferParams::default().relay_buf_size,
+            ctx.relay_buf_size,
         )
         .await
     }

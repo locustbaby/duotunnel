@@ -37,6 +37,17 @@ impl CachedResolver {
         self.cache
             .retain(|_, v| now.duration_since(v.cached_at) < DNS_CACHE_TTL);
     }
+
+    fn evict_one_oldest(&self) {
+        let oldest_key = self
+            .cache
+            .iter()
+            .min_by_key(|entry| entry.value().cached_at)
+            .map(|entry| entry.key().clone());
+        if let Some(key) = oldest_key {
+            self.cache.remove(&key);
+        }
+    }
 }
 
 impl Default for CachedResolver {
@@ -67,8 +78,14 @@ impl Resolver for CachedResolver {
             return Err(anyhow!("no resolved IP for {}", cache_key));
         }
 
+        // A cache hit with expired data falls through here and re-inserts,
+        // so no extra `contains_key` guard is needed — we only over-evict in
+        // the rare case where the cache is actually full.
         if self.cache.len() >= MAX_CACHE_ENTRIES {
             self.evict_expired();
+            if self.cache.len() >= MAX_CACHE_ENTRIES {
+                self.evict_one_oldest();
+            }
         }
         self.cache.insert(
             cache_key,

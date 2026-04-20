@@ -142,7 +142,7 @@ mod tests {
             async fn handle(
                 &self,
                 _stream: tokio::net::TcpStream,
-                _route: Route,
+                _route: Option<Route>,
                 _ctx: &ServerCtx,
             ) -> Result<()> { Ok(()) }
         }

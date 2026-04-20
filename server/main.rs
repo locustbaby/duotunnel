@@ -395,11 +395,16 @@ async fn build_server_state(
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
         let mut reg = PluginRegistry::new();
+        let route_resolver: Arc<dyn tunnel_lib::plugin::RouteResolver> =
+            Arc::new(plugins::vhost::VhostPlugin {
+                routing: routing.clone(),
+            });
         reg.register_ingress_handler(Arc::new(plugins::tls::TlsHandler {
             registry: shared_registry.clone(),
         }));
         reg.register_ingress_handler(Arc::new(plugins::h2c::H2cHandler {
             registry: shared_registry.clone(),
+            route_resolver: route_resolver.clone(),
             single_authority: config.server.h2_single_authority,
         }));
         reg.register_ingress_handler(Arc::new(plugins::h1::H1Handler {
@@ -408,9 +413,7 @@ async fn build_server_state(
         reg.register_ingress_handler(Arc::new(plugins::tcp_pass::TcpPassHandler {
             registry: shared_registry.clone(),
         }));
-        reg.set_route_resolver(Arc::new(plugins::vhost::VhostPlugin {
-            routing: routing.clone(),
-        }));
+        reg.set_route_resolver(route_resolver);
         reg.set_metrics_sink(Arc::new(plugins::prometheus::PrometheusSink));
         reg.validate_for_ingress()?;
         Arc::new(reg)

@@ -24,7 +24,13 @@ impl IngressProtocolHandler for TlsHandler {
         ProtocolKind::Tls
     }
 
-    async fn handle(&self, stream: TcpStream, route: Route, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(
+        &self,
+        stream: TcpStream,
+        route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()> {
+        let route = route.ok_or_else(|| anyhow::anyhow!("TlsHandler: missing Route"))?;
         let host = ctx
             .hint
             .as_ref()

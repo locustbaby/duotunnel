@@ -162,6 +162,8 @@ pub struct ServerCtx {
     pub overload: OverloadLimits,
     pub timeouts: Timeouts,
     pub peer_addr: SocketAddr,
+    pub listener_port: u16,
+    pub relay_buf_size: usize,
 
     // Timing for the logging phase
     pub timing: PhaseTiming,
@@ -174,6 +176,8 @@ impl ServerCtx {
         tcp_params: Arc<TcpParams>,
         overload: OverloadLimits,
         timeouts: Timeouts,
+        listener_port: u16,
+        relay_buf_size: usize,
     ) -> Self {
         Self {
             metrics,
@@ -184,6 +188,8 @@ impl ServerCtx {
             overload,
             timeouts,
             peer_addr,
+            listener_port,
+            relay_buf_size,
             timing: PhaseTiming::new(),
         }
     }

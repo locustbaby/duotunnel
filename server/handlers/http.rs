@@ -48,6 +48,8 @@ pub async fn run_http_accept_loop(
                     Arc::new(state.tcp_params.clone()),
                     state.overload_limits.clone(),
                     timeouts,
+                    port,
+                    state.proxy_buffer_params.relay_buf_size,
                 );
                 ctx.timing.accepted_at = std::time::Instant::now();
 
@@ -66,4 +68,3 @@ pub async fn run_http_accept_loop(
     .await;
     Ok(())
 }
-

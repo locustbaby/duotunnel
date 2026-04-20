@@ -21,7 +21,13 @@ impl IngressProtocolHandler for TcpPassHandler {
         ProtocolKind::Tcp
     }
 
-    async fn handle(&self, stream: TcpStream, route: Route, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(
+        &self,
+        stream: TcpStream,
+        route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()> {
+        let route = route.ok_or_else(|| anyhow::anyhow!("TcpPassHandler: missing Route"))?;
         let hint = ctx.hint.as_ref();
         let host = hint.and_then(|h| h.sni.clone().or_else(|| h.authority.clone()));
         let initial_data = hint
@@ -66,7 +72,7 @@ impl IngressProtocolHandler for TcpPassHandler {
             send,
             recv,
             stream,
-            tunnel_lib::proxy::ProxyBufferParams::default().relay_buf_size,
+            ctx.relay_buf_size,
         )
         .await
     }

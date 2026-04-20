@@ -51,7 +51,7 @@ async fn sniff(stream: &TcpStream) -> Result<ProtocolHint> {
     };
 
     let raw_preface = bytes::Bytes::copy_from_slice(data);
-    let mut hint = ProtocolHint::new(kind, raw_preface);
+    let mut hint = ProtocolHint::new(kind, raw_preface).with_protocol(legacy_proto);
 
     match kind {
         ProtocolKind::Tls => {
@@ -155,40 +155,45 @@ impl IngressDispatcher {
         }
 
         // ── Phase 4: RouteResolver::resolve (from registry) ───────────────────
-        let route_ctx = RouteCtx {
-            listener_port: self.listener_port,
-            client_addr: ctx.peer_addr,
-            hint: hint.clone(),
-        };
-        let route = match self.registry.route_resolver.resolve(&route_ctx).await? {
-            PhaseResult::Continue(r) => {
-                timing.route_done_at = Some(Instant::now());
-                r
-            }
-            PhaseResult::Reject { status, message } => {
-                let outcome = PhaseOutcome {
-                    timing,
-                    bytes_sent: 0,
-                    bytes_recv: 0,
-                    error: Some(format!(
-                        "route rejected: status={} msg={}",
-                        status,
-                        String::from_utf8_lossy(&message)
-                    )),
-                };
-                safe_logging(svc, ctx, &outcome);
-                return Err(anyhow!("no route found (status={})", status));
-            }
-        };
-        ctx.route = Some(route.clone());
-
-        // ── Phase 5: IngressProtocolHandler::handle ───────────────────────────
         let handler = self
             .registry
             .ingress_handlers
             .get(&hint.kind)
             .ok_or_else(|| anyhow!("no ingress handler registered for {:?}", hint.kind))?;
 
+        let route = if hint.kind == ProtocolKind::H2c {
+            timing.route_done_at = Some(Instant::now());
+            None
+        } else {
+            let route_ctx = RouteCtx {
+                listener_port: self.listener_port,
+                client_addr: ctx.peer_addr,
+                hint: hint.clone(),
+            };
+            match self.registry.route_resolver.resolve(&route_ctx).await? {
+                PhaseResult::Continue(r) => {
+                    timing.route_done_at = Some(Instant::now());
+                    Some(r)
+                }
+                PhaseResult::Reject { status, message } => {
+                    let outcome = PhaseOutcome {
+                        timing,
+                        bytes_sent: 0,
+                        bytes_recv: 0,
+                        error: Some(format!(
+                            "route rejected: status={} msg={}",
+                            status,
+                            String::from_utf8_lossy(&message)
+                        )),
+                    };
+                    safe_logging(svc, ctx, &outcome);
+                    return Err(anyhow!("no route found (status={})", status));
+                }
+            }
+        };
+        ctx.route = route.clone();
+
+        // ── Phase 5: IngressProtocolHandler::handle ───────────────────────────
         timing.tunnel_open_at = Some(Instant::now());
         ctx.timing = timing.clone();
 

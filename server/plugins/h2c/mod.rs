@@ -10,17 +10,25 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tracing::debug;
 
-use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
+use tunnel_lib::plugin::{
+    IngressProtocolHandler, PhaseResult, ProtocolHint, ProtocolKind, Route, RouteCtx,
+    RouteResolver, ServerCtx,
+};
 use tunnel_lib::transport::listener::RouteTarget;
 
 use crate::registry::SharedRegistry;
 
 /// Serves HTTP/2 cleartext (h2c) connections with per-request vhost routing
 /// and authority rewriting via the QUIC tunnel.
+///
+/// Holds its own `RouteResolver` reference because H2 multiplexes many
+/// authorities on one TCP connection. The dispatcher's Phase 4 runs once
+/// per connection; this handler re-resolves per request with the request's
+/// `:authority`. This is why `IngressDispatcher` skips Phase 4 for
+/// `ProtocolKind::H2c` and passes `None` as the route.
 pub struct H2cHandler {
     pub registry: SharedRegistry,
-    /// When true, all requests on a single H2 connection must share the same
-    /// authority (mirrors `h2_single_authority` config option).
+    pub route_resolver: Arc<dyn RouteResolver>,
     pub single_authority: bool,
 }
 
@@ -30,15 +38,20 @@ impl IngressProtocolHandler for H2cHandler {
         ProtocolKind::H2c
     }
 
-    async fn handle(&self, stream: TcpStream, route: Route, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(
+        &self,
+        stream: TcpStream,
+        _route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()> {
         debug!("plaintext H2 detected, using L7 proxy");
         let src_addr = ctx.peer_addr.ip().to_string();
         let src_port = ctx.peer_addr.port();
+        let listener_port = ctx.listener_port;
+        let client_addr = ctx.peer_addr;
         let single_authority = self.single_authority;
-        let (_group_id, _proxy_name) = (route.group_id.clone(), route.proxy_name.clone());
 
         let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        // route_cache: host → Option<RouteTarget> (None = no route found)
         let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let sender_cache: Arc<
@@ -46,21 +59,14 @@ impl IngressProtocolHandler for H2cHandler {
         > = Arc::new(Mutex::new(HashMap::new()));
 
         let registry = self.registry.clone();
-
-        // The route passed in from the dispatcher is for the initial sniff host.
-        // For H2c each request can target a different authority, so we look up
-        // per-request inside the service closure (mirroring legacy behaviour).
-        let initial_route = RouteTarget {
-            group_id: route.group_id,
-            proxy_name: route.proxy_name,
-        };
+        let route_resolver = self.route_resolver.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let registry = registry.clone();
             let first_authority = first_authority.clone();
             let route_cache = route_cache.clone();
             let sender_cache = sender_cache.clone();
-            let initial_route = initial_route.clone();
+            let route_resolver = route_resolver.clone();
             let src_addr = src_addr.clone();
             async move {
                 let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
@@ -102,12 +108,40 @@ impl IngressProtocolHandler for H2cHandler {
                     }
                 }
 
-                let route_target = {
-                    let mut cache = route_cache.lock().unwrap();
-                    cache
-                        .entry(route_host.clone())
-                        .or_insert_with(|| Some(initial_route.clone()))
-                        .clone()
+                let cached_route = { route_cache.lock().unwrap().get(&route_host).cloned() };
+                let route_target = match cached_route {
+                    Some(route) => route,
+                    None => {
+                        let resolve_ctx = RouteCtx {
+                            listener_port,
+                            client_addr,
+                            hint: ProtocolHint::new(ProtocolKind::H2c, bytes::Bytes::new())
+                                .with_authority(route_host.clone()),
+                        };
+                        let resolved = match route_resolver.resolve(&resolve_ctx).await {
+                            Ok(PhaseResult::Continue(route)) => Some(RouteTarget {
+                                group_id: route.group_id,
+                                proxy_name: route.proxy_name,
+                            }),
+                            Ok(PhaseResult::Reject { .. }) => None,
+                            Err(e) => {
+                                tracing::error!(error = %e, host = %route_host, "h2c route resolve failed");
+                                return Ok(Response::builder()
+                                    .status(502)
+                                    .body(
+                                        Full::new(bytes::Bytes::from("Bad Gateway"))
+                                            .map_err(|_| unreachable!())
+                                            .boxed(),
+                                    )
+                                    .unwrap());
+                            }
+                        };
+                        route_cache
+                            .lock()
+                            .unwrap()
+                            .insert(route_host.clone(), resolved.clone());
+                        resolved
+                    }
                 };
                 let route_target = match route_target {
                     Some(r) => r,
