@@ -6,6 +6,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tunnel_lib::extract_host_from_http;
+use tunnel_lib::plugin::{IngressDispatcher, ServerCtx, Timeouts};
+#[allow(unused_imports)]
+use tunnel_lib::OverloadLimits;
 use tunnel_lib::proxy;
 use tunnel_lib::run_accept_worker;
 use tunnel_lib::RouteTarget;
@@ -19,20 +22,65 @@ pub async fn run_http_accept_loop(
     let addr = listener.local_addr()?;
     let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, "http accept loop started");
+
+    // Pre-build dispatcher if plugin stack is enabled.
+    let dispatcher: Option<Arc<IngressDispatcher>> =
+        if state.use_plugin_stack {
+            state.plugin_registry.as_ref().map(|reg| {
+                Arc::new(IngressDispatcher::new(reg.clone()))
+            })
+        } else {
+            None
+        };
+
     run_accept_worker(
         listener,
         cancel,
         emfile_backoff,
         "http",
-        move |stream, _peer_addr| {
+        move |stream, peer_addr| {
             let state = state.clone();
+            let dispatcher = dispatcher.clone();
             tokio::task::spawn(async move {
                 if let Err(e) = state.tcp_params.apply(&stream) {
                     debug!(error = %e, "tcp_params.apply failed");
                     return;
                 }
                 metrics::tcp_connection_opened();
-                let result = handle_http_connection(state, stream, port).await;
+                let result = if let Some(disp) = dispatcher {
+                    // ── plugin stack path ──────────────────────────────────
+                    let svc = crate::tunnel_service::DefaultTunnelService {
+                        routing: state.routing.clone(),
+                    };
+                    let timeouts = Timeouts {
+                        open_stream_ms: state.config.server.open_stream_timeout_ms,
+                        ..Timeouts::default()
+                    };
+                    let mut ctx = ServerCtx::new(
+                        peer_addr,
+                        state.plugin_registry
+                            .as_ref()
+                            .map(|r| r.metrics_sink.clone())
+                            .unwrap_or_else(|| Arc::new(tunnel_lib::plugin::NoopSink)),
+                        Arc::new(state.tcp_params.clone()),
+                        state.overload_limits.clone(),
+                        timeouts,
+                    );
+                    // listener_port is not carried in peer_addr; pass via RouteCtx
+                    // by stashing it in a thread-local or passing through ctx.
+                    // For now, encode port in a wrapper via a simple ctx extension:
+                    ctx.timing.accepted_at = std::time::Instant::now();
+                    // We need the port in RouteCtx — store it in a side-channel
+                    // by creating a thin wrapper service that knows the port.
+                    let svc_with_port = crate::tunnel_service::PortedTunnelService {
+                        inner: svc,
+                        port,
+                    };
+                    disp.dispatch(stream, &svc_with_port, &mut ctx).await
+                } else {
+                    // ── legacy path (default until PR ④) ──────────────────
+                    handle_http_connection(state, stream, port).await
+                };
                 if let Err(e) = &result {
                     debug!(error = %e, "entry connection error");
                     metrics::request_completed("http", "error");

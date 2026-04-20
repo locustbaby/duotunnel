@@ -24,9 +24,11 @@ mod listener_mgr;
 mod local_auth;
 mod metrics;
 mod null_stores;
+mod plugins;
 mod registry;
 mod service;
 mod tunnel_handler;
+mod tunnel_service;
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
     ServerEgressUpstream, TunnelManagement,
@@ -116,6 +118,12 @@ pub struct ServerState {
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
     pub overload_limits: tunnel_lib::OverloadLimits,
+    /// Shadow-migration flag: when true, route HTTP connections through the
+    /// new plugin-based IngressDispatcher instead of the legacy if/else dispatcher.
+    /// Defaults to false; flip to true once integration tests pass.
+    pub use_plugin_stack: bool,
+    /// Plugin registry used by IngressDispatcher (None when use_plugin_stack=false).
+    pub plugin_registry: Option<Arc<tunnel_lib::plugin::PluginRegistry>>,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
@@ -380,12 +388,37 @@ async fn build_server_state(
         max_concurrent_streams = max_streams,
         "overload protection resolved"
     );
+    let shared_registry = new_shared_registry();
+
+    // Build the plugin registry used by IngressDispatcher (PR ②).
+    // Populated with the four built-in ingress handlers; more plugins will be
+    // added as PRs ③–⑥ land.
+    let plugin_registry = {
+        use std::sync::Arc;
+        use tunnel_lib::plugin::PluginRegistry;
+        let mut reg = PluginRegistry::new();
+        reg.register_ingress_handler(Arc::new(plugins::tls::TlsHandler {
+            registry: shared_registry.clone(),
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::h2c::H2cHandler {
+            registry: shared_registry.clone(),
+            single_authority: config.server.h2_single_authority,
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::h1::H1Handler {
+            registry: shared_registry.clone(),
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::tcp_pass::TcpPassHandler {
+            registry: shared_registry.clone(),
+        }));
+        Arc::new(reg)
+    };
+
     Ok(Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
         routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
-        registry: new_shared_registry(),
+        registry: shared_registry,
         config: Arc::new(config.clone()),
         auth_store,
         rule_store,
@@ -394,6 +427,8 @@ async fn build_server_state(
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
         overload_limits,
+        use_plugin_stack: false,
+        plugin_registry: Some(plugin_registry),
     }))
 }
 
