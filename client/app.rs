@@ -1,79 +1,105 @@
 use anyhow::{anyhow, Context, Result};
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tracing::{debug, info};
 pub use tunnel_lib::egress::http::{H2cClient, HttpsClient};
+use tunnel_lib::plugin::{LoadBalancer, PickCtx, Resolver, Target};
 use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http::HttpPeer;
 use tunnel_lib::proxy::peers::PeerKind;
-use tunnel_lib::{ClientConfig, HttpClientParams, UpstreamGroup};
-struct CachedAddr {
-    addr: SocketAddr,
-    cached_at: Instant,
+use tunnel_lib::proxy::tcp::UpstreamScheme;
+use tunnel_lib::{ClientConfig, HttpClientParams};
+
+/// One named upstream group: a list of pre-parsed `Target`s plus the
+/// `LoadBalancer` plugin that picks from them.
+struct UpstreamGroupPlugin {
+    targets: Vec<Target>,
+    raw: Vec<String>,
+    lb: Arc<dyn LoadBalancer>,
 }
+
 pub struct LocalProxyMap {
-    upstreams: HashMap<String, UpstreamGroup>,
-    dns_cache: DashMap<String, CachedAddr>,
+    upstreams: HashMap<String, UpstreamGroupPlugin>,
+    resolver: Arc<dyn Resolver>,
     pub https_client: HttpsClient,
     pub h2c_client: H2cClient,
 }
+
 impl LocalProxyMap {
-    pub fn from_config(config: &ClientConfig, http_params: &HttpClientParams) -> Self {
+    pub fn from_config(
+        config: &ClientConfig,
+        http_params: &HttpClientParams,
+        lb: Arc<dyn LoadBalancer>,
+        resolver: Arc<dyn Resolver>,
+    ) -> Self {
         let mut upstreams = HashMap::new();
         for upstream in &config.upstreams {
-            let servers: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
-            upstreams.insert(upstream.name.clone(), UpstreamGroup::new(servers));
+            let raw: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
+            let targets: Vec<Target> = raw
+                .iter()
+                .map(|addr| {
+                    let (scheme, connect_addr, _tls_host) = UpstreamScheme::from_address(addr);
+                    let (host, port) = split_host_port(&connect_addr);
+                    Target { host, port, scheme }
+                })
+                .collect();
+            upstreams.insert(
+                upstream.name.clone(),
+                UpstreamGroupPlugin {
+                    targets,
+                    raw,
+                    lb: lb.clone(),
+                },
+            );
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
         Self {
             upstreams,
-            dns_cache: DashMap::new(),
+            resolver,
             https_client,
             h2c_client,
         }
     }
-    pub fn get_local_address(&self, proxy_name: &str) -> Option<String> {
+
+    /// Returns the raw upstream address (still in `scheme://host:port` form)
+    /// chosen by the `LoadBalancer` plugin for `proxy_name`.
+    pub fn get_local_address(&self, proxy_name: &str, client_addr: SocketAddr) -> Option<String> {
         let group = self.upstreams.get(proxy_name)?;
-        let server = group.next()?;
-        debug!(proxy_name = %proxy_name, server = %server, "upstream selected");
-        Some(server.clone())
+        let ctx = PickCtx { client_addr };
+        let target = group.lb.pick(&group.targets, &ctx)?;
+        let idx = group
+            .targets
+            .iter()
+            .position(|t| std::ptr::eq(t, target))?;
+        let addr = group.raw.get(idx).cloned()?;
+        debug!(proxy_name = %proxy_name, server = %addr, "upstream selected");
+        Some(addr)
     }
-    /// Resolve `connect_addr_str` to a `SocketAddr`, using a lazy DNS cache.
-    /// IP addresses are parsed directly. Hostnames are looked up once and cached.
+
+    /// Resolve `connect_addr_str` (host:port) to a single `SocketAddr` via
+    /// the `Resolver` plugin.
     pub async fn resolve_addr(&self, connect_addr_str: &str) -> Result<SocketAddr> {
-        const DNS_CACHE_TTL: Duration = Duration::from_secs(30);
         if let Ok(addr) = connect_addr_str.parse::<SocketAddr>() {
             return Ok(addr);
         }
-        if let Some(cached) = self.dns_cache.get(connect_addr_str) {
-            if cached.cached_at.elapsed() < DNS_CACHE_TTL {
-                return Ok(cached.addr);
-            }
-        }
-        let mut addrs = tokio::net::lookup_host(connect_addr_str)
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "failed to resolve upstream address {}: {}",
-                    connect_addr_str,
-                    e
-                )
-            })?;
-        let addr = addrs
+        let (host, port) = split_host_port(connect_addr_str);
+        let addrs = self.resolver.resolve(&host, port).await?;
+        addrs
+            .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?;
-        self.dns_cache.insert(
-            connect_addr_str.to_string(),
-            CachedAddr {
-                addr,
-                cached_at: Instant::now(),
-            },
-        );
-        Ok(addr)
+            .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))
+    }
+}
+
+fn split_host_port(addr: &str) -> (String, u16) {
+    match addr.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse::<u16>().unwrap_or(0);
+            (host.to_string(), port)
+        }
+        None => (addr.to_string(), 0),
     }
 }
 
@@ -94,9 +120,8 @@ impl UpstreamResolver for ClientApp {
             .ok_or_else(|| anyhow!("missing routing info in context"))?;
         let upstream_addr = self
             .map
-            .get_local_address(&routing.proxy_name)
+            .get_local_address(&routing.proxy_name, context.client_addr)
             .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", routing.proxy_name))?;
-        use tunnel_lib::proxy::tcp::UpstreamScheme;
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         let http_scheme = if is_https { "https" } else { "http" };
