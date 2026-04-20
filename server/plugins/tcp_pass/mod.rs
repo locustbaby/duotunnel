@@ -54,11 +54,16 @@ impl IngressProtocolHandler for TcpPassHandler {
             host,
         };
 
+        tunnel_lib::maybe_slow_path(
+            || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            &ctx.overload,
+        )
+        .await;
+
         let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
         let opened = tunnel_lib::open_bi_guarded(
             &selected.conn,
             &selected.inflight,
-            &ctx.overload,
             open_timeout,
             |_elapsed, _outcome| {},
         )
