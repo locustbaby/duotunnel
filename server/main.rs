@@ -118,12 +118,10 @@ pub struct ServerState {
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
     pub overload_limits: tunnel_lib::OverloadLimits,
-    /// Shadow-migration flag: when true, route HTTP connections through the
-    /// new plugin-based IngressDispatcher instead of the legacy if/else dispatcher.
-    /// Defaults to false; flip to true once integration tests pass.
-    pub use_plugin_stack: bool,
-    /// Plugin registry used by IngressDispatcher (None when use_plugin_stack=false).
-    pub plugin_registry: Option<Arc<tunnel_lib::plugin::PluginRegistry>>,
+    /// Plugin registry used by `IngressDispatcher`; always present after
+    /// startup. Populated with ingress handlers, the vhost route resolver,
+    /// and the prometheus metrics sink in `build_server_state`.
+    pub plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
@@ -431,8 +429,7 @@ async fn build_server_state(
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
         overload_limits,
-        use_plugin_stack: true,
-        plugin_registry: Some(plugin_registry),
+        plugin_registry,
     }))
 }
 
