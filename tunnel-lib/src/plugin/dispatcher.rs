@@ -22,7 +22,11 @@ fn safe_logging(svc: &dyn TunnelService, ctx: &ServerCtx, outcome: &PhaseOutcome
     }
 }
 
-const SNIFF_LIMIT: usize = 256;
+/// Upper bound on bytes that Phase 1 peeks before producing a
+/// `ProtocolHint`. Exposed so ingress handlers can size stack buffers
+/// (e.g. for discarding peeked bytes before handing the stream to a
+/// relay) without hard-coding the number.
+pub const SNIFF_LIMIT: usize = 256;
 
 // ── Protocol sniff (Phase 1, CORE — not pluggable) ────────────────────────────
 
