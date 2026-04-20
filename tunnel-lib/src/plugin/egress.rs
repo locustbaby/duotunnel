@@ -7,12 +7,13 @@ use crate::proxy::tcp::UpstreamScheme;
 
 // ── LoadBalancer ──────────────────────────────────────────────────────────────
 
-/// Select one target from a candidate list.
+/// Select one target from a candidate list, returning its index.
 ///
-/// Sync (no async) because selection algorithms are CPU-bound and must be
-/// fast enough to call on every stream.
+/// Returning an index (rather than a reference) lets callers keep any
+/// parallel data structures in sync without a fragile `ptr::eq` lookup.
+/// Sync because selection algorithms are CPU-bound and called on every stream.
 pub trait LoadBalancer: Send + Sync + 'static {
-    fn pick<'a>(&self, targets: &'a [Target], ctx: &PickCtx) -> Option<&'a Target>;
+    fn pick(&self, targets: &[Target], ctx: &PickCtx) -> Option<usize>;
 }
 
 // ── Connected ─────────────────────────────────────────────────────────────────
@@ -30,8 +31,12 @@ pub struct Connected {
 
 /// Open a connection to a single upstream target.
 ///
-/// Dialers declare which schemes they handle via `matches_scheme`; the
-/// framework picks the first matching dialer in registration order.
+/// Currently unused — the existing `UpstreamResolver` + `PeerKind` pipeline
+/// in `proxy/core.rs` + `proxy/peers.rs` already covers this seam. Kept here
+/// for symmetry with `LoadBalancer` / `Resolver` and to reserve the name, but
+/// not part of any live dispatch path. Do not implement against this trait
+/// without first wiring it through `tunnel-lib/src/proxy/core.rs`.
+#[doc(hidden)]
 #[async_trait]
 pub trait UpstreamDialer: Send + Sync + 'static {
     /// Return true if this dialer can handle the given scheme.

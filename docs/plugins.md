@@ -1,18 +1,22 @@
 # Ingress / Egress 插件化设计(v2)
 
-> 状态:**进行中** — PR ① 已合入(trait 骨架),PR ②–⑥ 待实施。
-> 最后更新:2026-04-19
+> 状态:**已完成** — PR ①–⑥ 全部落地,整体作为一个 PR 提交。
+> 最后更新:2026-04-20
 > v2 变更:参考 Cloudflare Pingora 架构重新设计,改"probe 竞争"为"phase 串行",拆 PluginCtx 为 Server/Egress 两个上下文,补全 phase 短路语义。
 >
 > **实施进度**
 > | PR | 内容 | 状态 |
 > |---|---|---|
 > | ① | `tunnel-lib/src/plugin/` trait 骨架(9 个文件,7 个 smoke tests) | ✅ 已合入 |
-> | ② | Ingress handler 插件化 + `IngressDispatcher`(影子迁移) | 🔜 待实施 |
-> | ③ | `RouteResolver` 插件化(VhostResolver + StaticPortResolver) | 🔜 待实施 |
-> | ④ | `MetricsSink` 插件化(PrometheusSink + NoopSink)+ 删 legacy 分支 | 🔜 待实施 |
-> | ⑤ | Egress 侧插件化(LoadBalancer + UpstreamDialer + Resolver) | 🔜 待实施 |
-> | ⑥ | 配置层接入 `ingress_plugins`/`egress_plugins` + 最终清理 | 🔜 待实施 |
+> | ② | Ingress handler 插件化 + `IngressDispatcher`(影子迁移) | ✅ 已合入 |
+> | ③ | `RouteResolver` 插件化(VhostPlugin + `NoRouteResolver` 兜底) | ✅ 已合入 |
+> | ④ | `MetricsSink` 插件化(PrometheusSink + NoopSink) | ✅ 已合入 |
+> | ⑤ | Egress 侧插件化(`RoundRobinLb` + `CachedResolver`;`UpstreamDialer` 沿用既有 `UpstreamResolver`/`PeerKind` 抽象) | ✅ 已合入 |
+> | ⑥ | 删除 `use_plugin_stack` 与 legacy HTTP dispatcher(~390 行) | ✅ 已合入 |
+>
+> **实施中的范围调整**:
+> - 配置驱动的 plugin 名字查表(`ingress_plugins: [...]`)未做 —— 当前每个 seam 只有一个实现,把字符串查表放进去属于过度抽象。等某个 seam 出现第二个实现时再加。
+> - `UpstreamDialer` trait 保留在 `tunnel-lib/src/plugin/egress.rs` 以保持对称性,但暂未用它替换 `client/app.rs` 的 `UpstreamResolver::upstream_peer` —— 后者已经是 trait 抽象,再套一层只会重复 dispatch 表。参见 §4.12 "Upstream Peer:不动"。
 
 ---
 

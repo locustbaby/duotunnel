@@ -24,6 +24,7 @@ mod config;
 mod conn_pool;
 mod connect;
 mod entry;
+mod plugins;
 mod pool;
 mod proxy;
 use app::LocalProxyMap;
@@ -303,9 +304,15 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
+    let lb: Arc<dyn tunnel_lib::plugin::LoadBalancer> =
+        Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
+    let resolver: Arc<dyn tunnel_lib::plugin::Resolver> =
+        Arc::new(plugins::resolver_cached::CachedResolver::new());
     let proxy_map = Arc::new(LocalProxyMap::from_config(
         &resp.config,
         &tunnel_lib::HttpClientParams::from(&config.http_pool),
+        lb,
+        resolver,
     ));
     let session_cancel = CancellationToken::new();
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);

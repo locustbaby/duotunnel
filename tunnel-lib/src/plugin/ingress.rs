@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::net::TcpStream;
 
+use crate::proxy::core::Protocol;
 use super::ctx::{Route, ServerCtx};
 
 // ── ProtocolKind ─────────────────────────────────────────────────────────────
@@ -23,9 +24,16 @@ pub enum ProtocolKind {
 
 /// Full output of Phase 1: protocol kind plus any metadata extractable from
 /// the peek buffer without consuming the stream.
+///
+/// `kind` and `protocol` coexist because they serve different purposes:
+/// `kind` is the handler-dispatch key (four values, stable), while `protocol`
+/// is the wire-level enum forwarded to the upstream via `RoutingInfo`. WS
+/// shares `ProtocolKind::Http1` with H1 but needs `Protocol::WebSocket`
+/// downstream, so the sniffer overrides `protocol` while keeping `kind`.
 #[derive(Debug, Clone)]
 pub struct ProtocolHint {
     pub kind: ProtocolKind,
+    pub protocol: Protocol,
     /// SNI hostname from a TLS ClientHello, if present.
     pub sni: Option<String>,
     /// HTTP `Host` header / H2 `:authority`, if present.
@@ -37,12 +45,23 @@ pub struct ProtocolHint {
 
 impl ProtocolHint {
     pub fn new(kind: ProtocolKind, raw_preface: impl Into<Bytes>) -> Self {
+        let protocol = match kind {
+            ProtocolKind::Tls | ProtocolKind::Tcp => Protocol::Tcp,
+            ProtocolKind::H2c => Protocol::H2,
+            ProtocolKind::Http1 => Protocol::H1,
+        };
         Self {
             kind,
+            protocol,
             sni: None,
             authority: None,
             raw_preface: raw_preface.into(),
         }
+    }
+
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
     }
 
     pub fn with_sni(mut self, sni: impl Into<String>) -> Self {
@@ -70,13 +89,16 @@ pub trait IngressProtocolHandler: Send + Sync + 'static {
 
     /// Handle an accepted TCP connection.
     ///
-    /// `route` has already been resolved by Phase 3.
+    /// `route` is `Some` when Phase 4 resolved a route per-connection.
+    /// It is `None` for handlers that do their own per-request route lookup
+    /// (currently only `H2cHandler`, which multiplexes many authorities on a
+    /// single connection).
     /// `ctx.hint.raw_preface` contains the bytes that were peeked; the handler
     /// is responsible for prepending them when forwarding to the upstream.
     async fn handle(
         &self,
         stream: TcpStream,
-        route: Route,
+        route: Option<Route>,
         ctx: &ServerCtx,
     ) -> Result<()>;
 }

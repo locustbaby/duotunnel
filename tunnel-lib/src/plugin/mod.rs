@@ -24,6 +24,7 @@ pub mod ingress;
 pub mod metrics;
 pub mod module;
 pub mod registry;
+pub mod route;
 pub mod service;
 
 // Convenience re-exports for the most commonly used types.
@@ -37,6 +38,7 @@ pub use ingress::{IngressProtocolHandler, ProtocolHint, ProtocolKind};
 pub use metrics::{MetricsSink, NoopSink};
 pub use module::ConnectionModule;
 pub use registry::PluginRegistry;
+pub use route::{NoRouteResolver, RouteResolver};
 pub use service::TunnelService;
 
 #[cfg(test)]
@@ -56,11 +58,7 @@ mod tests {
             Ok(PhaseResult::Continue(()))
         }
 
-        async fn resolve_route(&self, _ctx: &RouteCtx) -> Result<PhaseResult<Route>> {
-            Ok(PhaseResult::Continue(Route::new("test-group", "test-proxy")))
-        }
-
-        fn logging(&self, _outcome: &PhaseOutcome) {}
+        fn logging(&self, _ctx: &ServerCtx, _outcome: &PhaseOutcome) {}
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────
@@ -126,22 +124,47 @@ mod tests {
         assert!(result.is_continue());
     }
 
+    #[test]
+    fn validate_for_ingress_rejects_empty_registry() {
+        let reg = PluginRegistry::new();
+        let err = reg.validate_for_ingress().unwrap_err().to_string();
+        assert!(err.contains("no ingress handlers"), "actual: {err}");
+    }
+
+    #[test]
+    fn validate_for_ingress_rejects_missing_route_resolver() {
+        let mut reg = PluginRegistry::new();
+
+        struct DummyHandler;
+        #[async_trait]
+        impl IngressProtocolHandler for DummyHandler {
+            fn protocol_kind(&self) -> ProtocolKind { ProtocolKind::Tcp }
+            async fn handle(
+                &self,
+                _stream: tokio::net::TcpStream,
+                _route: Option<Route>,
+                _ctx: &ServerCtx,
+            ) -> Result<()> { Ok(()) }
+        }
+        reg.register_ingress_handler(Arc::new(DummyHandler));
+
+        let err = reg.validate_for_ingress().unwrap_err().to_string();
+        assert!(err.contains("no route resolver"), "actual: {err}");
+    }
+
     #[tokio::test]
-    async fn always_allow_service_resolves_route() {
-        let svc = AlwaysAllowService;
+    async fn no_route_resolver_rejects_with_404() {
+        let resolver = NoRouteResolver;
         let hint = ProtocolHint::new(ProtocolKind::Http1, bytes::Bytes::new());
         let ctx = RouteCtx {
             listener_port: 8080,
-            peer_addr: "127.0.0.1:1234".parse().unwrap(),
+            client_addr: "127.0.0.1:1234".parse().unwrap(),
             hint,
         };
-        let result = svc.resolve_route(&ctx).await.unwrap();
+        let result = resolver.resolve(&ctx).await.unwrap();
         match result {
-            PhaseResult::Continue(route) => {
-                assert_eq!(&*route.group_id, "test-group");
-                assert_eq!(&*route.proxy_name, "test-proxy");
-            }
-            _ => panic!("expected Continue"),
+            PhaseResult::Reject { status, .. } => assert_eq!(status, 404),
+            _ => panic!("expected Reject"),
         }
     }
 }

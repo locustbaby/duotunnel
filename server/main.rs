@@ -24,9 +24,11 @@ mod listener_mgr;
 mod local_auth;
 mod metrics;
 mod null_stores;
+mod plugins;
 mod registry;
 mod service;
 mod tunnel_handler;
+mod tunnel_service;
 use config::{
     ConfigSource, DbSource, FileSource, IngressMode, MergedSource, ServerConfigFile,
     ServerEgressUpstream, TunnelManagement,
@@ -116,6 +118,10 @@ pub struct ServerState {
     pub local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
     pub listeners: listener_mgr::ListenerManager,
     pub overload_limits: tunnel_lib::OverloadLimits,
+    /// Plugin registry used by `IngressDispatcher`; always present after
+    /// startup. Populated with ingress handlers, the vhost route resolver,
+    /// and the prometheus metrics sink in `build_server_state`.
+    pub plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
     let pool = tunnel_store::open_sqlite_pool(database_url).await?;
@@ -380,12 +386,45 @@ async fn build_server_state(
         max_concurrent_streams = max_streams,
         "overload protection resolved"
     );
+    let shared_registry = new_shared_registry();
+    let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
+
+    // Build the plugin registry used by IngressDispatcher. Populated with
+    // four ingress handlers, the vhost route resolver, and the prometheus
+    // metrics sink.
+    let plugin_registry = {
+        use tunnel_lib::plugin::PluginRegistry;
+        let mut reg = PluginRegistry::new();
+        let route_resolver: Arc<dyn tunnel_lib::plugin::RouteResolver> =
+            Arc::new(plugins::vhost::VhostPlugin {
+                routing: routing.clone(),
+            });
+        reg.register_ingress_handler(Arc::new(plugins::tls::TlsHandler {
+            registry: shared_registry.clone(),
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::h2c::H2cHandler {
+            registry: shared_registry.clone(),
+            route_resolver: route_resolver.clone(),
+            single_authority: config.server.h2_single_authority,
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::h1::H1Handler {
+            registry: shared_registry.clone(),
+        }));
+        reg.register_ingress_handler(Arc::new(plugins::tcp_pass::TcpPassHandler {
+            registry: shared_registry.clone(),
+        }));
+        reg.set_route_resolver(route_resolver);
+        reg.set_metrics_sink(Arc::new(plugins::prometheus::PrometheusSink));
+        reg.validate_for_ingress()?;
+        Arc::new(reg)
+    };
+
     Ok(Arc::new(ServerState {
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
-        routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
-        registry: new_shared_registry(),
+        routing,
+        registry: shared_registry,
         config: Arc::new(config.clone()),
         auth_store,
         rule_store,
@@ -394,6 +433,7 @@ async fn build_server_state(
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
         overload_limits,
+        plugin_registry,
     }))
 }
 
