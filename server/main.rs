@@ -389,9 +389,9 @@ async fn build_server_state(
     let shared_registry = new_shared_registry();
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
 
-    // Build the plugin registry used by IngressDispatcher (PR ②+③).
-    // Populated with the four built-in ingress handlers and the vhost route
-    // resolver; more plugins (metrics, egress, admission) land in PRs ④–⑥.
+    // Build the plugin registry used by IngressDispatcher. Populated with
+    // four ingress handlers, the vhost route resolver, and the prometheus
+    // metrics sink.
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
         let mut reg = PluginRegistry::new();

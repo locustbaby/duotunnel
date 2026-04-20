@@ -16,8 +16,7 @@ struct CachedAddr {
 /// DNS resolver with a lazy 30-second cache.
 ///
 /// Wraps `tokio::net::lookup_host`. An IP literal bypasses the cache. On a
-/// miss or expiry, the first resolved address is stored. Lifted verbatim from
-/// the inline logic in `client/app.rs:resolve_addr` (pre-PR ⑤).
+/// miss or expiry, the first resolved address is stored.
 pub struct CachedResolver {
     cache: DashMap<String, CachedAddr>,
 }

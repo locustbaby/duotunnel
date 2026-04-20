@@ -102,8 +102,6 @@ impl IngressProtocolHandler for H2cHandler {
                     }
                 }
 
-                // Use initial route for group lookup; per-request vhost → RouteTarget
-                // resolution is intentionally left for PR ③ (RouteResolver plugin).
                 let route_target = {
                     let mut cache = route_cache.lock().unwrap();
                     cache
