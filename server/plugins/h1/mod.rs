@@ -56,6 +56,16 @@ impl IngressProtocolHandler for H1Handler {
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
+        // Yield if the selected QUIC connection is near its stream cap.
+        // Placed before `read_exact` so the scheduler round-trip overlaps
+        // with draining already-peeked bytes instead of sitting on the
+        // request's critical path — this restores the 9cdbe83 ordering.
+        tunnel_lib::maybe_slow_path(
+            || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            &ctx.overload,
+        )
+        .await;
+
         // Consume the peeked bytes from the stream before handing it to relay.
         let mut discard = vec![0u8; initial_data.len()];
         stream.read_exact(&mut discard).await?;
@@ -72,7 +82,6 @@ impl IngressProtocolHandler for H1Handler {
         let opened = tunnel_lib::open_bi_guarded(
             &selected.conn,
             &selected.inflight,
-            &ctx.overload,
             open_timeout,
             |_elapsed, _outcome| {},
         )

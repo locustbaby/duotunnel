@@ -1,8 +1,6 @@
 use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
-use crate::overload::{maybe_slow_path, OverloadLimits};
 use anyhow::anyhow;
 use quinn::{Connection, RecvStream, SendStream};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -21,27 +19,27 @@ pub struct OpenedStream {
     pub inflight: InflightGuard,
 }
 
-/// Open a bidirectional QUIC stream with overload protection.
+/// Open a bidirectional QUIC stream with overload-safe inflight accounting.
 ///
 /// Flow:
-/// 1. `maybe_slow_path(inflight, limits)` — yield/backoff if the
-///    connection is near its `max_concurrent_streams` cap.
-/// 2. `begin_inflight(inflight)` — take the slot reservation.
-/// 3. `timeout(open_bi)` — bounded wait for a stream.
-/// 4. `on_wait_done(elapsed, outcome)` — a zero-cost hook the caller
+/// 1. `begin_inflight(inflight)` — take the slot reservation.
+/// 2. `timeout(open_bi)` — bounded wait for a stream.
+/// 3. `on_wait_done(elapsed, outcome)` — a zero-cost hook the caller
 ///    can use to observe wait time / emit metrics.  Always invoked.
+///
+/// The caller is responsible for invoking `crate::maybe_slow_path` before
+/// this function when appropriate — doing it here would force the yield to
+/// happen after any caller-side work (e.g. draining peeked bytes), which
+/// adds a scheduler round-trip to the request's critical path under load.
 pub async fn open_bi_guarded<F>(
     conn: &Connection,
     inflight: &InflightCounter,
-    limits: &OverloadLimits,
     stream_timeout: Duration,
     on_wait_done: F,
 ) -> anyhow::Result<OpenedStream>
 where
     F: FnOnce(Duration, OpenBiOutcome),
 {
-    let counter = inflight.clone();
-    maybe_slow_path(move || counter.load(Ordering::Relaxed), limits).await;
     let guard = begin_inflight(inflight);
     let started = Instant::now();
     let result = tokio::time::timeout(stream_timeout, conn.open_bi()).await;

@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use tunnel_lib::{open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
+use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -72,12 +72,16 @@ async fn handle_tcp_connection(
         protocol,
         host,
     };
+    maybe_slow_path(
+        || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+        &state.overload_limits,
+    )
+    .await;
     let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
     let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
     let opened = open_bi_guarded(
         &selected.conn,
         &selected.inflight,
-        &state.overload_limits,
         open_timeout,
         |elapsed, outcome| {
             metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);

@@ -9,8 +9,8 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, open_bi_guarded, relay_quic_to_tcp, run_accept_worker,
-    send_routing_info, OverloadLimits, PeekBufPool, RoutingInfo, TcpParams,
+    detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
+    run_accept_worker, send_routing_info, OverloadLimits, PeekBufPool, RoutingInfo, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -108,10 +108,14 @@ async fn handle_entry_connection(
             Some(c) => c,
             None => break,
         };
+        maybe_slow_path(
+            || conn.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            overload,
+        )
+        .await;
         match open_bi_guarded(
             &conn.conn,
             &conn.inflight,
-            overload,
             open_stream_timeout,
             |_elapsed, _outcome| {},
         )
