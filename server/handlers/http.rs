@@ -23,11 +23,12 @@ pub async fn run_http_accept_loop(
     let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, "http accept loop started");
 
-    // Pre-build dispatcher if plugin stack is enabled.
+    // Pre-build dispatcher if plugin stack is enabled. The dispatcher is
+    // keyed to this listener's port so Phase 4 route lookup uses it directly.
     let dispatcher: Option<Arc<IngressDispatcher>> =
         if state.use_plugin_stack {
             state.plugin_registry.as_ref().map(|reg| {
-                Arc::new(IngressDispatcher::new(reg.clone()))
+                Arc::new(IngressDispatcher::new(reg.clone(), port))
             })
         } else {
             None
@@ -49,9 +50,7 @@ pub async fn run_http_accept_loop(
                 metrics::tcp_connection_opened();
                 let result = if let Some(disp) = dispatcher {
                     // ── plugin stack path ──────────────────────────────────
-                    let svc = crate::tunnel_service::DefaultTunnelService {
-                        routing: state.routing.clone(),
-                    };
+                    let svc = crate::tunnel_service::DefaultTunnelService;
                     let timeouts = Timeouts {
                         open_stream_ms: state.config.server.open_stream_timeout_ms,
                         ..Timeouts::default()
@@ -66,19 +65,10 @@ pub async fn run_http_accept_loop(
                         state.overload_limits.clone(),
                         timeouts,
                     );
-                    // listener_port is not carried in peer_addr; pass via RouteCtx
-                    // by stashing it in a thread-local or passing through ctx.
-                    // For now, encode port in a wrapper via a simple ctx extension:
                     ctx.timing.accepted_at = std::time::Instant::now();
-                    // We need the port in RouteCtx — store it in a side-channel
-                    // by creating a thin wrapper service that knows the port.
-                    let svc_with_port = crate::tunnel_service::PortedTunnelService {
-                        inner: svc,
-                        port,
-                    };
-                    disp.dispatch(stream, &svc_with_port, &mut ctx).await
+                    disp.dispatch(stream, &svc, &mut ctx).await
                 } else {
-                    // ── legacy path (default until PR ④) ──────────────────
+                    // ── legacy path (default until PR ⑥) ──────────────────
                     handle_http_connection(state, stream, port).await
                 };
                 if let Err(e) = &result {

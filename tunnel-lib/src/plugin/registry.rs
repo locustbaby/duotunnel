@@ -5,6 +5,7 @@ use super::egress::{LoadBalancer, Resolver, SystemResolver, UpstreamDialer};
 use super::ingress::{IngressProtocolHandler, ProtocolKind};
 use super::metrics::{MetricsSink, NoopSink};
 use super::module::ConnectionModule;
+use super::route::{NoRouteResolver, RouteResolver};
 
 /// Central registry of all runtime plugin instances.
 ///
@@ -23,6 +24,9 @@ pub struct PluginRegistry {
     /// Active metrics backend.  Defaults to `NoopSink`.
     pub metrics_sink: Arc<dyn MetricsSink>,
 
+    /// Active route resolver.  Defaults to `NoRouteResolver` (fail-fast).
+    pub route_resolver: Arc<dyn RouteResolver>,
+
     /// Egress dialers tried in registration order until `matches_scheme` returns true.
     pub dialers: Vec<Arc<dyn UpstreamDialer>>,
 
@@ -40,6 +44,7 @@ impl PluginRegistry {
             ingress_handlers: HashMap::new(),
             modules: Vec::new(),
             metrics_sink: Arc::new(NoopSink),
+            route_resolver: Arc::new(NoRouteResolver),
             dialers: Vec::new(),
             lb: None,
             resolver: Arc::new(SystemResolver),
@@ -59,6 +64,10 @@ impl PluginRegistry {
 
     pub fn set_metrics_sink(&mut self, sink: Arc<dyn MetricsSink>) {
         self.metrics_sink = sink;
+    }
+
+    pub fn set_route_resolver(&mut self, resolver: Arc<dyn RouteResolver>) {
+        self.route_resolver = resolver;
     }
 
     pub fn add_dialer(&mut self, dialer: Arc<dyn UpstreamDialer>) {

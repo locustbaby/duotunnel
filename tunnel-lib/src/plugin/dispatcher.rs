@@ -63,19 +63,20 @@ async fn sniff(stream: &TcpStream) -> Result<ProtocolHint> {
 /// Runs the 5-phase ingress pipeline for every accepted TCP connection.
 ///
 /// Phase ordering:
-///   1. `sniff`                   — peek bytes, produce `ProtocolHint` (CORE)
+///   1. `sniff`                          — peek bytes, produce `ProtocolHint` (CORE)
 ///   2. `ConnectionModule::pre_admission` — IP/rate-limit modules, in order
 ///   3. `TunnelService::admission`        — token / auth check
-///   4. `TunnelService::resolve_route`    — vhost / static route lookup
+///   4. `RouteResolver::resolve`          — vhost / static route lookup (from registry)
 ///   5. `IngressProtocolHandler::handle`  — TLS / H2c / H1 / TCP handler
 ///   6. `TunnelService::logging`          — metrics & access logs
 pub struct IngressDispatcher {
     registry: Arc<PluginRegistry>,
+    listener_port: u16,
 }
 
 impl IngressDispatcher {
-    pub fn new(registry: Arc<PluginRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<PluginRegistry>, listener_port: u16) -> Self {
+        Self { registry, listener_port }
     }
 
     pub async fn dispatch(
@@ -141,13 +142,13 @@ impl IngressDispatcher {
             }
         }
 
-        // ── Phase 4: TunnelService::resolve_route ─────────────────────────────
+        // ── Phase 4: RouteResolver::resolve (from registry) ───────────────────
         let route_ctx = RouteCtx {
-            listener_port: ctx.peer_addr.port(), // caller should set this properly
+            listener_port: self.listener_port,
             peer_addr: ctx.peer_addr,
             hint: hint.clone(),
         };
-        let route = match svc.resolve_route(&route_ctx).await? {
+        let route = match self.registry.route_resolver.resolve(&route_ctx).await? {
             PhaseResult::Continue(r) => {
                 timing.route_done_at = Some(Instant::now());
                 r

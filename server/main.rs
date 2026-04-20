@@ -389,12 +389,12 @@ async fn build_server_state(
         "overload protection resolved"
     );
     let shared_registry = new_shared_registry();
+    let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
 
-    // Build the plugin registry used by IngressDispatcher (PR ②).
-    // Populated with the four built-in ingress handlers; more plugins will be
-    // added as PRs ③–⑥ land.
+    // Build the plugin registry used by IngressDispatcher (PR ②+③).
+    // Populated with the four built-in ingress handlers and the vhost route
+    // resolver; more plugins (metrics, egress, admission) land in PRs ④–⑥.
     let plugin_registry = {
-        use std::sync::Arc;
         use tunnel_lib::plugin::PluginRegistry;
         let mut reg = PluginRegistry::new();
         reg.register_ingress_handler(Arc::new(plugins::tls::TlsHandler {
@@ -410,6 +410,9 @@ async fn build_server_state(
         reg.register_ingress_handler(Arc::new(plugins::tcp_pass::TcpPassHandler {
             registry: shared_registry.clone(),
         }));
+        reg.set_route_resolver(Arc::new(plugins::vhost::VhostPlugin {
+            routing: routing.clone(),
+        }));
         Arc::new(reg)
     };
 
@@ -417,7 +420,7 @@ async fn build_server_state(
         tcp_params: tunnel_lib::TcpParams::from(&config.server.tcp),
         peek_buf_pool: PeekBufPool::new(proxy_buffer_params.peek_buf_size),
         proxy_buffer_params,
-        routing: Arc::new(ArcSwap::from_pointee(initial_snapshot)),
+        routing,
         registry: shared_registry,
         config: Arc::new(config.clone()),
         auth_store,
