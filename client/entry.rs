@@ -135,8 +135,15 @@ async fn handle_entry_connection(
                 send_routing_info(&mut send, &routing_info).await?;
                 if !initial_bytes.is_empty() {
                     send.write_all(&initial_bytes).await?;
-                    let mut discard = vec![0u8; initial_bytes.len()];
-                    local_stream.read_exact(&mut discard).await?;
+                    // Drain the peeked bytes from the socket. Reuse the
+                    // shared peek pool to avoid a per-connection heap
+                    // allocation for the discard buffer.
+                    let mut discard_buf = peek_pool.take();
+                    let result = local_stream
+                        .read_exact(&mut discard_buf[..initial_bytes.len()])
+                        .await;
+                    peek_pool.put(discard_buf);
+                    result?;
                 }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 debug!(

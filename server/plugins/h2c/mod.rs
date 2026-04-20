@@ -5,8 +5,9 @@ use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::debug;
 
@@ -91,7 +92,7 @@ impl IngressProtocolHandler for H2cHandler {
                 let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
 
                 if single_authority {
-                    let mut fa = first_authority.lock().unwrap();
+                    let mut fa = first_authority.lock();
                     match fa.as_ref() {
                         None => *fa = Some(route_host.clone()),
                         Some(pinned) if pinned != &route_host => {
@@ -108,7 +109,7 @@ impl IngressProtocolHandler for H2cHandler {
                     }
                 }
 
-                let cached_route = { route_cache.lock().unwrap().get(&route_host).cloned() };
+                let cached_route = { route_cache.lock().get(&route_host).cloned() };
                 let route_target = match cached_route {
                     Some(route) => route,
                     None => {
@@ -138,7 +139,6 @@ impl IngressProtocolHandler for H2cHandler {
                         };
                         route_cache
                             .lock()
-                            .unwrap()
                             .insert(route_host.clone(), resolved.clone());
                         resolved
                     }
@@ -160,7 +160,7 @@ impl IngressProtocolHandler for H2cHandler {
                 let (conn_group_id, proxy_name) =
                     (route_target.group_id.clone(), route_target.proxy_name.clone());
                 let (client_conn, h2_sender) = {
-                    let mut guard = sender_cache.lock().unwrap();
+                    let mut guard = sender_cache.lock();
                     if !guard.contains_key(&route_target) {
                         if let Some(selected) =
                             registry.select_client_for_group(&conn_group_id)
@@ -206,7 +206,7 @@ impl IngressProtocolHandler for H2cHandler {
                     Ok(resp) => Ok::<_, hyper::Error>(resp),
                     Err(e) => {
                         tracing::error!("L7 Proxy upstream error: {}", e);
-                        sender_cache.lock().unwrap().remove(&route_target);
+                        sender_cache.lock().remove(&route_target);
                         Ok(Response::builder()
                             .status(502)
                             .body(

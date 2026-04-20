@@ -32,7 +32,7 @@ pub use ctx::{
     AdmissionReq, ConnectInfo, DialCtx, EgressCtx, PhaseOutcome, PhaseTiming, PhaseResult,
     PickCtx, Route, RouteCtx, ServerCtx, Target, Timeouts,
 };
-pub use dispatcher::IngressDispatcher;
+pub use dispatcher::{IngressDispatcher, SNIFF_LIMIT};
 pub use egress::{Connected, LoadBalancer, Resolver, SystemResolver, UpstreamDialer};
 pub use ingress::{IngressProtocolHandler, ProtocolHint, ProtocolKind};
 pub use metrics::{MetricsSink, NoopSink};

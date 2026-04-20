@@ -67,8 +67,13 @@ impl IngressProtocolHandler for H1Handler {
         .await;
 
         // Consume the peeked bytes from the stream before handing it to relay.
-        let mut discard = vec![0u8; initial_data.len()];
-        stream.read_exact(&mut discard).await?;
+        // `initial_data.len()` ≤ `SNIFF_LIMIT` by construction (Phase 1 caps
+        // the peek at that size), so a stack buffer avoids a per-connection
+        // heap allocation.
+        let mut discard = [0u8; tunnel_lib::plugin::SNIFF_LIMIT];
+        stream
+            .read_exact(&mut discard[..initial_data.len()])
+            .await?;
 
         let routing_info = tunnel_lib::RoutingInfo {
             proxy_name: proxy_name.to_string(),
