@@ -413,6 +413,7 @@ async fn build_server_state(
         reg.set_route_resolver(Arc::new(plugins::vhost::VhostPlugin {
             routing: routing.clone(),
         }));
+        reg.set_metrics_sink(Arc::new(plugins::prometheus::PrometheusSink));
         Arc::new(reg)
     };
 
@@ -430,7 +431,7 @@ async fn build_server_state(
         local_token_cache,
         listeners: listener_mgr::ListenerManager::new(),
         overload_limits,
-        use_plugin_stack: false,
+        use_plugin_stack: true,
         plugin_registry: Some(plugin_registry),
     }))
 }

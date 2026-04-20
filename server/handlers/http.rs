@@ -50,17 +50,20 @@ pub async fn run_http_accept_loop(
                 metrics::tcp_connection_opened();
                 let result = if let Some(disp) = dispatcher {
                     // ── plugin stack path ──────────────────────────────────
-                    let svc = crate::tunnel_service::DefaultTunnelService;
+                    let metrics_sink = state.plugin_registry
+                        .as_ref()
+                        .map(|r| r.metrics_sink.clone())
+                        .unwrap_or_else(|| Arc::new(tunnel_lib::plugin::NoopSink));
+                    let svc = crate::tunnel_service::DefaultTunnelService {
+                        metrics: metrics_sink.clone(),
+                    };
                     let timeouts = Timeouts {
                         open_stream_ms: state.config.server.open_stream_timeout_ms,
                         ..Timeouts::default()
                     };
                     let mut ctx = ServerCtx::new(
                         peer_addr,
-                        state.plugin_registry
-                            .as_ref()
-                            .map(|r| r.metrics_sink.clone())
-                            .unwrap_or_else(|| Arc::new(tunnel_lib::plugin::NoopSink)),
+                        metrics_sink,
                         Arc::new(state.tcp_params.clone()),
                         state.overload_limits.clone(),
                         timeouts,
