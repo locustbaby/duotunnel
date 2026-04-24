@@ -3,6 +3,7 @@ pub mod buffer_params;
 pub mod core;
 pub mod h2;
 pub mod h2_proxy;
+pub mod http_connector;
 pub mod http;
 pub mod peers;
 pub mod tcp;

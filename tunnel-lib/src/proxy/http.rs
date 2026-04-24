@@ -1,5 +1,6 @@
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
+use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -109,7 +110,17 @@ impl HttpPeer {
             let response = match self.client.request(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    debug!(upstream = %self.target_host, error = %e, "H1 upstream request failed, sending 502");
+                    let proxy_err = ProxyError::http_upstream_request(format!(
+                        "{}: {}",
+                        self.target_host, e
+                    ));
+                    debug!(
+                        upstream = %self.target_host,
+                        kind = ?proxy_err.kind,
+                        retry = ?proxy_err.retry,
+                        error = %proxy_err,
+                        "H1 upstream request failed, sending 502"
+                    );
                     let _ = driver.write_502().await;
                     break;
                 }

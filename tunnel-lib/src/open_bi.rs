@@ -1,5 +1,5 @@
 use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
-use anyhow::anyhow;
+use crate::error::ProxyError;
 use quinn::{Connection, RecvStream, SendStream};
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ pub async fn open_bi_guarded<F>(
     inflight: &InflightCounter,
     stream_timeout: Duration,
     on_wait_done: F,
-) -> anyhow::Result<OpenedStream>
+) -> Result<OpenedStream, ProxyError>
 where
     F: FnOnce(Duration, OpenBiOutcome),
 {
@@ -55,11 +55,11 @@ where
         }
         Ok(Err(e)) => {
             on_wait_done(elapsed, OpenBiOutcome::ConnectionError);
-            Err(e.into())
+            Err(ProxyError::quic_open_connection(e.to_string()))
         }
         Err(_) => {
             on_wait_done(elapsed, OpenBiOutcome::Timeout);
-            Err(anyhow!("open_bi timed out after {:?}", stream_timeout))
+            Err(ProxyError::quic_open_timeout(stream_timeout))
         }
     }
 }

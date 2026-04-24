@@ -1,18 +1,17 @@
 use crate::config::ServerEgressUpstream;
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
-use tunnel_lib::egress::http::{H2cClient, HttpsClient};
 use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
-use tunnel_lib::proxy::http::HttpPeer;
-use tunnel_lib::proxy::peers::PeerKind;
-use tunnel_lib::proxy::tcp::{TcpPeer, UpstreamScheme};
+use tunnel_lib::proxy::http_connector::SharedHttpConnector;
+use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, PeerSpec, TlsPeerSpec};
+use tunnel_lib::proxy::tcp::UpstreamScheme;
 use tunnel_lib::{HttpClientParams, UpstreamGroup};
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
     http_rules: HashMap<String, String>,
-    https_client: HttpsClient,
-    h2c_client: H2cClient,
+    http_connector: SharedHttpConnector,
 }
 impl ServerEgressMap {
     pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
@@ -38,11 +37,12 @@ impl ServerEgressMap {
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
+        let http_connector =
+            tunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
         Self {
             upstreams,
             http_rules,
-            https_client,
-            h2c_client,
+            http_connector,
         }
     }
     /// Look up the upstream address for the given host (must be pre-stripped of port).
@@ -63,7 +63,7 @@ impl ServerEgressMap {
     }
 }
 impl UpstreamResolver for ServerEgressMap {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerKind> {
+    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec> {
         let routing = context
             .routing_info
             .as_ref()
@@ -91,37 +91,56 @@ impl UpstreamResolver for ServerEgressMap {
                         .next()
                         .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?
                 };
-                if is_https {
-                    Ok(PeerKind::Tcp(TcpPeer::new_tls(
-                        target_addr,
-                        tls_host.unwrap_or_default(),
-                        scheme.alpn(),
-                    )?))
-                } else {
-                    Ok(PeerKind::Tcp(TcpPeer::new(
-                        target_addr,
-                        tunnel_lib::TcpParams::default(),
-                    )))
-                }
+                let spec = BasicPeerSpec {
+                    target_addr,
+                    tls: is_https.then(|| TlsPeerSpec {
+                        host: tls_host.unwrap_or_default(),
+                        alpn: scheme.alpn(),
+                    }),
+                };
+                Ok(PeerSpec::Tcp(spec))
             }
             Protocol::H1 | Protocol::Unknown => {
-                let scheme_str = if is_https { "https" } else { "http" }.to_string();
-                Ok(PeerKind::Http(Box::new(HttpPeer {
-                    client: self.https_client.clone(),
+                let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
-                    scheme: scheme_str,
-                })))
+                    scheme: if is_https { "https" } else { "http" }.to_string(),
+                    protocol: context.protocol,
+                };
+                Ok(PeerSpec::Http(spec))
             }
             Protocol::H2 => {
-                let scheme_str = if is_https { "https" } else { "http" }.to_string();
-                Ok(PeerKind::H2(Box::new(tunnel_lib::proxy::h2::H2Peer {
+                let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
-                    scheme: scheme_str,
-                    https_client: self.https_client.clone(),
-                    h2c_client: self.h2c_client.clone(),
-                })))
+                    scheme: if is_https { "https" } else { "http" }.to_string(),
+                    protocol: context.protocol,
+                };
+                Ok(PeerSpec::Http(spec))
             }
             _ => Err(anyhow!("unsupported protocol for egress")),
+        }
+    }
+
+    async fn connect_peer(
+        &self,
+        peer: PeerSpec,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+        initial_data: Option<Bytes>,
+    ) -> Result<()> {
+        match peer {
+            PeerSpec::Tcp(spec) => {
+                spec.into_tcp_peer(tunnel_lib::TcpParams::default())?
+                    .connect_inner(send, recv, initial_data)
+                    .await
+            }
+            PeerSpec::Http(spec) => match spec.protocol {
+                Protocol::H2 | Protocol::H1 | Protocol::Unknown => self
+                    .http_connector
+                    .connect(spec, send, recv, initial_data)
+                    .await,
+                _ => Err(anyhow!("unsupported http protocol variant")),
+            },
+            PeerSpec::MitmH2(_) => Err(anyhow!("server egress does not support MITM peer")),
         }
     }
 }
@@ -131,7 +150,17 @@ impl UpstreamResolver for ServerEgressMap {
 pub struct EgressProxy(pub std::sync::Arc<ServerEgressMap>);
 
 impl UpstreamResolver for EgressProxy {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerKind> {
+    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec> {
         self.0.upstream_peer(context).await
+    }
+
+    async fn connect_peer(
+        &self,
+        peer: PeerSpec,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+        initial_data: Option<Bytes>,
+    ) -> Result<()> {
+        self.0.connect_peer(peer, send, recv, initial_data).await
     }
 }

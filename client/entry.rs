@@ -154,7 +154,7 @@ async fn handle_entry_connection(
             }
             Err(e) => {
                 warn!(error = %e, "open_bi failed, trying next connection");
-                last_err = e;
+                last_err = e.into();
             }
         }
     }

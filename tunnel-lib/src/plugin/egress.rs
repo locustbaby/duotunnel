@@ -20,8 +20,8 @@ pub trait LoadBalancer: Send + Sync + 'static {
 
 /// An open upstream connection returned by `UpstreamDialer::dial`.
 ///
-/// Wraps a boxed `UpstreamPeer` so dialers can return any peer variant
-/// without the framework needing to know the concrete type.
+/// Transitional type kept for the currently unused dialer seam. The live
+/// path has moved to `UpstreamResolver -> PeerSpec -> connect_peer`.
 pub struct Connected {
     pub peer: crate::proxy::peers::PeerKind,
     pub remote_addr: SocketAddr,
@@ -31,11 +31,10 @@ pub struct Connected {
 
 /// Open a connection to a single upstream target.
 ///
-/// Currently unused — the existing `UpstreamResolver` + `PeerKind` pipeline
-/// in `proxy/core.rs` + `proxy/peers.rs` already covers this seam. Kept here
-/// for symmetry with `LoadBalancer` / `Resolver` and to reserve the name, but
-/// not part of any live dispatch path. Do not implement against this trait
-/// without first wiring it through `tunnel-lib/src/proxy/core.rs`.
+/// Currently unused — the live path is `UpstreamResolver -> PeerSpec ->
+/// connect_peer` in `proxy/core.rs`. Kept here for symmetry with
+/// `LoadBalancer` / `Resolver` and to reserve the name, but not part of any
+/// live dispatch path.
 #[doc(hidden)]
 #[async_trait]
 pub trait UpstreamDialer: Send + Sync + 'static {

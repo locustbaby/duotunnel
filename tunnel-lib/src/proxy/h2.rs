@@ -1,5 +1,7 @@
-use crate::egress::http::{H2cClient, HttpsClient};
+use super::http_connector::SharedHttpConnector;
+use super::peers::HttpPeerSpec;
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
+use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -12,26 +14,21 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
 pub async fn serve_h2_forward<IO>(
     io: IO,
-    https_client: HttpsClient,
-    h2c_client: H2cClient,
-    scheme: String,
-    target_host: String,
+    connector: SharedHttpConnector,
+    spec: HttpPeerSpec,
 ) -> Result<()>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let use_h2c = scheme == "http";
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let https_client = https_client.clone();
-        let h2c_client = h2c_client.clone();
-        let scheme = scheme.clone();
-        let target_host = target_host.clone();
+        let connector = connector.clone();
+        let spec = spec.clone();
         async move {
             let (mut parts, body) = req.into_parts();
             let target_uri: hyper::Uri = format!(
                 "{}://{}{}",
-                scheme,
-                target_host,
+                spec.scheme,
+                spec.target_host,
                 parts
                     .uri
                     .path_and_query()
@@ -41,30 +38,29 @@ where
             .parse()
             .unwrap();
             parts.uri = target_uri;
-            if let Ok(hv) = target_host.parse() {
+            if let Ok(hv) = spec.target_host.parse() {
                 parts.headers.insert(hyper::header::HOST, hv);
             }
             debug!("H2 forward: {} {}", parts.method, parts.uri);
             let boxed_body = body.map_err(std::io::Error::other).boxed();
             let upstream_req = Request::from_parts(parts, boxed_body);
-            let result = if use_h2c {
-                h2c_client.request(upstream_req).await
-            } else {
-                https_client.request(upstream_req).await
-            };
-            match result {
+            match connector.request(&spec, upstream_req).await {
                 Ok(resp) => {
-                    let (parts, body) = resp.into_parts();
-                    let boxed = body.map_err(std::io::Error::other).boxed();
-                    Ok::<_, hyper::Error>(Response::from_parts(parts, boxed))
+                    Ok::<_, hyper::Error>(resp)
                 }
                 Err(e) => {
-                    debug!(error = % e, "H2 forward: upstream request failed");
+                    let proxy_err = ProxyError::http_upstream_request(e.to_string());
+                    debug!(
+                        kind = ?proxy_err.kind,
+                        retry = ?proxy_err.retry,
+                        error = %proxy_err,
+                        "H2 forward: upstream request failed"
+                    );
                     Ok(Response::builder()
-                        .status(502)
+                        .status(proxy_err.http_status().unwrap_or(hyper::StatusCode::BAD_GATEWAY))
                         .body(
                             http_body_util::Full::new(Bytes::from("Bad Gateway"))
-                                .map_err(|_| unreachable!())
+                                .map_err(|never| match never {})
                                 .boxed(),
                         )
                         .unwrap())
@@ -80,10 +76,8 @@ where
     Ok(())
 }
 pub struct H2Peer {
-    pub target_host: String,
-    pub scheme: String,
-    pub https_client: HttpsClient,
-    pub h2c_client: H2cClient,
+    pub connector: SharedHttpConnector,
+    pub spec: HttpPeerSpec,
 }
 impl H2Peer {
     pub async fn connect_inner(
@@ -92,27 +86,13 @@ impl H2Peer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
-        debug!(target = % self.target_host, scheme = % self.scheme, "H2 proxy starting");
+        debug!(target = % self.spec.target_host, scheme = % self.spec.scheme, "H2 proxy starting");
         let stream = QuinnStream { send, recv };
         if let Some(init) = initial_data.filter(|b| !b.is_empty()) {
             let io = PrefixedReadWrite::new(stream, init);
-            serve_h2_forward(
-                io,
-                self.https_client,
-                self.h2c_client,
-                self.scheme,
-                self.target_host,
-            )
-            .await
+            serve_h2_forward(io, self.connector, self.spec).await
         } else {
-            serve_h2_forward(
-                stream,
-                self.https_client,
-                self.h2c_client,
-                self.scheme,
-                self.target_host,
-            )
-            .await
+            serve_h2_forward(stream, self.connector, self.spec).await
         }
     }
 }

@@ -1,13 +1,15 @@
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info};
-pub use tunnel_lib::egress::http::{H2cClient, HttpsClient};
 use tunnel_lib::plugin::{LoadBalancer, PickCtx, Resolver, Target};
 use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, UpstreamResolver};
-use tunnel_lib::proxy::http::HttpPeer;
-use tunnel_lib::proxy::peers::PeerKind;
+use tunnel_lib::proxy::http_connector::SharedHttpConnector;
+use tunnel_lib::proxy::peers::{
+    BasicPeerSpec, HttpPeerSpec, MitmPeerSpec, PeerSpec, TlsPeerSpec,
+};
 use tunnel_lib::proxy::tcp::UpstreamScheme;
 use tunnel_lib::{ClientConfig, HttpClientParams};
 
@@ -24,8 +26,7 @@ struct UpstreamGroup {
 pub struct LocalProxyMap {
     upstreams: HashMap<String, UpstreamGroup>,
     resolver: Arc<dyn Resolver>,
-    pub https_client: HttpsClient,
-    pub h2c_client: H2cClient,
+    pub http_connector: SharedHttpConnector,
 }
 
 impl LocalProxyMap {
@@ -61,11 +62,12 @@ impl LocalProxyMap {
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
+        let http_connector =
+            tunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
         Self {
             upstreams,
             resolver,
-            https_client,
-            h2c_client,
+            http_connector,
         }
     }
 
@@ -106,7 +108,7 @@ impl ClientApp {
     }
 }
 impl UpstreamResolver for ClientApp {
-    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerKind> {
+    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerSpec> {
         let routing = context
             .routing_info
             .as_ref()
@@ -120,111 +122,108 @@ impl UpstreamResolver for ClientApp {
         let http_scheme = if is_https { "https" } else { "http" };
         #[allow(unreachable_patterns)]
         match context.protocol {
-            Protocol::H1 | Protocol::Unknown => Ok(PeerKind::Http(Box::new(HttpPeer {
-                client: self.map.https_client.clone(),
-                target_host: connect_addr_str,
-                scheme: http_scheme.to_string(),
-            }))),
-            Protocol::H2 => Ok(PeerKind::H2(Box::new(tunnel_lib::proxy::h2::H2Peer {
-                target_host: connect_addr_str,
-                scheme: http_scheme.to_string(),
-                https_client: self.map.https_client.clone(),
-                h2c_client: self.map.h2c_client.clone(),
-            }))),
+            Protocol::H1 | Protocol::Unknown => {
+                let spec = HttpPeerSpec {
+                    target_host: connect_addr_str,
+                    scheme: http_scheme.to_string(),
+                    protocol: context.protocol,
+                };
+                Ok(PeerSpec::Http(spec))
+            }
+            Protocol::H2 => {
+                let spec = HttpPeerSpec {
+                    target_host: connect_addr_str,
+                    scheme: http_scheme.to_string(),
+                    protocol: context.protocol,
+                };
+                Ok(PeerSpec::Http(spec))
+            }
             Protocol::WebSocket => {
                 info!("WebSocket protocol detected, using TCP relay");
                 let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
-                if is_https {
-                    Ok(PeerKind::Tcp(
-                        tunnel_lib::proxy::tcp::TcpPeer::new_tls_with_params(
-                            target_addr,
-                            tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
-                            None,
-                            self.tcp_params.clone(),
-                        )?,
-                    ))
-                } else {
-                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer::new(
-                        target_addr,
-                        self.tcp_params.clone(),
-                    )))
-                }
+                let spec = BasicPeerSpec {
+                    target_addr,
+                    tls: if is_https {
+                        Some(TlsPeerSpec {
+                            host: tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
+                            alpn: None,
+                        })
+                    } else {
+                        None
+                    },
+                };
+                Ok(PeerSpec::Tcp(spec))
             }
             Protocol::Tcp => {
                 info!("TCP protocol detected (opaque TLS)");
                 if is_https {
-                    let host_for_cert = tls_host.as_deref().unwrap_or("localhost").to_string();
+                    let spec = MitmPeerSpec {
+                        tls_host: tls_host.as_deref().unwrap_or("localhost").to_string(),
+                    };
                     info!(
                         "Terminating ingress TLS to fix SNI for upstream {}",
-                        host_for_cert
+                        spec.tls_host
                     );
-                    let server_config = tunnel_lib::get_or_create_server_config(&host_for_cert)?;
-                    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-                    struct MitmH2Peer {
-                        acceptor: tokio_rustls::TlsAcceptor,
-                        tls_host: String,
-                        https_client: HttpsClient,
-                        h2c_client: H2cClient,
-                    }
-                    impl tunnel_lib::proxy::peers::UpstreamPeer for MitmH2Peer {
-                        fn connect_boxed<'a>(
-                            &'a self,
-                            send: quinn::SendStream,
-                            recv: quinn::RecvStream,
-                            initial_data: Option<bytes::Bytes>,
-                        ) -> std::pin::Pin<
-                            Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>,
-                        > {
-                            Box::pin(self.do_connect(send, recv, initial_data))
-                        }
-                    }
-                    impl MitmH2Peer {
-                        async fn do_connect(
-                            &self,
-                            send: quinn::SendStream,
-                            recv: quinn::RecvStream,
-                            initial_data: Option<bytes::Bytes>,
-                        ) -> anyhow::Result<()> {
-                            let stream = tunnel_lib::QuinnStream { send, recv };
-                            let stream = if let Some(init) = initial_data {
-                                tunnel_lib::PrefixedReadWrite::new(stream, init)
-                            } else {
-                                tunnel_lib::PrefixedReadWrite::new(stream, bytes::Bytes::new())
-                            };
-                            let accepted_stream = self
-                                .acceptor
-                                .accept(stream)
-                                .await
-                                .context("failed to accept ingress TLS for MITM")?;
-                            info!(
-                                "MITM H2: TLS handshake accepted, starting H2 server for {}",
-                                self.tls_host
-                            );
-                            tunnel_lib::proxy::h2::serve_h2_forward(
-                                accepted_stream,
-                                self.https_client.clone(),
-                                self.h2c_client.clone(),
-                                "https".to_string(),
-                                self.tls_host.clone(),
-                            )
-                            .await
-                        }
-                    }
-                    Ok(PeerKind::Dyn(Box::new(MitmH2Peer {
-                        acceptor,
-                        tls_host: host_for_cert,
-                        https_client: self.map.https_client.clone(),
-                        h2c_client: self.map.h2c_client.clone(),
-                    })))
+                    Ok(PeerSpec::MitmH2(spec))
                 } else {
                     let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
-                    Ok(PeerKind::Tcp(tunnel_lib::proxy::tcp::TcpPeer::new(
+                    let spec = BasicPeerSpec {
                         target_addr,
-                        self.tcp_params.clone(),
-                    )))
+                        tls: None,
+                    };
+                    Ok(PeerSpec::Tcp(spec))
                 }
             }
             _ => Err(anyhow!("unsupported protocol")),
+        }
+    }
+
+    async fn connect_peer(
+        &self,
+        peer: PeerSpec,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+        initial_data: Option<Bytes>,
+    ) -> Result<()> {
+        match peer {
+            PeerSpec::Tcp(spec) => spec
+                .into_tcp_peer(self.tcp_params.clone())?
+                .connect_inner(send, recv, initial_data)
+                .await,
+            PeerSpec::Http(spec) => self
+                .map
+                .http_connector
+                .connect(spec, send, recv, initial_data)
+                .await,
+            PeerSpec::MitmH2(spec) => {
+                let server_config = tunnel_lib::get_or_create_server_config(&spec.tls_host)?;
+                let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+                let stream = tunnel_lib::QuinnStream { send, recv };
+                let stream = if let Some(init) = initial_data {
+                    tunnel_lib::PrefixedReadWrite::new(stream, init)
+                } else {
+                    tunnel_lib::PrefixedReadWrite::new(stream, bytes::Bytes::new())
+                };
+                let accepted_stream = acceptor
+                    .accept(stream)
+                    .await
+                    .context("failed to accept ingress TLS for MITM")?;
+                info!(
+                    "MITM H2: TLS handshake accepted, starting H2 server for {}",
+                    spec.tls_host
+                );
+                self.map
+                    .http_connector
+                    .serve_h2(
+                        accepted_stream,
+                        HttpPeerSpec {
+                            target_host: spec.tls_host,
+                            scheme: "https".to_string(),
+                            protocol: Protocol::H2,
+                        },
+                    )
+                    .await
+            }
         }
     }
 }

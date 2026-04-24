@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -16,8 +16,30 @@ use tunnel_lib::plugin::{
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
+use tunnel_lib::ProxyError;
 
 use crate::registry::SharedRegistry;
+
+#[derive(Clone)]
+struct SenderEntry {
+    conn_id: usize,
+    conn: quinn::Connection,
+    sender: tunnel_lib::H2Sender,
+}
+
+fn error_response(
+    err: &ProxyError,
+) -> Response<tunnel_lib::proxy::h2_proxy::BoxBody> {
+    let status = err.http_status().unwrap_or(StatusCode::BAD_GATEWAY);
+    Response::builder()
+        .status(status)
+        .body(
+            Full::new(bytes::Bytes::from(err.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap()
+}
 
 /// Serves HTTP/2 cleartext (h2c) connections with per-request vhost routing
 /// and authority rewriting via the QUIC tunnel.
@@ -31,6 +53,43 @@ pub struct H2cHandler {
     pub registry: SharedRegistry,
     pub route_resolver: Arc<dyn RouteResolver>,
     pub single_authority: bool,
+}
+
+fn get_or_create_sender(
+    sender_cache: &Mutex<HashMap<RouteTarget, SenderEntry>>,
+    registry: &SharedRegistry,
+    route_target: &RouteTarget,
+) -> Option<SenderEntry> {
+    let mut guard = sender_cache.lock();
+    if let Some(entry) = guard.get(route_target) {
+        if entry.conn.close_reason().is_none() {
+            return Some(entry.clone());
+        }
+        guard.remove(route_target);
+    }
+
+    let selected = registry.select_client_for_group(&route_target.group_id)?;
+    let entry = SenderEntry {
+        conn_id: selected.conn.stable_id(),
+        conn: selected.conn,
+        sender: tunnel_lib::new_h2_sender(),
+    };
+    guard.insert(route_target.clone(), entry.clone());
+    Some(entry)
+}
+
+fn invalidate_sender_if_matches(
+    sender_cache: &Mutex<HashMap<RouteTarget, SenderEntry>>,
+    route_target: &RouteTarget,
+    conn_id: usize,
+) {
+    let mut guard = sender_cache.lock();
+    if guard
+        .get(route_target)
+        .is_some_and(|entry| entry.conn_id == conn_id)
+    {
+        guard.remove(route_target);
+    }
 }
 
 #[async_trait]
@@ -55,9 +114,8 @@ impl IngressProtocolHandler for H2cHandler {
         let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sender_cache: Arc<
-            Mutex<HashMap<RouteTarget, (quinn::Connection, tunnel_lib::H2Sender)>>,
-        > = Arc::new(Mutex::new(HashMap::new()));
+        let sender_cache: Arc<Mutex<HashMap<RouteTarget, SenderEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let registry = self.registry.clone();
         let route_resolver = self.route_resolver.clone();
@@ -79,14 +137,8 @@ impl IngressProtocolHandler for H2cHandler {
                 let host = match authority {
                     Some(h) => h,
                     None => {
-                        return Ok(Response::builder()
-                            .status(400)
-                            .body(
-                                Full::new(bytes::Bytes::from("Missing authority"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed(),
-                            )
-                            .unwrap());
+                        let err = ProxyError::h2c_missing_authority();
+                        return Ok(error_response(&err));
                     }
                 };
                 let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
@@ -96,14 +148,8 @@ impl IngressProtocolHandler for H2cHandler {
                     match fa.as_ref() {
                         None => *fa = Some(route_host.clone()),
                         Some(pinned) if pinned != &route_host => {
-                            return Ok(Response::builder()
-                                .status(421)
-                                .body(
-                                    Full::new(bytes::Bytes::from("Misdirected Request"))
-                                        .map_err(|_| unreachable!())
-                                        .boxed(),
-                                )
-                                .unwrap());
+                            let err = ProxyError::h2c_misdirected(route_host.clone());
+                            return Ok(error_response(&err));
                         }
                         Some(_) => {}
                     }
@@ -126,15 +172,12 @@ impl IngressProtocolHandler for H2cHandler {
                             }),
                             Ok(PhaseResult::Reject { .. }) => None,
                             Err(e) => {
-                                tracing::error!(error = %e, host = %route_host, "h2c route resolve failed");
-                                return Ok(Response::builder()
-                                    .status(502)
-                                    .body(
-                                        Full::new(bytes::Bytes::from("Bad Gateway"))
-                                            .map_err(|_| unreachable!())
-                                            .boxed(),
-                                    )
-                                    .unwrap());
+                                let err = ProxyError::h2c_route_resolve(format!(
+                                    "host={}: {}",
+                                    route_host, e
+                                ));
+                                tracing::error!(kind = ?err.kind, error = %err, "h2c route resolve failed");
+                                return Ok(error_response(&err));
                             }
                         };
                         route_cache
@@ -146,45 +189,22 @@ impl IngressProtocolHandler for H2cHandler {
                 let route_target = match route_target {
                     Some(r) => r,
                     None => {
-                        return Ok(Response::builder()
-                            .status(404)
-                            .body(
-                                Full::new(bytes::Bytes::from("No route"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed(),
-                            )
-                            .unwrap());
+                        let err = ProxyError::h2c_no_route(route_host.clone());
+                        return Ok(error_response(&err));
                     }
                 };
 
-                let (conn_group_id, proxy_name) =
-                    (route_target.group_id.clone(), route_target.proxy_name.clone());
-                let (client_conn, h2_sender) = {
-                    let mut guard = sender_cache.lock();
-                    if !guard.contains_key(&route_target) {
-                        if let Some(selected) =
-                            registry.select_client_for_group(&conn_group_id)
-                        {
-                            guard.insert(
-                                route_target.clone(),
-                                (selected.conn, tunnel_lib::new_h2_sender()),
-                            );
-                        }
-                    }
-                    match guard.get(&route_target) {
-                        Some(pair) => (pair.0.clone(), pair.1.clone()),
+                let proxy_name = route_target.proxy_name.clone();
+                let sender_entry =
+                    match get_or_create_sender(&sender_cache, &registry, &route_target) {
+                        Some(entry) => entry,
                         None => {
-                            return Ok(Response::builder()
-                                .status(502)
-                                .body(
-                                    Full::new(bytes::Bytes::from("No client available"))
-                                        .map_err(|_| unreachable!())
-                                        .boxed(),
-                                )
-                                .unwrap());
+                            let err = ProxyError::h2c_no_client(
+                                route_target.group_id.to_string(),
+                            );
+                            return Ok(error_response(&err));
                         }
-                    }
-                };
+                    };
 
                 let (parts, body) = req.into_parts();
                 debug!(
@@ -200,21 +220,25 @@ impl IngressProtocolHandler for H2cHandler {
                 };
                 let boxed_body = body.map_err(std::io::Error::other).boxed();
                 let upstream_req = Request::from_parts(parts, boxed_body);
-                match tunnel_lib::forward_h2_request(&client_conn, &h2_sender, routing_info, upstream_req)
-                    .await
+                match tunnel_lib::forward_h2_request(
+                    &sender_entry.conn,
+                    &sender_entry.sender,
+                    routing_info,
+                    upstream_req,
+                )
+                .await
                 {
                     Ok(resp) => Ok::<_, hyper::Error>(resp),
-                    Err(e) => {
-                        tracing::error!("L7 Proxy upstream error: {}", e);
-                        sender_cache.lock().remove(&route_target);
-                        Ok(Response::builder()
-                            .status(502)
-                            .body(
-                                Full::new(bytes::Bytes::from("Bad Gateway"))
-                                    .map_err(|_| unreachable!())
-                                    .boxed(),
-                            )
-                            .unwrap())
+                    Err(first_err) => {
+                        invalidate_sender_if_matches(
+                            &sender_cache,
+                            &route_target,
+                            sender_entry.conn_id,
+                        );
+
+                        let err = ProxyError::h2c_forward(first_err.to_string());
+                        tracing::error!(kind = ?err.kind, error = %err, "L7 Proxy upstream error");
+                        Ok(error_response(&err))
                     }
                 }
             }

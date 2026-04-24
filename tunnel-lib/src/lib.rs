@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod config;
+pub mod error;
 pub mod plugin;
 pub mod ctld_proto;
 pub mod egress;
@@ -23,6 +24,7 @@ pub use egress::http::{
     create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
     forward_http, H2cClient, HttpClientParams,
 };
+pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use engine::bridge::relay_quic_to_tcp;
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};

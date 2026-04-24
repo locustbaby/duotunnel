@@ -1,36 +1,93 @@
+use super::http_connector::SharedHttpConnector;
+use crate::egress::http::HttpsClient;
+use crate::transport::tcp_params::TcpParams;
+use super::core::Protocol;
 use super::h2::H2Peer;
 use super::http::HttpPeer;
 use super::tcp::TcpPeer;
 use anyhow::Result;
 use bytes::Bytes;
-use quinn::{RecvStream, SendStream};
+use std::net::SocketAddr;
+
+#[derive(Debug, Clone)]
+pub enum PeerSpec {
+    Tcp(BasicPeerSpec),
+    Http(HttpPeerSpec),
+    MitmH2(MitmPeerSpec),
+}
+
+#[derive(Debug, Clone)]
+pub struct TlsPeerSpec {
+    pub host: String,
+    pub alpn: Option<Vec<Vec<u8>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BasicPeerSpec {
+    pub target_addr: SocketAddr,
+    pub tls: Option<TlsPeerSpec>,
+}
+
+impl BasicPeerSpec {
+    pub fn into_tcp_peer(self, tcp_params: TcpParams) -> Result<TcpPeer> {
+        match self.tls {
+            Some(tls) => TcpPeer::new_tls_with_params(
+                self.target_addr,
+                tls.host,
+                tls.alpn,
+                tcp_params,
+            ),
+            None => Ok(TcpPeer::new(self.target_addr, tcp_params)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpPeerSpec {
+    pub target_host: String,
+    pub scheme: String,
+    pub protocol: Protocol,
+}
+
+impl HttpPeerSpec {
+    pub fn into_h1_peer(self, client: HttpsClient) -> HttpPeer {
+        HttpPeer {
+            client,
+            target_host: self.target_host,
+            scheme: self.scheme,
+        }
+    }
+
+    pub fn into_h2_peer(self, connector: SharedHttpConnector) -> H2Peer {
+        H2Peer {
+            connector,
+            spec: self,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MitmPeerSpec {
+    pub tls_host: String,
+}
+
 pub enum PeerKind {
     Tcp(TcpPeer),
     Http(Box<HttpPeer>),
     H2(Box<H2Peer>),
-    Dyn(Box<dyn UpstreamPeer>),
 }
 impl PeerKind {
     #[inline]
     pub async fn connect(
         self,
-        send: SendStream,
-        recv: RecvStream,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         match self {
             Self::Tcp(p) => p.connect_inner(send, recv, initial_data).await,
             Self::Http(p) => p.connect_inner(send, recv, initial_data).await,
             Self::H2(p) => p.connect_inner(send, recv, initial_data).await,
-            Self::Dyn(p) => p.connect_boxed(send, recv, initial_data).await,
         }
     }
-}
-pub trait UpstreamPeer: Send + Sync {
-    fn connect_boxed<'a>(
-        &'a self,
-        send: SendStream,
-        recv: RecvStream,
-        initial_data: Option<Bytes>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 }
