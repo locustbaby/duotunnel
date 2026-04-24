@@ -1,9 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
+use hyper::body::Body as _;
 use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use tunnel_lib::plugin::{
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
-use tunnel_lib::ProxyError;
+use tunnel_lib::{ErrorKind, ErrorSource, ProxyError};
 
 use crate::registry::SharedRegistry;
 
@@ -25,6 +26,14 @@ struct SenderEntry {
     conn_id: usize,
     conn: quinn::Connection,
     sender: tunnel_lib::H2Sender,
+}
+
+#[derive(Clone)]
+struct RetryableRequest {
+    method: Method,
+    uri: Uri,
+    version: Version,
+    headers: hyper::HeaderMap,
 }
 
 fn error_response(
@@ -39,6 +48,54 @@ fn error_response(
                 .boxed(),
         )
         .unwrap()
+}
+
+fn error_kind_label(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::QuicOpenTimeout => "quic_open_timeout",
+        ErrorKind::QuicOpenConnection => "quic_open_connection",
+        ErrorKind::HttpUpstreamRequest => "http_upstream_request",
+        ErrorKind::H2cMissingAuthority => "h2c_missing_authority",
+        ErrorKind::H2cMisdirected => "h2c_misdirected",
+        ErrorKind::H2cRouteResolve => "h2c_route_resolve",
+        ErrorKind::H2cNoRoute => "h2c_no_route",
+        ErrorKind::H2cNoClient => "h2c_no_client",
+        ErrorKind::H2cForward => "h2c_forward",
+    }
+}
+
+fn error_source_label(source: ErrorSource) -> &'static str {
+    match source {
+        ErrorSource::Upstream => "upstream",
+        ErrorSource::Downstream => "downstream",
+        ErrorSource::Internal => "internal",
+    }
+}
+
+fn error_status_label(err: &ProxyError) -> &'static str {
+    match err.http_status().map(|s| s.as_u16()) {
+        Some(400) => "400",
+        Some(404) => "404",
+        Some(421) => "421",
+        Some(502) => "502",
+        Some(503) => "503",
+        Some(_) => "other",
+        None => "000",
+    }
+}
+
+fn observe_h2c_error(
+    metrics: &Arc<dyn tunnel_lib::plugin::MetricsSink>,
+    err: &ProxyError,
+) {
+    metrics.incr(
+        "duotunnel_h2c_errors_total",
+        &[
+            ("status", error_status_label(err)),
+            ("type", error_kind_label(err.kind)),
+            ("source", error_source_label(err.source)),
+        ],
+    );
 }
 
 /// Serves HTTP/2 cleartext (h2c) connections with per-request vhost routing
@@ -92,6 +149,23 @@ fn invalidate_sender_if_matches(
     }
 }
 
+fn build_retry_request(
+    template: &RetryableRequest,
+) -> Request<tunnel_lib::proxy::h2_proxy::BoxBody> {
+    let mut req = Request::builder()
+        .method(template.method.clone())
+        .uri(template.uri.clone())
+        .version(template.version)
+        .body(
+            http_body_util::Empty::<bytes::Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap();
+    *req.headers_mut() = template.headers.clone();
+    req
+}
+
 #[async_trait]
 impl IngressProtocolHandler for H2cHandler {
     fn protocol_kind(&self) -> ProtocolKind {
@@ -119,6 +193,7 @@ impl IngressProtocolHandler for H2cHandler {
 
         let registry = self.registry.clone();
         let route_resolver = self.route_resolver.clone();
+        let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let registry = registry.clone();
@@ -126,6 +201,7 @@ impl IngressProtocolHandler for H2cHandler {
             let route_cache = route_cache.clone();
             let sender_cache = sender_cache.clone();
             let route_resolver = route_resolver.clone();
+            let metrics = metrics.clone();
             let src_addr = src_addr.clone();
             async move {
                 let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
@@ -138,6 +214,7 @@ impl IngressProtocolHandler for H2cHandler {
                     Some(h) => h,
                     None => {
                         let err = ProxyError::h2c_missing_authority();
+                        observe_h2c_error(&metrics, &err);
                         return Ok(error_response(&err));
                     }
                 };
@@ -149,6 +226,7 @@ impl IngressProtocolHandler for H2cHandler {
                         None => *fa = Some(route_host.clone()),
                         Some(pinned) if pinned != &route_host => {
                             let err = ProxyError::h2c_misdirected(route_host.clone());
+                            observe_h2c_error(&metrics, &err);
                             return Ok(error_response(&err));
                         }
                         Some(_) => {}
@@ -176,6 +254,7 @@ impl IngressProtocolHandler for H2cHandler {
                                     "host={}: {}",
                                     route_host, e
                                 ));
+                                observe_h2c_error(&metrics, &err);
                                 tracing::error!(kind = ?err.kind, error = %err, "h2c route resolve failed");
                                 return Ok(error_response(&err));
                             }
@@ -190,6 +269,7 @@ impl IngressProtocolHandler for H2cHandler {
                     Some(r) => r,
                     None => {
                         let err = ProxyError::h2c_no_route(route_host.clone());
+                        observe_h2c_error(&metrics, &err);
                         return Ok(error_response(&err));
                     }
                 };
@@ -202,9 +282,17 @@ impl IngressProtocolHandler for H2cHandler {
                             let err = ProxyError::h2c_no_client(
                                 route_target.group_id.to_string(),
                             );
+                            observe_h2c_error(&metrics, &err);
                             return Ok(error_response(&err));
                         }
                     };
+
+                let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
+                    method: req.method().clone(),
+                    uri: req.uri().clone(),
+                    version: req.version(),
+                    headers: req.headers().clone(),
+                });
 
                 let (parts, body) = req.into_parts();
                 debug!(
@@ -223,7 +311,7 @@ impl IngressProtocolHandler for H2cHandler {
                 match tunnel_lib::forward_h2_request(
                     &sender_entry.conn,
                     &sender_entry.sender,
-                    routing_info,
+                    routing_info.clone(),
                     upstream_req,
                 )
                 .await
@@ -236,7 +324,56 @@ impl IngressProtocolHandler for H2cHandler {
                             sender_entry.conn_id,
                         );
 
+                        if let Some(template) = retryable_request.as_ref() {
+                            if let Some(retry_entry) =
+                                get_or_create_sender(&sender_cache, &registry, &route_target)
+                            {
+                                metrics.incr(
+                                    "duotunnel_h2c_retry_total",
+                                    &[("result", "attempt")],
+                                );
+                                let retry_req = build_retry_request(template);
+                                match tunnel_lib::forward_h2_request(
+                                    &retry_entry.conn,
+                                    &retry_entry.sender,
+                                    routing_info.clone(),
+                                    retry_req,
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        metrics.incr(
+                                            "duotunnel_h2c_retry_total",
+                                            &[("result", "success")],
+                                        );
+                                        return Ok::<_, hyper::Error>(resp);
+                                    }
+                                    Err(retry_err) => {
+                                        metrics.incr(
+                                            "duotunnel_h2c_retry_total",
+                                            &[("result", "error")],
+                                        );
+                                        invalidate_sender_if_matches(
+                                            &sender_cache,
+                                            &route_target,
+                                            retry_entry.conn_id,
+                                        );
+                                        let err =
+                                            ProxyError::h2c_forward(retry_err.to_string());
+                                        observe_h2c_error(&metrics, &err);
+                                        tracing::error!(
+                                            kind = ?err.kind,
+                                            error = %err,
+                                            "L7 Proxy upstream retry error"
+                                        );
+                                        return Ok(error_response(&err));
+                                    }
+                                }
+                            }
+                        }
+
                         let err = ProxyError::h2c_forward(first_err.to_string());
+                        observe_h2c_error(&metrics, &err);
                         tracing::error!(kind = ?err.kind, error = %err, "L7 Proxy upstream error");
                         Ok(error_response(&err))
                     }

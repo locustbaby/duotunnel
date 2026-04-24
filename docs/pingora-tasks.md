@@ -621,7 +621,10 @@ async fn forward_with_cached_sender(
 1. `sender_cache` 已从裸 `(Connection, H2Sender)` 升到显式 `SenderEntry { conn_id, conn, sender }`，开始记录 `quinn::Connection::stable_id()`。
 2. cache hit 前已先检查 `close_reason()`；如果 cached connection 已关闭，会先失效再重选，不再等到 `forward_h2_request` 报错后才发现 stale。
 3. 失败路径现在按 `conn_id` 条件失效旧条目，避免并发请求把新建的 sender entry 误删。
-4. 当前阶段刻意没有做“失败后立即重放同一条 h2 请求 body”，因为 `hyper::body::Incoming` 不是默认可重放体；这一步必须建立在显式 replayability 语义之上，不能为了表面 failover 牺牲正确性。
+4. 当前阶段只对“空 body / `is_end_stream()`”请求做一次安全重试：旧 sender 失效后会重建 sender 并重发一次。这能覆盖 benchmark 中的 GET 场景，但不会对不可重放 body 做冒险重试。
+5. 非空 body 请求仍然只做条件失效，不做立即重放；这一步必须建立在显式 replayability 语义之上，不能为了表面 failover 牺牲正确性。
+6. h2c plugin 已补最小观测口径：`duotunnel_h2c_errors_total{status,type,source}` 与 `duotunnel_h2c_retry_total{result}`，这样 route miss / no client / forward error / retry success 都能单独观察，不必再只看总 502 数。
+7. CI 辅助：`ci-helpers/run-bench-case.sh` 的 frp 路径加了端口清理（`pkill` + `reset-failed`）、基于 `is-failed` 的就绪等待、启动失败 diag dump 与 3 次重试，避免 bench 偶发被残留 frpc/frps 卡住。
 
 **Validation**: `cargo check -p tunnel-lib -p server -p client` 已通过。后续仍需补单 h2c connection 并发 2 个 Host、不串 route；kill cached client 后下一请求重选；以及错误 metrics/type-source 行为验证。
 
