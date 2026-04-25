@@ -23,7 +23,7 @@ use crate::registry::{SelectedConnection, SharedRegistry};
 
 #[derive(Clone)]
 struct CachedSender {
-    selected: SelectedConnection,
+    selected: Arc<SelectedConnection>,
     sender: tunnel_lib::H2Sender,
 }
 

@@ -24,7 +24,7 @@ pub struct SelectedConnection {
 
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
 ///
-/// `snapshot` is an `ArcSwap<Vec<SelectedConnection>>` — readers call `.load()` which is
+/// `snapshot` is an `ArcSwap<Vec<Arc<SelectedConnection>>>` — readers call `.load()` which is
 /// a single atomic pointer load with no allocation.  Writers hold a `Mutex` to
 /// serialize mutations, rebuild the Vec, and swap atomically.
 ///
@@ -36,7 +36,7 @@ pub struct ClientGroup {
     /// Mutable index: client_id → (Connection, inflight counter).  Only touched by writers.
     index: Mutex<ClientIndex>,
     /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
-    snapshot: ArcSwap<Vec<SelectedConnection>>,
+    snapshot: ArcSwap<Vec<Arc<SelectedConnection>>>,
 }
 
 impl ClientGroup {
@@ -47,13 +47,13 @@ impl ClientGroup {
         }
     }
 
-    fn build_snapshot(idx: &ClientIndex) -> Vec<SelectedConnection> {
+    fn build_snapshot(idx: &ClientIndex) -> Vec<Arc<SelectedConnection>> {
         idx.iter()
-            .map(|(client_id, (conn, inflight))| SelectedConnection {
+            .map(|(client_id, (conn, inflight))| Arc::new(SelectedConnection {
                 conn_id: Arc::<str>::from(client_id.as_str()),
                 conn: conn.clone(),
                 inflight: inflight.clone(),
-            })
+            }))
             .collect()
     }
 
@@ -85,7 +85,7 @@ impl ClientGroup {
     ///
     /// Reads are allocation-free: one atomic pointer load from the RCU snapshot,
     /// then a linear scan over healthy connections comparing `AtomicUsize` inflight counts.
-    pub fn select_healthy(&self) -> Option<SelectedConnection> {
+    pub fn select_healthy(&self) -> Option<Arc<SelectedConnection>> {
         let conns = self.snapshot.load();
         pick_least_inflight(
             conns.as_slice(),
@@ -166,7 +166,7 @@ impl ClientRegistry {
         }
     }
 
-    pub fn select_client_for_group(&self, group_id: &str) -> Option<SelectedConnection> {
+    pub fn select_client_for_group(&self, group_id: &str) -> Option<Arc<SelectedConnection>> {
         let group = self.groups.get(group_id)?;
         let conn = group.select_healthy();
         if conn.is_none() {

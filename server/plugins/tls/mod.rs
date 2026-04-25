@@ -53,7 +53,7 @@ impl IngressProtocolHandler for TlsHandler {
             .registry
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
-        let client_conn = selected.conn;
+        let client_conn = selected.conn.clone();
         let sender_cache = tunnel_lib::new_h2_sender();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
