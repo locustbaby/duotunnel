@@ -102,12 +102,14 @@ async fn handle_entry_connection(
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
     let pool_size = pool.pool_size();
+    let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
-        let conn = match pool.next_conn() {
+        let conn = match pool.next_conn_excluding(&tried_conn_ids) {
             Some(c) => c,
             None => break,
         };
+        tried_conn_ids.push(conn.conn.stable_id());
         maybe_slow_path(
             || conn.inflight.load(std::sync::atomic::Ordering::Relaxed),
             overload,

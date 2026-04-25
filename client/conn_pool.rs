@@ -40,11 +40,14 @@ impl EntryConnPool {
         self.snapshot.store(Arc::new(g.clone()));
     }
 
-    pub fn next_conn(&self) -> Option<Arc<PooledConnection>> {
+    pub fn next_conn_excluding(&self, excluded: &[usize]) -> Option<Arc<PooledConnection>> {
         let snap = self.snapshot.load();
         pick_least_inflight(
             snap.as_slice(),
-            |c| c.conn.close_reason().is_none(),
+            |c| {
+                c.conn.close_reason().is_none()
+                    && !excluded.contains(&c.conn.stable_id())
+            },
             |c| c.inflight.load(Ordering::Relaxed),
         )
         .cloned()
