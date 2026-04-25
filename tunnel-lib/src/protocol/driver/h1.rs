@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use http::{HeaderMap, Method, Response, Uri, Version};
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
 use quinn::{RecvStream, SendStream};
 use tokio::sync::oneshot;
 struct Reclaim {
@@ -266,7 +266,10 @@ impl ProtocolDriver for Http1Driver {
             body,
         }))
     }
-    async fn write_response(&mut self, mut response: Response<Incoming>) -> Result<()> {
+    async fn write_response(
+        &mut self,
+        mut response: Response<BoxBody<Bytes, std::io::Error>>,
+    ) -> Result<()> {
         let status = response.status();
         if let Some(conn) = response.headers().get(http::header::CONNECTION) {
             if let Ok(v) = conn.to_str() {

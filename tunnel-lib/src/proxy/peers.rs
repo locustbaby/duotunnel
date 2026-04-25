@@ -1,5 +1,4 @@
 use super::http_connector::SharedHttpConnector;
-use crate::egress::http::HttpsClient;
 use crate::transport::tcp_params::TcpParams;
 use super::core::Protocol;
 use super::h2::H2Peer;
@@ -50,11 +49,10 @@ pub struct HttpPeerSpec {
 }
 
 impl HttpPeerSpec {
-    pub fn into_h1_peer(self, client: HttpsClient) -> HttpPeer {
+    pub fn into_h1_peer(self, connector: SharedHttpConnector) -> HttpPeer {
         HttpPeer {
-            client,
-            target_host: self.target_host,
-            scheme: self.scheme,
+            connector,
+            spec: self,
         }
     }
 

@@ -68,16 +68,15 @@ impl HttpConnector {
     }
 
     async fn connect_h1(
-        &self,
+        self: &Arc<Self>,
         spec: HttpPeerSpec,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         HttpPeer {
-            client: self.https_client.clone(),
-            target_host: spec.target_host,
-            scheme: spec.scheme,
+            connector: self.clone(),
+            spec,
         }
         .connect_inner(send, recv, initial_data)
         .await
