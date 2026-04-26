@@ -30,8 +30,19 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
-    let (mut send, mut recv) = conn.accept_bi().await?;
     let login_timeout = Duration::from_secs(state.config.server.login_timeout_secs);
+    let (mut send, mut recv) = match tokio::time::timeout(login_timeout, conn.accept_bi()).await {
+        Ok(Ok(streams)) => streams,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_elapsed) => {
+            warn!(
+                addr = % remote_addr,
+                "login handshake timed out waiting for login stream"
+            );
+            conn.close(0u32.into(), b"login timeout");
+            return Ok(());
+        }
+    };
     let msg_type = match tokio::time::timeout(login_timeout, recv_message_type(&mut recv)).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => return Err(e),

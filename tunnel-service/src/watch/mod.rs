@@ -18,22 +18,46 @@ use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, Mes
 pub struct WatchServer {
     svc: Arc<ControlService>,
     bind_addr: SocketAddr,
+    auth_token: Option<String>,
 }
 
 impl WatchServer {
-    pub fn new(svc: Arc<ControlService>, bind_addr: SocketAddr) -> Self {
-        Self { svc, bind_addr }
+    pub fn new(
+        svc: Arc<ControlService>,
+        bind_addr: SocketAddr,
+        auth_token: Option<String>,
+    ) -> Self {
+        let auth_token = auth_token.and_then(|t| {
+            let t = t.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+        Self {
+            svc,
+            bind_addr,
+            auth_token,
+        }
     }
 
     pub async fn run(self) -> Result<()> {
         let listener = TcpListener::bind(self.bind_addr).await?;
-        info!(addr = %self.bind_addr, "WatchServer listening");
+        info!(
+            addr = %self.bind_addr,
+            auth_enabled = self.auth_token.is_some(),
+            "WatchServer listening"
+        );
+        let auth_token = Arc::new(self.auth_token);
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
                     let svc = Arc::clone(&self.svc);
+                    let auth_token = auth_token.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_watch_connection(stream, peer, svc).await {
+                        if let Err(e) = handle_watch_connection(stream, peer, svc, auth_token).await
+                        {
                             debug!(peer = %peer, error = %e, "watch connection ended");
                         }
                     });
@@ -50,6 +74,7 @@ async fn handle_watch_connection(
     stream: TcpStream,
     peer: SocketAddr,
     svc: Arc<ControlService>,
+    auth_token: Arc<Option<String>>,
 ) -> Result<()> {
     info!(peer = %peer, "watch connection accepted");
     let (reader, writer) = stream.into_split();
@@ -62,6 +87,13 @@ async fn handle_watch_connection(
         anyhow::bail!("expected ConfigPush/WatchRequest, got {:?}", msg_type);
     }
     let req: WatchRequest = recv_message(&mut reader).await?;
+    if let Some(expected) = auth_token.as_ref() {
+        let provided = req.token.as_deref().unwrap_or("");
+        if !tokens_equal(provided, expected) {
+            warn!(peer = %peer, "unauthorized watch request");
+            anyhow::bail!("unauthorized watch request");
+        }
+    }
     debug!(peer = %peer, resource_version = req.resource_version, "received WatchRequest");
 
     // Step 2: subscribe BEFORE reading current state to avoid a race where a
@@ -102,4 +134,10 @@ async fn handle_watch_connection(
     }
 
     Ok(())
+}
+
+fn tokens_equal(provided: &str, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }

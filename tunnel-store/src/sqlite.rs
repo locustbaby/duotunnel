@@ -16,6 +16,12 @@ pub async fn open_sqlite_pool(database_url: &str) -> Result<SqlitePool> {
     }
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys=ON").execute(conn).await?;
+                Ok(())
+            })
+        })
         .connect(database_url)
         .await?;
     sqlx::query("PRAGMA journal_mode=WAL")

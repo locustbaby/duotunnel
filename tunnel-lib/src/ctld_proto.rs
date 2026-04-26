@@ -103,6 +103,8 @@ pub struct WatchRequest {
     /// The last resource_version the server has seen.
     /// 0 means "I have nothing; send me the full snapshot".
     pub resource_version: u64,
+    /// Optional bearer token used to authenticate the watch client.
+    pub token: Option<String>,
 }
 
 /// The full config snapshot pushed by ctld as the list response,
