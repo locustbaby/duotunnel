@@ -22,7 +22,8 @@ function deepMerge(target, source) {
 }
 
 function processCases(input) {
-  return (input.cases || []).map(c => deepMerge(DEFAULTS, c));
+  const defaults = deepMerge(DEFAULTS, input.defaults || {});
+  return (input.cases || []).map(c => deepMerge(defaults, c));
 }
 
 export const ALL_CASES = [
