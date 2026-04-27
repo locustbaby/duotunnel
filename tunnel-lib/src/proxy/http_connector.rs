@@ -158,13 +158,16 @@ impl HttpConnector {
         B::Data: Into<Bytes> + Send,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let prefer_h1 = spec.scheme == "http" && self.gc_prefer_h1(&Self::cache_key(spec));
-        let retryable_request = (spec.scheme == "http" && !prefer_h1 && request.body().is_end_stream())
-            .then(|| RetryableRequest {
-                method: request.method().clone(),
-                uri: request.uri().clone(),
-                version: request.version(),
-                headers: request.headers().clone(),
+        let can_try_h2c = spec.scheme == "http" && matches!(spec.protocol, Protocol::H2);
+        let prefer_h1 = can_try_h2c && self.gc_prefer_h1(&Self::cache_key(spec));
+        let retryable_request =
+            (can_try_h2c && !prefer_h1 && request.body().is_end_stream()).then(|| {
+                RetryableRequest {
+                    method: request.method().clone(),
+                    uri: request.uri().clone(),
+                    version: request.version(),
+                    headers: request.headers().clone(),
+                }
             });
         let (parts, body) = request.into_parts();
         let boxed_body = body
@@ -173,7 +176,7 @@ impl HttpConnector {
             .boxed();
         let request = hyper::Request::from_parts(parts, boxed_body);
 
-        let result = if spec.scheme == "http" && !prefer_h1 {
+        let result = if can_try_h2c && !prefer_h1 {
             self.h2c_client.request(request).await
         } else {
             self.https_client.request(request).await
@@ -182,7 +185,7 @@ impl HttpConnector {
         match result {
             Ok(resp) => Ok(Self::box_response(resp)),
             Err(e) => {
-                if spec.scheme == "http" && !prefer_h1 {
+                if can_try_h2c && !prefer_h1 {
                     // Phase 1 policy: when cleartext H2 fails once, pin this upstream to H1 for a TTL window.
                     self.mark_prefer_h1(spec);
                     if let Some(template) = retryable_request.as_ref() {
@@ -194,10 +197,10 @@ impl HttpConnector {
                         {
                             Ok(resp) => return Ok(Self::box_response(resp)),
                             Err(retry_err) => {
-                                return Err(
-                                    ProxyError::http_upstream_request(retry_err.to_string())
-                                        .into(),
+                                return Err(ProxyError::http_upstream_request(
+                                    retry_err.to_string(),
                                 )
+                                .into());
                             }
                         }
                     }

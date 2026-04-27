@@ -12,10 +12,10 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
-    ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
+    send_watch_request, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
 };
-use tunnel_lib::models::msg::{recv_typed_message, send_message, MessageType};
+use tunnel_lib::models::msg::{recv_typed_message, MessageType};
 
 use crate::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -96,7 +96,7 @@ async fn connect_and_watch(
         resource_version: *last_version,
         token: auth_token.map(str::to_string),
     };
-    send_message(&mut writer, MessageType::ConfigPush, &req).await?;
+    send_watch_request(&mut writer, &req).await?;
     info!(addr = %addr, resource_version = *last_version, "sent WatchRequest");
 
     // Step 2+3: receive Snapshot then stream Patches until error/disconnect.

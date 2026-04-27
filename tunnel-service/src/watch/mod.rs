@@ -1,4 +1,4 @@
-use crate::proto::{WatchEvent, WatchRequest};
+use crate::proto::WatchEvent;
 use crate::service::ControlService;
 use anyhow::Result;
 /// WatchServer: TCP listener that implements the ctld-side of the list-watch protocol.
@@ -13,7 +13,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
-use tunnel_lib::models::msg::{recv_message, recv_message_type, send_message, MessageType};
+use tunnel_lib::ctld_proto::recv_watch_request;
+use tunnel_lib::models::msg::{recv_message_type, send_message, MessageType};
 
 pub struct WatchServer {
     svc: Arc<ControlService>,
@@ -86,7 +87,7 @@ async fn handle_watch_connection(
     if msg_type != MessageType::ConfigPush {
         anyhow::bail!("expected ConfigPush/WatchRequest, got {:?}", msg_type);
     }
-    let req: WatchRequest = recv_message(&mut reader).await?;
+    let req = recv_watch_request(&mut reader).await?;
     if let Some(expected) = auth_token.as_ref() {
         let provided = req.token.as_deref().unwrap_or("");
         if !tokens_equal(provided, expected) {

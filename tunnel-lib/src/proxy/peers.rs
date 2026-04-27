@@ -1,9 +1,8 @@
-use super::http_connector::SharedHttpConnector;
-use crate::transport::tcp_params::TcpParams;
 use super::core::Protocol;
 use super::h2::H2Peer;
 use super::http::HttpPeer;
 use super::tcp::TcpPeer;
+use crate::transport::tcp_params::TcpParams;
 use anyhow::Result;
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -30,12 +29,9 @@ pub struct BasicPeerSpec {
 impl BasicPeerSpec {
     pub fn into_tcp_peer(self, tcp_params: TcpParams) -> Result<TcpPeer> {
         match self.tls {
-            Some(tls) => TcpPeer::new_tls_with_params(
-                self.target_addr,
-                tls.host,
-                tls.alpn,
-                tcp_params,
-            ),
+            Some(tls) => {
+                TcpPeer::new_tls_with_params(self.target_addr, tls.host, tls.alpn, tcp_params)
+            }
             None => Ok(TcpPeer::new(self.target_addr, tcp_params)),
         }
     }
@@ -46,22 +42,6 @@ pub struct HttpPeerSpec {
     pub target_host: String,
     pub scheme: String,
     pub protocol: Protocol,
-}
-
-impl HttpPeerSpec {
-    pub fn into_h1_peer(self, connector: SharedHttpConnector) -> HttpPeer {
-        HttpPeer {
-            connector,
-            spec: self,
-        }
-    }
-
-    pub fn into_h2_peer(self, connector: SharedHttpConnector) -> H2Peer {
-        H2Peer {
-            connector,
-            spec: self,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
