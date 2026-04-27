@@ -8,7 +8,7 @@ use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,14 @@ use tracing::debug;
 const PREFER_H1_TTL: Duration = Duration::from_secs(300);
 
 pub type SharedHttpConnector = Arc<HttpConnector>;
+
+#[derive(Clone)]
+struct RetryableRequest {
+    method: hyper::Method,
+    uri: hyper::Uri,
+    version: hyper::Version,
+    headers: hyper::HeaderMap,
+}
 
 pub struct HttpConnector {
     https_client: HttpsClient,
@@ -54,6 +62,40 @@ impl HttpConnector {
         self.prefer_h1.insert(key, Instant::now());
     }
 
+    fn build_retry_request(
+        template: &RetryableRequest,
+    ) -> hyper::Request<super::h2_proxy::BoxBody> {
+        let mut req = hyper::Request::builder()
+            .method(template.method.clone())
+            .uri(template.uri.clone())
+            .version(template.version)
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .unwrap();
+        *req.headers_mut() = template.headers.clone();
+        req
+    }
+
+    fn box_response<RespBody>(
+        resp: hyper::Response<RespBody>,
+    ) -> hyper::Response<super::h2_proxy::BoxBody>
+    where
+        RespBody: hyper::body::Body + Send + Sync + 'static,
+        RespBody::Data: Into<Bytes> + Send,
+        RespBody::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let (parts, body) = resp.into_parts();
+        hyper::Response::from_parts(
+            parts,
+            body.map_frame(|f| f.map_data(Into::into))
+                .map_err(|e| std::io::Error::other(e.into()))
+                .boxed(),
+        )
+    }
+
     pub async fn connect(
         self: &Arc<Self>,
         spec: HttpPeerSpec,
@@ -68,16 +110,15 @@ impl HttpConnector {
     }
 
     async fn connect_h1(
-        &self,
+        self: &Arc<Self>,
         spec: HttpPeerSpec,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         HttpPeer {
-            client: self.https_client.clone(),
-            target_host: spec.target_host,
-            scheme: spec.scheme,
+            connector: self.clone(),
+            spec,
         }
         .connect_inner(send, recv, initial_data)
         .await
@@ -117,7 +158,17 @@ impl HttpConnector {
         B::Data: Into<Bytes> + Send,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let prefer_h1 = spec.scheme == "http" && self.gc_prefer_h1(&Self::cache_key(spec));
+        let can_try_h2c = spec.scheme == "http" && matches!(spec.protocol, Protocol::H2);
+        let prefer_h1 = can_try_h2c && self.gc_prefer_h1(&Self::cache_key(spec));
+        let retryable_request =
+            (can_try_h2c && !prefer_h1 && request.body().is_end_stream()).then(|| {
+                RetryableRequest {
+                    method: request.method().clone(),
+                    uri: request.uri().clone(),
+                    version: request.version(),
+                    headers: request.headers().clone(),
+                }
+            });
         let (parts, body) = request.into_parts();
         let boxed_body = body
             .map_frame(|f| f.map_data(Into::into))
@@ -125,24 +176,34 @@ impl HttpConnector {
             .boxed();
         let request = hyper::Request::from_parts(parts, boxed_body);
 
-        let result = if spec.scheme == "http" && !prefer_h1 {
+        let result = if can_try_h2c && !prefer_h1 {
             self.h2c_client.request(request).await
         } else {
             self.https_client.request(request).await
         };
 
         match result {
-            Ok(resp) => {
-                let (parts, body) = resp.into_parts();
-                Ok(hyper::Response::from_parts(
-                    parts,
-                    body.map_err(std::io::Error::other).boxed(),
-                ))
-            }
+            Ok(resp) => Ok(Self::box_response(resp)),
             Err(e) => {
-                if spec.scheme == "http" && !prefer_h1 {
+                if can_try_h2c && !prefer_h1 {
                     // Phase 1 policy: when cleartext H2 fails once, pin this upstream to H1 for a TTL window.
                     self.mark_prefer_h1(spec);
+                    if let Some(template) = retryable_request.as_ref() {
+                        debug!(target = %spec.target_host, "cleartext h2c request failed; retrying once with H1");
+                        match self
+                            .https_client
+                            .request(Self::build_retry_request(template))
+                            .await
+                        {
+                            Ok(resp) => return Ok(Self::box_response(resp)),
+                            Err(retry_err) => {
+                                return Err(ProxyError::http_upstream_request(
+                                    retry_err.to_string(),
+                                )
+                                .into());
+                            }
+                        }
+                    }
                 }
                 Err(ProxyError::http_upstream_request(e.to_string()).into())
             }

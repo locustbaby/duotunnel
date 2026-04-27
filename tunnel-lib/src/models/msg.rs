@@ -10,7 +10,7 @@ use rkyv::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +94,8 @@ where
     W: AsyncWriteExt + Unpin,
     M: for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, rancor::Error>>,
 {
-    let payload = rkyv::to_bytes::<rancor::Error>(msg)
-        .map_err(|e| anyhow!("rkyv serialize failed: {e}"))?;
+    let payload =
+        rkyv::to_bytes::<rancor::Error>(msg).map_err(|e| anyhow!("rkyv serialize failed: {e}"))?;
     if payload.len() > MAX_MESSAGE_BYTES {
         return Err(anyhow!(
             "Message too large to send: {} bytes",

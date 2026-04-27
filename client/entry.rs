@@ -10,7 +10,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
     detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
-    run_accept_worker, send_routing_info, OverloadLimits, PeekBufPool, RoutingInfo, TcpParams,
+    run_accept_worker, send_routing_info, ErrorKind, OverloadLimits, PeekBufPool, ProxyError,
+    RoutingInfo, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -102,12 +103,14 @@ async fn handle_entry_connection(
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
     let pool_size = pool.pool_size();
+    let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
-        let conn = match pool.next_conn() {
+        let conn = match pool.next_conn_excluding(&tried_conn_ids) {
             Some(c) => c,
             None => break,
         };
+        tried_conn_ids.push(conn.conn.stable_id());
         maybe_slow_path(
             || conn.inflight.load(std::sync::atomic::Ordering::Relaxed),
             overload,
@@ -153,8 +156,45 @@ async fn handle_entry_connection(
                 return Ok(());
             }
             Err(e) => {
-                warn!(error = %e, "open_bi failed, trying next connection");
-                last_err = e.into();
+                match e.kind {
+                    ErrorKind::QuicOpenTimeout => {
+                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi timed out, trying next connection");
+                        last_err = ProxyError {
+                            detail: Some(format!(
+                                "conn_id={}: {}",
+                                conn.conn.stable_id(),
+                                e
+                            )),
+                            ..e
+                        }
+                        .into();
+                    }
+                    ErrorKind::QuicOpenConnection => {
+                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit connection error, evicting stale pool entry");
+                        pool.remove(&conn.conn);
+                        last_err = ProxyError {
+                            detail: Some(format!(
+                                "conn_id={}: {}",
+                                conn.conn.stable_id(),
+                                e
+                            )),
+                            ..e
+                        }
+                        .into();
+                    }
+                    _ => {
+                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi failed, trying next connection");
+                        last_err = ProxyError {
+                            detail: Some(format!(
+                                "conn_id={}: {}",
+                                conn.conn.stable_id(),
+                                e
+                            )),
+                            ..e
+                        }
+                        .into();
+                    }
+                }
             }
         }
     }

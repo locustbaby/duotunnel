@@ -5,7 +5,7 @@ trace_enabled: false
 
 # ── TLS ────────────────────────────────────────────────────────────────────────
 # Skip TLS verification for self-signed certs (development only)
-tls_skip_verify: true
+tls_skip_verify: false
 # tls_server_name: "example.com"  # Override SNI (defaults to server_addr)
 # tls_ca_cert: "/path/to/ca.pem"  # Custom CA certificate
 allow_insecure_fallback: false     # Fallback to insecure if system roots missing
@@ -13,7 +13,7 @@ allow_insecure_fallback: false     # Fallback to insecure if system roots missin
 # ── Server connection ──────────────────────────────────────────────────────────
 server_addr: "127.0.0.1"
 server_port: 10086
-auth_token: "dt_NCFxXxGafTN-N1crgLnb_miaKjzJkwQIPjCkBA9Lb1Y"
+auth_token: "dt_replace_with_token_from_ctld"
 
 # Optional: enable local HTTP entry listener (forward proxy entry point)
 http_entry_port: 8003

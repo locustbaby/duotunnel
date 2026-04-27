@@ -10,9 +10,9 @@ use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
 #[cfg(feature = "dial9-telemetry")]
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 mod config;
@@ -70,6 +70,10 @@ struct Cli {
     /// long-lived watch stream instead of reading SQLite directly.
     #[arg(long, global = true)]
     ctld_addr: Option<String>,
+    /// Bearer token for authenticating to tunnel-ctld watch endpoint.
+    /// Can also be provided through DUOTUNNEL_CTLD_TOKEN.
+    #[arg(long, global = true)]
+    ctld_token: Option<String>,
 }
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -149,9 +153,23 @@ fn main() -> Result<()> {
 }
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
+    let ctld_token = cli
+        .ctld_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("DUOTUNNEL_CTLD_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
     match cli.command {
         Some(Commands::Token { action }) => handle_token_command(&cli.config, action).await,
-        Some(Commands::Run) | None => run_server(&cli.config, cli.ctld_addr.as_deref()).await,
+        Some(Commands::Run) | None => {
+            run_server(&cli.config, cli.ctld_addr.as_deref(), ctld_token).await
+        }
     }
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
@@ -193,9 +211,8 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
     let result = runtime.block_on(async {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             r = fut => r,
             _ = sigterm.recv() => {
@@ -257,7 +274,11 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
     }
     Ok(())
 }
-async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
+async fn run_server(
+    config_path: &str,
+    ctld_addr: Option<&str>,
+    ctld_token: Option<String>,
+) -> Result<()> {
     let config = ServerConfigFile::load(config_path)?;
     if ctld_addr.is_none() {
         config::validate_server_config(&config)?;
@@ -302,6 +323,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     // ── background thread ───────────────────────────────────────────────────────
     let config_path_bg = config_path.to_string();
     let ctld_addr_bg = ctld_addr.map(|s| s.to_string());
+    let ctld_token_bg = ctld_token.clone();
     let shutdown_bg = shutdown.clone();
     let proxy_handle_bg = proxy_handle.clone();
     let background_thread = {
@@ -313,6 +335,7 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
                 state_bg,
                 config_path_bg,
                 ctld_addr_bg.as_deref(),
+                ctld_token_bg,
                 shutdown_bg,
                 proxy_handle_bg,
             ));
@@ -321,7 +344,8 @@ async fn run_server(config_path: &str, ctld_addr: Option<&str>) -> Result<()> {
     };
     let (state, background_thread) = background_thread;
 
-    let result = proxy_main(state, shutdown, ready).await;
+    let result = proxy_main(state, shutdown.clone(), ready).await;
+    shutdown.cancel();
 
     background_thread.join().ok();
     if let Some(t) = metrics_thread {
@@ -377,7 +401,8 @@ async fn build_server_state(
     let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
     let proxy_buffer_params = tunnel_lib::ProxyBufferParams::from(&config.server.proxy_buffers);
-    let max_streams = tunnel_lib::QuicTransportParams::from(&config.server.quic).max_concurrent_streams;
+    let max_streams =
+        tunnel_lib::QuicTransportParams::from(&config.server.quic).max_concurrent_streams;
     let overload_limits = config.server.overload.resolve(max_streams);
     info!(
         mode = ?overload_limits.mode,
@@ -442,11 +467,14 @@ async fn proxy_main(
     shutdown: CancellationToken,
     ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-
     // Sync initial listeners before QUIC starts.
     {
         let routing = state.routing.load();
-        let listeners: Vec<_> = routing.tunnel_management.server_ingress_routing.listeners.to_vec();
+        let listeners: Vec<_> = routing
+            .tunnel_management
+            .server_ingress_routing
+            .listeners
+            .to_vec();
         sync_listeners(&state, &listeners);
     }
 
@@ -465,6 +493,7 @@ async fn background_main(
     state: Arc<ServerState>,
     config_path: String,
     ctld_addr: Option<&str>,
+    ctld_token: Option<String>,
     shutdown: CancellationToken,
     proxy_handle: tokio::runtime::Handle,
 ) {
@@ -474,7 +503,10 @@ async fn background_main(
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
                 info!(addr = %addr, "starting ctld watch client");
-                Box::new(control_client::ControlClientService { ctld_addr: addr })
+                Box::new(control_client::ControlClientService {
+                    ctld_addr: addr,
+                    auth_token: ctld_token,
+                })
             }
             Err(e) => {
                 error!(error = %e, "invalid ctld_addr");

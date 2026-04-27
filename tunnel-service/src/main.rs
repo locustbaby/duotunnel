@@ -32,6 +32,8 @@ struct Config {
     #[serde(default = "default_watch_addr")]
     watch_addr: String,
     #[serde(default)]
+    watch_token: Option<String>,
+    #[serde(default)]
     log_level: Option<String>,
     /// Path to a server.yaml whose routing sections (`tunnel_management` +
     /// `server_egress_upstream`) are seeded into the DB on first boot (when
@@ -48,7 +50,7 @@ fn default_database_url() -> String {
 }
 
 fn default_watch_addr() -> String {
-    "0.0.0.0:7788".to_string()
+    "127.0.0.1:7788".to_string()
 }
 
 impl Config {
@@ -98,7 +100,9 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
     };
     info!(addr = %addr, "healthz server started");
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else { continue };
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
         let ready = ready.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 256];
@@ -136,7 +140,12 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::new(level))
         .init();
 
-    info!(database_url = %cfg.database_url, watch_addr = %cfg.watch_addr, "starting tunnel-ctld");
+    info!(
+        database_url = %cfg.database_url,
+        watch_addr = %cfg.watch_addr,
+        watch_auth = cfg.watch_token.as_ref().is_some_and(|t| !t.trim().is_empty()),
+        "starting tunnel-ctld"
+    );
 
     let ready = Arc::new(AtomicBool::new(false));
 
@@ -194,7 +203,9 @@ async fn main() -> Result<()> {
     match args.command.unwrap_or(Command::Serve) {
         Command::Serve => {
             let addr: SocketAddr = cfg.watch_addr.parse()?;
-            WatchServer::new(Arc::clone(&svc), addr).run().await?;
+            WatchServer::new(Arc::clone(&svc), addr, cfg.watch_token.clone())
+                .run()
+                .await?;
         }
         Command::Client(cmd) => {
             run_cli(cmd, &svc).await?;

@@ -347,6 +347,7 @@ pub(crate) async fn run_client(
     };
     session_cancel.cancel();
     entry_pool.remove(&conn);
+    ready.store(false, Ordering::Release);
     tokio::select! {
         _ = shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}

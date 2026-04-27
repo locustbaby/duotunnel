@@ -1,5 +1,8 @@
 database_url: "sqlite://./data/duotunnel.db?mode=rwc"
-watch_addr: "0.0.0.0:7788"
+watch_addr: "127.0.0.1:7788"
+# Set when exposing watch_addr beyond localhost. Server must pass the same value
+# via --ctld-token or DUOTUNNEL_CTLD_TOKEN.
+# watch_token: "replace-with-a-random-secret"
 log_level: "info"
 # Path to server.yaml — routing sections are seeded into the DB on first boot.
 # On subsequent boots this is ignored (routing lives in the DB).

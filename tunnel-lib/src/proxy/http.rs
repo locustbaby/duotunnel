@@ -1,13 +1,11 @@
+use super::http_connector::SharedHttpConnector;
+use super::peers::HttpPeerSpec;
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::combinators::BoxBody;
 use hyper::Request;
-use hyper_rustls::HttpsConnector;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
 use pin_project_lite::pin_project;
 use quinn::{RecvStream, SendStream};
 use std::future::Future;
@@ -15,7 +13,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tracing::debug;
-type HttpsClient = Client<HttpsConnector<HttpConnector>, BoxBody<Bytes, std::io::Error>>;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pin_project! {
@@ -61,9 +58,8 @@ fn lazy_timeout<F: Future>(duration: Duration, future: F) -> LazyTimeout<F> {
     }
 }
 pub struct HttpPeer {
-    pub client: HttpsClient,
-    pub target_host: String,
-    pub scheme: String,
+    pub connector: SharedHttpConnector,
+    pub spec: HttpPeerSpec,
 }
 impl HttpPeer {
     pub async fn connect_inner(
@@ -72,12 +68,12 @@ impl HttpPeer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
-        let upstream = self.target_host.clone();
+        let upstream = self.spec.target_host.clone();
         let mut driver = Http1Driver::new(
             send,
             recv,
-            self.scheme.clone(),
-            self.target_host.clone(),
+            self.spec.scheme.clone(),
+            self.spec.target_host.clone(),
             initial_data,
         );
         loop {
@@ -106,16 +102,16 @@ impl HttpPeer {
                 *headers = req.headers;
             }
             let request = builder.body(req.body)?;
-            debug!(upstream = %self.target_host, uri = %request.uri(), "H1 sending request to upstream");
-            let response = match self.client.request(request).await {
+            debug!(upstream = %self.spec.target_host, uri = %request.uri(), "H1 sending request to upstream");
+            let response = match self.connector.request(&self.spec, request).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     let proxy_err = ProxyError::http_upstream_request(format!(
                         "{}: {}",
-                        self.target_host, e
+                        self.spec.target_host, e
                     ));
                     debug!(
-                        upstream = %self.target_host,
+                        upstream = %self.spec.target_host,
                         kind = ?proxy_err.kind,
                         retry = ?proxy_err.retry,
                         error = %proxy_err,
@@ -125,16 +121,16 @@ impl HttpPeer {
                     break;
                 }
             };
-            debug!(upstream = %self.target_host, status = %response.status(), "H1 received response");
+            debug!(upstream = %self.spec.target_host, status = %response.status(), "H1 received response");
             if let Err(e) = driver.write_response(response).await {
-                debug!(upstream = %self.target_host, error = %e, "H1 write_response error, closing");
+                debug!(upstream = %self.spec.target_host, error = %e, "H1 write_response error, closing");
                 break;
             }
             if driver.should_close || should_close_after {
-                debug!(upstream = %self.target_host, "H1 keep-alive: Connection: close, closing");
+                debug!(upstream = %self.spec.target_host, "H1 keep-alive: Connection: close, closing");
                 break;
             }
-            debug!(upstream = %self.target_host, "H1 keep-alive: request complete, waiting for next");
+            debug!(upstream = %self.spec.target_host, "H1 keep-alive: request complete, waiting for next");
         }
         let _ = driver.finish().await;
         Ok(())

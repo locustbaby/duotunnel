@@ -4,7 +4,7 @@
 pub use tunnel_lib::ctld_proto::{
     ConfigSnapshot, ProtoClientGroup, ProtoClientUpstream, ProtoEgressUpstreamDef,
     ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ProtoIngressVhostRule,
-    ProtoUpstreamServer, TokenCacheEntry, WatchEvent, WatchRequest,
+    ProtoUpstreamServer, TokenCacheEntry, WatchEvent,
 };
 
 use tunnel_store::rules::{

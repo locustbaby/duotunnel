@@ -154,6 +154,10 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
             Ok(l) => Arc::new(l),
             Err(e) => {
                 error!(port = %port, error = %e, "failed to bind listener");
+                let mut map = state.listeners.map.lock();
+                if map.get(&port).map(|e| e.id == listener_id).unwrap_or(false) {
+                    map.remove(&port);
+                }
                 continue;
             }
         };

@@ -12,10 +12,10 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
-    ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
+    send_watch_request, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
 };
-use tunnel_lib::models::msg::{recv_typed_message, send_message, MessageType};
+use tunnel_lib::models::msg::{recv_typed_message, MessageType};
 
 use crate::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct ControlClientService {
     pub ctld_addr: SocketAddr,
+    pub auth_token: Option<String>,
 }
 
 impl BackgroundService for ControlClientService {
@@ -43,23 +44,26 @@ impl BackgroundService for ControlClientService {
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async move {
-            watch_loop(self.ctld_addr, state, shutdown).await;
+            watch_loop(self.ctld_addr, self.auth_token, state, shutdown).await;
             Ok(())
         })
     }
 }
 
-
-async fn watch_loop(ctld_addr: SocketAddr, state: Arc<ServerState>, shutdown: CancellationToken) {
+async fn watch_loop(
+    ctld_addr: SocketAddr,
+    auth_token: Option<String>,
+    state: Arc<ServerState>,
+    shutdown: CancellationToken,
+) {
     let mut backoff = Duration::from_secs(1);
     let mut last_version: u64 = 0;
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            result = connect_and_watch(ctld_addr, &state, last_version) => {
+            result = connect_and_watch(ctld_addr, auth_token.as_deref(), &state, &mut last_version) => {
                 match result {
-                    Ok(version) => {
-                        last_version = version;
+                    Ok(()) => {
                         backoff = Duration::from_secs(1);
                     }
                     Err(e) => {
@@ -78,9 +82,10 @@ async fn watch_loop(ctld_addr: SocketAddr, state: Arc<ServerState>, shutdown: Ca
 
 async fn connect_and_watch(
     addr: SocketAddr,
+    auth_token: Option<&str>,
     state: &Arc<ServerState>,
-    last_version: u64,
-) -> anyhow::Result<u64> {
+    last_version: &mut u64,
+) -> anyhow::Result<()> {
     info!(addr = %addr, "connecting to tunnel-ctld");
     let stream = TcpStream::connect(addr).await?;
     let (reader, mut writer) = stream.into_split();
@@ -88,38 +93,38 @@ async fn connect_and_watch(
 
     // Step 1: send WatchRequest
     let req = WatchRequest {
-        resource_version: last_version,
+        resource_version: *last_version,
+        token: auth_token.map(str::to_string),
     };
-    send_message(&mut writer, MessageType::ConfigPush, &req).await?;
-    info!(addr = %addr, resource_version = last_version, "sent WatchRequest");
+    send_watch_request(&mut writer, &req).await?;
+    info!(addr = %addr, resource_version = *last_version, "sent WatchRequest");
 
     // Step 2+3: receive Snapshot then stream Patches until error/disconnect.
     // Returns the last seen resource_version so the caller can reconnect with it.
-    let mut last_seen: u64 = 0;
     let err = loop {
-        let event: WatchEvent =
-            match recv_typed_message(&mut reader, MessageType::ConfigPush).await {
-                Ok(e) => e,
-                Err(e) => break e,
-            };
-        last_seen = match event {
+        let event: WatchEvent = match recv_typed_message(&mut reader, MessageType::ConfigPush).await
+        {
+            Ok(e) => e,
+            Err(e) => break e,
+        };
+        match event {
             WatchEvent::Snapshot(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
                 apply_snapshot(snap, state);
-                v
+                *last_version = v;
             }
             WatchEvent::Patch(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Patch from ctld");
                 apply_snapshot(snap, state);
-                v
+                *last_version = v;
             }
-        };
+        }
     };
     // Return the last version we successfully applied so the reconnect sends
     // resource_version=N instead of 0, allowing future delta optimisation.
-    Err(err.context(format!("ctld disconnected at version {}", last_seen)))
+    Err(err.context(format!("ctld disconnected at version {}", *last_version)))
 }
 
 /// Apply a ConfigSnapshot to both the routing ArcSwap and the token cache.
