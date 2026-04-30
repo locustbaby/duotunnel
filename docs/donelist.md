@@ -19,7 +19,10 @@
 - [x] **CR2 — Relay 逻辑归一化**: 统一 `relay_inner` / `forward_inner` 核心，全路径升级为 64KB `copy_buf`。
 - [x] **CR3 — URL 解析归一化**: `UpstreamScheme` 统一使用 `transport/addr.rs` 解析，减少冗余扫描，RPS +410。
 - [x] **CR-NEW-A — 消息读取封装**: 实现 `recv_typed_message<T>`，合并 type-byte 与 body 读取，代码更安全。
+- [x] **CR-NEW-B — RouteTarget 类型化**: `VhostRouter` 已返回 `RouteTarget { group_id, proxy_name }`，替代匿名 `(Arc<str>, Arc<str>)` 元组。
 - [x] **CR-NEW-D — API 导出梳理**: `lib.rs` 手术级裁剪，隐藏内部细节，核心 relay 函数收进 `pub mod relay`。
+- [x] **CR-NEW-E — PeekBufPool 共享工具**: 提取 `infra::peek_buf::PeekBufPool`，`client/entry.rs` 与 `proxy/core.rs` 复用同一 thread-local buffer pool，集中维护 `set_len` 安全前提。
+- [x] **CR-NEW-C — TcpPeer/TlsTcpPeer 合并**: TCP peer 已收敛为 `TcpPeer { tls: Option<TlsConfig> }` / `BasicPeerSpec { tls: Option<TlsPeerSpec> }` 形态。
 
 ---
 
@@ -183,12 +186,13 @@ ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forw
 - [x] **entry open_bi 失败后重试其他连接**
   `entry.rs` 改为遍历 pool_size 次，超时或 error 时跳下一条连接，避免单连接 stream 打满时请求失败。
 
-- [x] **entry peek buf 复用 thread-local**
-  `entry.rs` 用模块级 `thread_local!` + `set_len` 替代每连接 `BytesMut::zeroed`，消除 alloc+memset。
+- [x] **entry / stream peek buf 复用 thread-local pool**
+  `entry.rs` 与 `proxy/core.rs` 均使用 `PeekBufPool` 复用 peek/read-ahead buffer，消除每连接 alloc+memset，并把 unsafe `set_len` 前提集中到 `infra::peek_buf`。
 
 - [x] **H2 sender cache 去串行化**
   `h2_proxy.rs` 重构为 `H2SenderCache`：
-  - fast path：`std::sync::Mutex` 只包住一次 `clone()`，临界区 ns 级，不跨 await
+  - body 类型已从 `UnsyncBoxBody` 迁移到 `BoxBody`
+  - fast path：`ArcSwap<Option<SendRequest<BoxBody>>>` 原子 load，不再锁住热路径
   - slow path：`tokio::sync::Mutex`（`rebuild_mu`）序列化重建，只有一个任务做 `open_bi` + H2 握手
   - double-check 防止多任务同时 miss 时浪费 QUIC stream
 
@@ -209,6 +213,12 @@ ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forw
 **Files**: `tunnel-lib/src/transport/listener.rs`
 
 `detect_protocol_and_host` 主路径已改用 httparse，`extract_host_from_http` 降为非热路径 fallback。单次 httparse pass 同时完成协议探测 + Host 提取 + WebSocket 检测。
+
+### [TODO-14] HTTP drain discard buffer heap allocation cleanup ✅
+
+**Files**: `server/handlers/http.rs`
+
+2026-05-01 代码核对确认：`server/handlers/http.rs` 中已无原 TODO 记录的 `vec![0u8; len]` drain 分配路径，该项从 TODO 队列移除。
 
 ## Bench Fixes
 

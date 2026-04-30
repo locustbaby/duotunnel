@@ -13,6 +13,8 @@
 > **2026-04-26 代码核对修正**：本次对照实现再次确认后，文档中“`TODO-65` = Done”“`TODO-64` = In Progress”的写法过于乐观。实际状态更接近：`TODO-65` 为 **In Progress（Phase 1 Done）**，因为 `ProxyError` 已接入 `open_bi`/h2c/部分 upstream 路径，但 `UpstreamResolver` 等热路径边界仍大量使用 `anyhow`；`TODO-64` 仍是 **TODO**，仓库内尚未引入 `ids.rs`、`ClientId/GroupId/ReuseHash`。`TODO-66` 的 `prefer_h1` 记忆目前只覆盖 `HttpConnector::request()` 的 cleartext request path，`connect()` 入口仍主要按 `spec.protocol` 分派，故继续记为 Phase 1 进行中；`TODO-69` 已有 stale cache 失效和空 body 一次重试，但 cached value 仍未升级到 `SelectedConnectionHandle/Arc<SelectedConnection>`。
 >
 > **2026-04-26 当日追加进度**：随后继续实现后，`TODO-66` 又补了两步：H1 downstream 的 upstream request 已统一走 `HttpConnector::request()`，cleartext upstream 的空 body 请求在 h2c 失败后会自动回退到 H1 一次；`TODO-69` 的 h2c cache value 已从拆散的 `(conn_id, conn, sender)` 收口到 `CachedSender { selected: Arc<SelectedConnection>, sender }`；`TODO-70` 已完成；`TODO-72` 已进入进行中，已补 client 侧 exclude set、`stable_id` 去重索引，以及 entry retry loop 对 `QuicOpenTimeout / QuicOpenConnection` 的区别处理。
+>
+> **2026-05-01 文档队列同步**：未完成项已统一收敛到 `docs/todo.md`。本文件保留 Pingora 主线的详细设计与进度说明；如状态摘要冲突，以 `docs/todo.md` 的 active mainline 分组为准。已确认 `TODO-69` 当前代码已使用 `CachedSender { selected: Arc<SelectedConnection>, sender }`，剩余工作集中在 h2c state 收敛、非空 body replayability 与 failover 验证。
 
 ## 代码结构现状（速览）
 
@@ -307,7 +309,7 @@ Metrics 增加 error label：`error_total{type="ConnectTimeout", source="upstrea
 **依赖与影响**:
 - 依赖：TODO-63（`PeerSpec` 作为统一输入）、TODO-65（结构化错误）
 - 被依赖：—
-- 吞并：todo.md 的 TODO-62（per-peer 协议自适应直接落地）、TODO-CR-NEW-C（合并 TcpPeer 和 TlsTcpPeer）
+- 吞并：todo.md 的 TODO-62（per-peer 协议自适应直接落地）；TODO-CR-NEW-C（合并 TcpPeer 和 TlsTcpPeer）已在代码中完成并迁入 `docs/donelist.md`
 - 两端影响：server egress + client egress upstream 都改用 Connector
 
 **Problem**:
