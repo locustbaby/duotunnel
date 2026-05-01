@@ -1,4 +1,10 @@
 {
+  "defaults": {
+    "tunnel": "frp",
+    "ports": {
+      "ingress": {"env": "FRP_HTTP_PORT", "default": 7800}
+    }
+  },
   "cases": [
     {
       "name": "frp_ingress_3000qps",

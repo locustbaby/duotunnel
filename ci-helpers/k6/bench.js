@@ -21,9 +21,9 @@ function activeProfile() {
 }
 
 function filterCases(cases, profile) {
-  if (profile === '8k')        return cases.filter((c) => c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
-  if (profile === 'core')      return cases.filter((c) => !c.name.includes('_8000qps') && !c.name.startsWith('frp_'));
-  if (profile === 'frp')       return cases.filter((c) => c.name.startsWith('frp_'));
+  if (profile === '8k')        return cases.filter((c) => c.name.includes('_8000qps') && c.tunnel !== 'frp');
+  if (profile === 'core')      return cases.filter((c) => !c.name.includes('_8000qps') && c.tunnel !== 'frp');
+  if (profile === 'frp')       return cases.filter((c) => c.tunnel === 'frp');
   if (profile === 'basic')     return cases.filter((c) => c.category === 'basic');
   if (profile === 'body_size') return cases.filter((c) => c.category === 'body_size');
   return cases;
@@ -112,10 +112,34 @@ function track(ok) {
   if (!ok) errCounters[sn].add(1);
 }
 
+function currentCase() {
+  const sn = exec.scenario.name;
+  return ACTIVE_CASES.find((c) => c.name === sn) || {};
+}
+
+function resolvePort(portSpec, fallback) {
+  if (typeof portSpec === 'number') return portSpec;
+  if (portSpec && typeof portSpec === 'object') {
+    const envPort = portSpec.env ? parseEnvPositiveInt(__ENV[portSpec.env]) : null;
+    if (envPort !== null) return envPort;
+    const defaultPort = parseEnvPositiveInt(portSpec.default);
+    if (defaultPort !== null) return defaultPort;
+  }
+  return fallback;
+}
+
+function casePort(name, fallback) {
+  return resolvePort(currentCase().ports?.[name], fallback);
+}
+
+function caseTunnel() {
+  return currentCase().tunnel || 'duotunnel';
+}
+
 export function ingressHttpGet() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://echo.local:8080/?id=${id}`, {
+  const res = http.get(`http://echo.local:${casePort('ingress', 8080)}/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
@@ -134,15 +158,14 @@ export function ingressMultihost() {
   const id = `${__VU}-${__ITER}`;
   const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
-  // DuoTunnel uses 8080, FRP uses 7800. Differentiate by scenario name.
-  const port = sn.startsWith('frp_') ? 7800 : 8080;
+  const port = casePort('ingress', 8080);
   const res = http.get(`http://${host}:${port}/?id=${id}&host=${host}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
   });
 
-  const checkPrefix = sn.startsWith('frp_') ? 'frp ingress multihost' : 'ingress multihost';
+  const checkPrefix = caseTunnel() === 'frp' ? 'frp ingress multihost' : 'ingress multihost';
   const ok = check(res, {
     [`${checkPrefix} 200`]: (r) => r.status === 200,
     [`${checkPrefix} host echo`]: (r) => r.body && r.body.includes(host),
@@ -155,7 +178,7 @@ export function ingressMultihost() {
 export function ingressHttpGetKeepalive() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://echo.local:7800/?id=${id}`, {
+  const res = http.get(`http://echo.local:${casePort('ingress', 8080)}/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
@@ -173,7 +196,7 @@ export function egressMultihost() {
   const id = `${__VU}-${__ITER}`;
   const n = ((__VU - 1) % MULTIHOST_COUNT) + 1;
   const host = `echo-${String(n).padStart(2, '0')}.local`;
-  const res = http.get(`http://${host}:8082/?id=${id}&host=${host}`, {
+  const res = http.get(`http://${host}:${casePort('egress', 8082)}/?id=${id}&host=${host}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
@@ -190,7 +213,7 @@ export function ingressHttpPost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.post(
-    'http://echo.local:8080/',
+    `http://echo.local:${casePort('ingress', 8080)}/`,
     JSON.stringify({ bench: 'ingress-post', id: id }),
     { headers: { 'Content-Type': 'application/json' }, timeout: '10s', tags: { name: sn }, responseType: 'text' },
   );
@@ -204,7 +227,7 @@ export function ingressHttpPost() {
 export function egressHttpGet() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const res = http.get(`http://echo.local:8082/?id=${id}`, {
+  const res = http.get(`http://echo.local:${casePort('egress', 8082)}/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
@@ -220,7 +243,7 @@ export function egressHttpPost() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
   const res = http.post(
-    'http://echo.local:8082/',
+    `http://echo.local:${casePort('egress', 8082)}/`,
     JSON.stringify({ bench: 'egress-post', id: id }),
     {
       headers: { 'Content-Type': 'application/json' },
@@ -239,7 +262,7 @@ export function egressHttpPost() {
 export function ingressPost1K() {
   const sn = exec.scenario.name;
   const res = http.post(
-    'http://echo.local:8080/',
+    `http://echo.local:${casePort('ingress', 8080)}/`,
     PAYLOAD_1K,
     {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -258,7 +281,7 @@ export function ingressPost1K() {
 export function ingressPost10K() {
   const sn = exec.scenario.name;
   const res = http.post(
-    'http://echo.local:8080/',
+    `http://echo.local:${casePort('ingress', 8080)}/`,
     PAYLOAD_10K,
     {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -277,7 +300,7 @@ export function ingressPost10K() {
 export function ingressPost100K() {
   const sn = exec.scenario.name;
   const res = http.post(
-    'http://echo.local:8080/',
+    `http://echo.local:${casePort('ingress', 8080)}/`,
     PAYLOAD_100K,
     {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -296,7 +319,7 @@ export function ingressPost100K() {
 export function egressPost10K() {
   const sn = exec.scenario.name;
   const res = http.post(
-    'http://echo.local:8082/',
+    `http://echo.local:${casePort('egress', 8082)}/`,
     PAYLOAD_10K,
     {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -314,7 +337,7 @@ export function egressPost10K() {
 
 export function wsIngress() {
   const sn = exec.scenario.name;
-  ws.connect('ws://ws.local:8080', { tags: { name: sn } }, function (socket) {
+  ws.connect(`ws://ws.local:${casePort('ws', 8080)}`, { tags: { name: sn } }, function (socket) {
     let counted = false;
 
     socket.setTimeout(function () {
@@ -346,7 +369,7 @@ export function wsMultiMsg() {
   let received = 0;
   let counted = false;
 
-  ws.connect('ws://ws.local:8080', { tags: { name: sn } }, function (socket) {
+  ws.connect(`ws://ws.local:${casePort('ws', 8080)}`, { tags: { name: sn } }, function (socket) {
     socket.setTimeout(function () {
       if (!counted) { reqCounters[sn].add(1); errCounters[sn].add(1); counted = true; }
       socket.close();
@@ -387,17 +410,20 @@ grpcLargeClient.load(['../proto'], 'grpc_echo.proto');
 const grpcHighQpsClient = new grpc.Client();
 grpcHighQpsClient.load(['../proto'], 'grpc_echo.proto');
 
+function grpcIngressTarget() {
+  return `grpc.local:${casePort('grpc', 8080)}`;
+}
 
 export function grpcHealthIngress() {
   const sn = exec.scenario.name;
-  if (__ITER === 0) grpcHealthClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+  if (__ITER === 0) grpcHealthClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   const resp = grpcHealthClient.invoke('grpc.health.v1.Health/Check', { service: '' }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
     errCounters[sn].add(1);
     try { grpcHealthClient.close(); } catch (_) {}
-    grpcHealthClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+    grpcHealthClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   }
   check(resp, { 'grpc health OK': (r) => r && r.status === grpc.StatusOK });
 }
@@ -405,14 +431,14 @@ export function grpcHealthIngress() {
 export function grpcEchoIngress() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  if (__ITER === 0) grpcEchoClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+  if (__ITER === 0) grpcEchoClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   const resp = grpcEchoClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
     errCounters[sn].add(1);
     try { grpcEchoClient.close(); } catch (_) {}
-    grpcEchoClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+    grpcEchoClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   }
   check(resp, {
     'grpc echo OK': (r) => r && r.status === grpc.StatusOK,
@@ -422,14 +448,14 @@ export function grpcEchoIngress() {
 
 export function grpcLargePayload() {
   const sn = exec.scenario.name;
-  if (__ITER === 0) grpcLargeClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+  if (__ITER === 0) grpcLargeClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   const resp = grpcLargeClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: PAYLOAD_10K }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
     errCounters[sn].add(1);
     try { grpcLargeClient.close(); } catch (_) {}
-    grpcLargeClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+    grpcLargeClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   }
   check(resp, {
     'grpc 10K OK': (r) => r && r.status === grpc.StatusOK,
@@ -440,14 +466,14 @@ export function grpcLargePayload() {
 export function grpcHighQps() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  if (__ITER === 0) grpcHighQpsClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+  if (__ITER === 0) grpcHighQpsClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   const resp = grpcHighQpsClient.invoke('grpc_echo.v1.EchoService/Echo', { ping: id }, { tags: { name: sn } });
   const ok = resp && resp.status === grpc.StatusOK;
   reqCounters[sn].add(1);
   if (!ok) {
     errCounters[sn].add(1);
     try { grpcHighQpsClient.close(); } catch (_) {}
-    grpcHighQpsClient.connect('grpc.local:8080', { plaintext: true, timeout: '5s' });
+    grpcHighQpsClient.connect(grpcIngressTarget(), { plaintext: true, timeout: '5s' });
   }
   check(resp, {
     'grpc high qps OK': (r) => r && r.status === grpc.StatusOK,
@@ -458,12 +484,12 @@ export function grpcHighQps() {
 export function bidirectional() {
   const sn = exec.scenario.name;
   const id = `${__VU}-${__ITER}`;
-  const inRes = http.get(`http://echo.local:8080/?id=${id}`, {
+  const inRes = http.get(`http://echo.local:${casePort('ingress', 8080)}/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
   });
-  const egRes = http.get(`http://echo.local:8082/?id=${id}`, {
+  const egRes = http.get(`http://echo.local:${casePort('egress', 8082)}/?id=${id}`, {
     timeout: '10s',
     tags: { name: sn },
     responseType: 'text',
@@ -482,7 +508,7 @@ export function bidirectional() {
 
 export function handleSummary(data) {
   const extras = {};
-  if (ACTIVE_CASES.length > 0 && ACTIVE_CASES.every(c => c.name.startsWith('frp_'))) {
+  if (ACTIVE_CASES.length > 0 && ACTIVE_CASES.every(c => c.tunnel === 'frp')) {
     extras.tunnel = 'frp';
   }
 

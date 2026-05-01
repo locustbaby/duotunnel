@@ -8,6 +8,12 @@
     "httpReqFailed": "rate<0.05",
     "duration": "p(95)<60000"
   },
+  "ports": {
+    "ingress": {"env": "DUOTUNNEL_INGRESS_PORT", "default": 8080},
+    "egress": {"env": "DUOTUNNEL_EGRESS_PORT", "default": 8082},
+    "ws": {"env": "DUOTUNNEL_WS_PORT", "default": 8080},
+    "grpc": {"env": "DUOTUNNEL_GRPC_PORT", "default": 8080}
+  },
   "durationSec": 20,
   "includeInTotalRps": false
 }
