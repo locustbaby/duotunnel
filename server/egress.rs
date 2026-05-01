@@ -1,5 +1,4 @@
 use crate::config::ServerEgressUpstream;
-use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -7,7 +6,7 @@ use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
 use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, PeerSpec, TlsPeerSpec};
 use tunnel_lib::proxy::tcp::UpstreamScheme;
-use tunnel_lib::{HttpClientParams, UpstreamGroup};
+use tunnel_lib::{HttpClientParams, ProxyError, UpstreamGroup};
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
     http_rules: HashMap<String, String>,
@@ -63,19 +62,19 @@ impl ServerEgressMap {
     }
 }
 impl UpstreamResolver for ServerEgressMap {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec> {
+    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec, ProxyError> {
         let routing = context
             .routing_info
             .as_ref()
-            .ok_or_else(|| anyhow!("missing routing info in context"))?;
+            .ok_or_else(ProxyError::routing_missing_info)?;
         let host_raw = routing
             .host
             .as_deref()
-            .ok_or_else(|| anyhow!("no host in routing info"))?;
+            .ok_or_else(ProxyError::routing_missing_host)?;
         let host = host_raw.split(':').next().unwrap_or(host_raw);
         let upstream_addr = self
             .get_upstream_address(host)
-            .ok_or_else(|| anyhow!("no egress route for host: {}", host))?;
+            .ok_or_else(|| ProxyError::route_not_found(format!("host={host}")))?;
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         match context.protocol {
@@ -87,9 +86,15 @@ impl UpstreamResolver for ServerEgressMap {
                 } else {
                     tokio::net::lookup_host(&connect_addr_str)
                         .await
-                        .map_err(|e| anyhow!("failed to resolve: {}: {}", connect_addr_str, e))?
+                        .map_err(|e| {
+                            ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
+                        })?
                         .next()
-                        .ok_or_else(|| anyhow!("no resolved IP for {}", connect_addr_str))?
+                        .ok_or_else(|| {
+                            ProxyError::resolve_upstream(format!(
+                                "no resolved IP for {connect_addr_str}"
+                            ))
+                        })?
                 };
                 let spec = BasicPeerSpec {
                     target_addr,
@@ -116,7 +121,9 @@ impl UpstreamResolver for ServerEgressMap {
                 };
                 Ok(PeerSpec::Http(spec))
             }
-            _ => Err(anyhow!("unsupported protocol for egress")),
+            p => Err(ProxyError::unsupported_protocol(format!(
+                "server egress: {p:?}"
+            ))),
         }
     }
 
@@ -126,21 +133,27 @@ impl UpstreamResolver for ServerEgressMap {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
-    ) -> Result<()> {
+    ) -> Result<(), ProxyError> {
         match peer {
-            PeerSpec::Tcp(spec) => {
-                spec.into_tcp_peer(tunnel_lib::TcpParams::default())?
-                    .connect_inner(send, recv, initial_data)
-                    .await
-            }
+            PeerSpec::Tcp(spec) => spec
+                .into_tcp_peer(tunnel_lib::TcpParams::default())
+                .map_err(|e| ProxyError::upstream_connect(e.to_string()))?
+                .connect_inner(send, recv, initial_data)
+                .await
+                .map_err(|e| ProxyError::upstream_forward(e.to_string())),
             PeerSpec::Http(spec) => match spec.protocol {
                 Protocol::H2 | Protocol::H1 | Protocol::Unknown => self
                     .http_connector
                     .connect(spec, send, recv, initial_data)
-                    .await,
-                _ => Err(anyhow!("unsupported http protocol variant")),
+                    .await
+                    .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
+                p => Err(ProxyError::unsupported_protocol(format!(
+                    "server http peer: {p:?}"
+                ))),
             },
-            PeerSpec::MitmH2(_) => Err(anyhow!("server egress does not support MITM peer")),
+            PeerSpec::MitmH2(_) => Err(ProxyError::unsupported_protocol(
+                "server egress does not support MITM peer",
+            )),
         }
     }
 }
@@ -150,7 +163,7 @@ impl UpstreamResolver for ServerEgressMap {
 pub struct EgressProxy(pub std::sync::Arc<ServerEgressMap>);
 
 impl UpstreamResolver for EgressProxy {
-    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec> {
+    async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec, ProxyError> {
         self.0.upstream_peer(context).await
     }
 
@@ -160,7 +173,7 @@ impl UpstreamResolver for EgressProxy {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
-    ) -> Result<()> {
+    ) -> Result<(), ProxyError> {
         self.0.connect_peer(peer, send, recv, initial_data).await
     }
 }

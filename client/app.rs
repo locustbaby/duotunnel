@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -7,11 +7,9 @@ use tracing::{debug, info};
 use tunnel_lib::plugin::{LoadBalancer, PickCtx, Resolver, Target};
 use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
-use tunnel_lib::proxy::peers::{
-    BasicPeerSpec, HttpPeerSpec, MitmPeerSpec, PeerSpec, TlsPeerSpec,
-};
+use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, MitmPeerSpec, PeerSpec, TlsPeerSpec};
 use tunnel_lib::proxy::tcp::UpstreamScheme;
-use tunnel_lib::{ClientConfig, HttpClientParams};
+use tunnel_lib::{ClientConfig, HttpClientParams, ProxyError};
 
 /// One named upstream group. `raw` is the source-of-truth address list in
 /// `scheme://host:port` form. `targets` is a parallel view built at config
@@ -108,15 +106,17 @@ impl ClientApp {
     }
 }
 impl UpstreamResolver for ClientApp {
-    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerSpec> {
+    async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerSpec, ProxyError> {
         let routing = context
             .routing_info
             .as_ref()
-            .ok_or_else(|| anyhow!("missing routing info in context"))?;
+            .ok_or_else(ProxyError::routing_missing_info)?;
         let upstream_addr = self
             .map
             .get_local_address(&routing.proxy_name, context.client_addr)
-            .ok_or_else(|| anyhow::anyhow!("no upstream for proxy_name: {}", routing.proxy_name))?;
+            .ok_or_else(|| {
+                ProxyError::route_not_found(format!("proxy_name={}", routing.proxy_name))
+            })?;
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         let http_scheme = if is_https { "https" } else { "http" };
@@ -140,12 +140,20 @@ impl UpstreamResolver for ClientApp {
             }
             Protocol::WebSocket => {
                 info!("WebSocket protocol detected, using TCP relay");
-                let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
+                let target_addr = self
+                    .map
+                    .resolve_addr(&connect_addr_str)
+                    .await
+                    .map_err(|e| {
+                        ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
+                    })?;
                 let spec = BasicPeerSpec {
                     target_addr,
                     tls: if is_https {
                         Some(TlsPeerSpec {
-                            host: tls_host.ok_or_else(|| anyhow!("TLS host required for WSS"))?,
+                            host: tls_host.ok_or_else(|| {
+                                ProxyError::upstream_connect("TLS host required for WSS")
+                            })?,
                             alpn: None,
                         })
                     } else {
@@ -166,7 +174,13 @@ impl UpstreamResolver for ClientApp {
                     );
                     Ok(PeerSpec::MitmH2(spec))
                 } else {
-                    let target_addr = self.map.resolve_addr(&connect_addr_str).await?;
+                    let target_addr =
+                        self.map
+                            .resolve_addr(&connect_addr_str)
+                            .await
+                            .map_err(|e| {
+                                ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
+                            })?;
                     let spec = BasicPeerSpec {
                         target_addr,
                         tls: None,
@@ -174,7 +188,9 @@ impl UpstreamResolver for ClientApp {
                     Ok(PeerSpec::Tcp(spec))
                 }
             }
-            _ => Err(anyhow!("unsupported protocol")),
+            p => Err(ProxyError::unsupported_protocol(format!(
+                "client app: {p:?}"
+            ))),
         }
     }
 
@@ -184,19 +200,23 @@ impl UpstreamResolver for ClientApp {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
-    ) -> Result<()> {
+    ) -> Result<(), ProxyError> {
         match peer {
             PeerSpec::Tcp(spec) => spec
-                .into_tcp_peer(self.tcp_params.clone())?
+                .into_tcp_peer(self.tcp_params.clone())
+                .map_err(|e| ProxyError::upstream_connect(e.to_string()))?
                 .connect_inner(send, recv, initial_data)
-                .await,
+                .await
+                .map_err(|e| ProxyError::upstream_forward(e.to_string())),
             PeerSpec::Http(spec) => self
                 .map
                 .http_connector
                 .connect(spec, send, recv, initial_data)
-                .await,
+                .await
+                .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
             PeerSpec::MitmH2(spec) => {
-                let server_config = tunnel_lib::get_or_create_server_config(&spec.tls_host)?;
+                let server_config = tunnel_lib::get_or_create_server_config(&spec.tls_host)
+                    .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
                 let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
                 let stream = tunnel_lib::QuinnStream { send, recv };
                 let stream = if let Some(init) = initial_data {
@@ -204,10 +224,9 @@ impl UpstreamResolver for ClientApp {
                 } else {
                     tunnel_lib::PrefixedReadWrite::new(stream, bytes::Bytes::new())
                 };
-                let accepted_stream = acceptor
-                    .accept(stream)
-                    .await
-                    .context("failed to accept ingress TLS for MITM")?;
+                let accepted_stream = acceptor.accept(stream).await.map_err(|e| {
+                    ProxyError::tls_handshake(format!("failed to accept ingress TLS for MITM: {e}"))
+                })?;
                 info!(
                     "MITM H2: TLS handshake accepted, starting H2 server for {}",
                     spec.tls_host
@@ -223,6 +242,7 @@ impl UpstreamResolver for ClientApp {
                         },
                     )
                     .await
+                    .map_err(|e| ProxyError::http_upstream_request(e.to_string()))
             }
         }
     }

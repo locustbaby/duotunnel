@@ -1,4 +1,5 @@
 use super::peers::PeerSpec;
+use crate::ProxyError;
 use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
 use anyhow::Result;
@@ -6,9 +7,7 @@ use bytes::Bytes;
 use quinn::{RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
-#[derive(
-    Debug, Clone, Copy, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Protocol {
     H1,
     H2,
@@ -26,7 +25,7 @@ pub trait UpstreamResolver: Send + Sync {
     fn upstream_peer(
         &self,
         context: &mut Context,
-    ) -> impl std::future::Future<Output = Result<PeerSpec>> + Send;
+    ) -> impl std::future::Future<Output = std::result::Result<PeerSpec, ProxyError>> + Send;
 
     fn connect_peer(
         &self,
@@ -34,7 +33,7 @@ pub trait UpstreamResolver: Send + Sync {
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
-    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    ) -> impl std::future::Future<Output = std::result::Result<(), ProxyError>> + Send;
 }
 pub struct ProxyEngine<A: UpstreamResolver> {
     app: A,
@@ -77,7 +76,9 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             routing_info,
         };
         let peer = self.app.upstream_peer(&mut ctx).await?;
-        self.app.connect_peer(peer, send, recv, ctx.initial_bytes).await?;
+        self.app
+            .connect_peer(peer, send, recv, ctx.initial_bytes)
+            .await?;
         Ok(())
     }
 }

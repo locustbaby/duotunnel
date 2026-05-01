@@ -1,12 +1,13 @@
+use crate::plugins::prometheus::PrometheusSink;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::OnceLock;
+use tunnel_lib::ProxyError;
 
 static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 pub fn set_handle(handle: PrometheusHandle) {
     HANDLE.set(handle).ok();
 }
-
 
 pub fn encode() -> String {
     HANDLE.get().map(|h| h.render()).unwrap_or_default()
@@ -31,25 +32,36 @@ pub fn tcp_connection_closed() {
 }
 
 pub fn auth_success(group_id: &str) {
-    metrics::counter!("duotunnel_auth_success_total", "group_id" => group_id.to_string()).increment(1);
+    metrics::counter!("duotunnel_auth_success_total", "group_id" => group_id.to_string())
+        .increment(1);
 }
 
 pub fn auth_failure(group_id: &str) {
-    metrics::counter!("duotunnel_auth_failure_total", "group_id" => group_id.to_string()).increment(1);
+    metrics::counter!("duotunnel_auth_failure_total", "group_id" => group_id.to_string())
+        .increment(1);
 }
 
 pub fn client_registered(group_id: &str) {
-    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string()).increment(1.0);
+    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string())
+        .increment(1.0);
 }
 
 pub fn client_unregistered(group_id: &str) {
-    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string()).decrement(1.0);
+    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string())
+        .decrement(1.0);
 }
 
 pub fn request_completed(protocol: &'static str, status: &'static str) {
-    metrics::counter!("duotunnel_requests_total", "protocol" => protocol, "status" => status).increment(1);
+    metrics::counter!("duotunnel_requests_total", "protocol" => protocol, "status" => status)
+        .increment(1);
 }
 
+pub fn request_failed(protocol: &'static str, error: &anyhow::Error) {
+    request_completed(protocol, "error");
+    if let Some(proxy_error) = error.downcast_ref::<ProxyError>() {
+        tunnel_lib::plugin::observe_proxy_error(&PrometheusSink, protocol, proxy_error);
+    }
+}
 
 pub struct OpenBiInflightGuard;
 
@@ -69,6 +81,6 @@ pub fn open_bi_observe_wait_ms(wait_ms: f64) {
     metrics::histogram!("duotunnel_open_bi_wait_ms").record(wait_ms);
 }
 
-pub fn open_bi_timeout() {
-    metrics::counter!("duotunnel_open_bi_timeout_total").increment(1);
+pub fn open_bi_stream_limit() {
+    metrics::counter!("duotunnel_open_bi_stream_limit_total").increment(1);
 }

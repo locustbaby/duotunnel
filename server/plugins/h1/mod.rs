@@ -5,6 +5,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::debug;
 
+use tunnel_lib::ProxyError;
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 
 use crate::registry::SharedRegistry;
@@ -29,16 +30,16 @@ impl IngressProtocolHandler for H1Handler {
         route: Option<Route>,
         ctx: &ServerCtx,
     ) -> Result<()> {
-        let route = route.ok_or_else(|| anyhow::anyhow!("H1Handler: missing Route"))?;
+        let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let hint = ctx
             .hint
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("H1Handler: missing ProtocolHint"))?;
+            .ok_or_else(ProxyError::routing_missing_info)?;
 
         let host = hint
             .authority
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("no Host header in plaintext request"))?;
+            .ok_or_else(ProxyError::routing_missing_host)?;
 
         let initial_data: Vec<u8> = hint.raw_preface.to_vec();
         let protocol = match hint.protocol {
@@ -54,7 +55,7 @@ impl IngressProtocolHandler for H1Handler {
         let selected = self
             .registry
             .select_client_for_group(&group_id)
-            .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+            .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
         // Yield if the selected QUIC connection is near its stream cap.
         // Placed before `read_exact` so the scheduler round-trip overlaps

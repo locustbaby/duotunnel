@@ -1,13 +1,14 @@
-use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
 use crate::error::ProxyError;
+use crate::inflight::{InflightCounter, InflightGuard, begin_inflight};
 use quinn::{Connection, RecvStream, SendStream};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum OpenBiOutcome {
     Ok,
-    Timeout,
-    ConnectionError,
+    StreamLimit,
+    ConnectionLost,
+    ConnectionFatal,
 }
 
 pub struct OpenedStream {
@@ -54,12 +55,34 @@ where
             })
         }
         Ok(Err(e)) => {
-            on_wait_done(elapsed, OpenBiOutcome::ConnectionError);
-            Err(ProxyError::quic_open_connection(e.to_string()))
+            let (outcome, err) = classify_open_bi_error(e);
+            on_wait_done(elapsed, outcome);
+            Err(err)
         }
         Err(_) => {
-            on_wait_done(elapsed, OpenBiOutcome::Timeout);
-            Err(ProxyError::quic_open_timeout(stream_timeout))
+            on_wait_done(elapsed, OpenBiOutcome::StreamLimit);
+            Err(ProxyError::quic_stream_limit(stream_timeout))
         }
+    }
+}
+
+fn classify_open_bi_error(error: quinn::ConnectionError) -> (OpenBiOutcome, ProxyError) {
+    use quinn::ConnectionError;
+
+    match error {
+        ConnectionError::TimedOut
+        | ConnectionError::Reset
+        | ConnectionError::ConnectionClosed(_)
+        | ConnectionError::ApplicationClosed(_) => (
+            OpenBiOutcome::ConnectionLost,
+            ProxyError::quic_connection_lost(error.to_string()),
+        ),
+        ConnectionError::VersionMismatch
+        | ConnectionError::TransportError(_)
+        | ConnectionError::LocallyClosed
+        | ConnectionError::CidsExhausted => (
+            OpenBiOutcome::ConnectionFatal,
+            ProxyError::quic_connection_fatal(error.to_string()),
+        ),
     }
 }
