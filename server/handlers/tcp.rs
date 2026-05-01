@@ -1,11 +1,11 @@
-use crate::{metrics, ServerState};
+use crate::{ServerState, metrics};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
+use tunnel_lib::{OpenBiOutcome, maybe_slow_path, open_bi_guarded, proxy, run_accept_worker};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -36,7 +36,7 @@ pub async fn run_tcp_accept_loop(
                 let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
                 if let Err(e) = &result {
                     debug!(error = %e, "TCP connection error");
-                    metrics::request_completed("tcp", "error");
+                    metrics::request_failed("tcp", e);
                 } else {
                     metrics::request_completed("tcp", "success");
                 }
@@ -85,8 +85,8 @@ async fn handle_tcp_connection(
         open_timeout,
         |elapsed, outcome| {
             metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
-            if matches!(outcome, OpenBiOutcome::Timeout) {
-                metrics::open_bi_timeout();
+            if matches!(outcome, OpenBiOutcome::StreamLimit) {
+                metrics::open_bi_stream_limit();
             }
         },
     )

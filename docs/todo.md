@@ -22,20 +22,9 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
 
 ## 1. Active Mainline: Pingora-Inspired HTTP / Proxy Refactor
 
-Recommended order: `65 -> 66 -> 69 -> 72 -> 64 -> 67b -> 68 -> 71`.
+Recommended order: `66 -> 69 -> 72 -> 64 -> 67b -> 68 -> 71`.
 
-### [TODO-65] Hot-path structured errors
-**Priority**: High | **Status**: In Progress (Phase 1 Done)
-
-**Current code state**:
-- `ProxyError / ErrorKind / ErrorSource / RetryType` exists in `tunnel-lib/src/error.rs`.
-- `open_bi_guarded` returns `ProxyError`.
-- h2c ingress maps structured errors to HTTP responses and metrics labels.
-
-**Remaining**:
-1. Replace `anyhow::Result` at hot-path boundaries such as `UpstreamResolver::upstream_peer` / `connect_peer`.
-2. Classify `QuicStreamLimit` / fatal-vs-transient connection errors instead of only `QuicOpenTimeout` / `QuicOpenConnection`.
-3. Extend metrics labels from h2c-only error counters to the shared proxy paths.
+Completed: `TODO-65` moved to `docs/donelist.md`.
 
 ### [TODO-66] Unified HttpConnector + H1/H2 fallback memory
 **Priority**: High | **Status**: In Progress
@@ -68,12 +57,11 @@ Recommended order: `65 -> 66 -> 69 -> 72 -> 64 -> 67b -> 68 -> 71`.
 
 **Current code state**:
 - `EntryConnPool` de-duplicates by `Connection::stable_id()`.
-- Entry retry uses an exclude set and distinguishes timeout vs connection error.
-- Connection errors evict stale pool entries.
+- Entry retry uses an exclude set and distinguishes stream capacity, transient connection loss, and fatal connection errors.
+- Connection-level failures evict stale pool entries.
 
 **Remaining**:
-1. Add finer fatal/transient classification once TODO-65 exposes it.
-2. Decide whether future multi-server HA needs grouped pools rather than the current flat pool.
+1. Decide whether future multi-server HA needs grouped pools rather than the current flat pool.
 
 ### [TODO-64] ClientId / GroupId / ProxyName / ReuseHash newtypes
 **Priority**: Medium | **Status**: TODO

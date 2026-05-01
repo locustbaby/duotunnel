@@ -10,9 +10,11 @@
 >
 > **2026-04-24 进度同步**：`TODO-63` 已完成；`TODO-65` 已完成第一阶段；`TODO-66` Phase 1 已落地并接入 live path；`TODO-69` 第一阶段已有部分实现。当前执行链路已从 `UpstreamResolver -> PeerKind` 切到 `UpstreamResolver -> PeerSpec -> connect_peer`；client 侧 MITM 路径不再依赖 `PeerKind::Dyn`；HTTP upstream/H2 upstream 已统一走 `HttpConnector` Phase 1。编译验证已通过：`cargo check -p tunnel-lib -p server -p client`。
 >
-> **2026-04-26 代码核对修正**：本次对照实现再次确认后，文档中“`TODO-65` = Done”“`TODO-64` = In Progress”的写法过于乐观。实际状态更接近：`TODO-65` 为 **In Progress（Phase 1 Done）**，因为 `ProxyError` 已接入 `open_bi`/h2c/部分 upstream 路径，但 `UpstreamResolver` 等热路径边界仍大量使用 `anyhow`；`TODO-64` 仍是 **TODO**，仓库内尚未引入 `ids.rs`、`ClientId/GroupId/ReuseHash`。`TODO-66` 的 `prefer_h1` 记忆目前只覆盖 `HttpConnector::request()` 的 cleartext request path，`connect()` 入口仍主要按 `spec.protocol` 分派，故继续记为 Phase 1 进行中；`TODO-69` 已有 stale cache 失效和空 body 一次重试，但 cached value 仍未升级到 `SelectedConnectionHandle/Arc<SelectedConnection>`。
+> **2026-04-26 代码核对修正**：本次对照实现再次确认后，文档中“`TODO-65` = Done”“`TODO-64` = In Progress”的写法过于乐观。彼时状态更接近：`TODO-65` 为 **In Progress（Phase 1 Done）**，因为 `ProxyError` 已接入 `open_bi`/h2c/部分 upstream 路径，但 `UpstreamResolver` 等热路径边界仍大量使用 `anyhow`；`TODO-64` 仍是 **TODO**，仓库内尚未引入 `ids.rs`、`ClientId/GroupId/ReuseHash`。`TODO-66` 的 `prefer_h1` 记忆目前只覆盖 `HttpConnector::request()` 的 cleartext request path，`connect()` 入口仍主要按 `spec.protocol` 分派，故继续记为 Phase 1 进行中；`TODO-69` 已有 stale cache 失效和空 body 一次重试，但 cached value 仍未升级到 `SelectedConnectionHandle/Arc<SelectedConnection>`。
 >
 > **2026-04-26 当日追加进度**：随后继续实现后，`TODO-66` 又补了两步：H1 downstream 的 upstream request 已统一走 `HttpConnector::request()`，cleartext upstream 的空 body 请求在 h2c 失败后会自动回退到 H1 一次；`TODO-69` 的 h2c cache value 已从拆散的 `(conn_id, conn, sender)` 收口到 `CachedSender { selected: Arc<SelectedConnection>, sender }`；`TODO-70` 已完成；`TODO-72` 已进入进行中，已补 client 侧 exclude set、`stable_id` 去重索引，以及 entry retry loop 对 `QuicOpenTimeout / QuicOpenConnection` 的区别处理。
+>
+> **2026-05-01 进度同步**：`TODO-65` 已完成。`UpstreamResolver` 边界已切到 `ProxyError`，`open_bi` 已区分 stream capacity、transient connection loss、fatal connection error，server/client resolver 和 H1/H2c/TLS/TCP ingress 热路径已接入结构化错误；共享指标 `duotunnel_proxy_errors_total{protocol,type,source,retry}` 已覆盖 plugin dispatcher、h2c、TLS H2 和 legacy server handler 路径。验证已通过：`cargo check -p tunnel-lib -p server -p client` 与 `cargo test -p tunnel-lib -p server -p client`。
 >
 > **2026-05-01 文档队列同步**：未完成项已统一收敛到 `docs/todo.md`。本文件保留 Pingora 主线的详细设计与进度说明；如状态摘要冲突，以 `docs/todo.md` 的 active mainline 分组为准。已确认 `TODO-69` 当前代码已使用 `CachedSender { selected: Arc<SelectedConnection>, sender }`，剩余工作集中在 h2c state 收敛、非空 body replayability 与 failover 验证。
 
@@ -22,7 +24,7 @@
 
 - **Plugin 系统** `tunnel-lib/src/plugin/`：`dispatcher.rs`（6 相位管线）、`ingress.rs`（`IngressProtocolHandler` trait）、`egress.rs`（`LoadBalancer/UpstreamDialer/Resolver` trait）、`service.rs`（`TunnelService`）、`route.rs`（`RouteResolver`）、`ctx.rs`（`PhaseResult/ServerCtx/RouteCtx/Route/...`）、`metrics.rs`（`MetricsSink`）、`module.rs`（`ConnectionModule`）、`registry.rs`（`PluginRegistry`）
 - **Ingress 分派器** `tunnel-lib/src/plugin/dispatcher.rs:88-218`：sniff → pre_admission → admission → route → handle → logging
-- **UpstreamResolver trait** `tunnel-lib/src/proxy/core.rs:25-37`：`async fn upstream_peer(&self, ctx: &mut Context) -> Result<PeerSpec>` + `connect_peer(...)`
+- **UpstreamResolver trait** `tunnel-lib/src/proxy/core.rs:25-37`：`async fn upstream_peer(&self, ctx: &mut Context) -> Result<PeerSpec, ProxyError>` + `connect_peer(...) -> Result<(), ProxyError>`
   - server 实现 `server/egress.rs:65` `impl UpstreamResolver for ServerEgressMap`
   - client 实现 `client/app.rs:108` `impl UpstreamResolver for ClientApp`
 - **Ingress 插件** `server/plugins/{h1,h2c,tls,tcp_pass,vhost,prometheus}/mod.rs`
@@ -43,7 +45,7 @@
 |---|---|---|---|
 | [TODO-63](#todo-63-peer-描述符化--先消灭-peerkind--dyn-双轨) | Peer 描述符化 + 先消灭 `PeerKind + Dyn` 双轨 | High | Done |
 | [TODO-64](#todo-64-reusehash--clientidgroupid-newtype收尾类型安全) | ReuseHash + ClientId/GroupId newtype（收尾类型安全） | Medium | TODO |
-| [TODO-65](#todo-65-热路径结构化错误--先替换-anyhow-黑盒) | 热路径结构化错误 + 先替换 `anyhow` 黑盒 | High | In Progress（Phase 1 Done） |
+| [TODO-65](#todo-65-热路径结构化错误--先替换-anyhow-黑盒) | 热路径结构化错误 + 先替换 `anyhow` 黑盒 | High | Done |
 | [TODO-66](#todo-66-统一-httpconnector--h1h2-降级记忆替代-httppeerh2peer) | 统一 HttpConnector + H1/H2 降级记忆 | High | In Progress |
 | [TODO-67](#todo-67-servicea--serverapp-抽象统一-accept--handle) | ~~Service\<A\> + ServerApp 抽象~~ | — | **部分达成，剩余部分降级为 TODO-67b** |
 | [TODO-67b](#todo-67b-keep-alive-loop-下沉到-session-层) | keep-alive loop 下沉到 Session 层 | Medium | TODO |
@@ -54,7 +56,7 @@
 | [TODO-72](#todo-72-client-端小优化非紧急随手做) | Client 端小优化 | Low | In Progress |
 | [TODO-73](#todo-73-不要抄-pingora-的部分参考避坑) | 不要抄 Pingora 的部分（参考避坑） | FYI | — |
 
-**推荐落地顺序**：63 → 65 → 66 → 69 → 72 → 64 → 67b → 68 → 71。理由：先把 resolver 输出收敛成“纯描述符”，再补热路径错误语义，随后用最小改动落地 `HttpConnector` Phase 1，并把 h2c 的 sticky sender 补成可失效重选。`Client` 侧小优化现在也已经进入实施阶段，优先级高于 `newtype` 收尾；`TODO-70` 已完成，从主线顺序中移除。当前进度：`63`、`70` 已完成；`65` 第一阶段已完成但未全量替掉热路径边界的 `anyhow`；`66` Phase 1 继续推进中；`69` 第一阶段已继续收敛；`72` 已进入进行中。每个 TODO 完成后跑 CI stress phase，观察基准变化。
+**推荐落地顺序**：66 → 69 → 72 → 64 → 67b → 68 → 71。理由：`63`、`65`、`70` 已完成；后续先继续收敛 `HttpConnector` 与 h2c sticky sender/failover，再做 client 侧小优化和 newtype 收尾。每个 TODO 完成后跑 CI stress phase，观察基准变化。
 
 ---
 
@@ -212,7 +214,7 @@ impl PeerSpec {
 
 ## [TODO-65] 热路径结构化错误 + 先替换 `anyhow` 黑盒
 
-**Priority**: High | **Status**: In Progress（Phase 1 Done）
+**Priority**: High | **Status**: Done
 **依赖与影响**:
 - 依赖：—（可独立于 63/64 推进，但最好在 63 之后做，边界更清晰）
 - 被依赖：TODO-66（Connector 的 `ReusedOnly` 语义）、TODO-72（client retry 可使用结构化 QUIC open 错误，但不直接套 `ReusedOnly`）
@@ -291,15 +293,17 @@ Metrics 增加 error label：`error_total{type="ConnectTimeout", source="upstrea
 - `server/handlers/metrics.rs` / `client` 对应位置
 - 后续扩展：`tunnel-lib/src/ctld_proto.rs`、`tunnel-store/src/traits.rs`
 
-**实际进展（已完成第一阶段）**:
+**实际进展（已完成）**:
 1. 已新增 `tunnel-lib/src/error.rs`，提供最小 `ProxyError / ErrorKind / ErrorSource / RetryType`。
-2. `open_bi_guarded` 已改为返回 `ProxyError`，至少能区分 timeout 和 connection error。
-3. H1/H2 upstream 失败日志已改为结构化错误口径。
+2. `open_bi_guarded` 已改为返回 `ProxyError`，并区分 `QuicStreamLimit`、`QuicConnectionLost`、`QuicConnectionFatal`。
+3. H1/H2 upstream 失败日志已改为结构化错误口径，HTTP upstream request 保留 `RetryType::ReusedOnly` 语义给后续 Session/Connector 重试使用。
 4. h2c ingress 的 `400 / 404 / 421 / 502 / 503` 已统一走 `ProxyError -> error_response`。
-5. 但 `tunnel-lib/src/proxy/core.rs` 的 `UpstreamResolver` 以及不少外围路径仍使用 `anyhow::Result`，还不能算“热路径结构化错误”整体完成。
-6. `client/entry.rs` 已开始按 `QuicOpenTimeout / QuicOpenConnection` 区分处理，并在 connection error 时主动移除 stale pool entry；但更细的 `stream-limit` / fatal-vs-transient 分类仍未补齐。
+5. `tunnel-lib/src/proxy/core.rs` 的 `UpstreamResolver::upstream_peer` / `connect_peer` 已改为返回 `ProxyError`；server/client resolver 实现已把缺路由、DNS 解析、unsupported protocol、upstream connect/forward、HTTP request、MITM TLS handshake 等错误映射为结构化类型。
+6. `client/entry.rs` 已按 stream capacity、transient connection loss、fatal connection error 分类处理；connection-level 失败会移除 stale pool entry。
+7. plugin dispatcher、h2c、TLS H2 和 legacy server handler 路径已打共享 `duotunnel_proxy_errors_total{protocol,type,source,retry}` 指标。
+8. 外围路径（config/store/ctld 等）仍保留 `anyhow::Result`，不在热路径结构化错误的当前范围内。
 
-**Validation**: `cargo check -p tunnel-lib -p server -p client` 已通过。行为验证仍放在 `TODO-66/69` 后继续补充重试与 failover 测试。
+**Validation**: `cargo check -p tunnel-lib -p server -p client` 与 `cargo test -p tunnel-lib -p server -p client` 已通过。行为验证仍放在 `TODO-66/69` 后继续补充重试与 failover 测试。
 
 ---
 
@@ -802,10 +806,10 @@ pub fn pick_p2c<T>(items: &[T], inflight: impl Fn(&T) -> usize, healthy: impl Fn
 **实际进展（已完成一部分）**:
 1. `EntryConnPool::push` 已补 `HashSet<stable_id>`，去重不再线性扫描整池。
 2. `client/entry.rs` 的重试循环已带 exclude set，当前轮失败过的 QUIC 连接不会被重复挑中。
-3. `client/entry.rs` 已开始按 `QuicOpenTimeout / QuicOpenConnection` 区分处理，并在 connection error 时移除 stale pool entry。
-4. 但更完整的 fatal-vs-transient 分类，以及未来多 server group 分池，都还未展开。
+3. `client/entry.rs` 已按 `QuicStreamLimit` / `QuicConnectionLost` / `QuicConnectionFatal` 做更细分类，并在 connection-level 失败时移除 stale pool entry。
+4. 未来多 server group 分池还未展开。
 
-**Validation**: `cargo check -p tunnel-lib -p server -p client` 已通过。
+**Validation**: `cargo check -p tunnel-lib -p server -p client` 与 `cargo test -p tunnel-lib -p server -p client` 已通过。
 
 ---
 

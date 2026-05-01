@@ -3,17 +3,16 @@ use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
+use tunnel_lib::ProxyError;
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 
 use crate::registry::SharedRegistry;
 
-/// Terminates TLS (self-signed cert via PKI cache), then serves the inner
-/// connection as HTTP/2 with authority rewriting via the QUIC tunnel.
 pub struct TlsHandler {
     pub registry: SharedRegistry,
 }
@@ -24,23 +23,22 @@ impl IngressProtocolHandler for TlsHandler {
         ProtocolKind::Tls
     }
 
-    async fn handle(
-        &self,
-        stream: TcpStream,
-        route: Option<Route>,
-        ctx: &ServerCtx,
-    ) -> Result<()> {
-        let route = route.ok_or_else(|| anyhow::anyhow!("TlsHandler: missing Route"))?;
+    async fn handle(&self, stream: TcpStream, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
+        let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let host = ctx
             .hint
             .as_ref()
             .and_then(|h| h.sni.clone())
-            .ok_or_else(|| anyhow::anyhow!("TlsHandler: no SNI in ProtocolHint"))?;
+            .ok_or_else(ProxyError::routing_missing_host)?;
 
         debug!(host = %host, "TLS connection: terminating");
-        let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)?;
+        let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)
+            .map_err(|e| ProxyError::tls_handshake(format!("server config for {host}: {e}")))?;
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        let tls_stream = acceptor.accept(stream).await?;
+        let tls_stream = acceptor
+            .accept(stream)
+            .await
+            .map_err(|e| ProxyError::tls_handshake(e.to_string()))?;
         info!("TLS terminated, serving H2 with authority rewriting");
 
         let (group_id, proxy_name) = (route.group_id.clone(), route.proxy_name.clone());
@@ -52,13 +50,15 @@ impl IngressProtocolHandler for TlsHandler {
         let selected = self
             .registry
             .select_client_for_group(&group_id)
-            .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+            .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
         let client_conn = selected.conn.clone();
         let sender_cache = tunnel_lib::new_h2_sender();
+        let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let client_conn = client_conn.clone();
             let sender_cache = sender_cache.clone();
+            let metrics = metrics.clone();
             let proxy_name = proxy_name.clone();
             let target_host = target_host.clone();
             let src_addr = src_addr.clone();
@@ -95,9 +95,15 @@ impl IngressProtocolHandler for TlsHandler {
                 {
                     Ok(resp) => Ok::<_, hyper::Error>(resp),
                     Err(e) => {
-                        tracing::error!("L7 Proxy upstream error: {}", e);
+                        let err = ProxyError::upstream_forward(e.to_string());
+                        tunnel_lib::plugin::observe_proxy_error(
+                            metrics.as_ref(),
+                            ProtocolKind::Tls.as_label(),
+                            &err,
+                        );
+                        tracing::error!(kind = ?err.kind, error = %err, "L7 Proxy upstream error");
                         Ok(Response::builder()
-                            .status(502)
+                            .status(err.http_status().unwrap_or(StatusCode::BAD_GATEWAY))
                             .body(
                                 Full::new(bytes::Bytes::from("Bad Gateway"))
                                     .map_err(|_| unreachable!())
@@ -113,7 +119,7 @@ impl IngressProtocolHandler for TlsHandler {
         H2Builder::new(hyper_util::rt::TokioExecutor::new())
             .serve_connection(io, service)
             .await
-            .map_err(|e| anyhow::anyhow!("H2 connection error: {}", e))?;
+            .map_err(|e| ProxyError::downstream_connection(format!("H2 connection error: {e}")))?;
         Ok(())
     }
 }

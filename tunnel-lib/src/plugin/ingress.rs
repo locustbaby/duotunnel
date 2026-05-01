@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::net::TcpStream;
 
-use crate::proxy::core::Protocol;
 use super::ctx::{Route, ServerCtx};
+use crate::proxy::core::Protocol;
 
 // ── ProtocolKind ─────────────────────────────────────────────────────────────
 
@@ -18,6 +18,17 @@ pub enum ProtocolKind {
     H2c,   // HTTP/2 cleartext preface
     Http1, // HTTP/1.x or WebSocket upgrade
     Tcp,   // Unrecognised — passthrough
+}
+
+impl ProtocolKind {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            ProtocolKind::Tls => "tls",
+            ProtocolKind::H2c => "h2c",
+            ProtocolKind::Http1 => "h1",
+            ProtocolKind::Tcp => "tcp",
+        }
+    }
 }
 
 // ── ProtocolHint ─────────────────────────────────────────────────────────────
@@ -95,10 +106,5 @@ pub trait IngressProtocolHandler: Send + Sync + 'static {
     /// single connection).
     /// `ctx.hint.raw_preface` contains the bytes that were peeked; the handler
     /// is responsible for prepending them when forwarding to the upstream.
-    async fn handle(
-        &self,
-        stream: TcpStream,
-        route: Option<Route>,
-        ctx: &ServerCtx,
-    ) -> Result<()>;
+    async fn handle(&self, stream: TcpStream, route: Option<Route>, ctx: &ServerCtx) -> Result<()>;
 }

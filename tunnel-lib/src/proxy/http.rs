@@ -1,8 +1,8 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::protocol::driver::h1::Http1Driver;
-use crate::protocol::driver::ProtocolDriver;
 use crate::ProxyError;
+use crate::protocol::driver::ProtocolDriver;
+use crate::protocol::driver::h1::Http1Driver;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::Request;
@@ -77,22 +77,21 @@ impl HttpPeer {
             initial_data,
         );
         loop {
-            let req =
-                match lazy_timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
-                    Ok(Ok(Some(r))) => r,
-                    Ok(Ok(None)) => {
-                        debug!(upstream = %upstream, "H1 keep-alive: clean EOF, closing");
-                        break;
-                    }
-                    Ok(Err(e)) => {
-                        debug!(upstream = %upstream, error = %e, "H1 keep-alive: read_request error, closing");
-                        break;
-                    }
-                    Err(()) => {
-                        debug!(upstream = %upstream, "H1 keep-alive: idle timeout, closing");
-                        break;
-                    }
-                };
+            let req = match lazy_timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
+                Ok(Ok(Some(r))) => r,
+                Ok(Ok(None)) => {
+                    debug!(upstream = %upstream, "H1 keep-alive: clean EOF, closing");
+                    break;
+                }
+                Ok(Err(e)) => {
+                    debug!(upstream = %upstream, error = %e, "H1 keep-alive: read_request error, closing");
+                    break;
+                }
+                Err(()) => {
+                    debug!(upstream = %upstream, "H1 keep-alive: idle timeout, closing");
+                    break;
+                }
+            };
             let should_close_after = driver.should_close;
             let mut builder = Request::builder()
                 .method(req.method)
@@ -113,7 +112,7 @@ impl HttpPeer {
                     debug!(
                         upstream = %self.spec.target_host,
                         kind = ?proxy_err.kind,
-                        retry = ?proxy_err.retry,
+                        retry = ?proxy_err.retry(),
                         error = %proxy_err,
                         "H1 upstream request failed, sending 502"
                     );

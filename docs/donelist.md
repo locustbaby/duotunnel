@@ -24,6 +24,16 @@
 - [x] **CR-NEW-E — PeekBufPool 共享工具**: 提取 `infra::peek_buf::PeekBufPool`，`client/entry.rs` 与 `proxy/core.rs` 复用同一 thread-local buffer pool，集中维护 `set_len` 安全前提。
 - [x] **CR-NEW-C — TcpPeer/TlsTcpPeer 合并**: TCP peer 已收敛为 `TcpPeer { tls: Option<TlsConfig> }` / `BasicPeerSpec { tls: Option<TlsPeerSpec> }` 形态。
 
+## Pingora-inspired Proxy Refactor ✅
+
+- [x] **TODO-63 — Peer 描述符化**: 执行链路已从 `UpstreamResolver -> PeerKind` 切到 `UpstreamResolver -> PeerSpec -> connect_peer`，client MITM 路径不再依赖 `PeerKind::Dyn`。
+- [x] **TODO-65 — Hot-path structured errors**: `ProxyError / ErrorKind / ErrorSource / RetryType` 已覆盖 `open_bi_guarded`、server/client `UpstreamResolver`、H1/H2c/TLS/TCP ingress 热路径和共享 proxy error metrics。
+  - `open_bi` 已区分 stream capacity (`QuicStreamLimit`)、transient connection loss (`QuicConnectionLost`) 和 fatal connection error (`QuicConnectionFatal`)。
+  - `client/entry.rs` 根据结构化 QUIC open 错误做 next-connection retry、stale connection eviction 或 fatal fail-fast。
+  - `duotunnel_proxy_errors_total{protocol,type,source,retry}` 已接入 plugin dispatcher、h2c、TLS H2 和 legacy server handler 路径。
+  - 验证：`cargo check -p tunnel-lib -p server -p client`；`cargo test -p tunnel-lib -p server -p client`。
+- [x] **TODO-70 — Server snapshot 持 Arc<SelectedConnection>**: server 侧连接快照已与 client 侧共享/缓存语义对齐。
+
 ---
 
 ## Auth & Config Source Plan

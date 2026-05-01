@@ -1,7 +1,7 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
+use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -45,19 +45,21 @@ where
             let boxed_body = body.map_err(std::io::Error::other).boxed();
             let upstream_req = Request::from_parts(parts, boxed_body);
             match connector.request(&spec, upstream_req).await {
-                Ok(resp) => {
-                    Ok::<_, hyper::Error>(resp)
-                }
+                Ok(resp) => Ok::<_, hyper::Error>(resp),
                 Err(e) => {
                     let proxy_err = ProxyError::http_upstream_request(e.to_string());
                     debug!(
                         kind = ?proxy_err.kind,
-                        retry = ?proxy_err.retry,
+                        retry = ?proxy_err.retry(),
                         error = %proxy_err,
                         "H2 forward: upstream request failed"
                     );
                     Ok(Response::builder()
-                        .status(proxy_err.http_status().unwrap_or(hyper::StatusCode::BAD_GATEWAY))
+                        .status(
+                            proxy_err
+                                .http_status()
+                                .unwrap_or(hyper::StatusCode::BAD_GATEWAY),
+                        )
                         .body(
                             http_body_util::Full::new(Bytes::from("Bad Gateway"))
                                 .map_err(|never| match never {})

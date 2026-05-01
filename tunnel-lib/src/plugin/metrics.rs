@@ -1,3 +1,5 @@
+use crate::ProxyError;
+
 /// Abstraction over metrics backends.
 ///
 /// Injected into `ServerCtx` and `EgressCtx`; handlers call `ctx.metrics.incr()`
@@ -19,4 +21,16 @@ impl MetricsSink for NoopSink {
     fn incr(&self, _name: &'static str, _labels: &[(&'static str, &str)]) {}
     #[inline]
     fn observe(&self, _name: &'static str, _value: f64, _labels: &[(&'static str, &str)]) {}
+}
+
+pub fn observe_proxy_error(metrics: &dyn MetricsSink, protocol: &str, err: &ProxyError) {
+    metrics.incr(
+        "duotunnel_proxy_errors_total",
+        &[
+            ("protocol", protocol),
+            ("type", err.kind.as_label()),
+            ("source", err.source().as_label()),
+            ("retry", err.retry().as_label()),
+        ],
+    );
 }

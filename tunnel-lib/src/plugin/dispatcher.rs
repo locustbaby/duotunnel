@@ -1,14 +1,16 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
 use tracing::error;
 
-use super::ctx::{AdmissionReq, PhaseOutcome, PhaseTiming, PhaseResult, RouteCtx, ServerCtx};
+use super::ctx::{AdmissionReq, PhaseOutcome, PhaseResult, PhaseTiming, RouteCtx, ServerCtx};
 use super::ingress::{ProtocolHint, ProtocolKind};
+use super::metrics::observe_proxy_error;
 use super::registry::PluginRegistry;
 use super::service::TunnelService;
+use crate::ProxyError;
 use crate::protocol::detect::{detect_protocol_and_host, extract_tls_sni};
 use crate::proxy::core::Protocol;
 
@@ -92,7 +94,10 @@ pub struct IngressDispatcher {
 
 impl IngressDispatcher {
     pub fn new(registry: Arc<PluginRegistry>, listener_port: u16) -> Self {
-        Self { registry, listener_port }
+        Self {
+            registry,
+            listener_port,
+        }
     }
 
     pub async fn dispatch(
@@ -129,7 +134,10 @@ impl IngressDispatcher {
                         )),
                     };
                     safe_logging(svc, ctx, &outcome);
-                    return Err(anyhow!("connection rejected at pre_admission (status={})", status));
+                    return Err(anyhow!(
+                        "connection rejected at pre_admission (status={})",
+                        status
+                    ));
                 }
                 PhaseResult::Continue(()) => {}
             }
@@ -150,7 +158,10 @@ impl IngressDispatcher {
                     )),
                 };
                 safe_logging(svc, ctx, &outcome);
-                return Err(anyhow!("connection rejected at admission (status={})", status));
+                return Err(anyhow!(
+                    "connection rejected at admission (status={})",
+                    status
+                ));
             }
             PhaseResult::Continue(()) => {
                 ctx.admitted = true;
@@ -202,6 +213,11 @@ impl IngressDispatcher {
         ctx.timing = timing.clone();
 
         let handle_result = handler.handle(stream, route, ctx).await;
+        if let Err(err) = &handle_result {
+            if let Some(proxy_error) = err.downcast_ref::<ProxyError>() {
+                observe_proxy_error(ctx.metrics.as_ref(), hint.kind.as_label(), proxy_error);
+            }
+        }
 
         // ── Phase 6: logging ──────────────────────────────────────────────────
         timing.completed_at = Some(Instant::now());

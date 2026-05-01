@@ -9,14 +9,19 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
+    ErrorKind, OverloadLimits, PeekBufPool, ProxyError, RoutingInfo, TcpParams,
     detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
-    run_accept_worker, send_routing_info, ErrorKind, OverloadLimits, PeekBufPool, ProxyError,
-    RoutingInfo, TcpParams,
+    run_accept_worker, send_routing_info,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
 
 static ENTRY_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
+
+fn with_conn_detail(conn_id: impl std::fmt::Display, err: ProxyError) -> ProxyError {
+    let detail = format!("conn_id={conn_id}: {err}");
+    err.with_detail(detail)
+}
 
 pub struct EntryListenerConfig {
     pub port: u16,
@@ -138,9 +143,6 @@ async fn handle_entry_connection(
                 send_routing_info(&mut send, &routing_info).await?;
                 if !initial_bytes.is_empty() {
                     send.write_all(&initial_bytes).await?;
-                    // Drain the peeked bytes from the socket. Reuse the
-                    // shared peek pool to avoid a per-connection heap
-                    // allocation for the discard buffer.
                     let mut discard_buf = peek_pool.take();
                     let result = local_stream
                         .read_exact(&mut discard_buf[..initial_bytes.len()])
@@ -155,47 +157,26 @@ async fn handle_entry_connection(
                 );
                 return Ok(());
             }
-            Err(e) => {
-                match e.kind {
-                    ErrorKind::QuicOpenTimeout => {
-                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi timed out, trying next connection");
-                        last_err = ProxyError {
-                            detail: Some(format!(
-                                "conn_id={}: {}",
-                                conn.conn.stable_id(),
-                                e
-                            )),
-                            ..e
-                        }
-                        .into();
-                    }
-                    ErrorKind::QuicOpenConnection => {
-                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit connection error, evicting stale pool entry");
-                        pool.remove(&conn.conn);
-                        last_err = ProxyError {
-                            detail: Some(format!(
-                                "conn_id={}: {}",
-                                conn.conn.stable_id(),
-                                e
-                            )),
-                            ..e
-                        }
-                        .into();
-                    }
-                    _ => {
-                        warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi failed, trying next connection");
-                        last_err = ProxyError {
-                            detail: Some(format!(
-                                "conn_id={}: {}",
-                                conn.conn.stable_id(),
-                                e
-                            )),
-                            ..e
-                        }
-                        .into();
-                    }
+            Err(e) => match e.kind {
+                ErrorKind::QuicStreamLimit => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi stream capacity unavailable, trying next connection");
+                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
                 }
-            }
+                ErrorKind::QuicConnectionLost => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit stale connection, evicting pool entry");
+                    pool.remove(&conn.conn);
+                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                }
+                ErrorKind::QuicConnectionFatal => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit fatal connection error");
+                    pool.remove(&conn.conn);
+                    return Err(with_conn_detail(conn.conn.stable_id(), e).into());
+                }
+                _ => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi failed, trying next connection");
+                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                }
+            },
         }
     }
     Err(last_err)

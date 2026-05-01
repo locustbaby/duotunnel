@@ -35,7 +35,7 @@ pub use ctx::{
 pub use dispatcher::{IngressDispatcher, SNIFF_LIMIT};
 pub use egress::{Connected, LoadBalancer, Resolver, SystemResolver, UpstreamDialer};
 pub use ingress::{IngressProtocolHandler, ProtocolHint, ProtocolKind};
-pub use metrics::{MetricsSink, NoopSink};
+pub use metrics::{MetricsSink, NoopSink, observe_proxy_error};
 pub use module::ConnectionModule;
 pub use registry::PluginRegistry;
 pub use route::{NoRouteResolver, RouteResolver};
