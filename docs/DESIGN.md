@@ -63,19 +63,20 @@ Reverse Proxy (Egress):   Internal Request → Client → Server → External Se
 
 ```
 tunnel/
-├── tunnel-lib/                    # Core library (~2,600 LOC)
+├── tunnel-lib/                    # Core library
 │   └── src/
+│       ├── accept.rs              # Concurrency Accept with SO_REUSEPORT
 │       ├── models/msg.rs          # Message protocol definitions
 │       ├── transport/             # QUIC/TCP transport layer
 │       │   ├── listener.rs        # VhostRouter, PortRouter
 │       │   ├── quinn_io.rs        # QUIC stream adapter
 │       │   └── addr.rs            # Address resolution
 │       ├── protocol/              # Protocol handling
-│       │   ├── detect.rs          # Protocol detection (TLS/HTTP/H2)
+│       │   ├── detect.rs          # Protocol detection (httparse integration)
 │       │   └── rewrite.rs         # Header rewriting
 │       ├── proxy/                 # Proxy core
-│       │   ├── core.rs            # ProxyApp trait
-│       │   ├── peers.rs           # UpstreamPeer trait
+│       │   ├── core.rs            # UpstreamResolver trait
+│       │   ├── peers.rs           # PeerSpec enum (replaces old UpstreamPeer)
 │       │   ├── tcp.rs             # TCP passthrough
 │       │   ├── http.rs            # HTTP/1.1 proxy
 │       │   └── h2.rs              # HTTP/2 proxy
@@ -83,28 +84,42 @@ tunnel/
 │       │   ├── relay.rs           # Bidirectional data relay
 │       │   └── bridge.rs          # QUIC-TCP bridge
 │       ├── egress/                # Outbound proxy
-│       │   └── http.rs            # HTTP client
+│       ├── plugin/                # 6-phase pipeline plugin core
+│       │   ├── dispatcher.rs      # Pipeline dispatcher
+│       │   ├── ingress.rs         # IngressProtocolHandler trait
+│       │   └── egress.rs          # Egress plugins
+│       ├── error.rs               # Structured proxy errors
+│       ├── overload.rs            # Overload protection backoff
 │       └── infra/                 # Infrastructure
 │           ├── pki.rs             # Certificate generation (MITM)
+│           ├── peek_buf.rs        # PeekBufPool thread-local cache
 │           └── observability.rs   # Logging and tracing
 │
-├── server/                        # Server (~1,400 LOC)
-│   ├── main.rs                    # Entry point
+├── server/                        # Server
+│   ├── main.rs                    # Multi-worker runtime (proxy, metrics, bg)
 │   ├── config.rs                  # Configuration parsing
 │   ├── registry.rs                # ClientRegistry (DashMap)
-│   ├── egress.rs                  # Outbound routing
+│   ├── listener_mgr.rs            # Ingress listener manager (RCU and reuseport)
+│   ├── egress.rs                  # Outbound routing (HttpConnector wrapper)
+│   ├── plugins/                   # Ingress protocol plugins
+│   │   ├── h1/                    # HTTP/1.1 protocol plugin
+│   │   ├── h2c/                   # H2c protocol plugin (with CachedSender)
+│   │   ├── tls/                   # TLS termination / MITM plugin
+│   │   ├── tcp_pass/              # TCP passthrough plugin
+│   │   └── prometheus/            # Prometheus metrics plugin
 │   └── handlers/
-│       ├── quic.rs                # QUIC connection handling
-│       ├── http.rs                # HTTP entry (H1/H2/TLS)
-│       ├── tcp.rs                 # TCP entry
-│       └── metrics.rs             # Prometheus metrics
+│       ├── quic.rs                # QUIC connection & Login handling
+│       ├── http.rs                # Ingress HTTP server handler
+│       ├── tcp.rs                 # Ingress TCP listener handler
+│       └── metrics.rs             # Prometheus metrics service
 │
-└── client/                        # Client (~1,100 LOC)
+└── client/                        # Client
     ├── main.rs                    # Entry + reconnection logic
     ├── config.rs                  # Configuration parsing
     ├── app.rs                     # LocalProxyMap
+    ├── conn_pool.rs               # Multi QUIC connection pool (RCU + Round-Robin)
     ├── proxy.rs                   # Workflow handling
-    └── entry.rs                   # Reverse proxy entry
+    └── entry.rs                   # Reverse proxy entry (with retry logic)
 ```
 
 ---
@@ -371,24 +386,36 @@ impl<T> VhostRouter<T> {
 }
 ```
 
-### 7.3 UpstreamPeer (Protocol Abstraction)
+### 7.3 UpstreamResolver and PeerSpec (Protocol Abstraction)
 
 ```rust
-#[async_trait]
-pub trait UpstreamPeer: Send {
-    async fn connect_and_proxy(
-        self: Box<Self>,
-        quic_send: quinn::SendStream,
-        quic_recv: quinn::RecvStream,
-        initial_data: Option<&[u8]>,
-    ) -> Result<()>;
+pub trait UpstreamResolver: Send + Sync {
+    async fn upstream_peer(&self, ctx: &mut Context) -> Result<PeerSpec, ProxyError>;
+    async fn connect_peer(&self, peer: &PeerSpec, ctx: &mut Context) -> Result<BiStream, ProxyError>;
 }
 
-// Implementations
-pub struct TcpPeer { addr: String }
-pub struct TlsTcpPeer { addr: String, host: String }
-pub struct HttpPeer { addr: String, client: Client }
-pub struct H2Peer { addr: String }
+// Peer specification (pure descriptor object, doesn't hold connection pools)
+pub enum PeerSpec {
+    Tcp(BasicPeerSpec),
+    Http(HttpPeerSpec),
+    MitmH2(MitmPeerSpec),
+}
+
+pub struct BasicPeerSpec {
+    pub addr: SocketAddr,
+    pub tls: Option<TlsConfig>,
+}
+
+pub struct HttpPeerSpec {
+    pub addr: SocketAddr,
+    pub host: String,
+    pub scheme: Scheme,
+}
+
+pub struct MitmPeerSpec {
+    pub addr: SocketAddr,
+    pub host: String,
+}
 ```
 
 ---

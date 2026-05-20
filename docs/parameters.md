@@ -161,7 +161,7 @@ duotunnel 当前只有**全局一份**（`ClientConfigFile` / `ServerConfigFile`
 | `PeerOptions.max_h2_streams` | QUIC 有（`max_concurrent_streams`），H2 egress 无 | egress 侧 H2 没有 per-upstream 流数限制 |
 | `PeerOptions.h2_ping_interval` | QUIC `keepalive_secs` 有，H2 egress 无 | egress H2 长连接没有主动探活 |
 | `PeerOptions.connection_timeout / read_timeout / write_timeout / idle_timeout` | 散落在 `reconnect.*` / `http_pool.*` | duotunnel 命名按"动作"（reconnect/login/open_stream）而非"语义"（read/write/idle），上游方向的 read/write timeout 完全缺失 |
-| `TcpSocketOptions.so_reuseport` | ❌（`todo.md` TODO-23） | pingora 已有，duotunnel 还在 TODO |
+| `TcpSocketOptions.so_reuseport` | ✅ 已实现 | `build_reuseport_listener` 已在 `listener.rs` 引入并应用于 ingress listener。对齐 pingora |
 | `TcpSocketOptions.tcp_fastopen` / `dscp` / `ipv6_only` | ❌ | 没有 TFO、DSCP、IPv6 独占等 |
 | `ServerConf.threads` / `listener_tasks_per_fd` / `work_stealing` | 仅 `accept_workers` | duotunnel 没有"每 service 独立 runtime"的概念 |
 | `ServerConf.max_blocking_threads` / `blocking_threads_ttl_seconds` | ❌ | tokio 阻塞池未暴露 |

@@ -235,3 +235,13 @@ ingress 的 `handle_plaintext_h1_connection` 在 `open_bi` 后立刻通过 `forw
 ### viewer "No CPU samples" 报错排查 ✅
 
 CI run 24198270418 所有 job 通过，`cpu.json.gz` 有实际数据（837 KB–1.1 MB），问题已确认并标记为已解决。
+
+### [TODO-58] ingress_multihost 100% errors ✅
+
+在 CI composite action `start-infra` 中已配置全局 `/etc/hosts` 以映射 `echo-NN.local` 域名；同时在 `bench-3k` 和 `bench-6k` 中确保多域名路由规则已正确通过 `server.yaml` 进行静态加载与 `ctld` 动态同步，此项已顺利通过 CI 验证。
+
+### [TODO-59/60/61] 排查基线延迟与 body 传输 P95 尾部延迟回归 ✅
+
+通过多项性能优化手段成功消除了延迟回归：
+1. **H2 Sender Cache 去串行化**：采用 `ArcSwap` 实现无锁 fast path 读取，只有在 connection miss 的 slow path 上才使用 Mutex 进行握手重建，彻底解决了并发 H2 sender 竞争 contention 问题。
+2. **零拷贝/低开销传输**：引入 `PeekBufPool` 消除连接建立时的 alloc 与 memset，改用 `httparse` 零拷贝解析头，并在客户端 `open_bi` 后提前写入首字节数据避免额外的唤醒等待，显著降低了 baseline 延迟。

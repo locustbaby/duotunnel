@@ -126,7 +126,11 @@ impl UpstreamResolver for ClientApp {
                 let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
                     scheme: http_scheme.to_string(),
-                    protocol: context.protocol,
+                    upstream_protocol: if is_https {
+                        Protocol::Unknown
+                    } else {
+                        Protocol::H1
+                    },
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -134,7 +138,11 @@ impl UpstreamResolver for ClientApp {
                 let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
                     scheme: http_scheme.to_string(),
-                    protocol: context.protocol,
+                    upstream_protocol: if is_https {
+                        Protocol::Unknown
+                    } else {
+                        Protocol::H2
+                    },
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -197,6 +205,7 @@ impl UpstreamResolver for ClientApp {
     async fn connect_peer(
         &self,
         peer: PeerSpec,
+        downstream_protocol: Protocol,
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
@@ -211,7 +220,7 @@ impl UpstreamResolver for ClientApp {
             PeerSpec::Http(spec) => self
                 .map
                 .http_connector
-                .connect(spec, send, recv, initial_data)
+                .connect(spec, downstream_protocol, send, recv, initial_data)
                 .await
                 .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
             PeerSpec::MitmH2(spec) => {
@@ -238,7 +247,7 @@ impl UpstreamResolver for ClientApp {
                         HttpPeerSpec {
                             target_host: spec.tls_host,
                             scheme: "https".to_string(),
-                            protocol: Protocol::H2,
+                            upstream_protocol: Protocol::H2,
                         },
                     )
                     .await

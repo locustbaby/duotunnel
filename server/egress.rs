@@ -109,7 +109,11 @@ impl UpstreamResolver for ServerEgressMap {
                 let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
                     scheme: if is_https { "https" } else { "http" }.to_string(),
-                    protocol: context.protocol,
+                    upstream_protocol: if is_https {
+                        Protocol::Unknown
+                    } else {
+                        Protocol::H1
+                    },
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -117,7 +121,11 @@ impl UpstreamResolver for ServerEgressMap {
                 let spec = HttpPeerSpec {
                     target_host: connect_addr_str,
                     scheme: if is_https { "https" } else { "http" }.to_string(),
-                    protocol: context.protocol,
+                    upstream_protocol: if is_https {
+                        Protocol::Unknown
+                    } else {
+                        Protocol::H2
+                    },
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -130,6 +138,7 @@ impl UpstreamResolver for ServerEgressMap {
     async fn connect_peer(
         &self,
         peer: PeerSpec,
+        downstream_protocol: Protocol,
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
@@ -141,16 +150,11 @@ impl UpstreamResolver for ServerEgressMap {
                 .connect_inner(send, recv, initial_data)
                 .await
                 .map_err(|e| ProxyError::upstream_forward(e.to_string())),
-            PeerSpec::Http(spec) => match spec.protocol {
-                Protocol::H2 | Protocol::H1 | Protocol::Unknown => self
-                    .http_connector
-                    .connect(spec, send, recv, initial_data)
-                    .await
-                    .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
-                p => Err(ProxyError::unsupported_protocol(format!(
-                    "server http peer: {p:?}"
-                ))),
-            },
+            PeerSpec::Http(spec) => self
+                .http_connector
+                .connect(spec, downstream_protocol, send, recv, initial_data)
+                .await
+                .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
             PeerSpec::MitmH2(_) => Err(ProxyError::unsupported_protocol(
                 "server egress does not support MITM peer",
             )),
@@ -170,10 +174,11 @@ impl UpstreamResolver for EgressProxy {
     async fn connect_peer(
         &self,
         peer: PeerSpec,
+        downstream_protocol: Protocol,
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<(), ProxyError> {
-        self.0.connect_peer(peer, send, recv, initial_data).await
+        self.0.connect_peer(peer, downstream_protocol, send, recv, initial_data).await
     }
 }

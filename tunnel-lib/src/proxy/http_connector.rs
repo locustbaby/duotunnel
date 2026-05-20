@@ -99,11 +99,12 @@ impl HttpConnector {
     pub async fn connect(
         self: &Arc<Self>,
         spec: HttpPeerSpec,
+        downstream_protocol: Protocol,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
-        match spec.protocol {
+        match downstream_protocol {
             Protocol::H2 => self.connect_h2(spec, send, recv, initial_data).await,
             _ => self.connect_h1(spec, send, recv, initial_data).await,
         }
@@ -158,7 +159,7 @@ impl HttpConnector {
         B::Data: Into<Bytes> + Send,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let can_try_h2c = spec.scheme == "http" && matches!(spec.protocol, Protocol::H2);
+        let can_try_h2c = spec.scheme == "http" && matches!(spec.upstream_protocol, Protocol::H2);
         let prefer_h1 = can_try_h2c && self.gc_prefer_h1(&Self::cache_key(spec));
         let retryable_request =
             (can_try_h2c && !prefer_h1 && request.body().is_end_stream()).then(|| {

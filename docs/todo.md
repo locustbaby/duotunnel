@@ -1,6 +1,6 @@
 # Tunnel TODO
 
-> Last synced against code: 2026-05-01.
+> Last synced against code: 2026-05-20.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to `docs/donelist.md`. Detailed design notes remain in the topical docs, especially `docs/pingora-tasks.md` and `docs/parameters.md`.
 
@@ -33,11 +33,12 @@ Completed: `TODO-65` moved to `docs/donelist.md`.
 - `HttpConnector` exists and wraps `HttpsClient` + `H2cClient`.
 - H1 downstream requests go through `HttpConnector::request()`.
 - Cleartext h2c empty-body requests can fall back to H1 once and mark `prefer_h1` with TTL.
+- Downstream protocol and upstream protocol are fully decoupled via explicit `downstream_protocol` connection parameter.
+- `HttpConnector::connect()` dynamically dispatches primarily by `downstream_protocol` instead of being bound to upstream descriptors.
 
 **Remaining**:
-1. `HttpConnector::connect()` still dispatches primarily by `spec.protocol`; finish decoupling downstream protocol from upstream protocol.
-2. Keep-alive/session ownership still lives under `HttpPeer` / `H2Peer`; finish the Session split in TODO-67b.
-3. Expand protocol preference beyond the current cleartext request path where it is valuable and testable.
+1. Keep-alive/session ownership still lives under `HttpPeer` / `H2Peer`; finish the Session split in TODO-67b.
+2. Expand protocol preference beyond the current cleartext request path where it is valuable and testable.
 
 ### [TODO-69] h2c per-route sticky sender cache failover
 **Priority**: Medium | **Status**: In Progress
@@ -314,26 +315,6 @@ Only relevant if DuoTunnel grows multi-replica upstream selection where consiste
 ---
 
 ## 6. Bench, CI, and Observability Follow-Ups
-
-### [TODO-58] ingress_multihost 100% errors
-**Priority**: High | **Status**: TODO
-
-CI case shows all errors for ingress multihost while egress multihost works. Verify `/etc/hosts`, generated server ingress vhost rules, and route resolution for `echo-NN.local`.
-
-### [TODO-59] ingress_http_get / bidir_mixed p95 tail regression
-**Priority**: Medium | **Status**: TODO
-
-Likely caused by shared H2 sender/window contention between overlapping benchmark phases. Confirm phase overlap and isolate sender/cache scope if needed.
-
-### [TODO-60] ingress_post_100k p95 regression
-**Priority**: Medium | **Status**: TODO
-
-Investigate H2 window/frame tuning, BBR on loopback-like RTT, and overlap with other body-size phases.
-
-### [TODO-61] Global baseline latency increase after H2Sender path
-**Priority**: Medium | **Status**: TODO
-
-H2-over-QUIC reuse adds a fixed framing cost. Optimize only where the reuse tradeoff is not worth it or can be reduced.
 
 ### [TODO-CI-1] CI connection matrix
 **Priority**: Low | **Status**: TODO

@@ -41,7 +41,7 @@ impl BasicPeerSpec {
 pub struct HttpPeerSpec {
     pub target_host: String,
     pub scheme: String,
-    pub protocol: Protocol,
+    pub upstream_protocol: Protocol,
 }
 
 #[derive(Debug, Clone)]

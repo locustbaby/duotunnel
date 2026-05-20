@@ -30,6 +30,7 @@ pub trait UpstreamResolver: Send + Sync {
     fn connect_peer(
         &self,
         peer: PeerSpec,
+        downstream_protocol: Protocol,
         send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
@@ -77,7 +78,7 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         };
         let peer = self.app.upstream_peer(&mut ctx).await?;
         self.app
-            .connect_peer(peer, send, recv, ctx.initial_bytes)
+            .connect_peer(peer, ctx.protocol, send, recv, ctx.initial_bytes)
             .await?;
         Ok(())
     }
