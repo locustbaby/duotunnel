@@ -2,7 +2,7 @@
 
 > Last synced against code: 2026-05-20.
 >
-> This file is the source of truth for unfinished work. Completed or stale items were moved to `docs/donelist.md`. Detailed design notes remain in the topical docs, especially `docs/pingora-tasks.md` and `docs/parameters.md`.
+> This file is the source of truth for unfinished work. Completed or stale items were moved to `docs/archive/donelist.md`. Detailed design notes remain in the topical docs, especially `docs/archive/pingora-tasks.md` and `docs/spec/parameters.md`.
 
 ---
 
@@ -24,7 +24,7 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
 
 Recommended order: `66 -> 69 -> 72 -> 64 -> 67b -> 68 -> 71`.
 
-Completed: `TODO-65` moved to `docs/donelist.md`.
+Completed: `TODO-65` moved to `docs/archive/donelist.md`.
 
 ### [TODO-66] Unified HttpConnector + H1/H2 fallback memory
 **Priority**: High | **Status**: In Progress
@@ -110,6 +110,28 @@ Server `ClientGroup::select_healthy` and client `EntryConnPool::next_conn_exclud
 2. Decouple downstream H1/H2 from upstream H1/H2 across both server egress and client egress.
 3. Decide how to observe TLS ALPN outcome if hyper does not expose enough connection-level detail.
 
+### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+Egress (client-to-server) path latency is significantly higher under the same QPS due to un-cached WAN DNS resolution on the hot path (for TCP/WebSocket) and lack of L4 upstream connection pooling.
+
+**Fix**:
+1. Implement a system-resolver wrapper with a TTL-based cache for raw TCP/WS egress target resolution.
+2. Introduce a lightweight, lock-free upstream TCP connection pool for L4 egress to reuse WAN connections.
+3. Optimize ProxyEngine to avoid serializing hostname resolution behind reading the first client data chunk when the protocol is already declared in RoutingInfo.
+
+### [TODO-75] Real-Time Bottleneck Observability & Load-Shedding
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+Synchronous accept loop sleep on EMFILE and blocking open_bi waits under resource pressure lack visibility, appearing as silent hangs/blackboxes.
+
+**Fix**:
+1. Implement active atomic gauges for accepted connections, pending QUIC stream queue depth, and slow-path waiting tasks.
+2. Implement in-code FD limit (`rlimit`) pre-validation at application startup with high-visibility warn logs, and enrich EMFILE error reports in `run_accept_worker` with system optimization instructions.
+3. Implement pluggable load-shedding to fail-fast (drop connections with 503) when pending queues exceed limits.
+
 ---
 
 ## 2. Control Plane, Auth, and Config
@@ -138,7 +160,7 @@ Move from pull-style `ConfigSource::load()` snapshots toward a stream model such
 ### [TODO-PARAM-1] Unified parameter configuration schema
 **Priority**: Medium | **Status**: TODO
 
-Tracked in detail in `docs/parameters.md`.
+Tracked in detail in `docs/spec/parameters.md`.
 
 **Steps**:
 1. Add top-level schema version.
@@ -230,6 +252,17 @@ Deferred until native Tokio/io_uring support is mature enough to avoid disruptin
 **Priority**: Low | **Status**: Deferred pending evidence
 
 Only patch or upstream this if a current flamegraph confirms the span construction is still a real hotspot.
+
+### [TODO-73] Plugin-based IPv6 support and DNS Hijacking connection interceptor
+**Priority**: Medium | **Status**: TODO
+
+**Problem**:
+The core transport lacks pluggable IPv6-first routing or dynamic DNS intercepting/hijacking, making environment-specific networking setups rigid.
+
+**Fix**:
+1. Implement a pluggable `Resolver` trait (e.g., `Ipv6FirstResolver`) prioritizing AAAA (IPv6) addresses over A (IPv4).
+2. Build a DNS Hijacking `ConnectionModule` that intercept and redirects traffic destined for standard DNS ports during `pre_admission`.
+3. Support enabling/disabling these modules dynamically via YAML configurations.
 
 ---
 
