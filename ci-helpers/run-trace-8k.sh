@@ -162,6 +162,12 @@ if [ "$BUILD_PROFILE" != "release" ]; then
     sudo cp /tmp/server-trace.0.bin.gz "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
     sudo cp /tmp/client-trace.0.bin.gz "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
     sudo chown runner:runner "/tmp/trace-${SUFFIX}/server-trace.bin.gz" "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
+  else
+    echo "ERROR: Expected trace files not found or empty!"
+    [ ! -s /tmp/server-trace.0.bin.gz ] && echo "  - /tmp/server-trace.0.bin.gz is missing or empty"
+    [ ! -s /tmp/client-trace.0.bin.gz ] && echo "  - /tmp/client-trace.0.bin.gz is missing or empty"
+    echo "  Contents of /tmp matching trace pattern:"
+    ls -la /tmp/server-trace* /tmp/client-trace* 2>/dev/null || echo "    (none)"
   fi
 fi
 
