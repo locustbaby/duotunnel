@@ -5,13 +5,14 @@ const MAGIC = [0x54, 0x52, 0x43, 0x00];
 const TAG_SCHEMA = 0x01;
 const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
-// Tag 0x04 is reserved (formerly SymbolTable, now a schema-based event).
+const TAG_STACK_POOL = 0x04;
 const TAG_TIMESTAMP_RESET = 0x05;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
-  Bytes: 5, PooledString: 7, StackFrames: 8, Varint: 9,
+  Bytes: 5, PooledStackFrames: 6, PooledString: 7, StackFrames: 8, Varint: 9,
   StringMap: 10, U8: 11, U16: 12, U32: 13,
+  DynamicList: 14, DynamicMap: 15,
 };
 
 function decodeULEB128(view, offset) {
@@ -26,7 +27,16 @@ function decodeULEB128(view, offset) {
   }
 }
 
+const OPTIONAL_BIT = 0x80;
+
 function decodeFieldValue(view, offset, fieldType) {
+  // Handle optional modifier: high bit set means 1-byte presence prefix.
+  if (fieldType & OPTIONAL_BIT) {
+    const prefix = view.getUint8(offset);
+    if (prefix === 0x00) return [null, 1];
+    const [val, size] = decodeFieldValue(view, offset + 1, fieldType & 0x7F);
+    return [val, 1 + size];
+  }
   switch (fieldType) {
     case FieldType.I64: return [view.getBigInt64(offset, true), 8];
     case FieldType.F64: return [view.getFloat64(offset, true), 8];
@@ -45,6 +55,7 @@ function decodeFieldValue(view, offset, fieldType) {
       return [val.toString(), consumed];
     }
     case FieldType.PooledString: return [view.getUint32(offset, true), 4];
+    case FieldType.PooledStackFrames: return [view.getUint32(offset, true), 4];
     case FieldType.StackFrames: {
       const count = view.getUint32(offset, true);
       let pos = 4;
@@ -75,6 +86,33 @@ function decodeFieldValue(view, offset, fieldType) {
     case FieldType.U8: return [view.getUint8(offset), 1];
     case FieldType.U16: return [view.getUint16(offset, true), 2];
     case FieldType.U32: return [view.getUint32(offset, true), 4];
+    case FieldType.DynamicList: {
+      const count = view.getUint32(offset, true);
+      let pos = 4;
+      const items = [];
+      for (let i = 0; i < count; i++) {
+        const tag = view.getUint8(offset + pos); pos += 1;
+        const [val, consumed] = decodeFieldValue(view, offset + pos, tag);
+        items.push(val);
+        pos += consumed;
+      }
+      return [items, pos];
+    }
+    case FieldType.DynamicMap: {
+      const count = view.getUint32(offset, true);
+      let pos = 4;
+      const entries = [];
+      for (let i = 0; i < count; i++) {
+        const keyTag = view.getUint8(offset + pos); pos += 1;
+        const [key, keySize] = decodeFieldValue(view, offset + pos, keyTag);
+        pos += keySize;
+        const valTag = view.getUint8(offset + pos); pos += 1;
+        const [val, valSize] = decodeFieldValue(view, offset + pos, valTag);
+        pos += valSize;
+        entries.push([key, val]);
+      }
+      return [entries, pos];
+    }
     default: throw new Error(`Unknown field type: ${fieldType}`);
   }
 }
@@ -88,6 +126,7 @@ class TraceDecoder {
     this._pos = 0;
     this.schemas = new Map();
     this.stringPool = new Map();
+    this.stackPool = new Map();
     this.version = 0;
     this._timestampBaseNs = 0n;
   }
@@ -114,6 +153,7 @@ class TraceDecoder {
         if (isHeader) {
           this.schemas = new Map();
           this.stringPool = new Map();
+          this.stackPool = new Map();
           this._timestampBaseNs = 0n;
           this._pos += 5; // skip header
           return this.nextFrame();
@@ -124,6 +164,7 @@ class TraceDecoder {
         case TAG_SCHEMA: return this._decodeSchema();
         case TAG_EVENT: return this._decodeEvent();
         case TAG_STRING_POOL: return this._decodeStringPool();
+        case TAG_STACK_POOL: return this._decodeStackPool();
         case TAG_TIMESTAMP_RESET: {
           const lo = this._view.getUint32(this._pos, true);
           const hi = this._view.getUint32(this._pos + 4, true);
@@ -191,8 +232,11 @@ class TraceDecoder {
     const values = {};
     for (const field of schema.fields) {
       const [val, consumed] = decodeFieldValue(this._view, this._pos, field.fieldType);
-      if (field.fieldType === FieldType.PooledString) {
+      const innerType = field.fieldType & 0x7F;
+      if (innerType === FieldType.PooledString && val !== null) {
         values[field.name] = this.stringPool.get(val) ?? `<unresolved pool#${val}>`;
+      } else if (innerType === FieldType.PooledStackFrames && val !== null) {
+        values[field.name] = this.stackPool.get(val) ?? `<unresolved stack#${val}>`;
       } else {
         values[field.name] = val;
       }
@@ -202,6 +246,12 @@ class TraceDecoder {
     if (timestampNs !== null) result.timestamp_ns = timestampNs;
     return result;
   }
+
+  /** Current byte offset into the buffer. */
+  get position() { return this._pos; }
+
+  /** Total byte length of the buffer. */
+  get byteLength() { return this._view.byteLength; }
 
   _decodeStringPool() {
     const count = this._view.getUint32(this._pos, true); this._pos += 4;
@@ -216,6 +266,25 @@ class TraceDecoder {
       entries.push({ poolId, data });
     }
     return { type: 'string_pool', entries };
+  }
+
+  _decodeStackPool() {
+    const count = this._view.getUint32(this._pos, true); this._pos += 4;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const poolId = this._view.getUint32(this._pos, true); this._pos += 4;
+      const frameCount = this._view.getUint32(this._pos, true); this._pos += 4;
+      const addrs = [];
+      for (let j = 0; j < frameCount; j++) {
+        const lo = this._view.getUint32(this._pos, true);
+        const hi = this._view.getUint32(this._pos + 4, true);
+        addrs.push((BigInt(hi) << 32n | BigInt(lo)).toString());
+        this._pos += 8;
+      }
+      this.stackPool.set(poolId, addrs);
+      entries.push({ poolId, addrs });
+    }
+    return { type: 'stack_pool', entries };
   }
 
 }
@@ -233,6 +302,7 @@ if (typeof require !== 'undefined' && require.main === module) {
     version: dec.version,
     frames,
     stringPool: Object.fromEntries(dec.stringPool),
+    stackPool: Object.fromEntries(dec.stackPool),
   }, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
   console.log(json);
 }
