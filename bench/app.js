@@ -275,8 +275,9 @@ async function renderDetail(entry) {
     if (artifacts.trace_server) links.push({label:'Server trace', url:artifacts.trace_server});
     if (artifacts.trace_client) links.push({label:'Client trace', url:artifacts.trace_client});
     (artifacts.trace_cases||[]).forEach(tc => {
-      links.push({label:`${tc.case} (srv)`, url: `viewer/?trace=${encodeURIComponent(tc.server)}`});
-      links.push({label:`${tc.case} (cli)`, url: `viewer/?trace=${encodeURIComponent(tc.client)}`});
+      const caseLabel = tc.case.replace(/_/g, ' ');
+      links.push({label:`${caseLabel} (srv)`, url: `viewer/?trace=${encodeURIComponent(tc.server)}`});
+      links.push({label:`${caseLabel} (cli)`, url: `viewer/?trace=${encodeURIComponent(tc.client)}`});
     });
     html += UI.Panel('Dial9 Traces', UI.LinkGroup(links));
   }
