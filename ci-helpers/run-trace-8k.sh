@@ -158,9 +158,9 @@ cp /tmp/bench-results.json "/tmp/trace-${SUFFIX}/bench-results.json"
 [ -f "/tmp/resource-data-${CASE_NAME}.json" ] && cp "/tmp/resource-data-${CASE_NAME}.json" "/tmp/trace-${SUFFIX}/resource-data.json" || true
 
 if [ "$BUILD_PROFILE" != "release" ]; then
-  if [ -s /tmp/server-trace.0.bin ] && [ -s /tmp/client-trace.0.bin ]; then
-    sudo cp /tmp/server-trace.0.bin "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
-    sudo cp /tmp/client-trace.0.bin "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
+  if [ -s /tmp/server-trace.0.bin.gz ] && [ -s /tmp/client-trace.0.bin.gz ]; then
+    sudo cp /tmp/server-trace.0.bin.gz "/tmp/trace-${SUFFIX}/server-trace.bin.gz"
+    sudo cp /tmp/client-trace.0.bin.gz "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
     sudo chown runner:runner "/tmp/trace-${SUFFIX}/server-trace.bin.gz" "/tmp/trace-${SUFFIX}/client-trace.bin.gz"
   fi
 fi
