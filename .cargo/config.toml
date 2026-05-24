@@ -9,4 +9,4 @@
 # For cross-compiled or distributed builds, remove this file or set
 # CARGO_ENCODED_RUSTFLAGS="" to override.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "--cfg", "tokio_unstable"]

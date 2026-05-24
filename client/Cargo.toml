@@ -42,4 +42,4 @@ arc-swap = "1.9"
 figment = { version = "0.10", features = ["yaml", "env"] }
 rand = "0.9"
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
-dial9-tokio-telemetry = { version = "0.2.0", features = ["cpu-profiling"], optional = true }
+dial9-tokio-telemetry = { version = "0.3.11", features = ["cpu-profiling"], optional = true }

@@ -184,9 +184,8 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
 }
 #[cfg(feature = "dial9-telemetry")]
 fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
-    use dial9_tokio_telemetry::telemetry::{
-        CpuProfilingConfig, RotatingWriter, SchedEventConfig, TracedRuntime,
-    };
+    use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
     let writer = RotatingWriter::builder()
         .base_path(&trace_path)
         .max_file_size(512 * 1024 * 1024)
@@ -211,9 +210,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .with_task_tracking(true)
         .with_trace_path(trace_path)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_sched_events(SchedEventConfig {
-            include_kernel: true,
-        })
+        .with_sched_events(SchedEventConfig::default().include_kernel(true))
         .build_and_start_with_writer(builder, writer)?;
     let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
