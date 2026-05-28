@@ -243,7 +243,21 @@ Cache `Arc<RoutingSnapshot>` at H2 connection scope when hot reload semantics al
 ### [TODO-26] Native UDP proxy over QUIC Datagram
 **Priority**: High | **Status**: TODO
 
-Enable QUIC Datagram and implement UDP session tracking, timeout, and resend behavior. This is a feature gap, not a micro-optimization.
+**Problem**:
+Currently, UDP proxying is a complete feature gap. While Quinn (QUIC) provides native unreliable Datagram (RFC 9221) support for WAN transport, DuoTunnel lacks both Client-side UDP socket binding/multiplexing and Server-side upstream UDP socket proxying and session tracking.
+
+**Fix**:
+1. **Client-side UDP Listener (Ingress/Entry)**:
+   - Implement `UdpListener` binding to configured local UDP ingress ports.
+   - Demultiplex incoming raw UDP packets, map them to an internal session key `(Client_Addr, Target_Addr)`.
+   - Wrap payload with metadata and send them via `quinn::Connection::send_datagram()`.
+2. **Server-side Stateful UDP Session Tracker (Upstream UDP)**:
+   - Implement `UdpSessionManager` storing active ephemeral upstream UDP sockets mapped by `(Client_QUIC_ID, Target_UDP_Addr)`.
+   - On incoming Datagram, reuse or bind a new ephemeral `tokio::net::UdpSocket` and relay via `send_to()`.
+   - For each ephemeral socket, spawn a background tokio task to loop on `recv_from()`, wrap responses, and send them back downstream via QUIC Datagrams.
+3. **UDP Session Idle Eviction (FD leak prevention)**:
+   - Track `last_active` timestamps on sessions.
+   - Run a periodic tick task to evict sessions inactive for > 30 seconds (evicting mapping and closing background sockets to prevent file descriptor leaks).
 
 ### [TODO-27] QUIC certificate and 0-RTT persistence
 **Priority**: Medium | **Status**: TODO
