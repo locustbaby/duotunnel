@@ -10,25 +10,25 @@ use clap::Parser;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(feature = "dial9-telemetry")]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "dial9-telemetry")]
-use std::path::PathBuf;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 mod config;
-mod engine;
 mod egress;
+mod engine;
 mod ingress;
 mod plugins;
 mod tunnel;
 
 use config::ClientConfigFile;
-use engine::ClientEngine;
 use egress::listener::EntryListenerConfig;
+use engine::ClientEngine;
 use ingress::app::LocalProxyMap;
 use ingress::handler::handle_work_stream;
 use tunnel::conn_pool::EntryConnPool;
@@ -82,7 +82,9 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
     };
     info!(addr = %addr, "healthz server started");
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else { continue };
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
         let ready = ready.clone();
         crate::spawn_task(async move {
             let mut buf = [0u8; 256];
@@ -135,10 +137,8 @@ async fn async_main() -> Result<()> {
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        let overload_limits = config
-            .overload
-            .resolve(config.quic.max_concurrent_streams);
-        
+        let overload_limits = config.overload.resolve(config.quic.max_concurrent_streams);
+
         info!(
             mode = ?overload_limits.mode,
             yield_threshold = overload_limits.inflight_yield_threshold,
@@ -146,7 +146,7 @@ async fn async_main() -> Result<()> {
             max_concurrent_streams = config.quic.max_concurrent_streams,
             "overload protection resolved"
         );
-        
+
         let entry_cfg = EntryListenerConfig {
             port: entry_port,
             tcp_params: entry_tcp_params,
@@ -155,7 +155,7 @@ async fn async_main() -> Result<()> {
             accept_workers: config.entry.accept_workers.max(1),
             overload: Arc::new(overload_limits),
         };
-        
+
         engine.add_service(Box::new(egress::listener::EgressListenerService {
             entry_cfg,
             pool: entry_pool.clone(),
@@ -180,8 +180,8 @@ fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
 }
 #[cfg(feature = "dial9-telemetry")]
 fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) -> Result<()> {
-    use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
     use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+    use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
     let writer = RotatingWriter::builder()
         .base_path(&trace_path)
         .max_file_size(512 * 1024 * 1024)
@@ -211,9 +211,8 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
     let result = runtime.block_on(async {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             r = fut => r,
             _ = sigterm.recv() => {
@@ -290,7 +289,9 @@ pub(crate) async fn run_client(
         .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
         .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
     if !resp.success {
-        return Err(tunnel::supervisor::classify_login_failure(resp.error.as_deref()));
+        return Err(tunnel::supervisor::classify_login_failure(
+            resp.error.as_deref(),
+        ));
     }
     info!(
         client_group = %resp.client_group,

@@ -170,8 +170,13 @@ pub fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
                     let cancel = cancel.clone();
                     let is_last = i == accept_workers - 1;
                     tokio::task::spawn(async move {
-                        if let Err(e) =
-                            crate::handlers::http::run_http_accept_loop(listener, s.clone(), port, cancel).await
+                        if let Err(e) = crate::handlers::http::run_http_accept_loop(
+                            listener,
+                            s.clone(),
+                            port,
+                            cancel,
+                        )
+                        .await
                         {
                             error!(port = %port, error = %e, "HTTP accept loop failed");
                         }

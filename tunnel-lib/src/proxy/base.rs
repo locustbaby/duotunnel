@@ -51,5 +51,12 @@ pub async fn forward_with_initial_data(
     initial_data: &[u8],
     relay_buf_size: usize,
 ) -> Result<()> {
-    forward_inner(send, recv, external_stream, Some(initial_data), relay_buf_size).await
+    forward_inner(
+        send,
+        recv,
+        external_stream,
+        Some(initial_data),
+        relay_buf_size,
+    )
+    .await
 }

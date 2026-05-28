@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,9 +10,9 @@ use super::ingress::{ProtocolHint, ProtocolKind};
 use super::metrics::observe_proxy_error;
 use super::registry::PluginRegistry;
 use super::service::TunnelService;
-use crate::ProxyError;
 use crate::protocol::detect::{detect_protocol_and_host, extract_tls_sni};
 use crate::proxy::core::Protocol;
+use crate::ProxyError;
 
 /// Call `svc.logging` inside `catch_unwind` so a broken implementation can't
 /// tear down the accept worker. Emission errors are dropped — this is the

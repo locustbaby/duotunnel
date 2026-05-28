@@ -6,7 +6,10 @@ use crate::service::ControlService;
 
 const PUBLISH_DEBOUNCE_MS: u64 = 50;
 
-pub(crate) async fn debounce_publish_task(svc: std::sync::Weak<ControlService>, mut rx: mpsc::Receiver<()>) {
+pub(crate) async fn debounce_publish_task(
+    svc: std::sync::Weak<ControlService>,
+    mut rx: mpsc::Receiver<()>,
+) {
     let mut consecutive_failures: u32 = 0;
     loop {
         if rx.recv().await.is_none() {
@@ -35,5 +38,3 @@ pub(crate) async fn debounce_publish_task(svc: std::sync::Weak<ControlService>, 
         }
     }
 }
-
-

@@ -8,8 +8,8 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
-use tunnel_lib::ProxyError;
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
+use tunnel_lib::ProxyError;
 
 use crate::registry::SharedRegistry;
 

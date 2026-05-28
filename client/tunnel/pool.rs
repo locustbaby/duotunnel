@@ -22,7 +22,14 @@ pub async fn run_pool(
         let slot_ready = ready.clone();
         let slot_pool = entry_pool.clone();
         slots.spawn(async move {
-            crate::tunnel::supervisor::run_supervisor(slot_config, endpoint, slot_cancel, slot_ready, slot_pool).await
+            crate::tunnel::supervisor::run_supervisor(
+                slot_config,
+                endpoint,
+                slot_cancel,
+                slot_ready,
+                slot_pool,
+            )
+            .await
         });
     }
     while let Some(join_result) = slots.join_next().await {

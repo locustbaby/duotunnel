@@ -1,4 +1,4 @@
-use crate::{ServerState, metrics};
+use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;

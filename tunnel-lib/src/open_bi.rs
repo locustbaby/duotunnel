@@ -1,5 +1,5 @@
 use crate::error::ProxyError;
-use crate::inflight::{InflightCounter, InflightGuard, begin_inflight};
+use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
 use quinn::{Connection, RecvStream, SendStream};
 use std::time::{Duration, Instant};
 

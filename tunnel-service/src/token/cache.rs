@@ -42,4 +42,3 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
             .collect())
     }
 }
-

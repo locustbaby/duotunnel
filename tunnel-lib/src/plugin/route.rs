@@ -28,11 +28,7 @@ impl RouteResolver for NoRouteResolver {
     async fn resolve(&self, ctx: &RouteCtx) -> Result<PhaseResult<Route>> {
         Ok(PhaseResult::Reject {
             status: 404,
-            message: format!(
-                "no RouteResolver configured for port {}",
-                ctx.listener_port
-            )
-            .into(),
+            message: format!("no RouteResolver configured for port {}", ctx.listener_port).into(),
         })
     }
 }

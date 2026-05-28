@@ -9,8 +9,6 @@ use tracing::info;
 use tunnel_store::rules::RoutingData;
 use tunnel_store::{AuthStore, RuleStore, TokenListEntry};
 
-
-
 /// Central coordinator: owns the stores, maintains the watch channel.
 pub struct ControlService {
     auth_store: Arc<dyn AuthStore>,
@@ -50,7 +48,10 @@ impl ControlService {
         // Spawn the debounce task. Uses a Weak reference so the task exits cleanly
         // when the last strong Arc<ControlService> is dropped.
         let weak = Arc::downgrade(&svc);
-        tokio::spawn(crate::reactor::debounce_publish_task(weak.clone(), publish_rx));
+        tokio::spawn(crate::reactor::debounce_publish_task(
+            weak.clone(),
+            publish_rx,
+        ));
         Ok(svc)
     }
 
@@ -152,6 +153,4 @@ impl ControlService {
     pub async fn load_routing(&self) -> Result<RoutingData> {
         self.rule_store.load_routing().await
     }
-
 }
-

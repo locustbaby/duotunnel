@@ -21,7 +21,6 @@ pub struct SelectedConnection {
     pub inflight: InflightCounter,
 }
 
-
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
 ///
 /// `snapshot` is an `ArcSwap<Vec<Arc<SelectedConnection>>>` — readers call `.load()` which is
@@ -49,11 +48,13 @@ impl ClientGroup {
 
     fn build_snapshot(idx: &ClientIndex) -> Vec<Arc<SelectedConnection>> {
         idx.iter()
-            .map(|(client_id, (conn, inflight))| Arc::new(SelectedConnection {
-                conn_id: Arc::<str>::from(client_id.as_str()),
-                conn: conn.clone(),
-                inflight: inflight.clone(),
-            }))
+            .map(|(client_id, (conn, inflight))| {
+                Arc::new(SelectedConnection {
+                    conn_id: Arc::<str>::from(client_id.as_str()),
+                    conn: conn.clone(),
+                    inflight: inflight.clone(),
+                })
+            })
             .collect()
     }
 

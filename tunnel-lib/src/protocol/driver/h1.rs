@@ -48,7 +48,8 @@ impl Http1Driver {
         Ok(())
     }
     pub async fn write_502(&mut self) -> Result<()> {
-        const RESP: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        const RESP: &[u8] =
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         self.send.write_all(RESP).await?;
         Ok(())
     }
@@ -188,9 +189,7 @@ impl ProtocolDriver for Http1Driver {
         let body_remaining = content_length.saturating_sub(body_prefix_len);
         let body = if content_length == 0 {
             self.recv = Some(recv);
-            http_body_util::Empty::new()
-                .map_err(|e| match e {})
-                .boxed()
+            http_body_util::Empty::new().map_err(|e| match e {}).boxed()
         } else if body_remaining == 0 {
             self.recv = Some(recv);
             let prefix = body_prefix;

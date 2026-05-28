@@ -29,13 +29,13 @@ pub mod service;
 
 // Convenience re-exports for the most commonly used types.
 pub use ctx::{
-    AdmissionReq, ConnectInfo, DialCtx, EgressCtx, PhaseOutcome, PhaseTiming, PhaseResult,
-    PickCtx, Route, RouteCtx, ServerCtx, Target, Timeouts,
+    AdmissionReq, ConnectInfo, DialCtx, EgressCtx, PhaseOutcome, PhaseResult, PhaseTiming, PickCtx,
+    Route, RouteCtx, ServerCtx, Target, Timeouts,
 };
 pub use dispatcher::{IngressDispatcher, SNIFF_LIMIT};
 pub use egress::{Connected, LoadBalancer, Resolver, SystemResolver, UpstreamDialer};
 pub use ingress::{IngressProtocolHandler, ProtocolHint, ProtocolKind};
-pub use metrics::{MetricsSink, NoopSink, observe_proxy_error};
+pub use metrics::{observe_proxy_error, MetricsSink, NoopSink};
 pub use module::ConnectionModule;
 pub use registry::PluginRegistry;
 pub use route::{NoRouteResolver, RouteResolver};
@@ -86,7 +86,9 @@ mod tests {
         struct OrderedModule(i32);
         #[async_trait]
         impl ConnectionModule for OrderedModule {
-            fn order(&self) -> i32 { self.0 }
+            fn order(&self) -> i32 {
+                self.0
+            }
         }
 
         reg.add_module(Arc::new(OrderedModule(30)));
@@ -138,13 +140,17 @@ mod tests {
         struct DummyHandler;
         #[async_trait]
         impl IngressProtocolHandler for DummyHandler {
-            fn protocol_kind(&self) -> ProtocolKind { ProtocolKind::Tcp }
+            fn protocol_kind(&self) -> ProtocolKind {
+                ProtocolKind::Tcp
+            }
             async fn handle(
                 &self,
                 _stream: tokio::net::TcpStream,
                 _route: Option<Route>,
                 _ctx: &ServerCtx,
-            ) -> Result<()> { Ok(()) }
+            ) -> Result<()> {
+                Ok(())
+            }
         }
         reg.register_ingress_handler(Arc::new(DummyHandler));
 

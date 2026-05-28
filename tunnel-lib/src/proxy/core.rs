@@ -1,7 +1,7 @@
 use super::peers::PeerSpec;
-use crate::ProxyError;
 use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
+use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use quinn::{RecvStream, SendStream};

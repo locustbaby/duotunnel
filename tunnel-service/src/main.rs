@@ -159,7 +159,6 @@ async fn main() -> Result<()> {
 
     let ready = Arc::new(AtomicBool::new(false));
 
-
     let pool = open_sqlite_pool(&cfg.database_url).await?;
 
     let auth_store_inner = SqliteAuthStore::from_pool(pool.clone());
@@ -170,7 +169,9 @@ async fn main() -> Result<()> {
 
     let auth_store: Arc<dyn tunnel_store::AuthStore> = Arc::new(auth_store_inner);
     let rule_store: Arc<dyn tunnel_store::RuleStore> = Arc::new(rule_store_inner);
-    let token_cache: Arc<dyn crate::token::cache::TokenCacheProvider> = Arc::new(crate::token::cache::SqliteTokenCacheProvider::new(pool.clone()));
+    let token_cache: Arc<dyn crate::token::cache::TokenCacheProvider> = Arc::new(
+        crate::token::cache::SqliteTokenCacheProvider::new(pool.clone()),
+    );
 
     // Seed routing from server.yaml on first boot (when the routing table is empty).
     if let Some(ref server_cfg_path) = cfg.server_config {

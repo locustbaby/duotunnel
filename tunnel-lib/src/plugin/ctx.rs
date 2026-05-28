@@ -153,9 +153,9 @@ pub struct ServerCtx {
     pub metrics: Arc<dyn MetricsSink>,
 
     // Phase outputs — populated as the pipeline advances
-    pub hint: Option<ProtocolHint>,  // filled at Phase 1
-    pub route: Option<Route>,         // filled at Phase 3
-    pub admitted: bool,               // set true after Phase 2 passes
+    pub hint: Option<ProtocolHint>, // filled at Phase 1
+    pub route: Option<Route>,       // filled at Phase 3
+    pub admitted: bool,             // set true after Phase 2 passes
 
     // Shared read-only config (no need to abstract — single implementation)
     pub tcp_params: Arc<TcpParams>,
@@ -240,9 +240,9 @@ pub struct EgressCtx {
     pub metrics: Arc<dyn MetricsSink>,
 
     // Phase outputs
-    pub resolved: Vec<std::net::SocketAddr>,  // filled at Phase 1
-    pub selected: Option<Target>,              // filled at Phase 2
-    pub connected: Option<ConnectInfo>,        // filled at Phase 3
+    pub resolved: Vec<std::net::SocketAddr>, // filled at Phase 1
+    pub selected: Option<Target>,            // filled at Phase 2
+    pub connected: Option<ConnectInfo>,      // filled at Phase 3
 
     // Shared read-only config
     pub tcp_params: Arc<TcpParams>,

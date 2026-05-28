@@ -12,12 +12,12 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::debug;
 
-use tunnel_lib::ProxyError;
 use tunnel_lib::plugin::{
     IngressProtocolHandler, PhaseResult, ProtocolHint, ProtocolKind, Route, RouteCtx,
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
+use tunnel_lib::ProxyError;
 
 use crate::registry::{SelectedConnection, SharedRegistry};
 

@@ -89,8 +89,15 @@ fn base_tls_config() -> Arc<rustls::ClientConfig> {
 
 impl TcpPeer {
     /// Construct a plain TCP peer.
-    pub fn new(target_addr: SocketAddr, tcp_params: crate::transport::tcp_params::TcpParams) -> Self {
-        Self { target_addr, tls: None, tcp_params }
+    pub fn new(
+        target_addr: SocketAddr,
+        tcp_params: crate::transport::tcp_params::TcpParams,
+    ) -> Self {
+        Self {
+            target_addr,
+            tls: None,
+            tcp_params,
+        }
     }
 
     /// Construct a TLS peer. `alpn` is optional; pass `None` for the default TLS config.
@@ -124,7 +131,10 @@ impl TcpPeer {
         };
         Ok(Self {
             target_addr,
-            tls: Some(TlsConfig { host: tls_host, connector }),
+            tls: Some(TlsConfig {
+                host: tls_host,
+                connector,
+            }),
             tcp_params,
         })
     }
@@ -146,7 +156,8 @@ impl TcpPeer {
         match self.tls {
             None => {
                 info!(target = %self.target_addr, "starting bidirectional relay (raw tcp)");
-                bridge::relay_with_first_data(recv, send, tcp_stream, initial_data.as_deref()).await?;
+                bridge::relay_with_first_data(recv, send, tcp_stream, initial_data.as_deref())
+                    .await?;
             }
             Some(tls) => {
                 debug!("TLS upstream: {} (SNI: {})", self.target_addr, tls.host);
@@ -158,7 +169,13 @@ impl TcpPeer {
                     .await
                     .context("TLS handshake failed")?;
                 info!(target = %self.target_addr, tls_host = %tls.host, "starting TLS bidirectional relay");
-                relay_with_initial(recv, send, tls_stream, initial_data.as_deref().unwrap_or(&[])).await?;
+                relay_with_initial(
+                    recv,
+                    send,
+                    tls_stream,
+                    initial_data.as_deref().unwrap_or(&[]),
+                )
+                .await?;
             }
         }
         Ok(())

@@ -57,10 +57,7 @@ impl EntryConnPool {
         let snap = self.snapshot.load();
         pick_least_inflight(
             snap.as_slice(),
-            |c| {
-                c.conn.close_reason().is_none()
-                    && !excluded.contains(&c.conn.stable_id())
-            },
+            |c| c.conn.close_reason().is_none() && !excluded.contains(&c.conn.stable_id()),
             |c| c.inflight.load(Ordering::Relaxed),
         )
         .cloned()

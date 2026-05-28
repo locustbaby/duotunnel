@@ -25,7 +25,11 @@ impl TunnelService for DefaultTunnelService {
         // `duotunnel_requests_total`) to preserve existing dashboards;
         // don't duplicate it here.
         if let Some(total) = outcome.timing.total() {
-            let status = if outcome.error.is_some() { "error" } else { "success" };
+            let status = if outcome.error.is_some() {
+                "error"
+            } else {
+                "success"
+            };
             ctx.metrics.observe(
                 "duotunnel_ingress_total_ms",
                 total.as_secs_f64() * 1000.0,

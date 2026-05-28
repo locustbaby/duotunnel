@@ -5,8 +5,8 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::debug;
 
-use tunnel_lib::ProxyError;
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
+use tunnel_lib::ProxyError;
 
 use crate::registry::SharedRegistry;
 

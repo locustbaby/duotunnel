@@ -179,6 +179,8 @@ impl UpstreamResolver for EgressProxy {
         recv: quinn::RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<(), ProxyError> {
-        self.0.connect_peer(peer, downstream_protocol, send, recv, initial_data).await
+        self.0
+            .connect_peer(peer, downstream_protocol, send, recv, initial_data)
+            .await
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing::{debug, info, warn};
-use tunnel_lib::proxy::core::{UpstreamResolver, ProxyEngine};
+use tunnel_lib::proxy::core::{ProxyEngine, UpstreamResolver};
 use tunnel_lib::recv_routing_info;
 
 pub async fn handle_tunnel_stream<A: UpstreamResolver>(

@@ -33,7 +33,6 @@ impl BackgroundService for HotReloadService {
     }
 }
 
-
 async fn watch_loop(
     config_path: String,
     state: Arc<ServerState>,

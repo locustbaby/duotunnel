@@ -1,7 +1,7 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::ProxyError;
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
+use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::BodyExt;

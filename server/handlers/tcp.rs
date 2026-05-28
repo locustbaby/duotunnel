@@ -1,11 +1,11 @@
-use crate::{ServerState, metrics};
+use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use tunnel_lib::{OpenBiOutcome, maybe_slow_path, open_bi_guarded, proxy, run_accept_worker};
+use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,

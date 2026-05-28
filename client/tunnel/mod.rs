@@ -30,7 +30,8 @@ impl ClientService for TunnelPoolService {
                 shutdown,
                 self.ready.clone(),
                 self.entry_pool.clone(),
-            ).await
+            )
+            .await
             .map_err(|e| anyhow::anyhow!("run_pool failed: {}", e))
         } else {
             supervisor::run_supervisor(
@@ -39,7 +40,8 @@ impl ClientService for TunnelPoolService {
                 shutdown,
                 self.ready.clone(),
                 self.entry_pool.clone(),
-            ).await
+            )
+            .await
             .map_err(|e| anyhow::anyhow!("run_supervisor failed: {}", e))
         }
     }

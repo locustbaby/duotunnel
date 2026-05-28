@@ -59,7 +59,8 @@ impl PluginRegistry {
     // ── Builder-style helpers ─────────────────────────────────────────────────
 
     pub fn register_ingress_handler(&mut self, handler: Arc<dyn IngressProtocolHandler>) {
-        self.ingress_handlers.insert(handler.protocol_kind(), handler);
+        self.ingress_handlers
+            .insert(handler.protocol_kind(), handler);
     }
 
     pub fn add_module(&mut self, module: Arc<dyn ConnectionModule>) {

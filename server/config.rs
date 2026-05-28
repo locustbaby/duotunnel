@@ -214,7 +214,9 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
     if cfg.server.open_stream_timeout_ms == 0 {
         errors.push("server.open_stream_timeout_ms must be >= 1".into());
     }
-    if cfg.server.proxy_buffers.relay_buf_size < tunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE {
+    if cfg.server.proxy_buffers.relay_buf_size
+        < tunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE
+    {
         errors.push(format!(
             "server.proxy_buffers.relay_buf_size ({}) must be >= {}",
             cfg.server.proxy_buffers.relay_buf_size,

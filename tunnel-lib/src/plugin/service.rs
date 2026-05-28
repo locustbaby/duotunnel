@@ -13,10 +13,7 @@ use super::ctx::{AdmissionReq, PhaseOutcome, PhaseResult, ServerCtx};
 /// `RouteResolver` in the plugin registry, not this trait.
 #[async_trait]
 pub trait TunnelService: Send + Sync + 'static {
-    async fn admission(
-        &self,
-        req: &AdmissionReq,
-    ) -> Result<PhaseResult>;
+    async fn admission(&self, req: &AdmissionReq) -> Result<PhaseResult>;
 
     /// Emit access logs / metrics after the tunnel closes.
     ///

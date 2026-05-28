@@ -39,7 +39,11 @@ impl RouteResolver for VhostPlugin {
             ))),
             None => Ok(PhaseResult::Reject {
                 status: 404,
-                message: format!("no vhost route for host '{}' on port {}", host, ctx.listener_port).into(),
+                message: format!(
+                    "no vhost route for host '{}' on port {}",
+                    host, ctx.listener_port
+                )
+                .into(),
             }),
         }
     }

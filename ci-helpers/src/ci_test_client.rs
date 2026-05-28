@@ -610,19 +610,16 @@ async fn run_grpc_server_stream(addr: &str, args: &[String]) -> Result<String, S
         count,
     });
 
-    let resp = tokio::time::timeout(
-        Duration::from_secs(15),
-        client.server_stream_echo(request),
-    )
-    .await
-    .map_err(|_| "gRPC ServerStreamEcho timeout".to_string())?
-    .map_err(|e| {
-        format!(
-            "gRPC ServerStreamEcho error: status={} message={}",
-            e.code(),
-            e.message()
-        )
-    })?;
+    let resp = tokio::time::timeout(Duration::from_secs(15), client.server_stream_echo(request))
+        .await
+        .map_err(|_| "gRPC ServerStreamEcho timeout".to_string())?
+        .map_err(|e| {
+            format!(
+                "gRPC ServerStreamEcho error: status={} message={}",
+                e.code(),
+                e.message()
+            )
+        })?;
 
     let mut stream = resp.into_inner();
     let mut received = 0;
@@ -694,19 +691,16 @@ async fn run_grpc_bidi_stream(addr: &str, args: &[String]) -> Result<String, Str
 
     let request = tonic::Request::new(outbound);
 
-    let resp = tokio::time::timeout(
-        Duration::from_secs(15),
-        client.bidi_stream_echo(request),
-    )
-    .await
-    .map_err(|_| "gRPC BidiStreamEcho timeout".to_string())?
-    .map_err(|e| {
-        format!(
-            "gRPC BidiStreamEcho error: status={} message={}",
-            e.code(),
-            e.message()
-        )
-    })?;
+    let resp = tokio::time::timeout(Duration::from_secs(15), client.bidi_stream_echo(request))
+        .await
+        .map_err(|_| "gRPC BidiStreamEcho timeout".to_string())?
+        .map_err(|e| {
+            format!(
+                "gRPC BidiStreamEcho error: status={} message={}",
+                e.code(),
+                e.message()
+            )
+        })?;
 
     let mut stream = resp.into_inner();
     let mut received = 0;

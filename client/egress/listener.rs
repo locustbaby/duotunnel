@@ -10,9 +10,9 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    ErrorKind, OverloadLimits, PeekBufPool, ProxyError, RoutingInfo, TcpParams,
     detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
-    run_accept_worker, send_routing_info,
+    run_accept_worker, send_routing_info, ErrorKind, OverloadLimits, PeekBufPool, ProxyError,
+    RoutingInfo, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);

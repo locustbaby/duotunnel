@@ -24,5 +24,7 @@ pub async fn handle_work_stream(
         .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
     let app = ClientApp::new(proxy_map, tcp_params);
     let engine = ProxyEngine::new(app);
-    engine.run_stream(send, recv, client_addr, Some(routing_info)).await
+    engine
+        .run_stream(send, recv, client_addr, Some(routing_info))
+        .await
 }
