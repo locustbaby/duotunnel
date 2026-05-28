@@ -88,7 +88,7 @@ start_frp_stack() {
   : > /tmp/frpc.log
 
   sudo systemd-run --scope --unit=frp-server --collect \
-    -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frps -c "${FRPS_CONFIG}" >> /tmp/frps.log 2>&1 &
 
   for i in $(seq 1 20); do
@@ -105,7 +105,7 @@ start_frp_stack() {
   fi
 
   sudo systemd-run --scope --unit=frp-client --collect \
-    -p CPUQuota=50% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frpc -c "${FRPC_CONFIG}" >> /tmp/frpc.log 2>&1 &
 
   for i in $(seq 1 20); do
