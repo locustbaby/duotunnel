@@ -578,6 +578,10 @@ jobs:
           kill "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat /tmp/ctld.pid   2>/dev/null)" 2>/dev/null || true
+          sleep 1
+          kill -9 "$(cat /tmp/client.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/server.pid 2>/dev/null)" 2>/dev/null || true
+          kill -9 "$(cat /tmp/ctld.pid   2>/dev/null)" 2>/dev/null || true
           sleep 0.5
 
       - name: "[Standalone] 7-A: start server — verify SQLite auto-seed on first boot"
