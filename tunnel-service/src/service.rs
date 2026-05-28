@@ -52,7 +52,12 @@ impl ControlService {
             weak.clone(),
             publish_rx,
         ));
+        tokio::spawn(crate::reactor::db_poll_task(weak));
         Ok(svc)
+    }
+
+    pub async fn load_token_cache(&self) -> Result<Vec<crate::proto::TokenCacheEntry>> {
+        self.token_cache.load_token_cache().await
     }
 
     /// Subscribe to the watch stream. New subscribers immediately get the

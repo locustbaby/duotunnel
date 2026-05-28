@@ -38,3 +38,30 @@ pub(crate) async fn debounce_publish_task(
         }
     }
 }
+
+pub(crate) async fn db_poll_task(svc: std::sync::Weak<ControlService>) {
+    let mut last_fingerprint: Option<String> = None;
+    loop {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let Some(svc) = svc.upgrade() else { break };
+        match svc.load_token_cache().await {
+            Err(e) => {
+                warn!(error = %e, "db_poll: failed to load token cache");
+            }
+            Ok(entries) => {
+                let mut parts: Vec<String> = entries
+                    .iter()
+                    .map(|e| format!("{}:{}:{}", e.hash_hex, e.token_status, e.client_status))
+                    .collect();
+                parts.sort_unstable();
+                let fingerprint = parts.join("|");
+                let changed = last_fingerprint.as_deref() != Some(&fingerprint);
+                last_fingerprint = Some(fingerprint);
+                if changed {
+                    tracing::debug!("db_poll: token change detected, triggering publish");
+                    svc.publish();
+                }
+            }
+        }
+    }
+}
