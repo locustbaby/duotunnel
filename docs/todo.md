@@ -132,6 +132,28 @@ Synchronous accept loop sleep on EMFILE and blocking open_bi waits under resourc
 2. Implement in-code FD limit (`rlimit`) pre-validation at application startup with high-visibility warn logs, and enrich EMFILE error reports in `run_accept_worker` with system optimization instructions.
 3. Implement pluggable load-shedding to fail-fast (drop connections with 503) when pending queues exceed limits.
 
+### [TODO-76] Client-side local egress rule evaluation and early truncation
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+Currently, egress outbound routing rules are resolved entirely on the server side (`ServerEgressMap::upstream_peer`). If a host does not match the egress rules, the client still establishes a QUIC connection/stream and relays data, only for the server to reject the stream with `route_not_found`. This wastes QUIC streams and WAN bandwidth.
+
+**Fix**:
+1. Synchronize or distribute the egress outbound rules down to the client configuration.
+2. In `client/egress/listener.rs`, evaluate the matching rules *locally* right after sniffing the host/protocol.
+3. If no matching rule exists, immediately truncate/reject the request locally (e.g. close local TCP stream or respond with 502/404) and avoid opening a QUIC stream.
+
+### [TODO-77] Unified multi-protocol session handling inspired by Pingora
+**Priority**: Medium | **Status**: TODO
+
+**Problem**:
+Downstream traffic can be H1, H2, WebSockets, or potentially UDP in the future. The current driver approach (`Http1Driver`, etc.) is tightly coupled to specific protocol types and uses heavy L7 engines (Hyper) which makes multi-protocol extensions complex and computationally expensive on the server.
+
+**Fix**:
+1. Study Pingora's unified `Session` abstraction which operates directly on zero-copy byte buffers (`BytesMut`) and decouples the connection stream from the parsing layer.
+2. Abstract the downstream reader/writer as a protocol-agnostic byte channel.
+3. Decouple L7 session parsing from transmission; support dynamic protocol upgrades (e.g. TCP -> WS, H1 -> H2, or future UDP datagram mapping) within a unified session lifecycle.
+
 ---
 
 ## 2. Control Plane, Auth, and Config
