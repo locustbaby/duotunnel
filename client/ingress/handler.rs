@@ -2,7 +2,7 @@ use crate::ingress::app::{ClientApp, LocalProxyMap};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
-use tracing::info;
+use tracing::debug;
 use tunnel_lib::proxy::core::ProxyEngine;
 use tunnel_lib::recv_routing_info;
 pub async fn handle_work_stream(
@@ -12,7 +12,7 @@ pub async fn handle_work_stream(
     tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
-    info!(
+    debug!(
         proxy_name = %routing_info.proxy_name,
         protocol = ?routing_info.protocol,
         host = ?routing_info.host,

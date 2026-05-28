@@ -93,7 +93,11 @@ impl ClientGroup {
             let idx1 = fastrand::usize(..len);
             let idx2 = {
                 let r = fastrand::usize(..len - 1);
-                if r >= idx1 { r + 1 } else { r }
+                if r >= idx1 {
+                    r + 1
+                } else {
+                    r
+                }
             };
             let c1 = &conns[idx1];
             let c2 = &conns[idx2];

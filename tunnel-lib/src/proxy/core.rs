@@ -56,24 +56,32 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         client_addr: SocketAddr,
         routing_info: Option<RoutingInfo>,
     ) -> Result<()> {
-        let pool = stream_peek_pool();
-        let mut buf = pool.take();
-        let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
-
-        let initial_bytes: bytes::Bytes = if n > 0 {
-            let b = bytes::Bytes::copy_from_slice(&buf[..n]);
-            pool.put(buf);
-            b
+        let (protocol, initial_bytes) = if let Some(p) = routing_info
+            .as_ref()
+            .map(|ri| ri.protocol)
+            .filter(|&p| p != Protocol::Unknown)
+        {
+            (p, None)
         } else {
-            pool.put(buf);
-            bytes::Bytes::new()
+            let pool = stream_peek_pool();
+            let mut buf = pool.take();
+            let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
+            let initial_bytes = if n > 0 {
+                let b = bytes::Bytes::copy_from_slice(&buf[..n]);
+                pool.put(buf);
+                b
+            } else {
+                pool.put(buf);
+                bytes::Bytes::new()
+            };
+            let protocol = detect_protocol(n, &initial_bytes);
+            (protocol, if n > 0 { Some(initial_bytes) } else { None })
         };
 
-        let protocol = detect_protocol(n, &initial_bytes, routing_info.as_ref());
         let mut ctx = Context {
             client_addr,
             protocol,
-            initial_bytes: if n > 0 { Some(initial_bytes) } else { None },
+            initial_bytes,
             routing_info,
         };
         let peer = self.app.upstream_peer(&mut ctx).await?;
@@ -84,15 +92,9 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
     }
 }
 
-/// Determine protocol from routing_info hint or from the first bytes of the stream.
+/// Determine protocol from the first bytes of the stream.
 /// Consolidates the websocket upgrade check into a single httparse pass.
-fn detect_protocol(n: usize, data: &[u8], routing_info: Option<&RoutingInfo>) -> Protocol {
-    if let Some(ri) = routing_info {
-        match ri.protocol {
-            Protocol::Unknown => {}
-            p => return p,
-        }
-    }
+fn detect_protocol(n: usize, data: &[u8]) -> Protocol {
     if n == 0 {
         return Protocol::Unknown;
     }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use tunnel_lib::proxy::core::{ProxyEngine, UpstreamResolver};
 use tunnel_lib::recv_routing_info;
 
@@ -9,7 +9,7 @@ pub async fn handle_tunnel_stream<A: UpstreamResolver>(
     app: A,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
-    info!(
+    debug!(
         target_host = ?routing_info.host, protocol = ?routing_info.protocol,
         "handling egress request from client"
     );
