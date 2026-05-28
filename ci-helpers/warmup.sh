@@ -59,7 +59,7 @@ wait_unit_gone
 
 echo "Restarting server..."
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -- ./target/release/server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "$SERVER_LOG" 2>&1 &
 
@@ -76,7 +76,7 @@ fi
 
 echo "Restarting client..."
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "$CLIENT_LOG" 2>&1 &
 
 CLIENT_UP=0

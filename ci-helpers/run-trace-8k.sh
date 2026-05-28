@@ -66,7 +66,7 @@ fi
 
 # 3. Start Server
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
   ${TOKIO_ENV:+-E $TOKIO_ENV} \
   -- ./target/release/server --config ci-helpers/configs/server.yaml \
@@ -89,7 +89,7 @@ fi
 sleep 3
 
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  -p CPUQuota=100% -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
   ${TOKIO_ENV:+-E $TOKIO_ENV} \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &

@@ -81,6 +81,10 @@ on:
         description: 'Target RPS for stress-category cases in core profile (0 = use catalog default of 3000)'
         type: number
         default: 0
+      stress_cpu_quota:
+        description: 'CPU quota limit for server/client (e.g., 50%, 100%, 200%)'
+        type: string
+        default: '100%'
       # ── Monitor ───────────────────────────────────────────────────────────────
       monitor_cpu:
         description: 'Collect CPU/memory/IO/ctxsw metrics (bench-tool.py collect via psutil)'
@@ -129,6 +133,7 @@ env:
   # Override .cargo/config.toml target-cpu=native — CI runners have
   # varying CPU micro-architectures so we must build portable binaries.
   CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
+  STRESS_CPU_QUOTA: "${{ inputs.stress_cpu_quota || '100%' }}"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
