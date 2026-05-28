@@ -11,12 +11,24 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
     let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
     let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
-    let endpoint = quinn::Endpoint::server(server_config, addr.parse()?)?;
+    let udp_socket = tunnel_lib::build_udp_socket(addr.parse()?, &quic_params)?;
+    let endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        udp_socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     ready.store(true, Ordering::Release);
-    info!(addr = % addr, "QUIC server listening");
+    info!(
+        addr = %addr,
+        udp_recv_buf_mb = quic_params.udp_recv_buf_bytes / (1024 * 1024),
+        udp_send_buf_mb = quic_params.udp_send_buf_bytes / (1024 * 1024),
+        "QUIC server listening"
+    );
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
         tokio::task::spawn(async move {
+
             metrics::quic_connection_opened();
             if let Err(e) = handle_quic_connection(state, incoming).await {
                 error!(error = % e, "QUIC connection error");

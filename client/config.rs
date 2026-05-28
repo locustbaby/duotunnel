@@ -29,12 +29,12 @@ pub struct ClientQuicConfig {
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
     pub connection_window_mb: Option<u64>,
-    /// Independent send-window override. Falls back to connection_window_mb, then default.
-    /// Useful for asymmetric links where upload/download windows differ.
     pub send_window_mb: Option<u64>,
     pub keepalive_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
     pub congestion: Option<String>,
+    pub udp_recv_buf_mb: Option<u32>,
+    pub udp_send_buf_mb: Option<u32>,
 }
 impl Default for ClientQuicConfig {
     fn default() -> Self {
@@ -47,6 +47,8 @@ impl Default for ClientQuicConfig {
             keepalive_secs: None,
             idle_timeout_secs: None,
             congestion: None,
+            udp_recv_buf_mb: None,
+            udp_send_buf_mb: None,
         }
     }
 }
@@ -72,6 +74,14 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
             keepalive_secs: c.keepalive_secs.unwrap_or(d.keepalive_secs),
             idle_timeout_secs: c.idle_timeout_secs.unwrap_or(d.idle_timeout_secs),
             congestion: c.congestion.clone().or(d.congestion),
+            udp_recv_buf_bytes: c
+                .udp_recv_buf_mb
+                .map(|mb| mb as usize * 1024 * 1024)
+                .unwrap_or(d.udp_recv_buf_bytes),
+            udp_send_buf_bytes: c
+                .udp_send_buf_mb
+                .map(|mb| mb as usize * 1024 * 1024)
+                .unwrap_or(d.udp_send_buf_bytes),
         }
     }
 }

@@ -36,6 +36,9 @@ server:
     # congestion: "bbr"           # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
     # stream_window_mb: 4         # Per-stream receive window in MB (default: 4)
     # connection_window_mb: 32    # Per-connection receive window in MB (default: 32)
+    # udp_recv_buf_mb: 8          # UDP socket SO_RCVBUF in MB; kernel doubles (Linux rmem_max) (default: 8)
+    # udp_send_buf_mb: 8          # UDP socket SO_SNDBUF in MB; enables kernel GSO batching (default: 8)
+
 
   # ── Outbound HTTP connection pool (egress forward proxy) ───────────────────
   http_pool:

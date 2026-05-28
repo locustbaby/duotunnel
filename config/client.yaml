@@ -29,6 +29,9 @@ quic:
   # stream_window_mb: 4           # Per-stream receive window in MB (default: 4)
   # connection_window_mb: 32      # Per-connection receive window in MB (default: 32)
   # send_window_mb: 8             # Send window override in MB (default: connection_window_mb)
+  # udp_recv_buf_mb: 8            # UDP socket SO_RCVBUF in MB; kernel doubles (Linux rmem_max) (default: 8)
+  # udp_send_buf_mb: 8            # UDP socket SO_SNDBUF in MB; enables kernel GSO batching (default: 8)
+
 
 # ── TCP socket options (applied to upstream connections) ──────────────────────
 tcp:

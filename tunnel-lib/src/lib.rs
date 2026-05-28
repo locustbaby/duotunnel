@@ -44,6 +44,7 @@ pub use transport::listener::{
     build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
     DEFAULT_ACCEPT_WORKERS,
 };
-pub use transport::quic::{build_transport_config, QuicTransportParams};
+pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};
+
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;

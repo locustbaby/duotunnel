@@ -32,6 +32,9 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **connections** | `client/worker.rs`: 启动 supervisor 的数量 | 1 / CI: 4 | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | 见 `client/app.rs` 的 slot 启动逻辑 |
 | **congestion_controller** | `quinn::BbrConfig` / `CubicConfig` / `NewRenoConfig` | bbr | `quic.congestion` | 丢包重传与吞吐爬坡算法；bbr 适合高带宽波动链路；未知值 fallback 到 quinn 默认（NewReno） | 代码见 `quic.rs:41-54` |
 | **login_timeout_secs** | `server/handlers/quic.rs:34` | 10s | `server.login_timeout_secs` | 服务端对 client QUIC 登录握手超时；与 client `reconnect.login_timeout_ms` (5000ms) **不对称** | 代码见 `tunnel-store/src/server_config.rs:143` |
+| **udp_recv_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_RCVBUF` | 8 MiB | `quic.udp_recv_buf_mb` | Linux 内核将请求值翻倍（受 `net.core.rmem_max` 上限约束）。过小导致高 RPS 下 UDP 丢包（`recvmsg ENOBUFS`），是 8000 RPS 延迟尖刺主因之一 | `ss -udp -e` 看 `rmem`；`/proc/net/udp` 的 `drops` 列 |
+| **udp_send_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_SNDBUF` | 8 MiB | `quic.udp_send_buf_mb` | 发送侧内核队列；过小时 quinn GSO batch 被截断，单次 `sendmmsg` 提交的包数减少，CPU 消耗上升 | `ss -udp -e` 看 `wmem` |
+
 
 ---
 

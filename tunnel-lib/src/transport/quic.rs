@@ -1,7 +1,9 @@
 use anyhow::Result;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::ServerConfig;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::convert::TryInto;
+use std::net::SocketAddr;
 use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct QuicTransportParams {
@@ -12,6 +14,8 @@ pub struct QuicTransportParams {
     pub keepalive_secs: u64,
     pub idle_timeout_secs: u64,
     pub congestion: Option<String>,
+    pub udp_recv_buf_bytes: usize,
+    pub udp_send_buf_bytes: usize,
 }
 impl Default for QuicTransportParams {
     fn default() -> Self {
@@ -23,6 +27,8 @@ impl Default for QuicTransportParams {
             keepalive_secs: 20,
             idle_timeout_secs: 60,
             congestion: Some("bbr".to_string()),
+            udp_recv_buf_bytes: 8 * 1024 * 1024,
+            udp_send_buf_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -53,6 +59,19 @@ fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTranspor
         }
     }
 }
+pub fn build_udp_socket(addr: SocketAddr, params: &QuicTransportParams) -> Result<std::net::UdpSocket> {
+    let domain = Domain::for_address(addr);
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
+    sock.set_recv_buffer_size(params.udp_recv_buf_bytes)?;
+    sock.set_send_buffer_size(params.udp_send_buf_bytes)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    Ok(sock.into())
+}
+
 pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerConfig> {
     let (certs, key) = crate::infra::pki::generate_self_signed_cert()?;
     let mut server_crypto = rustls::ServerConfig::builder()
@@ -66,6 +85,7 @@ pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerC
     server_config.transport_config(Arc::new(transport_config));
     Ok(server_config)
 }
+
 pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::TransportConfig> {
     let mut tc = quinn::TransportConfig::default();
     apply_transport_params(&mut tc, params);
