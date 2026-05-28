@@ -90,10 +90,9 @@ impl ClientGroup {
         let conns = self.snapshot.load();
         let len = conns.len();
         if len > 32 {
-            let mut rng = fastrand::Rng::new();
-            let idx1 = rng.usize(..len);
+            let idx1 = fastrand::usize(..len);
             let idx2 = {
-                let r = rng.usize(..len - 1);
+                let r = fastrand::usize(..len - 1);
                 if r >= idx1 { r + 1 } else { r }
             };
             let c1 = &conns[idx1];
