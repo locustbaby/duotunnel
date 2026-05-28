@@ -9,6 +9,8 @@ pub struct QuicConfig {
     pub keepalive_secs: Option<u64>,
     pub idle_timeout_secs: Option<u64>,
     pub congestion: Option<String>,
+    pub udp_recv_buf_mb: Option<u32>,
+    pub udp_send_buf_mb: Option<u32>,
 }
 impl From<&QuicConfig> for QuicTransportParams {
     fn from(c: &QuicConfig) -> Self {
@@ -30,6 +32,14 @@ impl From<&QuicConfig> for QuicTransportParams {
             keepalive_secs: c.keepalive_secs.unwrap_or(d.keepalive_secs),
             idle_timeout_secs: c.idle_timeout_secs.unwrap_or(d.idle_timeout_secs),
             congestion: c.congestion.clone().or(d.congestion),
+            udp_recv_buf_bytes: c
+                .udp_recv_buf_mb
+                .map(|mb| mb as usize * 1024 * 1024)
+                .unwrap_or(d.udp_recv_buf_bytes),
+            udp_send_buf_bytes: c
+                .udp_send_buf_mb
+                .map(|mb| mb as usize * 1024 * 1024)
+                .unwrap_or(d.udp_send_buf_bytes),
         }
     }
 }

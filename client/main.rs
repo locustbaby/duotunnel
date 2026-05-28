@@ -245,10 +245,17 @@ fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
         quic_params.keepalive_secs, congestion = ? quic_params.congestion,
         "QUIC transport configured"
     );
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    let udp_socket = tunnel_lib::build_udp_socket("0.0.0.0:0".parse()?, &quic_params)?;
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        udp_socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }
+
 pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
