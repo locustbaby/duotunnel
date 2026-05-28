@@ -92,7 +92,10 @@ impl ClientGroup {
         if len > 32 {
             let mut rng = fastrand::Rng::new();
             let idx1 = rng.usize(..len);
-            let idx2 = rng.usize(..len);
+            let idx2 = {
+                let r = rng.usize(..len - 1);
+                if r >= idx1 { r + 1 } else { r }
+            };
             let c1 = &conns[idx1];
             let c2 = &conns[idx2];
             let c1_healthy = c1.conn.close_reason().is_none();

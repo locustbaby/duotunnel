@@ -5,6 +5,7 @@ use tracing::warn;
 use crate::service::ControlService;
 
 const PUBLISH_DEBOUNCE_MS: u64 = 50;
+const POLL_INTERVAL_MS: u64 = 1500;
 
 pub(crate) async fn debounce_publish_task(
     svc: std::sync::Weak<ControlService>,
@@ -42,7 +43,7 @@ pub(crate) async fn debounce_publish_task(
 pub(crate) async fn db_poll_task(svc: std::sync::Weak<ControlService>) {
     let mut last_fingerprint: Option<String> = None;
     loop {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         let Some(svc) = svc.upgrade() else { break };
         match svc.load_token_cache().await {
             Err(e) => {
