@@ -149,18 +149,23 @@ Currently, egress outbound routing rules are resolved entirely on the server sid
 **Problem**:
 Downstream traffic can be H1, H2, WebSockets, or potentially UDP in the future. The current driver approach (`Http1Driver`, etc.) is tightly coupled to specific protocol types and uses heavy L7 engines (Hyper) which makes multi-protocol extensions complex and computationally expensive on the server.
 
-**Fix**:
-1. **Enum-based Session Abstraction (DownstreamSession)**:
-   - Define a unified `DownstreamSession` enum (variants like `H1`, `H2`, etc.) wrapping protocol-specific streams.
-   - Expose protocol-agnostic methods (`read_request_header()`, `read_body_chunk()`, and `write_task(task: HttpTask)`) using static dispatch to eliminate vtable lookup and dynamic box allocation overhead.
-2. **Channel-based Async Dual-Task Relay (Upstream-Downstream Decoupling)**:
-   - Completely decouple Upstream transmission from Hyper's client wrappers. Use hyper's low-level `http1::handshake` to write custom modified request headers.
-   - Set up an asynchronous bidirectional pipeline using a bounded `mpsc::channel::<HttpTask>()`.
-   - **Task Downstream**: Stream Request Body into the channel; write Response tasks back to the downstream socket.
-   - **Task Upstream**: Write Request Body to upstream; parse response headers and payload boundaries (using Content-Length and `0\r\n\r\n` chunked endings to safely return the TCP connection to a custom pool).
-3. **Tunnel Hand-off for WebSocket/Upgrade**:
-   - When the Upstream task parses a `101 Switching Protocols` response, pass the task downstream.
-   - Once the 101 header is sent back to the client, gracefully shut down both H1 channel tasks, extract the raw underlying QUIC stream and TCP socket handles, and hand them off to a lightweight L4 `bridge::relay` loop, achieving absolute zero-copy websocket transport performance.
+**Proposed Architectural Directions (To be decided):**
+
+#### Direction A: Pingora-Inspired Stateful Decoupled Pipeline
+* **Design**:
+  1. **DownstreamSession Enum**: Wrap H1, H2, and WS protocol streams. Expose unified static dispatch methods (`read_request_header()`, `read_body_chunk()`, etc.) avoiding virtual dispatch.
+  2. **Channel-based Async Dual-Task Relay**: Set up a bidirectional bounded `mpsc::channel::<HttpTask>()` between two concurrent tasks (`Task Downstream` and `Task Upstream`). Use hyper's low-level `http1::handshake` for upstream connection and headers modification.
+  3. **WebSocket Hand-off**: Gracefully dismantle H1/L7 task state machines upon receiving `101 Switching Protocols` and hand the raw sockets to a pure L4 `bridge::relay`.
+* **Pros**: Standardized, clean multi-protocol encapsulation (easily supports H2 upstreams, transparent retries on connection pool stale FINs, and cookie/CORS/response header modifications).
+* **Cons**: Higher code complexity, channel scheduling overhead, and minor memory allocations.
+
+#### Direction B: DuoTunnel-Optimized Single Streamlined Async Function (Direct Relay)
+* **Design**:
+  1. **Single async fn handler**: Define a streamlined `async fn proxy_h1_quic_stream(...)`.
+  2. **Direct Pipeline**: Read headers from QUIC stream $\rightarrow$ zero-copy parse via `httparse` $\rightarrow$ rewrite headers $\rightarrow$ fetch TCP socket from custom pool $\rightarrow$ write headers $\rightarrow$ immediately call `bridge::relay_with_first_data(...)` (L4 raw bytes relay).
+  3. **Simplification**: No `mpsc::channel` buffer pipes, no `DownstreamSession` driver structs, no task spawning. Leverage the 1-to-1 QUIC Stream-to-Upstream connection invariant (no multi-stream load balancing required).
+* **Pros**: Ultimate zero-copy performance, minimum latency, tiny memory footprint, and extremely low code complexity.
+* **Cons**: Cannot easily intercept/rewrite HTTP Response Headers once L4 copy begins, and scaling to complex protocol upgrades (like nested HTTP/2 multiplexed connections) or transparent stale connection retries will lead to a nested spaghetti of async code.
 
 ---
 
