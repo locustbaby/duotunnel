@@ -15,6 +15,7 @@ use tunnel_store::sqlite_rules::SqliteRuleStore;
 
 mod cli;
 mod proto;
+mod reactor;
 mod service;
 mod token;
 mod watch;
@@ -87,7 +88,7 @@ enum Command {
 
 // ── Healthz HTTP server ───────────────────────────────────────────────────────
 
-async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
+async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, svc: Option<Arc<ControlService>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     let addr = format!("0.0.0.0:{}", port);
@@ -104,6 +105,7 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
             continue;
         };
         let ready = ready.clone();
+        let svc = svc.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 256];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -114,8 +116,16 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
                 } else {
                     ("503 Service Unavailable", "not ready\n")
                 }
+            } else if req.starts_with("POST /api/reload") {
+                if let Some(ref svc) = svc {
+                    tracing::info!("manual reload triggered via api");
+                    svc.publish();
+                    ("200 OK", "reloaded\n")
+                } else {
+                    ("503 Service Unavailable", "service not attached\n")
+                }
             } else {
-                ("200 OK", "ok\n")
+                ("404 Not Found", "not found\n")
             };
             let response = format!(
                 "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
@@ -149,10 +159,6 @@ async fn main() -> Result<()> {
 
     let ready = Arc::new(AtomicBool::new(false));
 
-    if let Some(port) = cfg.metrics_port {
-        let ready2 = ready.clone();
-        tokio::spawn(run_healthz_server(port, ready2));
-    }
 
     let pool = open_sqlite_pool(&cfg.database_url).await?;
 
@@ -164,6 +170,7 @@ async fn main() -> Result<()> {
 
     let auth_store: Arc<dyn tunnel_store::AuthStore> = Arc::new(auth_store_inner);
     let rule_store: Arc<dyn tunnel_store::RuleStore> = Arc::new(rule_store_inner);
+    let token_cache: Arc<dyn crate::token::cache::TokenCacheProvider> = Arc::new(crate::token::cache::SqliteTokenCacheProvider::new(pool.clone()));
 
     // Seed routing from server.yaml on first boot (when the routing table is empty).
     if let Some(ref server_cfg_path) = cfg.server_config {
@@ -195,7 +202,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    let svc = ControlService::new(auth_store, rule_store, pool).await?;
+    let svc = ControlService::new(auth_store, rule_store, token_cache).await?;
+
+    if let Some(port) = cfg.metrics_port {
+        let ready2 = ready.clone();
+        tokio::spawn(run_healthz_server(port, ready2, Some(Arc::clone(&svc))));
+    }
 
     // All init done — mark ready.
     ready.store(true, Ordering::Release);
