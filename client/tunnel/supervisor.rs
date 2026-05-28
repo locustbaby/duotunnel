@@ -1,5 +1,5 @@
 use crate::config::ClientConfigFile;
-use crate::conn_pool::EntryConnPool;
+use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::{anyhow, Result};
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;

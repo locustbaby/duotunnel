@@ -87,12 +87,40 @@ impl ClientGroup {
     /// then a linear scan over healthy connections comparing `AtomicUsize` inflight counts.
     pub fn select_healthy(&self) -> Option<Arc<SelectedConnection>> {
         let conns = self.snapshot.load();
-        pick_least_inflight(
-            conns.as_slice(),
-            |c| c.conn.close_reason().is_none(),
-            |c| c.inflight.load(Ordering::Relaxed),
-        )
-        .cloned()
+        let len = conns.len();
+        if len > 32 {
+            let mut rng = fastrand::Rng::new();
+            let idx1 = rng.usize(..len);
+            let idx2 = rng.usize(..len);
+            let c1 = &conns[idx1];
+            let c2 = &conns[idx2];
+            let c1_healthy = c1.conn.close_reason().is_none();
+            let c2_healthy = c2.conn.close_reason().is_none();
+            match (c1_healthy, c2_healthy) {
+                (true, true) => {
+                    if c1.inflight.load(Ordering::Relaxed) <= c2.inflight.load(Ordering::Relaxed) {
+                        Some(c1.clone())
+                    } else {
+                        Some(c2.clone())
+                    }
+                }
+                (true, false) => Some(c1.clone()),
+                (false, true) => Some(c2.clone()),
+                (false, false) => pick_least_inflight(
+                    conns.as_slice(),
+                    |c| c.conn.close_reason().is_none(),
+                    |c| c.inflight.load(Ordering::Relaxed),
+                )
+                .cloned(),
+            }
+        } else {
+            pick_least_inflight(
+                conns.as_slice(),
+                |c| c.conn.close_reason().is_none(),
+                |c| c.inflight.load(Ordering::Relaxed),
+            )
+            .cloned()
+        }
     }
 }
 

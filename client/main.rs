@@ -17,21 +17,22 @@ use std::time::Duration;
 use std::path::PathBuf;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
-mod app;
 mod config;
-mod conn_pool;
-mod connect;
-mod entry;
+mod engine;
+mod egress;
+mod ingress;
 mod plugins;
-mod pool;
-mod proxy;
-use app::LocalProxyMap;
-use conn_pool::EntryConnPool;
+mod tunnel;
+
 use config::ClientConfigFile;
-use connect::ConnectError;
-use proxy::handle_work_stream;
+use engine::ClientEngine;
+use egress::listener::EntryListenerConfig;
+use ingress::app::LocalProxyMap;
+use ingress::handler::handle_work_stream;
+use tunnel::conn_pool::EntryConnPool;
+use tunnel::supervisor::ConnectError;
 
 #[cfg(feature = "dial9-telemetry")]
 static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
@@ -127,18 +128,17 @@ async fn async_main() -> Result<()> {
     if let Some(port) = config.metrics_port {
         crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
-
     let entry_pool = EntryConnPool::new();
+    let mut engine = ClientEngine::new(cancel.clone());
 
     if let Some(entry_port) = config.entry.port {
-        let pool = entry_pool.clone();
-        let token = cancel.clone();
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
         let overload_limits = config
             .overload
             .resolve(config.quic.max_concurrent_streams);
+        
         info!(
             mode = ?overload_limits.mode,
             yield_threshold = overload_limits.inflight_yield_threshold,
@@ -146,7 +146,8 @@ async fn async_main() -> Result<()> {
             max_concurrent_streams = config.quic.max_concurrent_streams,
             "overload protection resolved"
         );
-        let entry_cfg = entry::EntryListenerConfig {
+        
+        let entry_cfg = EntryListenerConfig {
             port: entry_port,
             tcp_params: entry_tcp_params,
             peek_buf_size,
@@ -154,26 +155,21 @@ async fn async_main() -> Result<()> {
             accept_workers: config.entry.accept_workers.max(1),
             overload: Arc::new(overload_limits),
         };
-        crate::spawn_task(async move {
-            if let Err(e) = entry::start_entry_listener(pool, token, entry_cfg).await {
-                error!(port = entry_port, error = % e, "entry listener failed");
-            }
-        });
+        
+        engine.add_service(Box::new(egress::listener::EgressListenerService {
+            entry_cfg,
+            pool: entry_pool.clone(),
+        }));
     }
 
-    let run_cancel = cancel.clone();
-    let run_ready = ready.clone();
-    let run_fut = async move {
-        if config.quic.connections > 1 {
-            info!(
-                connections = % config.quic.connections, "using multi-QUIC connection pool"
-            );
-            pool::run_pool(config, endpoint, run_cancel, run_ready, entry_pool).await
-        } else {
-            connect::run_supervisor(config, endpoint, run_cancel, run_ready, entry_pool).await
-        }
-    };
-    run_fut.await
+    engine.add_service(Box::new(tunnel::TunnelPoolService {
+        config,
+        endpoint,
+        entry_pool,
+        ready,
+    }));
+
+    engine.run_until_shutdown().await
 }
 fn run_with_tokio(fut: impl Future<Output = Result<()>>) -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -294,7 +290,7 @@ pub(crate) async fn run_client(
         .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
         .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
     if !resp.success {
-        return Err(connect::classify_login_failure(resp.error.as_deref()));
+        return Err(tunnel::supervisor::classify_login_failure(resp.error.as_deref()));
     }
     info!(
         client_group = %resp.client_group,

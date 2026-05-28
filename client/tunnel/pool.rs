@@ -1,5 +1,5 @@
 use crate::config::ClientConfigFile;
-use crate::conn_pool::EntryConnPool;
+use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::task::JoinSet;
@@ -22,7 +22,7 @@ pub async fn run_pool(
         let slot_ready = ready.clone();
         let slot_pool = entry_pool.clone();
         slots.spawn(async move {
-            crate::connect::run_supervisor(slot_config, endpoint, slot_cancel, slot_ready, slot_pool).await
+            crate::tunnel::supervisor::run_supervisor(slot_config, endpoint, slot_cancel, slot_ready, slot_pool).await
         });
     }
     while let Some(join_result) = slots.join_next().await {

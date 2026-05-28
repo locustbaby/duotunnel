@@ -1,4 +1,4 @@
-use crate::app::{ClientApp, LocalProxyMap};
+use crate::ingress::app::{ClientApp, LocalProxyMap};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;

@@ -1,4 +1,5 @@
-use crate::conn_pool::EntryConnPool;
+use crate::engine::ClientService;
+use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ fn with_conn_detail(conn_id: impl std::fmt::Display, err: ProxyError) -> ProxyEr
     err.with_detail(detail)
 }
 
+#[derive(Clone)]
 pub struct EntryListenerConfig {
     pub port: u16,
     pub tcp_params: TcpParams,
@@ -180,4 +182,21 @@ async fn handle_entry_connection(
         }
     }
     Err(last_err)
+}
+
+pub struct EgressListenerService {
+    pub entry_cfg: EntryListenerConfig,
+    pub pool: Arc<EntryConnPool>,
+}
+
+#[async_trait::async_trait]
+impl ClientService for EgressListenerService {
+    fn name(&self) -> &'static str {
+        "egress-tcp-listener"
+    }
+    async fn start(&self, shutdown: CancellationToken) -> anyhow::Result<()> {
+        start_entry_listener(self.pool.clone(), shutdown, self.entry_cfg.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("entry listener failed: {}", e))
+    }
 }

@@ -41,7 +41,7 @@ impl IngressProtocolHandler for H1Handler {
             .clone()
             .ok_or_else(ProxyError::routing_missing_host)?;
 
-        let initial_data: Vec<u8> = hint.raw_preface.to_vec();
+        let initial_data = &hint.raw_preface;
         let protocol = match hint.protocol {
             tunnel_lib::proxy::core::Protocol::WebSocket => {
                 tunnel_lib::proxy::core::Protocol::WebSocket
@@ -57,20 +57,12 @@ impl IngressProtocolHandler for H1Handler {
             .select_client_for_group(&group_id)
             .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
-        // Yield if the selected QUIC connection is near its stream cap.
-        // Placed before `read_exact` so the scheduler round-trip overlaps
-        // with draining already-peeked bytes instead of sitting on the
-        // request's critical path — this restores the 9cdbe83 ordering.
         tunnel_lib::maybe_slow_path(
             || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
             &ctx.overload,
         )
         .await;
 
-        // Consume the peeked bytes from the stream before handing it to relay.
-        // `initial_data.len()` ≤ `SNIFF_LIMIT` by construction (Phase 1 caps
-        // the peek at that size), so a stack buffer avoids a per-connection
-        // heap allocation.
         let mut discard = [0u8; tunnel_lib::plugin::SNIFF_LIMIT];
         stream
             .read_exact(&mut discard[..initial_data.len()])
@@ -101,7 +93,7 @@ impl IngressProtocolHandler for H1Handler {
             send,
             recv,
             stream,
-            &initial_data,
+            initial_data,
             ctx.relay_buf_size,
         )
         .await
