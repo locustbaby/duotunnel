@@ -288,9 +288,6 @@ impl ServerConfigFile {
         if self.server.tunnel_port == 0 {
             errors.push("server.tunnel_port must not be 0".into());
         }
-        if self.server.database_url.trim().is_empty() {
-            errors.push("server.database_url is required".into());
-        }
         if self.server.login_timeout_secs == 0 {
             errors.push("server.login_timeout_secs must be >= 1".into());
         }

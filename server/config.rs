@@ -203,13 +203,14 @@ pub async fn sync_file_to_db(
     rule_store.save_routing(&data).await
 }
 
-// ── Validation ───────────────────────────────────────────────────────────────
-
 pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     if cfg.server.tunnel_port == 0 {
         errors.push("server.tunnel_port must not be 0".into());
+    }
+    if cfg.server.database_url.trim().is_empty() {
+        errors.push("server.database_url is required".into());
     }
     if cfg.server.open_stream_timeout_ms == 0 {
         errors.push("server.open_stream_timeout_ms must be >= 1".into());
