@@ -28,8 +28,8 @@ impl TunnelService for DefaultTunnelService {
             let (status, error_kind) = if let Some(err_str) = &outcome.error {
                 let mut kind = "unknown";
                 let err_lower = err_str.to_lowercase();
-                if err_lower.contains("quic stream limit") || err_lower.contains("stream capacity") {
-                    kind = "quic_stream_limit";
+                if err_lower.contains("quic open timed out") || err_lower.contains("open_bi timed out") {
+                    kind = "quic_open_timed_out";
                 } else if err_lower.contains("quic connection lost") || err_lower.contains("connection lost") {
                     kind = "quic_connection_lost";
                 } else if err_lower.contains("quic connection fatal") || err_lower.contains("fatal connection error") {

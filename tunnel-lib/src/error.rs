@@ -29,7 +29,7 @@ impl RetryType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    QuicStreamLimit,
+    QuicOpenTimedOut,
     QuicConnectionLost,
     QuicConnectionFatal,
     RoutingMissingInfo,
@@ -54,7 +54,7 @@ pub enum ErrorKind {
 impl ErrorKind {
     pub fn as_label(self) -> &'static str {
         match self {
-            ErrorKind::QuicStreamLimit => "quic_stream_limit",
+            ErrorKind::QuicOpenTimedOut => "quic_open_timed_out",
             ErrorKind::QuicConnectionLost => "quic_connection_lost",
             ErrorKind::QuicConnectionFatal => "quic_connection_fatal",
             ErrorKind::RoutingMissingInfo => "routing_missing_info",
@@ -79,7 +79,7 @@ impl ErrorKind {
 
     pub fn source(self) -> ErrorSource {
         match self {
-            ErrorKind::QuicStreamLimit
+            ErrorKind::QuicOpenTimedOut
             | ErrorKind::RoutingMissingInfo
             | ErrorKind::QuicConnectionFatal
             | ErrorKind::H2cRouteResolve => ErrorSource::Internal,
@@ -104,7 +104,7 @@ impl ErrorKind {
 
     pub fn retry(self) -> RetryType {
         match self {
-            ErrorKind::QuicStreamLimit
+            ErrorKind::QuicOpenTimedOut
             | ErrorKind::QuicConnectionLost
             | ErrorKind::NoClientAvailable
             | ErrorKind::ResolveUpstream
@@ -145,13 +145,10 @@ pub struct ProxyError {
 }
 
 impl ProxyError {
-    pub fn quic_stream_limit(timeout: Duration) -> Self {
+    pub fn quic_open_timed_out(timeout: Duration) -> Self {
         Self {
-            kind: ErrorKind::QuicStreamLimit,
-            detail: Some(format!(
-                "open_bi waited {:?} for bidirectional stream capacity",
-                timeout
-            )),
+            kind: ErrorKind::QuicOpenTimedOut,
+            detail: Some(format!("open_bi timed out after {:?}", timeout)),
         }
     }
 
@@ -328,7 +325,7 @@ impl ProxyError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             ErrorKind::DownstreamConnection => return None,
-            ErrorKind::QuicStreamLimit
+            ErrorKind::QuicOpenTimedOut
             | ErrorKind::QuicConnectionLost
             | ErrorKind::QuicConnectionFatal => return None,
         })
@@ -338,7 +335,7 @@ impl ProxyError {
 impl fmt::Display for ProxyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self.kind {
-            ErrorKind::QuicStreamLimit => "quic stream limit",
+            ErrorKind::QuicOpenTimedOut => "quic open timed out",
             ErrorKind::QuicConnectionLost => "quic connection lost",
             ErrorKind::QuicConnectionFatal => "quic connection fatal",
             ErrorKind::RoutingMissingInfo => "routing info missing",
@@ -374,9 +371,9 @@ mod tests {
 
     #[test]
     fn proxy_error_labels_are_stable_for_metrics() {
-        let err = ProxyError::quic_stream_limit(Duration::from_millis(10));
+        let err = ProxyError::quic_open_timed_out(Duration::from_millis(10));
 
-        assert_eq!(err.kind.as_label(), "quic_stream_limit");
+        assert_eq!(err.kind.as_label(), "quic_open_timed_out");
         assert_eq!(err.source().as_label(), "internal");
         assert_eq!(err.retry().as_label(), "safe");
     }

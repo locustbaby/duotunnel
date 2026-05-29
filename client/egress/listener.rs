@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use tunnel_lib::{
     detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
     run_accept_worker, send_routing_info, ErrorKind, OverloadLimits, PeekBufPool, ProxyError,
-    RoutingInfo, TcpParams,
+    RoutingInfo, TcpParams, inflight_load,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -119,7 +119,7 @@ async fn handle_entry_connection(
         };
         tried_conn_ids.push(conn.conn.stable_id());
         maybe_slow_path(
-            || conn.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            || inflight_load(&conn.inflight, std::sync::atomic::Ordering::Relaxed),
             overload,
         )
         .await;
@@ -154,8 +154,8 @@ async fn handle_entry_connection(
                 return Ok(());
             }
             Err(e) => match e.kind {
-                ErrorKind::QuicStreamLimit => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi stream capacity unavailable, trying next connection");
+                ErrorKind::QuicOpenTimedOut => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi timed out, trying next connection");
                     last_err = with_conn_detail(conn.conn.stable_id(), e).into();
                 }
                 ErrorKind::QuicConnectionLost => {

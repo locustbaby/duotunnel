@@ -22,11 +22,13 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use inflight::{
-    begin_inflight, new_inflight_counter, pick_least_inflight, InflightCounter, InflightGuard,
+    begin_inflight, inflight_load, new_inflight_counter, pick_least_inflight, InflightCounter,
+    InflightGuard,
 };
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
+pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
 pub use models::msg::{
     recv_message, recv_message_type, recv_routing_info, recv_typed_message, send_message,
     send_routing_info, ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig,

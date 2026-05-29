@@ -73,7 +73,7 @@ async fn handle_tcp_connection(
         host,
     };
     maybe_slow_path(
-        || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+        || tunnel_lib::inflight_load(&selected.inflight, std::sync::atomic::Ordering::Relaxed),
         &state.overload_limits,
     )
     .await;
@@ -85,8 +85,8 @@ async fn handle_tcp_connection(
         open_timeout,
         |elapsed, outcome| {
             metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
-            if matches!(outcome, OpenBiOutcome::StreamLimit) {
-                metrics::open_bi_stream_limit();
+            if matches!(outcome, OpenBiOutcome::TimedOut) {
+                metrics::open_bi_timed_out();
             }
         },
     )

@@ -2,10 +2,9 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use quinn::Connection;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::{new_inflight_counter, pick_least_inflight, InflightCounter};
+use tunnel_lib::{inflight_load, new_inflight_counter, pick_least_inflight, InflightCounter};
 
 struct ClientInfo {
     group_id: String,
@@ -105,7 +104,9 @@ impl ClientGroup {
             let c2_healthy = c2.conn.close_reason().is_none();
             match (c1_healthy, c2_healthy) {
                 (true, true) => {
-                    if c1.inflight.load(Ordering::Relaxed) <= c2.inflight.load(Ordering::Relaxed) {
+                    if inflight_load(&c1.inflight, std::sync::atomic::Ordering::Relaxed)
+                        <= inflight_load(&c2.inflight, std::sync::atomic::Ordering::Relaxed)
+                    {
                         Some(c1.clone())
                     } else {
                         Some(c2.clone())
@@ -116,7 +117,7 @@ impl ClientGroup {
                 (false, false) => pick_least_inflight(
                     conns.as_slice(),
                     |c| c.conn.close_reason().is_none(),
-                    |c| c.inflight.load(Ordering::Relaxed),
+                    |c| inflight_load(&c.inflight, std::sync::atomic::Ordering::Relaxed),
                 )
                 .cloned(),
             }
@@ -124,7 +125,7 @@ impl ClientGroup {
             pick_least_inflight(
                 conns.as_slice(),
                 |c| c.conn.close_reason().is_none(),
-                |c| c.inflight.load(Ordering::Relaxed),
+                |c| inflight_load(&c.inflight, std::sync::atomic::Ordering::Relaxed),
             )
             .cloned()
         }

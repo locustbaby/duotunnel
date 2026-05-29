@@ -1,62 +1,16 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
+use crate::timeout as lazy_timeout;
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::Request;
-use pin_project_lite::pin_project;
 use quinn::{RecvStream, SendStream};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::debug;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
-pin_project! {
-    struct LazyTimeout<F> {
-        #[pin]
-        future: F,
-        deadline: Instant,
-        #[pin]
-        timer: Option<tokio::time::Sleep>,
-    }
-}
-
-impl<F, T> Future for LazyTimeout<F>
-where
-    F: Future<Output = T>,
-{
-    type Output = Result<T, ()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        if let Poll::Ready(v) = this.future.poll(cx) {
-            return Poll::Ready(Ok(v));
-        }
-        if this.timer.as_ref().as_pin_ref().is_none() {
-            this.timer.set(Some(tokio::time::sleep_until(
-                tokio::time::Instant::from_std(*this.deadline),
-            )));
-        }
-        if let Some(timer) = this.timer.as_mut().as_pin_mut() {
-            if timer.poll(cx).is_ready() {
-                return Poll::Ready(Err(()));
-            }
-        }
-        Poll::Pending
-    }
-}
-
-fn lazy_timeout<F: Future>(duration: Duration, future: F) -> LazyTimeout<F> {
-    LazyTimeout {
-        future,
-        deadline: Instant::now() + duration,
-        timer: None,
-    }
-}
 pub struct HttpPeer {
     pub connector: SharedHttpConnector,
     pub spec: HttpPeerSpec,
@@ -87,7 +41,7 @@ impl HttpPeer {
                     debug!(upstream = %upstream, error = %e, "H1 keep-alive: read_request error, closing");
                     break;
                 }
-                Err(()) => {
+                Err(_) => {
                     debug!(upstream = %upstream, "H1 keep-alive: idle timeout, closing");
                     break;
                 }

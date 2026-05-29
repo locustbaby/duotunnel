@@ -7,22 +7,42 @@ thread_local! {
     static ROTATING_INDEX: Cell<usize> = const { Cell::new(0) };
 }
 
-pub type InflightCounter = Arc<CachePadded<AtomicUsize>>;
-
-pub fn new_inflight_counter() -> InflightCounter {
-    Arc::new(CachePadded::new(AtomicUsize::new(0)))
+pub struct InflightCounts {
+    pending_opens: AtomicUsize,
+    active_streams: AtomicUsize,
 }
 
-pub struct InflightGuard(InflightCounter);
+pub type InflightCounter = Arc<CachePadded<InflightCounts>>;
+
+pub fn new_inflight_counter() -> InflightCounter {
+    Arc::new(CachePadded::new(InflightCounts {
+        pending_opens: AtomicUsize::new(0),
+        active_streams: AtomicUsize::new(0),
+    }))
+}
+
+enum InflightPhase {
+    PendingOpen,
+    ActiveStream,
+}
+
+pub struct InflightGuard {
+    counter: InflightCounter,
+    phase: InflightPhase,
+}
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let mut current = self.0.load(Ordering::Relaxed);
+        let counter = match self.phase {
+            InflightPhase::PendingOpen => &self.counter.pending_opens,
+            InflightPhase::ActiveStream => &self.counter.active_streams,
+        };
+        let mut current = counter.load(Ordering::Relaxed);
         loop {
             if current == 0 {
                 break;
             }
-            match self.0.compare_exchange_weak(
+            match counter.compare_exchange_weak(
                 current,
                 current - 1,
                 Ordering::Relaxed,
@@ -36,8 +56,24 @@ impl Drop for InflightGuard {
 }
 
 pub fn begin_inflight(counter: &InflightCounter) -> InflightGuard {
-    counter.fetch_add(1, Ordering::Relaxed);
-    InflightGuard(counter.clone())
+    counter.pending_opens.fetch_add(1, Ordering::Relaxed);
+    InflightGuard {
+        counter: counter.clone(),
+        phase: InflightPhase::PendingOpen,
+    }
+}
+
+impl InflightGuard {
+    pub fn promote(mut self) -> Self {
+        self.counter.pending_opens.fetch_sub(1, Ordering::Relaxed);
+        self.counter.active_streams.fetch_add(1, Ordering::Relaxed);
+        self.phase = InflightPhase::ActiveStream;
+        self
+    }
+}
+
+pub fn inflight_load(counter: &InflightCounter, ordering: Ordering) -> usize {
+    counter.pending_opens.load(ordering) + counter.active_streams.load(ordering)
 }
 
 pub fn pick_least_inflight<T, H, I>(items: &[T], is_healthy: H, inflight: I) -> Option<&T>

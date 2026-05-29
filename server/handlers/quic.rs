@@ -43,7 +43,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
     let login_timeout = Duration::from_secs(state.config.server.login_timeout_secs);
-    let (mut send, mut recv) = match tokio::time::timeout(login_timeout, conn.accept_bi()).await {
+    let (mut send, mut recv) = match tunnel_lib::timeout(login_timeout, conn.accept_bi()).await {
         Ok(Ok(streams)) => streams,
         Ok(Err(e)) => return Err(e.into()),
         Err(_elapsed) => {
@@ -55,7 +55,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
             return Ok(());
         }
     };
-    let msg_type = match tokio::time::timeout(login_timeout, recv_message_type(&mut recv)).await {
+    let msg_type = match tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv)).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
@@ -88,7 +88,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         }
         return Ok(());
     }
-    let login: Login = match tokio::time::timeout(login_timeout, recv_message(&mut recv)).await {
+    let login: Login = match tunnel_lib::timeout(login_timeout, recv_message(&mut recv)).await {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {

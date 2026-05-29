@@ -49,7 +49,7 @@ impl IngressProtocolHandler for TcpPassHandler {
         };
 
         tunnel_lib::maybe_slow_path(
-            || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            || tunnel_lib::inflight_load(&selected.inflight, std::sync::atomic::Ordering::Relaxed),
             &ctx.overload,
         )
         .await;

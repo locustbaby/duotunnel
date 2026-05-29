@@ -81,6 +81,6 @@ pub fn open_bi_observe_wait_ms(wait_ms: f64) {
     metrics::histogram!("duotunnel_open_bi_wait_ms").record(wait_ms);
 }
 
-pub fn open_bi_stream_limit() {
-    metrics::counter!("duotunnel_open_bi_stream_limit_total").increment(1);
+pub fn open_bi_timed_out() {
+    metrics::counter!("duotunnel_open_bi_timed_out_total").increment(1);
 }

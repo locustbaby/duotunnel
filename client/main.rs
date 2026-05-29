@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 #[cfg(feature = "dial9-telemetry")]
 use tracing::error;
@@ -266,14 +265,14 @@ pub(crate) async fn run_client(
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
     let login_timeout = Duration::from_millis(config.reconnect.login_timeout_ms);
-    let (mut send, mut recv) = timeout(login_timeout, conn.open_bi())
+    let (mut send, mut recv) = tunnel_lib::timeout(login_timeout, conn.open_bi())
         .await
         .map_err(|_| ConnectError::transient(anyhow!("open_bi timed out")))?
         .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
     let login = Login {
         token: config.auth_token.clone(),
     };
-    timeout(
+    tunnel_lib::timeout(
         login_timeout,
         send_message(&mut send, MessageType::Login, &login),
     )
@@ -281,7 +280,7 @@ pub(crate) async fn run_client(
     .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
     .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
     debug!("Login message sent");
-    let msg_type = timeout(login_timeout, recv_message_type(&mut recv))
+    let msg_type = tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv))
         .await
         .map_err(|_| ConnectError::transient(anyhow!("waiting login response timed out")))?
         .map_err(|e| {
@@ -293,7 +292,7 @@ pub(crate) async fn run_client(
             msg_type
         )));
     }
-    let resp: LoginResp = timeout(login_timeout, recv_message(&mut recv))
+    let resp: LoginResp = tunnel_lib::timeout(login_timeout, recv_message(&mut recv))
         .await
         .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
         .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
@@ -370,7 +369,7 @@ async fn connect_to_server(
         let connecting = endpoint
             .connect(addr, &sni)
             .map_err(|e| ConnectError::transient(anyhow!("connect setup failed: {}", e)))?;
-        match timeout(connect_timeout, connecting).await {
+        match tunnel_lib::timeout(connect_timeout, connecting).await {
             Ok(Ok(conn)) => return Ok(conn),
             Ok(Err(e)) => {
                 errors.push(format!("{}: {}", addr, e));
@@ -394,7 +393,7 @@ async fn resolve_server_addresses(
     let resolve_timeout = Duration::from_millis(config.reconnect.resolve_timeout_ms);
     let host = config.server_addr.clone();
     let lookup = tokio::net::lookup_host((host.as_str(), config.server_port));
-    let resolved = timeout(resolve_timeout, lookup)
+    let resolved = tunnel_lib::timeout(resolve_timeout, lookup)
         .await
         .map_err(|_| {
             ConnectError::transient(anyhow!(

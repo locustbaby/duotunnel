@@ -58,7 +58,7 @@ impl IngressProtocolHandler for H1Handler {
             .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
         tunnel_lib::maybe_slow_path(
-            || selected.inflight.load(std::sync::atomic::Ordering::Relaxed),
+            || tunnel_lib::inflight_load(&selected.inflight, std::sync::atomic::Ordering::Relaxed),
             &ctx.overload,
         )
         .await;

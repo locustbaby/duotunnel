@@ -94,7 +94,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ─── Preflight: binaries ──────────────────────────────────────────────────────
+# ─── Preflight: clippy & binaries ─────────────────────────────────────────────
+log "Running cargo clippy ..."
+cargo clippy --workspace || exit 1
+
 log "Checking binaries in $BIN ..."
 for b in server client tunnel-ctld http-echo-server ws-echo-server grpc-echo-server ci-test-client; do
   [[ -x "$BIN/$b" ]] || {

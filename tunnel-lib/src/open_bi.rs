@@ -1,12 +1,13 @@
 use crate::error::ProxyError;
 use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
+use crate::timeout;
 use quinn::{Connection, RecvStream, SendStream};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum OpenBiOutcome {
     Ok,
-    StreamLimit,
+    TimedOut,
     ConnectionLost,
     ConnectionFatal,
 }
@@ -43,13 +44,7 @@ where
 {
     let guard = begin_inflight(inflight);
     let started = Instant::now();
-    let open_fut = conn.open_bi();
-    tokio::pin!(open_fut);
-    let result = if let std::task::Poll::Ready(res) = futures_util::poll!(&mut open_fut) {
-        Ok(res)
-    } else {
-        tokio::time::timeout(stream_timeout, open_fut).await
-    };
+    let result = timeout(stream_timeout, conn.open_bi()).await;
     let elapsed = started.elapsed();
     match result {
         Ok(Ok((send, recv))) => {
@@ -57,7 +52,7 @@ where
             Ok(OpenedStream {
                 send,
                 recv,
-                inflight: guard,
+                inflight: guard.promote(),
             })
         }
         Ok(Err(e)) => {
@@ -66,8 +61,8 @@ where
             Err(err)
         }
         Err(_) => {
-            on_wait_done(elapsed, OpenBiOutcome::StreamLimit);
-            Err(ProxyError::quic_stream_limit(stream_timeout))
+            on_wait_done(elapsed, OpenBiOutcome::TimedOut);
+            Err(ProxyError::quic_open_timed_out(stream_timeout))
         }
     }
 }
