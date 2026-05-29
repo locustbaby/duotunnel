@@ -55,7 +55,18 @@ impl ClientEngine {
                 }
             }
         }
-        while handles.next().await.is_some() {}
+        shutdown.cancel();
+        while let Some(res) = handles.next().await {
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "secondary service error during shutdown drain");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "secondary service panicked during shutdown drain");
+                }
+            }
+        }
         match first_err {
             Some(err) => Err(err),
             None => Ok(()),

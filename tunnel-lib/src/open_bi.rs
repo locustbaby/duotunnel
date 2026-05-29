@@ -43,7 +43,13 @@ where
 {
     let guard = begin_inflight(inflight);
     let started = Instant::now();
-    let result = tokio::time::timeout(stream_timeout, conn.open_bi()).await;
+    let open_fut = conn.open_bi();
+    tokio::pin!(open_fut);
+    let result = if let std::task::Poll::Ready(res) = futures_util::poll!(&mut open_fut) {
+        Ok(res)
+    } else {
+        tokio::time::timeout(stream_timeout, open_fut).await
+    };
     let elapsed = started.elapsed();
     match result {
         Ok(Ok((send, recv))) => {

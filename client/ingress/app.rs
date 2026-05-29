@@ -88,7 +88,9 @@ impl LocalProxyMap {
             return Ok(addr);
         }
         let parsed = tunnel_lib::transport::addr::parse_upstream(connect_addr_str);
-        let addrs = self.resolver.resolve(&parsed.host, parsed.port).await?;
+        let mut addrs = self.resolver.resolve(&parsed.host, parsed.port).await?;
+        use rand::seq::SliceRandom;
+        addrs.shuffle(&mut rand::rng());
         addrs
             .into_iter()
             .next()

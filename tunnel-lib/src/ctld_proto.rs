@@ -170,7 +170,9 @@ where
         return Err(anyhow!("Message too large: {} bytes", len));
     }
     let mut buf = AlignedVec::<16>::with_capacity(len);
-    buf.resize(len, 0);
+    unsafe {
+        buf.set_len(len);
+    }
     reader.read_exact(&mut buf[..]).await?;
 
     decode_rkyv::<WatchRequest>(&buf)

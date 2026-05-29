@@ -108,21 +108,22 @@ impl JitterBackoff {
     fn next_delay(&mut self) -> Duration {
         let cap = self.current;
         self.current = std::cmp::min(self.current.saturating_mul(2), self.max);
-        random_delay_up_to(cap).max(Duration::from_millis(1))
+        let min_delay = cap / 2;
+        random_delay_range(min_delay, cap).max(Duration::from_millis(1))
     }
 }
-fn random_delay_up_to(cap: Duration) -> Duration {
+fn random_delay_range(min: Duration, max: Duration) -> Duration {
     use rand::Rng;
-    let max_ms_u128 = cap.as_millis();
-    if max_ms_u128 == 0 {
-        return Duration::ZERO;
+    let min_ms = min.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    if min_ms >= max_ms {
+        return min;
     }
-    let max_ms = std::cmp::min(max_ms_u128, u64::MAX as u128) as u64;
-    if max_ms <= 1 {
-        return Duration::from_millis(max_ms);
-    }
-    let jitter_ms = rand::rng().random_range(1..=max_ms);
+    let jitter_ms = rand::rng().random_range(min_ms..=max_ms);
     Duration::from_millis(jitter_ms)
+}
+fn random_delay_up_to(cap: Duration) -> Duration {
+    random_delay_range(Duration::ZERO, cap)
 }
 pub fn classify_login_failure(resp_error: Option<&str>) -> ConnectError {
     let msg = resp_error.unwrap_or("unknown login error");

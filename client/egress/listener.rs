@@ -102,7 +102,7 @@ async fn handle_entry_connection(
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
     let mut buf = peek_pool.take();
-    let n = local_stream.peek(&mut buf).await?;
+    let n = local_stream.read(&mut buf).await?;
     let initial_bytes = bytes::Bytes::copy_from_slice(&buf[..n]);
     peek_pool.put(buf);
 
@@ -145,12 +145,6 @@ async fn handle_entry_connection(
                 send_routing_info(&mut send, &routing_info).await?;
                 if !initial_bytes.is_empty() {
                     send.write_all(&initial_bytes).await?;
-                    let mut discard_buf = peek_pool.take();
-                    let result = local_stream
-                        .read_exact(&mut discard_buf[..initial_bytes.len()])
-                        .await;
-                    peek_pool.put(discard_buf);
-                    result?;
                 }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 debug!(

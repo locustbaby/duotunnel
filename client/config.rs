@@ -59,28 +59,27 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
             max_concurrent_streams: c.max_concurrent_streams,
             stream_receive_window_bytes: c
                 .stream_window_mb
-                .map(|mb| mb * 1024 * 1024)
+                .map(|mb| mb.saturating_mul(1024 * 1024))
                 .unwrap_or(d.stream_receive_window_bytes),
             connection_receive_window_bytes: c
                 .connection_window_mb
-                .map(|mb| mb * 1024 * 1024)
+                .map(|mb| mb.saturating_mul(1024 * 1024))
                 .unwrap_or(d.connection_receive_window_bytes),
-            // send_window_mb takes priority; falls back to connection_window_mb then default.
             send_window_bytes: c
                 .send_window_mb
                 .or(c.connection_window_mb)
-                .map(|mb| mb * 1024 * 1024)
+                .map(|mb| mb.saturating_mul(1024 * 1024))
                 .unwrap_or(d.send_window_bytes),
             keepalive_secs: c.keepalive_secs.unwrap_or(d.keepalive_secs),
             idle_timeout_secs: c.idle_timeout_secs.unwrap_or(d.idle_timeout_secs),
             congestion: c.congestion.clone().or(d.congestion),
             udp_recv_buf_bytes: c
                 .udp_recv_buf_mb
-                .map(|mb| mb as usize * 1024 * 1024)
+                .map(|mb| (mb as usize).saturating_mul(1024 * 1024))
                 .unwrap_or(d.udp_recv_buf_bytes),
             udp_send_buf_bytes: c
                 .udp_send_buf_mb
-                .map(|mb| mb as usize * 1024 * 1024)
+                .map(|mb| (mb as usize).saturating_mul(1024 * 1024))
                 .unwrap_or(d.udp_send_buf_bytes),
         }
     }
@@ -302,6 +301,20 @@ impl ClientConfigFile {
         if let Some(name) = self.tls_server_name.as_ref() {
             if name.trim().is_empty() {
                 errors.push("tls_server_name must not be empty when set".into());
+            }
+        }
+        if self.overload.inflight_yield_threshold > self.overload.inflight_sleep_threshold {
+            errors.push(format!(
+                "overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
+                self.overload.inflight_yield_threshold, self.overload.inflight_sleep_threshold
+            ));
+        }
+        if let (Some(ypct), Some(spct)) = (self.overload.inflight_yield_pct, self.overload.inflight_sleep_pct) {
+            if ypct > spct {
+                errors.push(format!(
+                    "overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",
+                    ypct, spct
+                ));
             }
         }
         if errors.is_empty() {

@@ -31,14 +31,17 @@ where
     };
     let stream_to_quic = async {
         let bytes = tokio::io::copy_buf(&mut stream_read, &mut quic_send).await?;
-        let _ = quic_send.finish();
+        if let Err(e) = quic_send.finish() {
+            tracing::warn!(?e, "failed to finish quic send stream");
+        }
         Ok::<_, std::io::Error>(bytes)
     };
-    let (r1, r2) = tokio::join!(quic_to_stream, stream_to_quic);
-    debug!(quic_to_stream = ?r1, stream_to_quic = ?r2, "relay completed");
-    match (r1, r2) {
-        (Ok(a), Ok(b)) => Ok((a, b)),
-        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+    match tokio::try_join!(quic_to_stream, stream_to_quic) {
+        Ok((a, b)) => {
+            debug!(quic_to_stream = a, stream_to_quic = b, "relay completed");
+            Ok((a, b))
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
