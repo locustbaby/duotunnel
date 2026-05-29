@@ -39,9 +39,16 @@ pub async fn run_accept_worker<H>(
                         on_conn(stream, peer_addr);
                     }
                     Err(e) => {
-                        if e.raw_os_error() == Some(24) {
+                        let os_err = e.raw_os_error();
+                        if os_err == Some(24) || os_err == Some(23) {
                             warn!(tag = tag, "accept: too many open files, backing off");
-                            tokio::time::sleep(emfile_backoff).await;
+                            tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    debug!(tag = tag, "accept worker cancelled during backoff");
+                                    return;
+                                }
+                                _ = tokio::time::sleep(emfile_backoff) => {}
+                            }
                         } else {
                             warn!(tag = tag, error = %e, "accept error");
                         }

@@ -44,12 +44,15 @@ impl OverloadLimits {
         backoff: BackoffStrategy,
     ) -> Self {
         let max = max_concurrent_streams as usize;
-        let yield_t = yield_pct
+        let mut yield_t = yield_pct
             .map(|p| ((p.clamp(0.0, 1.0) as f64) * max as f64).round() as usize)
             .unwrap_or(yield_abs);
         let sleep_t = sleep_pct
             .map(|p| ((p.clamp(0.0, 1.0) as f64) * max as f64).round() as usize)
             .unwrap_or(sleep_abs);
+        if yield_t > sleep_t {
+            yield_t = sleep_t;
+        }
         Self {
             mode,
             inflight_yield_threshold: yield_t,
@@ -97,7 +100,7 @@ where
     if budget.is_zero() {
         return;
     }
-    let min = (budget / 16).max(Duration::from_micros(50));
+    let min = (budget / 16).max(Duration::from_millis(1));
     let max = budget / 4;
     let deadline = tokio::time::Instant::now() + budget;
     let mut delay = min;

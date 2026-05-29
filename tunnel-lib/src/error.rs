@@ -87,7 +87,6 @@ impl ErrorKind {
             | ErrorKind::RouteNotFound
             | ErrorKind::UnsupportedProtocol
             | ErrorKind::DownstreamConnection
-            | ErrorKind::TlsHandshake
             | ErrorKind::H2cMissingAuthority
             | ErrorKind::H2cMisdirected
             | ErrorKind::H2cNoRoute => ErrorSource::Downstream,
@@ -96,6 +95,7 @@ impl ErrorKind {
             | ErrorKind::ResolveUpstream
             | ErrorKind::UpstreamConnect
             | ErrorKind::UpstreamForward
+            | ErrorKind::TlsHandshake
             | ErrorKind::HttpUpstreamRequest
             | ErrorKind::H2cNoClient
             | ErrorKind::H2cForward => ErrorSource::Upstream,
@@ -315,12 +315,12 @@ impl ProxyError {
             | ErrorKind::ResolveUpstream
             | ErrorKind::UpstreamConnect
             | ErrorKind::UpstreamForward
+            | ErrorKind::TlsHandshake
             | ErrorKind::H2cRouteResolve
             | ErrorKind::H2cForward => StatusCode::BAD_GATEWAY,
             ErrorKind::RoutingMissingInfo
             | ErrorKind::RoutingMissingHost
             | ErrorKind::UnsupportedProtocol
-            | ErrorKind::TlsHandshake
             | ErrorKind::H2cMissingAuthority => StatusCode::BAD_REQUEST,
             ErrorKind::H2cMisdirected => StatusCode::MISDIRECTED_REQUEST,
             ErrorKind::RouteNotFound | ErrorKind::H2cNoRoute => StatusCode::NOT_FOUND,

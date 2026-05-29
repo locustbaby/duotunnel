@@ -99,7 +99,7 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
                     ("503 Service Unavailable", "not ready\n")
                 }
             } else {
-                ("200 OK", "ok\n")
+                ("400 Bad Request", "bad request\n")
             };
             let response = format!(
                 "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",

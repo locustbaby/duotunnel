@@ -21,15 +21,12 @@ where
         let _ = a_write.shutdown().await;
         Ok::<_, std::io::Error>(bytes)
     };
-    let (sent, recv) = tokio::join!(a_to_b, b_to_a);
-    debug!("relay completed: sent={:?}, recv={:?}", sent, recv);
-    match (sent, recv) {
-        (Ok(a), Ok(b)) => Ok((a, b)),
-        (Err(e1), Err(e2)) => {
-            debug!("relay: both directions failed; suppressed: {}", e2);
-            Err(e1)
+    match tokio::try_join!(a_to_b, b_to_a) {
+        Ok((sent, recv)) => {
+            debug!("relay completed: sent={:?}, recv={:?}", sent, recv);
+            Ok((sent, recv))
         }
-        (Err(e), _) | (_, Err(e)) => Err(e),
+        Err(e) => Err(e),
     }
 }
 pub async fn relay_unidirectional<R, W>(reader: R, mut writer: W) -> std::io::Result<u64>
@@ -77,21 +74,17 @@ pub async fn relay_with_first_data(
     };
     let tcp_to_quic = async {
         let bytes = tokio::io::copy_buf(&mut tcp_read, &mut quic_send).await?;
-        let _ = quic_send.finish();
+        if let Err(e) = quic_send.finish() {
+            tracing::warn!(?e, "failed to finish quic send stream");
+        }
         Ok::<_, std::io::Error>(bytes)
     };
-    let (sent, recv) = tokio::join!(quic_to_tcp, tcp_to_quic);
-    debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
-    match (sent, recv) {
-        (Ok(a), Ok(b)) => Ok((a, b)),
-        (Err(e1), Err(e2)) => {
-            debug!(
-                "relay_with_first_data: both directions failed; suppressed: {}",
-                e2
-            );
-            Err(e1.into())
+    match tokio::try_join!(quic_to_tcp, tcp_to_quic) {
+        Ok((sent, recv)) => {
+            debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
+            Ok((sent, recv))
         }
-        (Err(e), _) | (_, Err(e)) => Err(e.into()),
+        Err(e) => Err(e.into()),
     }
 }
 

@@ -19,9 +19,9 @@ pub async fn handle_work_stream(
         src = format!("{}:{}", routing_info.src_addr, routing_info.src_port),
         "received work stream"
     );
-    let client_addr = format!("{}:{}", routing_info.src_addr, routing_info.src_port)
-        .parse()
-        .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+    let ip = routing_info.src_addr.parse::<std::net::IpAddr>()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let client_addr = std::net::SocketAddr::new(ip, routing_info.src_port);
     let app = ClientApp::new(proxy_map, tcp_params);
     let engine = ProxyEngine::new(app);
     engine

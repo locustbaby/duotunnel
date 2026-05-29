@@ -95,15 +95,28 @@ impl AuthStore for SqliteAuthStore {
         const HASH_PREFIX_HEX_LEN: usize = 16;
         const MAX_CANDIDATES: usize = 8;
         let prefix = &candidate_hex[..HASH_PREFIX_HEX_LEN];
+        let mut prefix_end = prefix.to_string();
+        if let Some(last_char) = prefix_end.chars().last() {
+            let next_char = match last_char {
+                '0'..='8' => char::from_u32(last_char as u32 + 1).unwrap(),
+                '9' => 'a',
+                'a'..='e' => char::from_u32(last_char as u32 + 1).unwrap(),
+                'f' => 'g',
+                _ => last_char,
+            };
+            prefix_end.pop();
+            prefix_end.push(next_char);
+        }
         let rows = sqlx::query(
             "SELECT c.name as client_name, c.status as client_status,
                         t.token_hash, t.status as token_status
              FROM client_tokens t
              JOIN clients c ON c.id = t.client_id
-             WHERE substr(t.token_hash, 1, 16) = ?
+             WHERE t.token_hash >= ? AND t.token_hash < ?
              LIMIT 9",
         )
         .bind(prefix)
+        .bind(&prefix_end)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| AuthError::Internal(e.into()))?;

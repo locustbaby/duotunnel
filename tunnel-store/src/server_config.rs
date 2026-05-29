@@ -280,7 +280,42 @@ impl ServerConfigFile {
                     .split("__"),
             )
             .extract()?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+    pub fn validate(&self) -> Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+        if self.server.tunnel_port == 0 {
+            errors.push("server.tunnel_port must not be 0".into());
+        }
+        if self.server.login_timeout_secs == 0 {
+            errors.push("server.login_timeout_secs must be >= 1".into());
+        }
+        if self.server.open_stream_timeout_ms == 0 {
+            errors.push("server.open_stream_timeout_ms must be >= 1".into());
+        }
+        if self.server.overload.inflight_yield_threshold > self.server.overload.inflight_sleep_threshold {
+            errors.push(format!(
+                "server.overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
+                self.server.overload.inflight_yield_threshold, self.server.overload.inflight_sleep_threshold
+            ));
+        }
+        if let (Some(ypct), Some(spct)) = (self.server.overload.inflight_yield_pct, self.server.overload.inflight_sleep_pct) {
+            if ypct > spct {
+                errors.push(format!(
+                    "server.overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",
+                    ypct, spct
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Server config validation failed:\n  - {}",
+                errors.join("\n  - ")
+            ))
+        }
     }
 }
 
