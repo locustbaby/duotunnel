@@ -700,6 +700,28 @@ jobs:
 
       - name: "[Standalone] 7-J: token rotate — new token works"
         run: |
+          dump_rotate_diag() {
+            echo "=== token-rotate diagnostics ==="
+            echo "run_id=${{ github.run_id }} job=${{ github.job }} step=7-J"
+            echo "artifact_hint=ci-logs-${{ github.run_id }}"
+            echo "time=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "=== client pid ==="
+            cat /tmp/sa-client.pid 2>/dev/null || true
+            echo "=== listening ports ==="
+            ss -ltnp '( sport = :8180 or sport = :9091 or sport = :9092 or sport = :10087 )' 2>/dev/null || true
+            echo "=== recent server key events ==="
+            grep -E "registering client|unregistering client|authenticated|connection closed|accept_bi error|open_bi|timed out|no healthy clients|no client for group" /tmp/sa-server.log 2>/dev/null | tail -80 || true
+            echo "=== recent client key events ==="
+            grep -E "Connected to server|Login successful|connection closed|open_bi|timed out|accept_bi failed|work stream error|entry connection error" /tmp/sa-client2.log 2>/dev/null | tail -80 || true
+            echo "=== server tail ==="
+            tail -80 /tmp/sa-server.log 2>/dev/null || true
+            echo "=== client tail ==="
+            tail -80 /tmp/sa-client2.log 2>/dev/null || true
+            echo "=== curl warmup ==="
+            curl -sv --max-time 5 -H "Accept: text/markdown" http://echo.local:8180/ >/tmp/sa-rotate-curl.out 2>/tmp/sa-rotate-curl.err || true
+            cat /tmp/sa-rotate-curl.err 2>/dev/null || true
+            cat /tmp/sa-rotate-curl.out 2>/dev/null || true
+          }
           NEW_TOKEN=$(./target/release/server --config ci-helpers/configs/server-standalone.yaml \
             token rotate --name ci-standalone 2>/dev/null | tail -1)
           if [ -z "$NEW_TOKEN" ]; then
@@ -724,6 +746,7 @@ jobs:
           done
           if [ "$UNREGISTERED" -ne 1 ]; then
             echo "ERROR: server did not unregister old client after kill"
+            dump_rotate_diag
             exit 1
           fi
           python3 -c "
@@ -744,22 +767,32 @@ jobs:
           done
           if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
             echo "ERROR: client did not reconnect after token rotate"
-            echo "=== server ===" && tail -30 /tmp/sa-server.log
-            echo "=== client ===" && cat /tmp/sa-client2.log
+            dump_rotate_diag
             exit 1
           fi
           if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
             echo "ERROR: standalone client healthz not ready after token rotate"
-            echo "=== server ===" && tail -30 /tmp/sa-server.log
-            echo "=== client ===" && cat /tmp/sa-client2.log
+            dump_rotate_diag
             exit 1
           fi
-          # Warmup: wait for QUIC streams to be ready for traffic.
+          WARMUP_OK=0
           for i in $(seq 1 10); do
-            curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1 && break
+            if curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1; then
+              WARMUP_OK=1
+              break
+            fi
             sleep 0.5
           done
-          ./target/release/ci-test-client http "http://echo.local:8180/"
+          if [ "$WARMUP_OK" -ne 1 ]; then
+            echo "ERROR: token rotate warmup failed"
+            dump_rotate_diag
+            exit 1
+          fi
+          if ! ./target/release/ci-test-client http "http://echo.local:8180/"; then
+            echo "ERROR: token rotate final request failed"
+            dump_rotate_diag
+            exit 1
+          fi
           echo "Token rotate + reconnect OK"
 
       # ─── Diagnostics ─────────────────────────────────────────────────────────
