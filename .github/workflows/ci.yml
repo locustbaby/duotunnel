@@ -706,16 +706,26 @@ jobs:
             echo "ERROR: token rotate returned empty output"; exit 1
           fi
           echo "New token after rotate: $NEW_TOKEN"
-          # Count server registrations before kill so we can detect unregistration.
           REG_BEFORE=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || true)
           REG_BEFORE=${REG_BEFORE:-0}
-          kill "$(cat /tmp/sa-client.pid 2>/dev/null)" 2>/dev/null || true
-          for i in $(seq 1 15); do
+          PID=$(cat /tmp/sa-client.pid 2>/dev/null)
+          if [ -n "$PID" ]; then
+            kill -9 "$PID" 2>/dev/null || true
+          fi
+          UNREGISTERED=0
+          for i in $(seq 1 60); do
             REG_NOW=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || true)
             REG_NOW=${REG_NOW:-0}
-            [ "$REG_NOW" -gt "$REG_BEFORE" ] && break
+            if [ "$REG_NOW" -gt "$REG_BEFORE" ]; then
+              UNREGISTERED=1
+              break
+            fi
             sleep 0.5
           done
+          if [ "$UNREGISTERED" -ne 1 ]; then
+            echo "ERROR: server did not unregister old client after kill"
+            exit 1
+          fi
           python3 -c "
           import re, sys
           f = 'ci-helpers/configs/client.yaml'
