@@ -15,3 +15,4 @@ pub use rules::{
 pub use sqlite::open_sqlite_pool;
 pub use token::{generate_token, hash_token, hash_token_bytes};
 pub use traits::{AuthError, AuthResult, AuthStore, TokenListEntry};
+pub use tunnel_lib::{ClientStatus, TokenStatus};

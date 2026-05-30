@@ -6,14 +6,16 @@
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    send_watch_request, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, WatchEvent, WatchRequest,
+    send_watch_request, ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent,
+    WatchRequest,
 };
 use tunnel_lib::models::msg::{recv_typed_message, MessageType};
 
@@ -90,6 +92,7 @@ async fn connect_and_watch(
     let stream = TcpStream::connect(addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let mut current_snapshot: Option<ConfigSnapshot> = None;
 
     // Step 1: send WatchRequest
     let req = WatchRequest {
@@ -111,13 +114,17 @@ async fn connect_and_watch(
             WatchEvent::Snapshot(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
-                apply_snapshot(snap, state);
+                apply_snapshot(&snap, state).await;
+                current_snapshot = Some(snap);
                 *last_version = v;
             }
-            WatchEvent::Patch(snap) => {
-                let v = snap.resource_version;
+            WatchEvent::Patch(patch) => {
+                let v = patch.resource_version;
                 info!(resource_version = v, "received Patch from ctld");
-                apply_snapshot(snap, state);
+                if let Some(snapshot) = current_snapshot.as_mut() {
+                    let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
+                    apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await;
+                }
                 *last_version = v;
             }
         }
@@ -128,11 +135,16 @@ async fn connect_and_watch(
 }
 
 /// Apply a ConfigSnapshot to both the routing ArcSwap and the token cache.
-fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
-    // Update token cache
+async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
+    update_token_cache(&snap.token_cache, state);
+    let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state);
+    crate::sync_all_listeners(state, &listeners).await;
+    state.routing.store(Arc::new(routing_snapshot));
+}
+
+fn update_token_cache(entries: &[tunnel_lib::shared::TokenCacheEntryDef], state: &Arc<ServerState>) {
     if let Some(cache) = state.local_token_cache.as_ref() {
-        let entries: Vec<CacheEntry> = snap
-            .token_cache
+        let entries: Vec<CacheEntry> = entries
             .iter()
             .filter_map(|e| {
                 let bytes = match hex::decode(&e.hash_hex) {
@@ -149,26 +161,100 @@ fn apply_snapshot(snap: ConfigSnapshot, state: &Arc<ServerState>) {
                 Some(CacheEntry {
                     hash_bytes: bytes,
                     client_group: e.client_group.clone(),
-                    client_status: e.client_status.clone(),
-                    token_status: e.token_status.clone(),
+                    client_status: e.client_status,
+                    token_status: e.token_status,
                 })
             })
             .collect();
         cache.update(entries);
     }
+}
 
-    // Convert proto routing types → server config types, then build snapshot
+fn build_runtime_snapshot(
+    snap: &ConfigSnapshot,
+    state: &Arc<ServerState>,
+) -> (Vec<IngressListener>, crate::RoutingSnapshot) {
     let tm = proto_to_tunnel_management(&snap.ingress_listeners, &snap.client_groups);
     let egress = proto_to_server_egress(&snap.egress_upstreams, &snap.egress_vhost_rules);
     let http_params = tunnel_lib::HttpClientParams::from(&state.config.server.http_pool);
     let routing_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
-
-    // Sync listeners BEFORE swapping the routing table: a listener that hasn't
-    // started yet returns 503 (recoverable), while a route pointing to a port
-    // with no listener silently drops the connection (unrecoverable from client POV).
     let listeners = tm.server_ingress_routing.listeners.clone();
-    crate::sync_listeners(state, &listeners);
+    (listeners, routing_snapshot)
+}
+
+async fn apply_patch_to_runtime(
+    snapshot: &ConfigSnapshot,
+    patch: &ConfigPatch,
+    affected_ports: &HashSet<u16>,
+    state: &Arc<ServerState>,
+) {
+    update_token_cache(&snapshot.token_cache, state);
+    let touches_routing = !patch.ingress_listeners.is_empty()
+        || !patch.client_groups.is_empty()
+        || !patch.egress_upstreams.is_empty()
+        || !patch.egress_vhost_rules.is_empty();
+    if !touches_routing {
+        return;
+    }
+    let (listeners, routing_snapshot) = build_runtime_snapshot(snapshot, state);
+    if !patch.ingress_listeners.is_empty() {
+        crate::sync_listener_subset(state, &listeners, affected_ports).await;
+    }
     state.routing.store(Arc::new(routing_snapshot));
+}
+
+fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {
+    snapshot.resource_version = patch.resource_version;
+    let affected_ports = patch
+        .ingress_listeners
+        .iter()
+        .filter_map(|op| match op {
+            ResourceOp::Upsert(item) => Some(item.port),
+            ResourceOp::Delete { key } => key.parse().ok(),
+        })
+        .collect();
+    apply_ops(
+        &mut snapshot.ingress_listeners,
+        &patch.ingress_listeners,
+        |item| item.port.to_string(),
+    );
+    apply_ops(&mut snapshot.client_groups, &patch.client_groups, |item| {
+        item.group_id.clone()
+    });
+    apply_ops(
+        &mut snapshot.egress_upstreams,
+        &patch.egress_upstreams,
+        |item| item.name.clone(),
+    );
+    apply_ops(
+        &mut snapshot.egress_vhost_rules,
+        &patch.egress_vhost_rules,
+        |item| item.match_host.clone(),
+    );
+    apply_ops(&mut snapshot.token_cache, &patch.token_cache, |item| {
+        item.hash_hex.clone()
+    });
+    affected_ports
+}
+
+fn apply_ops<T, F>(items: &mut Vec<T>, ops: &[ResourceOp<T>], key_of: F)
+where
+    T: Clone,
+    F: Fn(&T) -> String,
+{
+    let mut map: std::collections::BTreeMap<String, T> =
+        items.drain(..).map(|item| (key_of(&item), item)).collect();
+    for op in ops {
+        match op {
+            ResourceOp::Upsert(item) => {
+                map.insert(key_of(item), item.clone());
+            }
+            ResourceOp::Delete { key } => {
+                map.remove(key);
+            }
+        }
+    }
+    *items = map.into_values().collect();
 }
 
 // ── Type conversions: tunnel_store routing types → server config types ────────

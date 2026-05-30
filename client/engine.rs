@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[async_trait]
@@ -8,7 +9,7 @@ pub trait ClientService: Send + Sync {
 }
 
 pub struct ClientEngine {
-    services: Vec<Box<dyn ClientService>>,
+    services: Vec<Arc<dyn ClientService>>,
     shutdown: CancellationToken,
 }
 
@@ -20,7 +21,7 @@ impl ClientEngine {
         }
     }
 
-    pub fn add_service(&mut self, service: Box<dyn ClientService>) {
+    pub fn add_service(&mut self, service: Arc<dyn ClientService>) {
         self.services.push(service);
     }
 

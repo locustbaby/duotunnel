@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use quinn::Connection;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::{inflight_load, new_inflight_counter, pick_least_inflight, InflightCounter};
+use tunnel_lib::{inflight_load, new_inflight_table, pick_least_inflight, InflightSlotId, InflightTable};
 
 struct ClientInfo {
     group_id: String,
@@ -15,9 +15,8 @@ struct ClientInfo {
 pub struct SelectedConnection {
     pub conn_id: Arc<str>,
     pub conn: Connection,
-    /// Shared inflight counter for this specific connection slot.
-    /// Incremented by the caller before `open_bi`, decremented on drop via `InflightGuard`.
-    pub inflight: InflightCounter,
+    pub inflight_table: Arc<InflightTable>,
+    pub slot_id: InflightSlotId,
 }
 
 /// Per-group connection pool using RCU (Read-Copy-Update) for routing reads.
@@ -28,13 +27,12 @@ pub struct SelectedConnection {
 ///
 /// This replaces the previous `DashMap<String, Connection>` pattern that caused
 /// a heap allocation + many Arc reference-count bumps on *every* routing lookup.
-type ClientIndex = std::collections::HashMap<String, (Connection, InflightCounter)>;
+type ClientIndex = std::collections::HashMap<String, (Connection, InflightSlotId)>;
 
 pub struct ClientGroup {
-    /// Mutable index: client_id → (Connection, inflight counter).  Only touched by writers.
     index: Mutex<ClientIndex>,
-    /// Read-side snapshot.  Rebuilt on every write; readers pay only one atomic load.
     snapshot: ArcSwap<Vec<Arc<SelectedConnection>>>,
+    inflight_table: Arc<InflightTable>,
 }
 
 impl ClientGroup {
@@ -42,16 +40,21 @@ impl ClientGroup {
         Self {
             index: Mutex::new(std::collections::HashMap::new()),
             snapshot: ArcSwap::from_pointee(Vec::new()),
+            inflight_table: new_inflight_table(4096),
         }
     }
 
-    fn build_snapshot(idx: &ClientIndex) -> Vec<Arc<SelectedConnection>> {
+    fn build_snapshot(
+        table: &Arc<InflightTable>,
+        idx: &ClientIndex,
+    ) -> Vec<Arc<SelectedConnection>> {
         idx.iter()
-            .map(|(client_id, (conn, inflight))| {
+            .map(|(client_id, (conn, slot_id))| {
                 Arc::new(SelectedConnection {
                     conn_id: Arc::<str>::from(client_id.as_str()),
                     conn: conn.clone(),
-                    inflight: inflight.clone(),
+                    inflight_table: table.clone(),
+                    slot_id: *slot_id,
                 })
             })
             .collect()
@@ -59,20 +62,29 @@ impl ClientGroup {
 
     pub fn set(&self, client_id: String, conn: Connection) {
         let mut idx = self.index.lock();
-        // Reuse existing inflight counter if this client_id reconnects.
-        let inflight = idx
+        let slot_id = idx
             .get(&client_id)
-            .map(|(_, c)| c.clone())
-            .unwrap_or_else(new_inflight_counter);
-        idx.insert(client_id, (conn, inflight));
-        self.snapshot.store(Arc::new(Self::build_snapshot(&idx)));
+            .map(|(_, slot_id)| *slot_id)
+            .unwrap_or_else(|| {
+                self.inflight_table
+                    .alloc_slot()
+                    .expect("inflight slot table exhausted")
+            });
+        idx.insert(client_id, (conn, slot_id));
+        self.snapshot
+            .store(Arc::new(Self::build_snapshot(&self.inflight_table, &idx)));
     }
 
     pub fn remove(&self, client_id: &str) -> bool {
         let mut idx = self.index.lock();
-        let removed = idx.remove(client_id).is_some();
+        let removed = idx.remove(client_id);
+        if let Some((_, slot_id)) = removed {
+            self.inflight_table.free_slot(slot_id);
+        }
+        let removed = removed.is_some();
         if removed {
-            self.snapshot.store(Arc::new(Self::build_snapshot(&idx)));
+            self.snapshot
+                .store(Arc::new(Self::build_snapshot(&self.inflight_table, &idx)));
         }
         removed
     }
@@ -104,8 +116,15 @@ impl ClientGroup {
             let c2_healthy = c2.conn.close_reason().is_none();
             match (c1_healthy, c2_healthy) {
                 (true, true) => {
-                    if inflight_load(&c1.inflight, std::sync::atomic::Ordering::Relaxed)
-                        <= inflight_load(&c2.inflight, std::sync::atomic::Ordering::Relaxed)
+                    if inflight_load(
+                        &c1.inflight_table,
+                        c1.slot_id,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) <= inflight_load(
+                        &c2.inflight_table,
+                        c2.slot_id,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
                     {
                         Some(c1.clone())
                     } else {
@@ -117,7 +136,13 @@ impl ClientGroup {
                 (false, false) => pick_least_inflight(
                     conns.as_slice(),
                     |c| c.conn.close_reason().is_none(),
-                    |c| inflight_load(&c.inflight, std::sync::atomic::Ordering::Relaxed),
+                    |c| {
+                        inflight_load(
+                            &c.inflight_table,
+                            c.slot_id,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                    },
                 )
                 .cloned(),
             }
@@ -125,7 +150,13 @@ impl ClientGroup {
             pick_least_inflight(
                 conns.as_slice(),
                 |c| c.conn.close_reason().is_none(),
-                |c| inflight_load(&c.inflight, std::sync::atomic::Ordering::Relaxed),
+                |c| {
+                    inflight_load(
+                        &c.inflight_table,
+                        c.slot_id,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                },
             )
             .cloned()
         }

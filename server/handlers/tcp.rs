@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
+use tunnel_lib::{
+    maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome,
+};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -23,11 +25,12 @@ pub async fn run_tcp_accept_loop(
         cancel,
         emfile_backoff,
         "tcp",
-        move |stream, _peer_addr| {
+        move |accepted| {
             let state = state.clone();
             let proxy_name = proxy_name.clone();
             let group_id = group_id.clone();
-            tokio::task::spawn(async move {
+            async move {
+                let stream = accepted.stream;
                 if let Err(e) = state.tcp_params.apply(&stream) {
                     debug!(error = %e, "tcp_params.apply failed");
                     return;
@@ -41,7 +44,7 @@ pub async fn run_tcp_accept_loop(
                     metrics::request_completed("tcp", "success");
                 }
                 metrics::tcp_connection_closed();
-            });
+            }
         },
     )
     .await;
@@ -73,7 +76,8 @@ async fn handle_tcp_connection(
         host,
     };
     maybe_slow_path(
-        || tunnel_lib::inflight_load(&selected.inflight, std::sync::atomic::Ordering::Relaxed),
+        &selected.inflight_table,
+        selected.slot_id,
         &state.overload_limits,
     )
     .await;
@@ -81,7 +85,8 @@ async fn handle_tcp_connection(
     let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
     let opened = open_bi_guarded(
         &selected.conn,
-        &selected.inflight,
+        &selected.inflight_table,
+        selected.slot_id,
         open_timeout,
         |elapsed, outcome| {
             metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);

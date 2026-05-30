@@ -14,7 +14,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 use tunnel_lib::ctld_proto::recv_watch_request;
-use tunnel_lib::models::msg::{recv_message_type, send_message, MessageType};
+use tunnel_lib::models::msg::{send_message, MessageType};
 
 pub struct WatchServer {
     svc: Arc<ControlService>,
@@ -83,10 +83,6 @@ async fn handle_watch_connection(
     let mut writer = BufWriter::new(writer);
 
     // Step 1: read the WatchRequest
-    let msg_type = recv_message_type(&mut reader).await?;
-    if msg_type != MessageType::ConfigPush {
-        anyhow::bail!("expected ConfigPush/WatchRequest, got {:?}", msg_type);
-    }
     let req = recv_watch_request(&mut reader).await?;
     if let Some(expected) = auth_token.as_ref() {
         let provided = req.token.as_deref().unwrap_or("");
@@ -104,12 +100,17 @@ async fn handle_watch_connection(
     let mut rx = svc.subscribe();
 
     // Send the full snapshot that was current at subscribe time.
-    let current = rx.borrow_and_update().clone();
-    send_message(&mut writer, MessageType::ConfigPush, &*current).await?;
+    let current = svc.snapshot();
+    send_message(
+        &mut writer,
+        MessageType::ConfigPush,
+        &WatchEvent::Snapshot(current.as_ref().clone()),
+    )
+    .await?;
     writer.flush().await?;
     info!(
         peer = %peer,
-        resource_version = svc.current_version(),
+        resource_version = current.resource_version,
         "sent initial Snapshot"
     );
     loop {

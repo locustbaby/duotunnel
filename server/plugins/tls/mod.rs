@@ -33,6 +33,7 @@ impl IngressProtocolHandler for TlsHandler {
 
         debug!(host = %host, "TLS connection: terminating");
         let server_config = tunnel_lib::infra::pki::get_or_create_server_config(&host)
+            .await
             .map_err(|e| ProxyError::tls_handshake(format!("server config for {host}: {e}")))?;
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
         let tls_stream = acceptor

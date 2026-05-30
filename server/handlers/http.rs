@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tunnel_lib::plugin::{IngressDispatcher, ServerCtx, Timeouts};
-use tunnel_lib::run_accept_worker;
+use tunnel_lib::{run_accept_worker, AcceptedConn};
 
 pub async fn run_http_accept_loop(
     listener: Arc<TcpListener>,
@@ -26,11 +26,17 @@ pub async fn run_http_accept_loop(
         cancel,
         emfile_backoff,
         "http",
-        move |stream, peer_addr| {
+        move |accepted| {
             let state = state.clone();
             let dispatcher = dispatcher.clone();
             let metrics_sink = metrics_sink.clone();
-            tokio::task::spawn(async move {
+            async move {
+                let AcceptedConn {
+                    stream,
+                    peer_addr,
+                    accepted_at,
+                    ..
+                } = accepted;
                 if let Err(e) = state.tcp_params.apply(&stream) {
                     debug!(error = %e, "tcp_params.apply failed");
                     return;
@@ -51,7 +57,7 @@ pub async fn run_http_accept_loop(
                     port,
                     state.proxy_buffer_params.relay_buf_size,
                 );
-                ctx.timing.accepted_at = std::time::Instant::now();
+                ctx.timing.accepted_at = accepted_at;
 
                 let result = dispatcher.dispatch(stream, &svc, &mut ctx).await;
 
@@ -62,7 +68,7 @@ pub async fn run_http_accept_loop(
                     metrics::request_completed("http", "success");
                 }
                 metrics::tcp_connection_closed();
-            });
+            }
         },
     )
     .await;

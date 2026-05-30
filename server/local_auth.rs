@@ -10,14 +10,14 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tunnel_store::{AuthError, AuthResult, AuthStore, TokenListEntry};
+use tunnel_store::{AuthError, AuthResult, AuthStore, ClientStatus, TokenListEntry, TokenStatus};
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
     pub hash_bytes: [u8; 32],
     pub client_group: String,
-    pub client_status: String,
-    pub token_status: String,
+    pub client_status: ClientStatus,
+    pub token_status: TokenStatus,
 }
 
 /// Atomically-swappable O(1) token lookup map.
@@ -52,10 +52,10 @@ impl AuthStore for LocalTokenCache {
         match map.get(&key) {
             None => Err(AuthError::InvalidToken),
             Some(entry) => {
-                if entry.client_status != "active" {
+                if entry.client_status != ClientStatus::Active {
                     return Err(AuthError::ClientDisabled);
                 }
-                if entry.token_status != "active" {
+                if entry.token_status != TokenStatus::Active {
                     return Err(AuthError::TokenRevoked);
                 }
                 Ok(AuthResult {

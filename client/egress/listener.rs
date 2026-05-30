@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
     detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
-    run_accept_worker, send_routing_info, ErrorKind, OverloadLimits, PeekBufPool, ProxyError,
-    RoutingInfo, TcpParams, inflight_load,
+    run_accept_worker, send_routing_info, AcceptedConn, ErrorKind, OverloadLimits, PeekBufPool,
+    ProxyError, RoutingInfo, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -43,14 +43,13 @@ pub async fn start_entry_listener(
     let open_stream_timeout = cfg.open_stream_timeout;
     let accept_workers = cfg.accept_workers;
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
-    let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
     let tcp_params = Arc::new(cfg.tcp_params);
     let overload = cfg.overload;
     info!(addr = %addr, accept_workers = %accept_workers, "client entry listener started");
 
     let mut handles = Vec::with_capacity(accept_workers);
     for _ in 0..accept_workers {
-        let listener = listener.clone();
+        let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
         let pool = pool.clone();
         let tcp_params = tcp_params.clone();
         let cancel_token = cancel_token.clone();
@@ -61,11 +60,12 @@ pub async fn start_entry_listener(
                 cancel_token,
                 EMFILE_BACKOFF,
                 "entry",
-                move |stream, _peer_addr| {
+                move |accepted| {
                     let pool = pool.clone();
                     let tcp_params = tcp_params.clone();
                     let overload = overload.clone();
-                    crate::spawn_task(async move {
+                    async move {
+                        let AcceptedConn { stream, .. } = accepted;
                         if let Err(e) = handle_entry_connection(
                             pool,
                             stream,
@@ -78,7 +78,7 @@ pub async fn start_entry_listener(
                         {
                             debug!(error = %e, "entry connection error");
                         }
-                    });
+                    }
                 },
             )
             .await;
@@ -118,14 +118,11 @@ async fn handle_entry_connection(
             None => break,
         };
         tried_conn_ids.push(conn.conn.stable_id());
-        maybe_slow_path(
-            || inflight_load(&conn.inflight, std::sync::atomic::Ordering::Relaxed),
-            overload,
-        )
-        .await;
+        maybe_slow_path(&conn.inflight_table, conn.slot_id, overload).await;
         match open_bi_guarded(
             &conn.conn,
-            &conn.inflight,
+            &conn.inflight_table,
+            conn.slot_id,
             open_stream_timeout,
             |_elapsed, _outcome| {},
         )

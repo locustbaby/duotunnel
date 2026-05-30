@@ -227,6 +227,7 @@ impl UpstreamResolver for ClientApp {
                 .map_err(|e| ProxyError::http_upstream_request(e.to_string())),
             PeerSpec::MitmH2(spec) => {
                 let server_config = tunnel_lib::get_or_create_server_config(&spec.tls_host)
+                    .await
                     .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
                 let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
                 let stream = tunnel_lib::QuinnStream { send, recv };

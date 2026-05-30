@@ -1,26 +1,16 @@
+use crate::engine::copy::{copy_buffered_then_finish, copy_buffered_then_shutdown};
 use crate::proxy::buffer_params::DEFAULT_RELAY_BUF_SIZE;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace};
-use DEFAULT_RELAY_BUF_SIZE as RELAY_BUF;
 pub async fn relay<A, B>(stream_a: A, stream_b: B) -> std::io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let (a_read, mut a_write) = tokio::io::split(stream_a);
-    let (b_read, mut b_write) = tokio::io::split(stream_b);
-    let mut a_read = BufReader::with_capacity(RELAY_BUF, a_read);
-    let mut b_read = BufReader::with_capacity(RELAY_BUF, b_read);
-    let a_to_b = async {
-        let bytes = tokio::io::copy_buf(&mut a_read, &mut b_write).await?;
-        let _ = b_write.shutdown().await;
-        Ok::<_, std::io::Error>(bytes)
-    };
-    let b_to_a = async {
-        let bytes = tokio::io::copy_buf(&mut b_read, &mut a_write).await?;
-        let _ = a_write.shutdown().await;
-        Ok::<_, std::io::Error>(bytes)
-    };
+    let (a_read, a_write) = tokio::io::split(stream_a);
+    let (b_read, b_write) = tokio::io::split(stream_b);
+    let a_to_b = copy_buffered_then_shutdown(a_read, b_write, DEFAULT_RELAY_BUF_SIZE);
+    let b_to_a = copy_buffered_then_shutdown(b_read, a_write, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(a_to_b, b_to_a) {
         Ok((sent, recv)) => {
             debug!("relay completed: sent={:?}, recv={:?}", sent, recv);
@@ -29,14 +19,12 @@ where
         Err(e) => Err(e),
     }
 }
-pub async fn relay_unidirectional<R, W>(reader: R, mut writer: W) -> std::io::Result<u64>
+pub async fn relay_unidirectional<R, W>(reader: R, writer: W) -> std::io::Result<u64>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut reader = BufReader::with_capacity(RELAY_BUF, reader);
-    let bytes = tokio::io::copy_buf(&mut reader, &mut writer).await?;
-    let _ = writer.shutdown().await;
+    let bytes = copy_buffered_then_shutdown(reader, writer, DEFAULT_RELAY_BUF_SIZE).await?;
     trace!("unidirectional relay completed: {} bytes", bytes);
     Ok(bytes)
 }
@@ -57,28 +45,18 @@ impl QuicBiStream {
 /// Pass `None` when there is no initial data.
 pub async fn relay_with_first_data(
     quic_recv: quinn::RecvStream,
-    mut quic_send: quinn::SendStream,
+    quic_send: quinn::SendStream,
     mut tcp_stream: tokio::net::TcpStream,
     first_data: Option<&[u8]>,
 ) -> anyhow::Result<(u64, u64)> {
     if let Some(data) = first_data {
         tcp_stream.write_all(data).await?;
     }
-    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
-    let mut quic_recv = BufReader::with_capacity(RELAY_BUF, quic_recv);
-    let mut tcp_read = BufReader::with_capacity(RELAY_BUF, tcp_read);
-    let quic_to_tcp = async {
-        let bytes = tokio::io::copy_buf(&mut quic_recv, &mut tcp_write).await?;
-        let _ = tcp_write.shutdown().await;
-        Ok::<_, std::io::Error>(bytes)
-    };
-    let tcp_to_quic = async {
-        let bytes = tokio::io::copy_buf(&mut tcp_read, &mut quic_send).await?;
-        if let Err(e) = quic_send.finish() {
-            tracing::warn!(?e, "failed to finish quic send stream");
-        }
-        Ok::<_, std::io::Error>(bytes)
-    };
+    let (tcp_read, tcp_write) = tcp_stream.into_split();
+    let quic_to_tcp =
+        copy_buffered_then_shutdown(quic_recv, tcp_write, DEFAULT_RELAY_BUF_SIZE);
+    let tcp_to_quic =
+        copy_buffered_then_finish(tcp_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(quic_to_tcp, tcp_to_quic) {
         Ok((sent, recv)) => {
             debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);

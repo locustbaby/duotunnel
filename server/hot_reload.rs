@@ -110,6 +110,6 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
     let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     state.routing.store(Arc::new(snapshot));
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
-    crate::sync_listeners(state, &listeners);
+    crate::sync_listeners(state, &listeners).await;
     Ok(())
 }

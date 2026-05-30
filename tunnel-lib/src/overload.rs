@@ -1,3 +1,5 @@
+use crate::inflight::{inflight_load, inflight_notify, InflightSlotId, InflightTable};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -7,16 +9,10 @@ pub enum OverloadMode {
     Burst,
 }
 
-/// Strategy for how to wait when inflight ≥ sleep threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackoffStrategy {
-    /// Don't wait — skip straight to `open_bi` and rely on QUIC backpressure.
     None,
-    /// Single fixed-duration sleep equal to the full budget (legacy behaviour).
     Fixed,
-    /// Exponential backoff within the budget.  Rechecks inflight between
-    /// steps so we stop as soon as a slot frees.  Derived shape:
-    /// `min = budget/16`, `max = budget/4`, `multiplier = 2.0`.
     #[default]
     Exponential,
 }
@@ -27,7 +23,6 @@ pub struct OverloadLimits {
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
     pub backoff: BackoffStrategy,
-    /// Total time budget for the slow-path wait.
     pub inflight_sleep_budget: Duration,
 }
 
@@ -63,57 +58,50 @@ impl OverloadLimits {
     }
 }
 
-/// Slow-path invoked before `open_bi()` when a QUIC connection is near its
-/// `max_concurrent_streams` cap.  `inflight` is a closure so the live count
-/// is re-read between backoff steps.
-pub async fn maybe_slow_path<F>(inflight: F, limits: &OverloadLimits)
-where
-    F: Fn() -> usize,
-{
+pub async fn maybe_slow_path(
+    table: &Arc<InflightTable>,
+    slot_id: InflightSlotId,
+    limits: &OverloadLimits,
+) {
     if limits.mode == OverloadMode::Burst {
         return;
     }
-    let cur = inflight();
+    let cur = inflight_load(table, slot_id, std::sync::atomic::Ordering::Relaxed);
     if cur < limits.inflight_yield_threshold {
         return;
     }
+    let notify = inflight_notify(table, slot_id);
     if cur < limits.inflight_sleep_threshold {
-        tokio::task::yield_now().await;
+        let notified = notify.notified();
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
         return;
     }
-    match limits.backoff {
-        BackoffStrategy::None => {}
-        BackoffStrategy::Fixed => {
-            tokio::time::sleep(limits.inflight_sleep_budget).await;
-        }
-        BackoffStrategy::Exponential => {
-            exponential_backoff(inflight, limits).await;
-        }
-    }
-}
-
-async fn exponential_backoff<F>(inflight: F, limits: &OverloadLimits)
-where
-    F: Fn() -> usize,
-{
-    let budget = limits.inflight_sleep_budget;
-    if budget.is_zero() {
+    if matches!(limits.backoff, BackoffStrategy::None) || limits.inflight_sleep_budget.is_zero() {
         return;
     }
-    let min = (budget / 16).max(Duration::from_millis(1));
-    let max = budget / 4;
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut delay = min;
+    let deadline = tokio::time::Instant::now() + limits.inflight_sleep_budget;
     loop {
+        if inflight_load(table, slot_id, std::sync::atomic::Ordering::Relaxed)
+            < limits.inflight_sleep_threshold
+        {
+            return;
+        }
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return;
         }
-        let step = delay.min(deadline - now);
-        tokio::time::sleep(step).await;
-        if inflight() < limits.inflight_sleep_threshold {
-            return;
+        let wait = match limits.backoff {
+            BackoffStrategy::Fixed => deadline - now,
+            BackoffStrategy::Exponential => (deadline - now).min(Duration::from_millis(10)),
+            BackoffStrategy::None => return,
+        };
+        let notified = notify.notified();
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(wait) => {}
         }
-        delay = (delay * 2).min(max);
     }
 }

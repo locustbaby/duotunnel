@@ -1,30 +1,28 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-/// Run a single TCP accept worker.  Loops until `cancel` fires, calling
-/// `on_conn` for each accepted connection.  On EMFILE (errno 24) backs
-/// off for `emfile_backoff`; on other accept errors logs and continues.
-///
-/// `on_conn` is a synchronous callback — it is expected to spawn its
-/// own task (whichever flavour the caller wants: `tokio::spawn`,
-/// `crate::spawn_task`, a telemetry-aware wrapper, …) and return
-/// quickly.  Blocking inside the callback will stall the accept loop.
-///
-/// Callers needing N parallel accept workers should spawn this function
-/// N times, each cloning the shared `Arc<TcpListener>` (built with
-/// `SO_REUSEPORT` for cross-worker load balancing).
-pub async fn run_accept_worker<H>(
+#[derive(Debug)]
+pub struct AcceptedConn {
+    pub stream: TcpStream,
+    pub peer_addr: SocketAddr,
+    pub accepted_at: Instant,
+    pub listener_tag: &'static str,
+}
+
+pub async fn run_accept_worker<H, Fut>(
     listener: Arc<TcpListener>,
     cancel: CancellationToken,
     emfile_backoff: Duration,
     tag: &'static str,
     on_conn: H,
 ) where
-    H: Fn(TcpStream, SocketAddr),
+    H: Fn(AcceptedConn) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     loop {
         tokio::select! {
@@ -36,7 +34,12 @@ pub async fn run_accept_worker<H>(
                 match result {
                     Ok((stream, peer_addr)) => {
                         debug!(tag = tag, peer_addr = %peer_addr, "accepted connection");
-                        on_conn(stream, peer_addr);
+                        tokio::spawn(on_conn(AcceptedConn {
+                            stream,
+                            peer_addr,
+                            accepted_at: Instant::now(),
+                            listener_tag: tag,
+                        }));
                     }
                     Err(e) => {
                         let os_err = e.raw_os_error();

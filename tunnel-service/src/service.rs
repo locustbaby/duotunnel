@@ -1,4 +1,4 @@
-use crate::proto::{ConfigSnapshot, WatchEvent};
+use crate::proto::{build_patch, ConfigSnapshot, WatchEvent};
 use crate::token::cache::TokenCacheProvider;
 use anyhow::Result;
 use std::sync::atomic::Ordering;
@@ -14,6 +14,7 @@ pub struct ControlService {
     auth_store: Arc<dyn AuthStore>,
     rule_store: Arc<dyn RuleStore>,
     token_cache: Arc<dyn TokenCacheProvider>,
+    current_snapshot: arc_swap::ArcSwap<ConfigSnapshot>,
     /// Monotonically increasing; incremented on every mutation.
     resource_version: std::sync::atomic::AtomicU64,
     watch_tx: watch::Sender<Arc<WatchEvent>>,
@@ -31,7 +32,7 @@ impl ControlService {
         token_cache: Arc<dyn TokenCacheProvider>,
     ) -> Result<Arc<Self>> {
         let initial = Self::build_snapshot(&*rule_store, &*token_cache, 1).await?;
-        let event = Arc::new(WatchEvent::Snapshot(initial));
+        let event = Arc::new(WatchEvent::Snapshot(initial.clone()));
         let (watch_tx, _watch_rx) = watch::channel(event);
         // Channel capacity 1: multiple senders collapse into a single pending signal.
         let (publish_tx, publish_rx) = mpsc::channel::<()>(1);
@@ -39,6 +40,7 @@ impl ControlService {
             auth_store,
             rule_store,
             token_cache,
+            current_snapshot: arc_swap::ArcSwap::from_pointee(initial.clone()),
             resource_version: std::sync::atomic::AtomicU64::new(1),
             watch_tx,
             _watch_rx,
@@ -66,8 +68,8 @@ impl ControlService {
         self.watch_tx.subscribe()
     }
 
-    pub fn current_version(&self) -> u64 {
-        self.resource_version.load(Ordering::Acquire)
+    pub fn snapshot(&self) -> Arc<ConfigSnapshot> {
+        self.current_snapshot.load_full()
     }
 
     // ── Snapshot builder ────────────────────────────────────────────────────
@@ -94,18 +96,17 @@ impl ControlService {
     /// Rebuilds snapshot from DB and broadcasts Patch event to all watchers.
     /// Called only from the debounce task — not directly from mutation methods.
     pub(crate) async fn do_publish(&self) -> Result<()> {
-        // Read the candidate version WITHOUT incrementing yet.
-        // Only commit the increment after a successful snapshot build so that
-        // a failed DB query does not leave a gap in the version sequence.
         let next = self.resource_version.load(Ordering::Acquire) + 1;
         let snapshot = Self::build_snapshot(&*self.rule_store, &*self.token_cache, next).await?;
-        // Build succeeded — now commit the version increment.
+        let current = self.current_snapshot.load();
+        let patch = build_patch(current.as_ref(), &snapshot);
+        self.current_snapshot.store(Arc::new(snapshot));
         self.resource_version.fetch_add(1, Ordering::AcqRel);
         info!(
             resource_version = next,
             "broadcasting config patch to watchers"
         );
-        let _ = self.watch_tx.send(Arc::new(WatchEvent::Patch(snapshot)));
+        let _ = self.watch_tx.send(Arc::new(WatchEvent::Patch(patch)));
         Ok(())
     }
 

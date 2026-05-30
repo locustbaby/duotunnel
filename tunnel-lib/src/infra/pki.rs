@@ -2,54 +2,64 @@ use anyhow::{anyhow, Result};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PkiParams {
     pub cert_cache_ttl_secs: u64,
+    pub max_parallel_generations: usize,
 }
+
 impl Default for PkiParams {
     fn default() -> Self {
         Self {
             cert_cache_ttl_secs: 3600,
+            max_parallel_generations: 4,
         }
     }
 }
 
 pub fn init_cert_cache(params: &PkiParams) {
-    let mut guard = CERT_CACHE.write().unwrap();
-    *guard = Some(CertCache::new(Duration::from_secs(
-        params.cert_cache_ttl_secs,
-    )));
+    let mut guard = CERT_STATE.write().unwrap();
+    *guard = Some(CertState::new(
+        Duration::from_secs(params.cert_cache_ttl_secs),
+        params.max_parallel_generations,
+    ));
 }
 
 struct CachedEntry {
-    /// Pre-built ServerConfig with ALPN [h2, http/1.1] set, ready for TlsAcceptor.
     server_config: Arc<rustls::ServerConfig>,
     created_at: Instant,
 }
 
-static CERT_CACHE: RwLock<Option<CertCache>> = RwLock::new(None);
-
-struct CertCache {
-    entries: HashMap<String, CachedEntry>,
-    ttl: Duration,
+struct InflightEntry {
+    lock: Arc<Mutex<()>>,
 }
 
-impl CertCache {
-    fn new(ttl: Duration) -> Self {
+struct CertState {
+    entries: HashMap<String, CachedEntry>,
+    inflight: HashMap<String, InflightEntry>,
+    ttl: Duration,
+    permits: Arc<Semaphore>,
+}
+
+impl CertState {
+    fn new(ttl: Duration, max_parallel_generations: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            inflight: HashMap::new(),
             ttl,
+            permits: Arc::new(Semaphore::new(max_parallel_generations.max(1))),
         }
     }
 
     fn get(&self, host: &str) -> Option<Arc<rustls::ServerConfig>> {
-        self.entries.get(host).and_then(|e| {
-            if e.created_at.elapsed() < self.ttl {
-                Some(Arc::clone(&e.server_config))
+        self.entries.get(host).and_then(|entry| {
+            if entry.created_at.elapsed() < self.ttl {
+                Some(Arc::clone(&entry.server_config))
             } else {
                 None
             }
@@ -58,7 +68,7 @@ impl CertCache {
 
     fn insert(&mut self, host: String, server_config: Arc<rustls::ServerConfig>) {
         let ttl = self.ttl;
-        self.entries.retain(|_, e| e.created_at.elapsed() < ttl);
+        self.entries.retain(|_, entry| entry.created_at.elapsed() < ttl);
         self.entries.insert(
             host,
             CachedEntry {
@@ -69,38 +79,79 @@ impl CertCache {
     }
 }
 
-/// Returns a cached `Arc<rustls::ServerConfig>` for `host`, creating one if needed.
-///
-/// The config is built with a fresh self-signed certificate and ALPN `[h2, http/1.1]`.
-/// Cache TTL defaults to 3600s (configurable via `init_cert_cache`).
-///
-/// Uses a single write-lock check+insert to avoid the double-checked-locking race
-/// where concurrent first-time requests for the same host each generate a certificate.
-pub fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::ServerConfig>> {
-    // Fast path: read lock.
+static CERT_STATE: RwLock<Option<CertState>> = RwLock::new(None);
+static PKI_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+fn ensure_state() {
+    let mut guard = CERT_STATE.write().unwrap();
+    if guard.is_none() {
+        let params = PkiParams::default();
+        *guard = Some(CertState::new(
+            Duration::from_secs(params.cert_cache_ttl_secs),
+            params.max_parallel_generations,
+        ));
+    }
+}
+
+pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::ServerConfig>> {
+    let _ = PKI_RUNTIME.set(tokio::runtime::Handle::current());
+    ensure_state();
     {
-        let guard = CERT_CACHE.read().unwrap();
-        if let Some(cache) = guard.as_ref() {
-            if let Some(cfg) = cache.get(host) {
-                return Ok(cfg);
+        let guard = CERT_STATE.read().unwrap();
+        if let Some(state) = guard.as_ref() {
+            if let Some(config) = state.get(host) {
+                return Ok(config);
             }
         }
     }
-    // Slow path: write lock — check again, then generate.
-    let mut guard = CERT_CACHE.write().unwrap();
-    let cache = guard.get_or_insert_with(|| {
-        CertCache::new(Duration::from_secs(
-            PkiParams::default().cert_cache_ttl_secs,
-        ))
-    });
-    // Second check inside write lock eliminates the race.
-    if let Some(cfg) = cache.get(host) {
-        return Ok(cfg);
+
+    let (entry_lock, permits) = {
+        let mut guard = CERT_STATE.write().unwrap();
+        let state = guard.as_mut().unwrap();
+        if let Some(config) = state.get(host) {
+            return Ok(config);
+        }
+        let entry = state
+            .inflight
+            .entry(host.to_string())
+            .or_insert_with(|| InflightEntry {
+                lock: Arc::new(Mutex::new(())),
+            });
+        (entry.lock.clone(), state.permits.clone())
+    };
+
+    let _entry_guard = entry_lock.lock().await;
+    {
+        let guard = CERT_STATE.read().unwrap();
+        if let Some(state) = guard.as_ref() {
+            if let Some(config) = state.get(host) {
+                return Ok(config);
+            }
+        }
     }
-    let cfg = build_server_config(host)?;
-    let arc = Arc::new(cfg);
-    cache.insert(host.to_string(), Arc::clone(&arc));
-    Ok(arc)
+
+    let permit = permits
+        .acquire_owned()
+        .await
+        .map_err(|_| anyhow!("pki generation limiter closed"))?;
+    let host_owned = host.to_string();
+    let config = tokio::task::spawn_blocking(move || build_server_config_with_permit(host_owned, permit))
+        .await
+        .map_err(|e| anyhow!("pki generation join error: {e}"))??;
+    let config = Arc::new(config);
+
+    let mut guard = CERT_STATE.write().unwrap();
+    let state = guard.as_mut().unwrap();
+    state.insert(host.to_string(), Arc::clone(&config));
+    state.inflight.remove(host);
+    Ok(config)
+}
+
+fn build_server_config_with_permit(
+    host: String,
+    _permit: OwnedSemaphorePermit,
+) -> Result<rustls::ServerConfig> {
+    build_server_config(&host)
 }
 
 fn build_server_config(host: &str) -> Result<rustls::ServerConfig> {
@@ -117,12 +168,9 @@ fn build_server_config(host: &str) -> Result<rustls::ServerConfig> {
     Ok(cfg)
 }
 
-/// Legacy: generate or retrieve raw cert+key (still used by client/app.rs).
 pub fn generate_self_signed_cert_for_host(
     host: &str,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    // Reuse the cached ServerConfig's internal cert by rebuilding from scratch.
-    // This path is only used by client/app.rs which needs raw DER bytes.
     let cert = rcgen::generate_simple_self_signed(vec![host.to_string()])?;
     let key_der = cert.signing_key.serialize_der();
     let cert_der = cert.cert.der().to_vec();

@@ -128,7 +128,7 @@ pub struct ServerState {
     pub plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
 }
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
-    let pool = tunnel_store::open_sqlite_pool(database_url).await?;
+    let pool = tunnel_store::open_sqlite_pool(database_url, 16).await?;
     let auth_store = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool.clone());
     auth_store.migrate().await?;
     let rule_store = tunnel_store::sqlite_rules::SqliteRuleStore::new(pool);
@@ -233,7 +233,7 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
     let config = ServerConfigFile::load(config_path)?;
     let log_level = config.server.log_level.as_deref().unwrap_or("info");
     init_observability(log_level);
-    let pool = tunnel_store::open_sqlite_pool(&config.server.database_url).await?;
+    let pool = tunnel_store::open_sqlite_pool(&config.server.database_url, 16).await?;
     let auth = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool);
     auth.migrate().await?;
     let store = Arc::new(auth) as Arc<dyn AuthStore>;
@@ -254,7 +254,9 @@ async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<
                     e.client_name,
                     e.client_status,
                     e.token_id,
-                    e.token_status,
+                    e.token_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
                     e.created_at,
                     e.revoked_at.as_deref().unwrap_or("-")
                 );
@@ -472,7 +474,7 @@ async fn proxy_main(
             .server_ingress_routing
             .listeners
             .to_vec();
-        sync_listeners(&state, &listeners);
+        sync_listeners(&state, &listeners).await;
     }
 
     let quic_state = state.clone();
@@ -552,4 +554,4 @@ pub fn build_routing_snapshot(
         egress_map: Arc::new(egress_map),
     }
 }
-pub use listener_mgr::sync_listeners;
+pub use listener_mgr::{sync_all_listeners, sync_listener_subset, sync_listeners};

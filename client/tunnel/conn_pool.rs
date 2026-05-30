@@ -2,11 +2,12 @@ use arc_swap::ArcSwap;
 use quinn::Connection;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tunnel_lib::{inflight_load, new_inflight_counter, pick_least_inflight, InflightCounter};
+use tunnel_lib::{inflight_load, new_inflight_table, pick_least_inflight, InflightSlotId, InflightTable};
 
 pub struct PooledConnection {
     pub conn: Connection,
-    pub inflight: InflightCounter,
+    pub inflight_table: Arc<InflightTable>,
+    pub slot_id: InflightSlotId,
 }
 
 struct PoolState {
@@ -17,16 +18,19 @@ struct PoolState {
 pub struct EntryConnPool {
     snapshot: ArcSwap<Vec<Arc<PooledConnection>>>,
     mu: Mutex<PoolState>,
+    inflight_table: Arc<InflightTable>,
 }
 
 impl EntryConnPool {
-    pub fn new() -> Arc<Self> {
+    pub fn new(max_concurrent_streams: u32, connections: u32) -> Arc<Self> {
+        let capacity = ((max_concurrent_streams as usize) * (connections as usize) * 2).max(1024);
         Arc::new(Self {
             snapshot: ArcSwap::from_pointee(Vec::new()),
             mu: Mutex::new(PoolState {
                 conns: Vec::new(),
                 ids: HashSet::new(),
             }),
+            inflight_table: new_inflight_table(capacity),
         })
     }
 
@@ -36,9 +40,17 @@ impl EntryConnPool {
         if !g.ids.insert(stable_id) {
             return;
         }
+        let Some(slot_id) = self.inflight_table.alloc_slot() else {
+            tracing::error!(
+                conn_id = stable_id,
+                "Inflight slot table exhausted"
+            );
+            return;
+        };
         g.conns.push(Arc::new(PooledConnection {
             conn,
-            inflight: new_inflight_counter(),
+            inflight_table: self.inflight_table.clone(),
+            slot_id,
         }));
         self.snapshot.store(Arc::new(g.conns.clone()));
     }
@@ -47,6 +59,9 @@ impl EntryConnPool {
         let mut g = self.mu.lock().unwrap();
         let stable_id = conn.stable_id();
         if g.ids.remove(&stable_id) {
+            if let Some(existing) = g.conns.iter().find(|c| c.conn.stable_id() == stable_id) {
+                self.inflight_table.free_slot(existing.slot_id);
+            }
             g.conns.retain(|c| c.conn.stable_id() != stable_id);
             self.snapshot.store(Arc::new(g.conns.clone()));
         }
@@ -57,7 +72,7 @@ impl EntryConnPool {
         pick_least_inflight(
             snap.as_slice(),
             |c| c.conn.close_reason().is_none() && !excluded.contains(&c.conn.stable_id()),
-            |c| inflight_load(&c.inflight, std::sync::atomic::Ordering::Relaxed),
+            |c| inflight_load(&c.inflight_table, c.slot_id, std::sync::atomic::Ordering::Relaxed),
         )
         .cloned()
     }

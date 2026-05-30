@@ -56,7 +56,13 @@ pub async fn run_cli(cmd: CliCommand, svc: &crate::service::ControlService) -> R
                 for t in &tokens {
                     println!(
                         "{:<20} {:<14} {:<8} {:<12} {}",
-                        t.client_name, t.client_status, t.token_id, t.token_status, t.created_at,
+                        t.client_name,
+                        t.client_status,
+                        t.token_id,
+                        t.token_status
+                            .map(|status| status.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        t.created_at,
                     );
                 }
             }

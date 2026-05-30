@@ -131,7 +131,7 @@ async fn async_main() -> Result<()> {
     if let Some(port) = config.metrics_port {
         crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
-    let entry_pool = EntryConnPool::new();
+    let entry_pool = EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
     let mut engine = ClientEngine::new(cancel.clone());
 
     if let Some(entry_port) = config.entry.port {
@@ -157,13 +157,13 @@ async fn async_main() -> Result<()> {
             overload: Arc::new(overload_limits),
         };
 
-        engine.add_service(Box::new(egress::listener::EgressListenerService {
+        engine.add_service(Arc::new(egress::listener::EgressListenerService {
             entry_cfg,
             pool: entry_pool.clone(),
         }));
     }
 
-    engine.add_service(Box::new(tunnel::TunnelPoolService {
+    engine.add_service(Arc::new(tunnel::TunnelPoolService {
         config,
         endpoint,
         entry_pool,

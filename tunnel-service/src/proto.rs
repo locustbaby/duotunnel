@@ -1,18 +1,11 @@
-/// Re-export the list-watch protocol types from tunnel-lib.
-/// Types live in tunnel-lib so that server can depend on tunnel-lib only,
-/// without depending on tunnel-service.
 pub use tunnel_lib::ctld_proto::{
-    ConfigSnapshot, ProtoClientGroup, ProtoClientUpstream, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ProtoIngressVhostRule,
-    ProtoUpstreamServer, TokenCacheEntry, WatchEvent,
+    ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
+    ProtoIngressListener, ResourceOp, TokenCacheEntry, WatchEvent,
 };
 
-use tunnel_store::rules::{
-    ClientGroup, EgressUpstreamDef, EgressVhostRule, IngressListener, IngressListenerMode,
-    RoutingData,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use tunnel_store::rules::RoutingData;
 
-/// Convert tunnel_store RoutingData into the proto types used in ConfigSnapshot.
 pub fn routing_data_to_proto(
     data: &RoutingData,
 ) -> (
@@ -21,87 +14,59 @@ pub fn routing_data_to_proto(
     Vec<ProtoEgressUpstreamDef>,
     Vec<ProtoEgressVhostRule>,
 ) {
-    let ingress = data.ingress_listeners.iter().map(proto_listener).collect();
-    let groups = data.client_groups.iter().map(proto_group).collect();
-    let egress_upstreams = data
-        .egress_upstreams
-        .iter()
-        .map(proto_egress_upstream)
-        .collect();
-    let egress_vhost = data
-        .egress_vhost_rules
-        .iter()
-        .map(proto_egress_vhost)
-        .collect();
-    (ingress, groups, egress_upstreams, egress_vhost)
+    (
+        data.ingress_listeners.clone(),
+        data.client_groups.clone(),
+        data.egress_upstreams.clone(),
+        data.egress_vhost_rules.clone(),
+    )
 }
 
-fn proto_listener(l: &IngressListener) -> ProtoIngressListener {
-    ProtoIngressListener {
-        port: l.port,
-        mode: match &l.mode {
-            IngressListenerMode::Http { vhost } => ProtoIngressListenerMode::Http {
-                vhost: vhost
-                    .iter()
-                    .map(|r| ProtoIngressVhostRule {
-                        match_host: r.match_host.clone(),
-                        group_id: r.group_id.clone(),
-                        proxy_name: r.proxy_name.clone(),
-                    })
-                    .collect(),
-            },
-            IngressListenerMode::Tcp {
-                group_id,
-                proxy_name,
-            } => ProtoIngressListenerMode::Tcp {
-                group_id: group_id.clone(),
-                proxy_name: proxy_name.clone(),
-            },
-        },
+pub fn build_patch(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> ConfigPatch {
+    ConfigPatch {
+        resource_version: next.resource_version,
+        ingress_listeners: diff_by_key(
+            &previous.ingress_listeners,
+            &next.ingress_listeners,
+            |item| item.port.to_string(),
+        ),
+        client_groups: diff_by_key(&previous.client_groups, &next.client_groups, |item| {
+            item.group_id.clone()
+        }),
+        egress_upstreams: diff_by_key(
+            &previous.egress_upstreams,
+            &next.egress_upstreams,
+            |item| item.name.clone(),
+        ),
+        egress_vhost_rules: diff_by_key(
+            &previous.egress_vhost_rules,
+            &next.egress_vhost_rules,
+            |item| item.match_host.clone(),
+        ),
+        token_cache: diff_by_key(&previous.token_cache, &next.token_cache, |item| {
+            item.hash_hex.clone()
+        }),
     }
 }
 
-fn proto_group(g: &ClientGroup) -> ProtoClientGroup {
-    ProtoClientGroup {
-        group_id: g.group_id.clone(),
-        config_version: g.config_version.clone(),
-        upstreams: g
-            .upstreams
-            .iter()
-            .map(|u| ProtoClientUpstream {
-                name: u.name.clone(),
-                lb_policy: u.lb_policy.clone(),
-                servers: u
-                    .servers
-                    .iter()
-                    .map(|s| ProtoUpstreamServer {
-                        address: s.address.clone(),
-                        resolve: s.resolve,
-                    })
-                    .collect(),
-            })
-            .collect(),
+fn diff_by_key<T, F>(previous: &[T], next: &[T], key_of: F) -> Vec<ResourceOp<T>>
+where
+    T: Clone + PartialEq,
+    F: Fn(&T) -> String,
+{
+    let prev_map: BTreeMap<String, &T> = previous.iter().map(|item| (key_of(item), item)).collect();
+    let next_map: BTreeMap<String, &T> = next.iter().map(|item| (key_of(item), item)).collect();
+    let mut keys = BTreeSet::new();
+    keys.extend(prev_map.keys().cloned());
+    keys.extend(next_map.keys().cloned());
+    let mut ops = Vec::new();
+    for key in keys {
+        match (prev_map.get(&key), next_map.get(&key)) {
+            (Some(prev), Some(next)) if *prev != *next => ops.push(ResourceOp::Upsert((*next).clone())),
+            (None, Some(next)) => ops.push(ResourceOp::Upsert((*next).clone())),
+            (Some(_), None) => ops.push(ResourceOp::Delete { key }),
+            _ => {}
+        }
     }
-}
-
-fn proto_egress_upstream(u: &EgressUpstreamDef) -> ProtoEgressUpstreamDef {
-    ProtoEgressUpstreamDef {
-        name: u.name.clone(),
-        lb_policy: u.lb_policy.clone(),
-        servers: u
-            .servers
-            .iter()
-            .map(|s| ProtoUpstreamServer {
-                address: s.address.clone(),
-                resolve: s.resolve,
-            })
-            .collect(),
-    }
-}
-
-fn proto_egress_vhost(r: &EgressVhostRule) -> ProtoEgressVhostRule {
-    ProtoEgressVhostRule {
-        match_host: r.match_host.clone(),
-        action_upstream: r.action_upstream.clone(),
-    }
+    ops
 }

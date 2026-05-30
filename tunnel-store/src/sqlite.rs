@@ -2,8 +2,9 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use tunnel_lib::{ClientStatus, TokenStatus};
 use tracing::{info, warn};
-pub async fn open_sqlite_pool(database_url: &str) -> Result<SqlitePool> {
+pub async fn open_sqlite_pool(database_url: &str, max_connections: u32) -> Result<SqlitePool> {
     if let Some(path) = database_url
         .strip_prefix("sqlite://")
         .and_then(|s| s.split('?').next())
@@ -15,7 +16,7 @@ pub async fn open_sqlite_pool(database_url: &str) -> Result<SqlitePool> {
         }
     }
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .after_connect(|conn, _meta| {
             Box::pin(async move {
                 sqlx::query("PRAGMA foreign_keys=ON").execute(conn).await?;
@@ -40,7 +41,7 @@ pub struct SqliteAuthStore {
 }
 impl SqliteAuthStore {
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = open_sqlite_pool(database_url).await?;
+        let pool = open_sqlite_pool(database_url, 8).await?;
         Ok(Self { pool })
     }
     pub async fn migrate(&self) -> Result<()> {
@@ -125,7 +126,7 @@ impl AuthStore for SqliteAuthStore {
                 "token prefix collision limit exceeded"
             )));
         }
-        let mut matched: Option<(String, String, String)> = None;
+        let mut matched: Option<(String, ClientStatus, TokenStatus)> = None;
         for row in rows {
             let stored_hex: String = row.get("token_hash");
             let stored_bytes =
@@ -134,10 +135,14 @@ impl AuthStore for SqliteAuthStore {
                 .try_into()
                 .map_err(|_| AuthError::Internal(anyhow!("invalid stored hash length")))?;
             if candidate.as_ref().ct_eq(stored.as_ref()).unwrap_u8() == 1 {
+                let client_status = ClientStatus::parse(&row.get::<String, _>("client_status"))
+                    .ok_or_else(|| AuthError::Internal(anyhow!("invalid client status")))?;
+                let token_status = TokenStatus::parse(&row.get::<String, _>("token_status"))
+                    .ok_or_else(|| AuthError::Internal(anyhow!("invalid token status")))?;
                 matched = Some((
                     row.get("client_name"),
-                    row.get("client_status"),
-                    row.get("token_status"),
+                    client_status,
+                    token_status,
                 ));
             }
         }
@@ -145,11 +150,11 @@ impl AuthStore for SqliteAuthStore {
             Some(values) => values,
             None => return Err(AuthError::InvalidToken),
         };
-        if token_status == "revoked" {
+        if token_status == TokenStatus::Revoked {
             warn!(client_group = %client_group, "login attempt with revoked token");
             return Err(AuthError::TokenRevoked);
         }
-        if client_status != "active" {
+        if client_status != ClientStatus::Active {
             warn!(client_group = %client_group, "login attempt for disabled client");
             return Err(AuthError::ClientDisabled);
         }
@@ -219,11 +224,13 @@ impl AuthStore for SqliteAuthStore {
                 let token_id: Option<i64> = r.get("token_id");
                 TokenListEntry {
                     client_name: r.get("name"),
-                    client_status: r.get("client_status"),
+                    client_status: ClientStatus::parse(&r.get::<String, _>("client_status"))
+                        .unwrap_or(ClientStatus::Disabled),
                     token_id: token_id.unwrap_or(-1),
                     token_status: r
                         .try_get::<String, _>("token_status")
-                        .unwrap_or_else(|_| "-".into()),
+                        .ok()
+                        .and_then(|value| TokenStatus::parse(&value)),
                     created_at: r
                         .try_get::<String, _>("created_at")
                         .unwrap_or_else(|_| "-".into()),

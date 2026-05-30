@@ -12,8 +12,9 @@ pub mod overload;
 pub mod plugin;
 pub mod protocol;
 pub mod proxy;
+pub mod shared;
 pub mod transport;
-pub use accept::run_accept_worker;
+pub use accept::{run_accept_worker, AcceptedConn};
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 pub use egress::http::{
     create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
@@ -22,8 +23,8 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use inflight::{
-    begin_inflight, inflight_load, new_inflight_counter, pick_least_inflight, InflightCounter,
-    InflightGuard,
+    begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
+    InflightGuard, InflightSlotId, InflightTable,
 };
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
@@ -42,6 +43,11 @@ pub use protocol::detect::detect_protocol_and_host;
 pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
+pub use shared::{
+    ClientGroupDef, ClientStatus, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef,
+    IngressListenerDef, IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef,
+    TokenStatus, UpstreamServerDef,
+};
 pub use transport::listener::{
     build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
     DEFAULT_ACCEPT_WORKERS,

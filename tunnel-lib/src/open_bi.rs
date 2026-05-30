@@ -1,62 +1,67 @@
 use crate::error::ProxyError;
-use crate::inflight::{begin_inflight, InflightCounter, InflightGuard};
+use crate::inflight::{begin_inflight, InflightGuard, InflightSlotId, InflightTable};
 use crate::timeout;
+use futures_util::FutureExt;
 use quinn::{Connection, RecvStream, SendStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum OpenBiOutcome {
-    Ok,
+    Ready,
     TimedOut,
     ConnectionLost,
-    ConnectionFatal,
+    ConnectionClosing,
+    TransportFatal,
 }
 
 pub struct OpenedStream {
     pub send: SendStream,
     pub recv: RecvStream,
-    /// RAII guard holding the per-connection inflight slot.  Keep it
-    /// alive for the full lifetime of the stream (through `relay_*`)
-    /// so `pick_least_inflight` sees accurate load.
     pub inflight: InflightGuard,
 }
 
-/// Open a bidirectional QUIC stream with overload-safe inflight accounting.
-///
-/// Flow:
-/// 1. `begin_inflight(inflight)` — take the slot reservation.
-/// 2. `timeout(open_bi)` — bounded wait for a stream.
-/// 3. `on_wait_done(elapsed, outcome)` — a zero-cost hook the caller
-///    can use to observe wait time / emit metrics.  Always invoked.
-///
-/// The caller is responsible for invoking `crate::maybe_slow_path` before
-/// this function when appropriate — doing it here would force the yield to
-/// happen after any caller-side work (e.g. draining peeked bytes), which
-/// adds a scheduler round-trip to the request's critical path under load.
 pub async fn open_bi_guarded<F>(
     conn: &Connection,
-    inflight: &InflightCounter,
+    inflight_table: &Arc<InflightTable>,
+    slot_id: InflightSlotId,
     stream_timeout: Duration,
     on_wait_done: F,
 ) -> Result<OpenedStream, ProxyError>
 where
     F: FnOnce(Duration, OpenBiOutcome),
 {
-    let guard = begin_inflight(inflight);
+    let guard = begin_inflight(inflight_table, slot_id);
+    let immediate = conn.open_bi().now_or_never();
+    match immediate {
+        Some(Ok((send, recv))) => {
+            return Ok(OpenedStream {
+                send,
+                recv,
+                inflight: guard.promote(),
+            });
+        }
+        Some(Err(error)) => {
+            let (_, err) = classify_open_bi_error(error);
+            return Err(err);
+        }
+        None => {}
+    }
+
     let started = Instant::now();
     let result = timeout(stream_timeout, conn.open_bi()).await;
     let elapsed = started.elapsed();
     match result {
         Ok(Ok((send, recv))) => {
-            on_wait_done(elapsed, OpenBiOutcome::Ok);
+            on_wait_done(elapsed, OpenBiOutcome::Ready);
             Ok(OpenedStream {
                 send,
                 recv,
                 inflight: guard.promote(),
             })
         }
-        Ok(Err(e)) => {
-            let (outcome, err) = classify_open_bi_error(e);
+        Ok(Err(error)) => {
+            let (outcome, err) = classify_open_bi_error(error);
             on_wait_done(elapsed, outcome);
             Err(err)
         }
@@ -78,11 +83,14 @@ fn classify_open_bi_error(error: quinn::ConnectionError) -> (OpenBiOutcome, Prox
             OpenBiOutcome::ConnectionLost,
             ProxyError::quic_connection_lost(error.to_string()),
         ),
+        ConnectionError::LocallyClosed => (
+            OpenBiOutcome::ConnectionClosing,
+            ProxyError::quic_connection_lost(error.to_string()),
+        ),
         ConnectionError::VersionMismatch
         | ConnectionError::TransportError(_)
-        | ConnectionError::LocallyClosed
         | ConnectionError::CidsExhausted => (
-            OpenBiOutcome::ConnectionFatal,
+            OpenBiOutcome::TransportFatal,
             ProxyError::quic_connection_fatal(error.to_string()),
         ),
     }

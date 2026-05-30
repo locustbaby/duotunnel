@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use tunnel_lib::{ClientStatus, TokenStatus};
 pub struct AuthResult {
     pub client_group: String,
 }
@@ -16,7 +17,7 @@ impl std::fmt::Display for AuthError {
             AuthError::InvalidToken => write!(f, "invalid token"),
             AuthError::TokenRevoked => write!(f, "token has been revoked"),
             AuthError::ClientDisabled => write!(f, "client is disabled"),
-            AuthError::Internal(e) => write!(f, "internal error: {}", e),
+            AuthError::Internal(_) => write!(f, "internal error"),
         }
     }
 }
@@ -31,9 +32,9 @@ pub trait AuthStore: Send + Sync {
 }
 pub struct TokenListEntry {
     pub client_name: String,
-    pub client_status: String,
+    pub client_status: ClientStatus,
     pub token_id: i64,
-    pub token_status: String,
+    pub token_status: Option<TokenStatus>,
     pub created_at: String,
     pub revoked_at: Option<String>,
 }

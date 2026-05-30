@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
 
     let ready = Arc::new(AtomicBool::new(false));
 
-    let pool = open_sqlite_pool(&cfg.database_url).await?;
+    let pool = open_sqlite_pool(&cfg.database_url, 8).await?;
 
     let auth_store_inner = SqliteAuthStore::from_pool(pool.clone());
     auth_store_inner.migrate().await?;

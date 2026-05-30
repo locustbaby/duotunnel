@@ -2,6 +2,7 @@ use crate::proto::TokenCacheEntry;
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::Row;
+use tunnel_store::{ClientStatus, TokenStatus};
 
 #[async_trait]
 pub trait TokenCacheProvider: Send + Sync {
@@ -36,8 +37,10 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
             .map(|r: sqlx::sqlite::SqliteRow| TokenCacheEntry {
                 hash_hex: r.get("token_hash"),
                 client_group: r.get("client_group"),
-                client_status: r.get("client_status"),
-                token_status: r.get("token_status"),
+                client_status: ClientStatus::parse(&r.get::<String, _>("client_status"))
+                    .unwrap_or(ClientStatus::Disabled),
+                token_status: TokenStatus::parse(&r.get::<String, _>("token_status"))
+                    .unwrap_or(TokenStatus::Revoked),
             })
             .collect())
     }
