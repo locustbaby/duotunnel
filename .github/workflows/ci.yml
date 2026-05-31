@@ -170,6 +170,21 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace -- -D warnings
 
+      - name: Install cargo-udeps
+        uses: taiki-e/install-action@cargo-udeps
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Install nightly Rust for cargo-udeps
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: cargo udeps (unused dependency check)
+        run: cargo +nightly udeps --all-targets
+
+      - name: cargo audit (security vulnerability check)
+        run: cargo audit
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 2a: Build release binaries — shared by integration-test and stress-test
   # ─────────────────────────────────────────────────────────────────────────────
