@@ -1,6 +1,7 @@
 use super::peers::PeerSpec;
 use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
+use crate::sniff::{default_proxyengine_detectors, SniffPolicy, SniffRuntime};
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
@@ -64,18 +65,13 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             (p, None)
         } else {
             let pool = stream_peek_pool();
-            let mut buf = pool.take();
-            let n = recv.read(&mut buf[..]).await?.unwrap_or(0);
-            let initial_bytes = if n > 0 {
-                let b = bytes::Bytes::copy_from_slice(&buf[..n]);
-                pool.put(buf);
-                b
+            let runtime = SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
+            let sniffed = runtime.sniff(&mut recv, pool).await?;
+            if sniffed.bytes_read > 0 {
+                (sniffed.hint.protocol, Some(sniffed.prefix.into_bytes()))
             } else {
-                pool.put(buf);
-                bytes::Bytes::new()
-            };
-            let protocol = detect_protocol(n, &initial_bytes);
-            (protocol, if n > 0 { Some(initial_bytes) } else { None })
+                (Protocol::Unknown, None)
+            }
         };
 
         let mut ctx = Context {
@@ -90,28 +86,4 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             .await?;
         Ok(())
     }
-}
-
-/// Determine protocol from the first bytes of the stream.
-/// Consolidates the websocket upgrade check into a single httparse pass.
-fn detect_protocol(n: usize, data: &[u8]) -> Protocol {
-    if n == 0 {
-        return Protocol::Unknown;
-    }
-    // Single httparse pass: detect both WebSocket upgrade and H1 together.
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Request::new(&mut headers);
-    if req.parse(data).is_ok() {
-        for h in req.headers {
-            if h.name.eq_ignore_ascii_case("Upgrade")
-                && std::str::from_utf8(h.value)
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case("websocket")
-            {
-                return Protocol::WebSocket;
-            }
-        }
-        return Protocol::H1;
-    }
-    Protocol::H1
 }

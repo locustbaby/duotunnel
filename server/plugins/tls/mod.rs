@@ -25,7 +25,7 @@ impl IngressProtocolHandler for TlsHandler {
         ProtocolKind::Tls
     }
 
-    async fn handle(&self, stream: TcpStream, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(&self, stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
         let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let host = ctx
             .hint

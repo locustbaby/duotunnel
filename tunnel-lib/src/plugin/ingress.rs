@@ -86,25 +86,8 @@ impl ProtocolHint {
     }
 }
 
-// ── IngressProtocolHandler ────────────────────────────────────────────────────
-
-/// Handler for a specific protocol on the ingress (server) side.
-///
-/// Unlike v1's `probe()` competition, the framework dispatches via
-/// `ProtocolKind` after a single sniff pass.  The handler never needs to
-/// identify the protocol — it only needs to *process* it.
 #[async_trait]
 pub trait IngressProtocolHandler: Send + Sync + 'static {
-    /// The protocol this handler serves.  Used as the registry dispatch key.
     fn protocol_kind(&self) -> ProtocolKind;
-
-    /// Handle an accepted TCP connection.
-    ///
-    /// `route` is `Some` when Phase 4 resolved a route per-connection.
-    /// It is `None` for handlers that do their own per-request route lookup
-    /// (currently only `H2cHandler`, which multiplexes many authorities on a
-    /// single connection).
-    /// `ctx.hint.raw_preface` contains the bytes that were peeked; the handler
-    /// is responsible for prepending them when forwarding to the upstream.
-    async fn handle(&self, stream: TcpStream, route: Option<Route>, ctx: &ServerCtx) -> Result<()>;
+    async fn handle(&self, stream: crate::PrefixedReadWrite<tokio::net::TcpStream>, route: Option<Route>, ctx: &ServerCtx) -> Result<()>;
 }

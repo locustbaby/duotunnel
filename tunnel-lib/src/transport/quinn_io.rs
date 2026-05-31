@@ -43,7 +43,8 @@ pub struct PrefixedReadWrite<S> {
     prefix: Option<Bytes>,
 }
 impl<S> PrefixedReadWrite<S> {
-    pub fn new(stream: S, prefix: Bytes) -> Self {
+    pub fn new(stream: S, prefix: impl Into<Bytes>) -> Self {
+        let prefix = prefix.into();
         Self {
             stream,
             prefix: if prefix.is_empty() {
@@ -87,5 +88,41 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedReadWrite<S> {
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+pub struct PrefixedReadHalf<R> {
+    reader: R,
+    prefix: Option<Bytes>,
+}
+impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReadHalf<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<()>> {
+        if let Some(prefix) = &mut self.prefix {
+            let len = std::cmp::min(prefix.len(), buf.remaining());
+            buf.put_slice(&prefix[..len]);
+            if len == prefix.len() {
+                self.prefix = None;
+            } else {
+                let remaining = prefix.split_off(len);
+                *prefix = remaining;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+impl PrefixedReadWrite<tokio::net::TcpStream> {
+    pub fn into_split(self) -> (PrefixedReadHalf<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf) {
+        let (r, w) = self.stream.into_split();
+        (
+            PrefixedReadHalf {
+                reader: r,
+                prefix: self.prefix,
+            },
+            w,
+        )
     }
 }

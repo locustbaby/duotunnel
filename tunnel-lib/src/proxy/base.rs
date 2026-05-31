@@ -47,3 +47,16 @@ pub async fn forward_with_initial_data(
     )
     .await
 }
+
+pub async fn forward_prefixed_to_client(
+    send: SendStream,
+    recv: RecvStream,
+    external_stream: crate::PrefixedReadWrite<TcpStream>,
+    relay_buf_size: usize,
+) -> Result<()> {
+    let (tcp_read, tcp_write) = external_stream.into_split();
+    let quic_to_tcp = copy_buffered_then_shutdown(recv, tcp_write, relay_buf_size);
+    let tcp_to_quic = copy_buffered_then_finish(tcp_read, send, relay_buf_size);
+    tokio::try_join!(quic_to_tcp, tcp_to_quic)?;
+    Ok(())
+}

@@ -26,7 +26,7 @@ impl IngressProtocolHandler for H1Handler {
 
     async fn handle(
         &self,
-        mut stream: TcpStream,
+        stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>,
         route: Option<Route>,
         ctx: &ServerCtx,
     ) -> Result<()> {
@@ -41,7 +41,6 @@ impl IngressProtocolHandler for H1Handler {
             .clone()
             .ok_or_else(ProxyError::routing_missing_host)?;
 
-        let initial_data = &hint.raw_preface;
         let protocol = match hint.protocol {
             tunnel_lib::proxy::core::Protocol::WebSocket => {
                 tunnel_lib::proxy::core::Protocol::WebSocket
@@ -52,11 +51,6 @@ impl IngressProtocolHandler for H1Handler {
         debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, byte-level forwarding");
 
         let (group_id, proxy_name) = (route.group_id, route.proxy_name);
-
-        let mut discard = [0u8; tunnel_lib::plugin::SNIFF_LIMIT];
-        stream
-            .read_exact(&mut discard[..initial_data.len()])
-            .await?;
 
         let mut attempts = 0;
         let max_attempts = 3;
@@ -108,11 +102,10 @@ impl IngressProtocolHandler for H1Handler {
             host: Some(host),
         };
         tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-        tunnel_lib::proxy::forward_with_initial_data(
+        tunnel_lib::proxy::forward_prefixed_to_client(
             send,
             recv,
             stream,
-            initial_data,
             ctx.relay_buf_size,
         )
         .await

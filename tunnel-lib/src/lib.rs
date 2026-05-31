@@ -13,6 +13,7 @@ pub mod plugin;
 pub mod protocol;
 pub mod proxy;
 pub mod shared;
+pub mod sniff;
 pub mod transport;
 pub use accept::{run_accept_worker, AcceptedConn};
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
@@ -56,5 +57,10 @@ pub use transport::listener::{
 };
 pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};
 
+pub use sniff::{
+    default_client_detectors, default_ingress_detectors, default_proxyengine_detectors,
+    H2cDetector, Http1Detector, ProtocolDetector, SniffOutcome, SniffPolicy, SniffPrefix,
+    SniffResult, SniffRuntime, SniffStream, TlsClientHelloDetector,
+};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;

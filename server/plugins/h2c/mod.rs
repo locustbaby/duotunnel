@@ -147,7 +147,7 @@ impl IngressProtocolHandler for H2cHandler {
 
     async fn handle(
         &self,
-        stream: TcpStream,
+        stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>,
         _route: Option<Route>,
         ctx: &ServerCtx,
     ) -> Result<()> {

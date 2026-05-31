@@ -9,9 +9,9 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    detect_protocol_and_host, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
+    default_client_detectors, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
     run_accept_worker, send_routing_info, AcceptedConn, ErrorKind, OverloadLimits, PeekBufPool,
-    ProxyError, RoutingInfo, TcpParams,
+    ProxyError, RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -90,20 +90,28 @@ pub async fn start_entry_listener(
 
 async fn handle_entry_connection(
     pool: Arc<EntryConnPool>,
-    local_stream: TcpStream,
+    mut local_stream: TcpStream,
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
     overload: &OverloadLimits,
 ) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
-    let mut buf = peek_pool.take();
-    let n = local_stream.peek(&mut buf).await?;
-    let (protocol, host) = detect_protocol_and_host(&buf[..n]);
-    peek_pool.put(buf);
+    let runtime = SniffRuntime::new(SniffPolicy::default(), default_client_detectors());
+    let sniffed = runtime.sniff(&mut local_stream, peek_pool).await?;
+    let (protocol, host, initial_bytes) = if sniffed.bytes_read > 0 {
+        (
+            sniffed.hint.protocol,
+            sniffed.hint.sni.clone().or(sniffed.hint.authority.clone()),
+            Some(sniffed.prefix.into_bytes()),
+        )
+    } else {
+        (tunnel_lib::proxy::core::Protocol::Unknown, None, None)
+    };
 
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
@@ -138,9 +146,13 @@ async fn handle_entry_connection(
                     host,
                 };
                 send_routing_info(&mut send, &routing_info).await?;
+                if let Some(ref init) = initial_bytes {
+                    send.write_all(init).await?;
+                }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
+                let extra = initial_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                 debug!(
-                    sent = sent, received = received, protocol = ? protocol,
+                    sent = sent + extra, received = received, protocol = ? protocol,
                     "entry relay completed"
                 );
                 return Ok(());

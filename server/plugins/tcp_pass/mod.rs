@@ -22,7 +22,7 @@ impl IngressProtocolHandler for TcpPassHandler {
         ProtocolKind::Tcp
     }
 
-    async fn handle(&self, stream: TcpStream, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(&self, stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
         let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let hint = ctx.hint.as_ref();
         let host = hint.and_then(|h| h.sni.clone().or_else(|| h.authority.clone()));
@@ -87,6 +87,6 @@ impl IngressProtocolHandler for TcpPassHandler {
         let recv = opened.recv;
         let _inflight_guard = opened.inflight;
         tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-        tunnel_lib::proxy::forward_to_client(send, recv, stream, ctx.relay_buf_size).await
+        tunnel_lib::proxy::forward_prefixed_to_client(send, recv, stream, ctx.relay_buf_size).await
     }
 }

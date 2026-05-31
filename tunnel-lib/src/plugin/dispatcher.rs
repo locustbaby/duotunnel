@@ -10,8 +10,7 @@ use super::ingress::{ProtocolHint, ProtocolKind};
 use super::metrics::observe_proxy_error;
 use super::registry::PluginRegistry;
 use super::service::TunnelService;
-use crate::protocol::detect::{detect_protocol_and_host, extract_tls_sni};
-use crate::proxy::core::Protocol;
+use crate::sniff::{default_ingress_detectors, SniffPolicy, SniffRuntime};
 use crate::ProxyError;
 
 /// Call `svc.logging` inside `catch_unwind` so a broken implementation can't
@@ -28,65 +27,20 @@ fn safe_logging(svc: &dyn TunnelService, ctx: &ServerCtx, outcome: &PhaseOutcome
 /// `ProtocolHint`. Exposed so ingress handlers can size stack buffers
 /// (e.g. for discarding peeked bytes before handing the stream to a
 /// relay) without hard-coding the number.
-pub const SNIFF_LIMIT: usize = 256;
+pub const SNIFF_LIMIT: usize = 4096;
 
-// ── Protocol sniff (Phase 1, CORE — not pluggable) ────────────────────────────
-
-/// Peek up to `SNIFF_LIMIT` bytes from the TCP stream and produce a
-/// `ProtocolHint`.  The stream is NOT advanced — peeked bytes are stored
-/// in `raw_preface` for the handler to replay.
-async fn sniff(stream: &TcpStream) -> Result<ProtocolHint> {
-    let mut buf = [0u8; SNIFF_LIMIT];
-    let n = stream.peek(&mut buf).await?;
-    let data = &buf[..n];
-
-    let (legacy_proto, host) = detect_protocol_and_host(data);
-
-    let kind = match legacy_proto {
-        Protocol::H2 => ProtocolKind::H2c,
-        Protocol::H1 | Protocol::WebSocket => ProtocolKind::Http1,
-        Protocol::Tcp | Protocol::Unknown => {
-            // detect.rs maps TLS ClientHello to Protocol::Tcp + SNI as host.
-            // Re-check: if first byte is 0x16 it's TLS.
-            if n > 0 && data[0] == 0x16 {
-                ProtocolKind::Tls
-            } else {
-                ProtocolKind::Tcp
-            }
-        }
-    };
-
-    let raw_preface = bytes::Bytes::copy_from_slice(data);
-    let mut hint = ProtocolHint::new(kind, raw_preface).with_protocol(legacy_proto);
-
-    match kind {
-        ProtocolKind::Tls => {
-            if let Some(sni) = extract_tls_sni(data) {
-                hint = hint.with_sni(sni);
-            }
-        }
-        ProtocolKind::H2c | ProtocolKind::Http1 => {
-            if let Some(h) = host {
-                hint = hint.with_authority(h);
-            }
-        }
-        ProtocolKind::Tcp => {}
+async fn sniff(mut stream: TcpStream) -> Result<(ProtocolHint, crate::PrefixedReadWrite<TcpStream>)> {
+    let runtime = SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors());
+    let pool = crate::PeekBufPool::new(SNIFF_LIMIT);
+    let sniffed = runtime.sniff(&mut stream, &pool).await?;
+    let mut hint = sniffed.hint.clone();
+    if hint.kind == ProtocolKind::Tcp && sniffed.bytes_read > 0 && sniffed.prefix.as_bytes()[0] == 0x16 {
+        hint.kind = ProtocolKind::Tls;
     }
-
-    Ok(hint)
+    let prefixed = sniffed.into_stream(stream);
+    Ok((hint, prefixed))
 }
 
-// ── IngressDispatcher ─────────────────────────────────────────────────────────
-
-/// Runs the 5-phase ingress pipeline for every accepted TCP connection.
-///
-/// Phase ordering:
-///   1. `sniff`                          — peek bytes, produce `ProtocolHint` (CORE)
-///   2. `ConnectionModule::pre_admission` — IP/rate-limit modules, in order
-///   3. `TunnelService::admission`        — token / auth check
-///   4. `RouteResolver::resolve`          — vhost / static route lookup (from registry)
-///   5. `IngressProtocolHandler::handle`  — TLS / H2c / H1 / TCP handler
-///   6. `TunnelService::logging`          — metrics & access logs
 pub struct IngressDispatcher {
     registry: Arc<PluginRegistry>,
     listener_port: u16,
@@ -108,8 +62,7 @@ impl IngressDispatcher {
     ) -> Result<()> {
         let mut timing = PhaseTiming::new();
 
-        // ── Phase 1: protocol sniff ───────────────────────────────────────────
-        let hint = sniff(&stream).await?;
+        let (hint, stream) = sniff(stream).await?;
         timing.sniff_done_at = Some(Instant::now());
         ctx.hint = Some(hint.clone());
 

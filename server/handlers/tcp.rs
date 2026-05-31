@@ -52,17 +52,24 @@ pub async fn run_tcp_accept_loop(
 }
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
-    stream: TcpStream,
+    mut stream: TcpStream,
     proxy_name: String,
     group_id: String,
 ) -> Result<()> {
-    use tunnel_lib::detect_protocol_and_host;
     let peer_addr = stream.peer_addr()?;
     let pool = &state.peek_buf_pool;
-    let mut buf = pool.take();
-    let n = stream.peek(&mut buf).await?;
-    let (protocol, host) = detect_protocol_and_host(&buf[..n]);
-    pool.put(buf);
+    let runtime = tunnel_lib::SniffRuntime::new(
+        tunnel_lib::SniffPolicy::default(),
+        tunnel_lib::default_ingress_detectors(),
+    );
+    let sniffed = runtime.sniff(&mut stream, pool).await?;
+    let protocol = if sniffed.bytes_read == 0 {
+        tunnel_lib::proxy::core::Protocol::Unknown
+    } else {
+        sniffed.hint.protocol
+    };
+    let host = sniffed.hint.sni.clone().or(sniffed.hint.authority.clone());
+    let prefixed_stream = sniffed.into_stream(stream);
     debug!(protocol = ? protocol, host = ? host, "detected protocol on tcp listener");
 
     let routing_info = tunnel_lib::RoutingInfo {
@@ -126,5 +133,5 @@ async fn handle_tcp_connection(
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-    proxy::forward_to_client(send, recv, stream, state.proxy_buffer_params.relay_buf_size).await
+    proxy::forward_prefixed_to_client(send, recv, prefixed_stream, state.proxy_buffer_params.relay_buf_size).await
 }
