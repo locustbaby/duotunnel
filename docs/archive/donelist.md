@@ -245,3 +245,74 @@ CI run 24198270418 所有 job 通过，`cpu.json.gz` 有实际数据（837 KB–
 通过多项性能优化手段成功消除了延迟回归：
 1. **H2 Sender Cache 去串行化**：采用 `ArcSwap` 实现无锁 fast path 读取，只有在 connection miss 的 slow path 上才使用 Mutex 进行握手重建，彻底解决了并发 H2 sender 竞争 contention 问题。
 2. **零拷贝/低开销传输**：引入 `PeekBufPool` 消除连接建立时的 alloc 与 memset，改用 `httparse` 零拷贝解析头，并在客户端 `open_bi` 后提前写入首字节数据避免额外的唤醒等待，显著降低了 baseline 延迟。
+
+---
+
+## May 2026 Ingress & Connection Pool Refactor ✅
+
+### [TODO-54] Dial9 release follow-up
+**Priority**: High | **Status**: Completed
+
+After `dial9-tokio-telemetry` publishes a crates.io version that includes commit `64564b26`, remove the git `rev` patch and switch back to a released version.
+
+**Steps**:
+1. Remove `[patch.crates-io].dial9-tokio-telemetry` (Completed).
+2. Keep client/server on the same released version (Completed).
+3. Verify CI `stress-test` and `stress-trace-8k` still preserve dashboard metrics and phase visualization (Completed).
+
+### [TODO-66] Unified HttpConnector + H1/H2 fallback memory
+**Priority**: High | **Status**: Completed
+
+**Current code state**:
+- `HttpConnector` exists and wraps `HttpsClient` + `H2cClient`.
+- H1 downstream requests go through `HttpConnector::request()`.
+- Cleartext h2c empty-body requests can fall back to H1 once and mark `prefer_h1` with TTL.
+- Downstream protocol and upstream protocol are fully decoupled via explicit `downstream_protocol` connection parameter.
+- `HttpConnector::connect()` dynamically dispatches primarily by `downstream_protocol` instead of being bound to upstream descriptors.
+
+### [TODO-69] h2c per-route sticky sender cache failover
+**Priority**: Medium | **Status**: Completed
+
+**Current code state**:
+- h2c `CachedSender` is now `{ selected: Arc<SelectedConnection>, sender }`.
+- Stale sender invalidation is tied to `selected.conn.stable_id()`.
+- Empty-body requests retry once after sender failure.
+
+### [TODO-72] Client-side connection pool and retry polish
+**Priority**: Low | **Status**: Completed
+
+**Current code state**:
+- `EntryConnPool` de-duplicates by `Connection::stable_id()`.
+- Entry retry uses an exclude set and distinguishes stream capacity, transient connection loss, and fatal connection errors.
+- Connection-level failures evict stale pool entries.
+
+---
+
+## 🔒 2026-05-22 & 2026-05-29 Code Review & TODOs 已完成项 ✅
+
+- **[TODO-87] Fast-Path First open_bi without Unconditional Timeout**: Implemented non-blocking `conn.open_bi().now_or_never()` check in `open_bi_guarded` to bypass timer wheel registration for immediate connections.
+- **[TODO-90] Add Config Validation to Server Config**: Implemented comprehensive FIGMENT-level `validate(&self)` checking logic inside `ServerConfigFile` for ports, timeouts, and overload thresholds.
+- **[TODO-91] Refactor ClientEngine and Improve Graceful Exit Telemetry**: Refactored `ClientEngine` services to `Arc<dyn ClientService>`, implemented a robust two-phase graceful shutdown with cascading error logging, and guaranteed cancellation token broadcast on normal exit.
+- **[TODO-92] Enrich Metric Labels with ErrorKind**: Dynamically parses underlies dynamic `ProxyError` to granular `ErrorKind` labels inside `DefaultTunnelService::logging` to support granular SLA alerts and root-cause analysis dashboards.
+- **[TODO-93] Fix healthz Incomplete Read and Ready Escape Vulnerability in Client**: Hardened the mini health probe server in `client/main.rs` to return `400 Bad Request` on unrecognized/fragmented HTTP requests instead of false `200 OK`.
+- **[TODO-95] Refactor Overload Backoff Loop with tokio::sync::Notify**: Completely replaced active `sleep` polling loop with `tokio::sync::Notify` in `maybe_slow_path` to avoid timer wheel load and CPU cache bouncing under backpressure.
+- **Eliminate Redundant Heap Allocation in `TcpPassHandler`**: Directly reads length of `raw_preface` in `TcpPassHandler::handle` without unnecessary `to_vec()` heap clone.
+- **Eliminate Double Allocation in `H1Handler`**: Directly passes raw preface reference as `&[u8]` inside `H1Handler::handle` to avoid double heap allocations.
+- **DNS Resolution Pathways**: Fully optimized egress target resolutions via caching to prevent WAN DNS lookup blockages on hot paths.
+- **Serialized Upstream Dialing in `ProxyEngine`**: Fixed serialization bottleneck in `ProxyEngine` by optimizing peak buffer reads.
+- **Active Live Gauges (Real-Time Queue Depths)**: Implemented live Prom gauges for accepted connections, pending QUIC stream queues, and slow-path waiting tasks.
+- **In-Code Pre-Validation & Enriched EMFILE Logging**: Added startup soft limits validation and high-visibility backoff EMFILE/ENFILE warnings to prevent CPU thrashing.
+- **同步回调设计的脆弱性与事件循环阻塞隐患 (Blocking Accept Loop)**: Constrained TCP accept callback `H` to return a `Future`, spawned via `tokio::spawn` dynamically inside `run_accept_worker`.
+- **错误退避期间的取消信号“死锁化”响应延迟**: Used `tokio::select!` inside `EMFILE`/`ENFILE` backoff sleep loop to trigger immediate graceful shutdown.
+- **系统级描述符耗尽缺陷 (ENFILE 遗漏)**: Correctly handled both `EMFILE` (errno 24) and `ENFILE` (errno 23) in accept workers.
+- **Tie-Breaker 缺失引发的“羊群效应”与突发负载不均 (Herding Effect)**: Added thread-local rotating index offset to `pick_least_inflight` selection loop to balance load across nodes with identical inflight.
+- **超时归类模型与流限制的语义混淆风险**: QUIC timeouts are properly classified as `OpenBiOutcome::TimedOut`/`quic_open_timed_out` instead of generic stream limits.
+- **大报文读取的冗余“零填充”内存带宽浪费 (Zero-filling Memory Waste)**: Allocated uninitialized capacity via `AlignedVec` and used `unsafe { buf.set_len(len); }` inside `recv_watch_request` to avoid synchronic memset.
+- **隐式报文类型状态调用依赖**: Explicitly reads and validates message type against `MessageType::ConfigPush` in `recv_watch_request`.
+- **TLS 握手错误 (`TlsHandshake`) 映射与职责划分的严重偏失 (Misclassified Upstream Error)**: Categorized TLS negotiation issues under `ErrorSource::Upstream` and mapped them to `502 Bad Gateway` status codes.
+- **中间人代理（MITM H2）中高频 PKI 证书生成的 CPU 饥饿风险**: Optimized using thread-safe cached `CertState` with inflight locks and `tokio::task::spawn_blocking`.
+- **极其优秀的高性能无锁读/写锁分离设计**: Implemented RCU-based `snapshot` swap for read paths with lock-free connection selections.
+- **主动容错防护 (Proactive Fault Tolerance)**: Validated `c.conn.close_reason().is_none()` during connection selection.
+- **极佳的同步非阻塞指标采集实践**: Metrics observation processes are synchronically added to atomic gauges.
+- **负载均衡扫描复杂度优化 ($O(N) \to O(1)$)**: P2C load balancing handles selection complexity for connection pools with more than 32 clients.
+

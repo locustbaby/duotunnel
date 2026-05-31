@@ -235,8 +235,8 @@ proxy.rs::handle_work_stream  — 接收远端 QUIC Stream → 解析后转发�
 
 | 编号 | 描述 | 影响大小 | 风险 | 依赖 | 建议顺序 |
 |---|---|---|---|---|---|
-| **CR-NEW-B** | `VhostRouter` 返回 `RouteTarget` 结构体替换匿名元组 | 低（类型安全，零运行时） | 低 | 无 | **1** — 改动机械，编译器保证 |
-| **CR-NEW-E** | 提取 `ThreadLocalBuf` 共享工具，消除 2 处 unsafe peek buf 重复 | 低（代码整洁，安全集中管理） | 低 | 无 | **3** — 小范围改动 |
+| **CR-NEW-B** [已完成] ✅ | `VhostRouter` 返回 `RouteTarget` 结构体替换匿名元组 | 低（类型安全，零运行时） | 低 | 无 | **1** — 改动机械，编译器保证 |
+| **CR-NEW-E** [已完成] ✅ | 提取 `ThreadLocalBuf` 共享工具，消除 2 处 unsafe peek buf 重复 | 低（代码整洁，安全集中管理） | 低 | 无 | **3** — 小范围改动 |
 | **CR4** | 解耦观测性：业务只抛 tracing 事件，独立 subscriber 汇总 metrics | 中（可读性+扩展性显著提升） | 中（on_event 必须非阻塞，需通过 channel 异步转发到后台 task，不可在锁内直接更新 Prometheus） | 无 | **4** — 独立，但改动面较广 |
-| **CR-NEW-C** | 合并 `TcpPeer` / `TlsTcpPeer` 为 `TcpPeer { tls: Option<TlsConfig> }` | 中（消除重复 connect_inner） | 中 | 无 | **5** — 需同步更新 `PeerKind` 构造点 |
+| **CR-NEW-C** [已完成] ✅ | 合并 `TcpPeer` / `TlsTcpPeer` 为 `TcpPeer { tls: Option<TlsConfig> }` | 中（消除重复 connect_inner） | 中 | 无 | **5** — 需同步更新 `PeerKind` 构造点 |
 | **CR5** | 配置流式化：`ConfigStream: Stream<Item = RoutingSnapshot>` | 高（动态配置中心扩展基础） | 中 | TODO-53 Milestone D 后进行 | **7** — 架构级改动，收益大但复杂 |

@@ -46,14 +46,14 @@
 | [TODO-63](#todo-63-peer-描述符化--先消灭-peerkind--dyn-双轨) | Peer 描述符化 + 先消灭 `PeerKind + Dyn` 双轨 | High | Done |
 | [TODO-64](#todo-64-reusehash--clientidgroupid-newtype收尾类型安全) | ReuseHash + ClientId/GroupId newtype（收尾类型安全） | Medium | TODO |
 | [TODO-65](#todo-65-热路径结构化错误--先替换-anyhow-黑盒) | 热路径结构化错误 + 先替换 `anyhow` 黑盒 | High | Done |
-| [TODO-66](#todo-66-统一-httpconnector--h1h2-降级记忆替代-httppeerh2peer) | 统一 HttpConnector + H1/H2 降级记忆 | High | In Progress |
+| [TODO-66](#todo-66-统一-httpconnector--h1h2-降级记忆替代-httppeerh2peer) | 统一 HttpConnector + H1/H2 降级记忆 | High | Done |
 | [TODO-67](#todo-67-servicea--serverapp-抽象统一-accept--handle) | ~~Service\<A\> + ServerApp 抽象~~ | — | **部分达成，剩余部分降级为 TODO-67b** |
 | [TODO-67b](#todo-67b-keep-alive-loop-下沉到-session-层) | keep-alive loop 下沉到 Session 层 | Medium | TODO |
 | [TODO-68](#todo-68-ingress-request-lifecycle-收敛不要扩展-upstreamresolver) | Ingress request lifecycle 收敛（不要扩展 UpstreamResolver） | Medium | TODO |
-| [TODO-69](#todo-69-h2c-per-route-sticky-cache-失效重选--failover) | h2c per-route sticky cache 失效重选 + failover | Medium | In Progress |
+| [TODO-69](#todo-69-h2c-per-route-sticky-cache-失效重选--failover) | h2c per-route sticky cache 失效重选 + failover | Medium | Done |
 | [TODO-70](#todo-70-server-端-snapshot-持-arcselectedconnection对齐-client) | Server 端 snapshot 持 Arc\<SelectedConnection\>（对齐 client） | Low | Done |
 | [TODO-71](#todo-71-p2c-pick-算法可选池规模增长后启用) | P2C pick 算法（可选，池规模增长后启用） | Low | TODO |
-| [TODO-72](#todo-72-client-端小优化非紧急随手做) | Client 端小优化 | Low | In Progress |
+| [TODO-72](#todo-72-client-端小优化非紧急随手做) | Client 端小优化 | Low | Done |
 | [TODO-73](#todo-73-不要抄-pingora-的部分参考避坑) | 不要抄 Pingora 的部分（参考避坑） | FYI | — |
 
 **推荐落地顺序**：66 → 69 → 72 → 64 → 67b → 68 → 71。理由：`63`、`65`、`70` 已完成；后续先继续收敛 `HttpConnector` 与 h2c sticky sender/failover，再做 client 侧小优化和 newtype 收尾。每个 TODO 完成后跑 CI stress phase，观察基准变化。
@@ -309,7 +309,7 @@ Metrics 增加 error label：`error_total{type="ConnectTimeout", source="upstrea
 
 ## [TODO-66] 统一 HttpConnector + H1/H2 降级记忆（替代 HttpPeer/H2Peer）
 
-**Priority**: High | **Status**: In Progress
+**Priority**: High | **Status**: Done
 **依赖与影响**:
 - 依赖：TODO-63（`PeerSpec` 作为统一输入）、TODO-65（结构化错误）
 - 被依赖：—
@@ -527,7 +527,7 @@ impl H2cConnState {
 
 ## [TODO-69] h2c per-route sticky cache 失效重选 + failover
 
-**Priority**: Medium | **Status**: In Progress
+**Priority**: Medium | **Status**: Done
 **依赖与影响**:
 - 依赖：TODO-65（结构化错误）；`TODO-70` 可选，不再是前置
 - 被依赖：—
@@ -764,7 +764,7 @@ pub fn pick_p2c<T>(items: &[T], inflight: impl Fn(&T) -> usize, healthy: impl Fn
 
 ## [TODO-72] Client 端小优化（非紧急，随手做）
 
-**Priority**: Low | **Status**: In Progress
+**Priority**: Low | **Status**: Done
 **依赖与影响**:
 - 依赖：—（exclude set 可独立做）；如果 TODO-65 已落地，可接入结构化 QUIC open 错误
 - 被依赖：—
