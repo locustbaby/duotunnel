@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::net::TcpStream;
 
 use super::ctx::{Route, ServerCtx};
 use crate::proxy::core::Protocol;

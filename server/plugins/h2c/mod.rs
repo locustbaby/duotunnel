@@ -9,7 +9,6 @@ use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tracing::debug;
 
 use tunnel_lib::plugin::{

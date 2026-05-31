@@ -96,7 +96,6 @@ async fn handle_entry_connection(
     open_stream_timeout: Duration,
     overload: &OverloadLimits,
 ) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
 
