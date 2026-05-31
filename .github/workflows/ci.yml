@@ -155,8 +155,17 @@ jobs:
         with:
           components: clippy
 
-      - name: cargo test (all workspace crates)
-        run: cargo test --workspace
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo test & generate coverage (all workspace crates)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: code-coverage-report
+          path: lcov.info
 
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace -- -D warnings
