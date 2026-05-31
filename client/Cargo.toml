@@ -33,7 +33,6 @@ hyper = { version = "1.9", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper-rustls = { version = "0.27", features = ["http2", "aws-lc-rs"] }
 rustls-native-certs = "0.8"
-rustls-pemfile = "2.0"
 http-body-util = "0.1"
 futures-util = "0.3"
 async-trait = "0.1"

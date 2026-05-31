@@ -6,6 +6,7 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{anyhow, Result};
+use rustls::pki_types::pem::PemObject;
 use clap::Parser;
 use std::collections::HashSet;
 use std::future::Future;
@@ -439,7 +440,7 @@ fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
         let ca_file = std::fs::File::open(ca_path)
             .map_err(|e| anyhow::anyhow!("Failed to open CA cert file {}: {}", ca_path, e))?;
         let mut reader = std::io::BufReader::new(ca_file);
-        let certs = rustls_pemfile::certs(&mut reader)
+        let certs = rustls::pki_types::CertificateDer::pem_reader_iter(&mut reader)
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
         if certs.is_empty() {

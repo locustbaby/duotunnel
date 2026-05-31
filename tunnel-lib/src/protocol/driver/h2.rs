@@ -1,4 +1,4 @@
-use hpack::Decoder;
+use fluke_hpack::Decoder;
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub fn extract_h2_authority(data: &[u8]) -> Option<String> {
     let start = if data.starts_with(HTTP2_PREFACE) {
