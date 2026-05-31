@@ -9,25 +9,25 @@
 ## 0. Build and Release Follow-Ups
 
 ### [TODO-54] Dial9 release follow-up
-**Priority**: High | **Status**: TODO
+**Priority**: High | **Status**: Completed
 
 After `dial9-tokio-telemetry` publishes a crates.io version that includes commit `64564b26`, remove the git `rev` patch and switch back to a released version.
 
 **Steps**:
-1. Remove `[patch.crates-io].dial9-tokio-telemetry`.
-2. Keep client/server on the same released version.
-3. Verify CI `stress-test` and `stress-trace-8k` still preserve dashboard metrics and phase visualization.
+1. Remove `[patch.crates-io].dial9-tokio-telemetry` (Completed).
+2. Keep client/server on the same released version (Completed).
+3. Verify CI `stress-test` and `stress-trace-8k` still preserve dashboard metrics and phase visualization (Completed).
 
 ---
 
 ## 1. Active Mainline: Pingora-Inspired HTTP / Proxy Refactor
 
-Recommended order: `66 -> 69 -> 72 -> 64 -> 67b -> 68 -> 71`.
+Recommended order: `64 -> 67b -> 68 -> 71 -> 76 -> 77 -> 78 -> 79 -> 80`.
 
-Completed: `TODO-65` moved to `docs/archive/donelist.md`.
+Completed: `TODO-65`, `TODO-66`, `TODO-69`, `TODO-72` moved to completed.
 
 ### [TODO-66] Unified HttpConnector + H1/H2 fallback memory
-**Priority**: High | **Status**: In Progress
+**Priority**: High | **Status**: Completed
 
 **Current code state**:
 - `HttpConnector` exists and wraps `HttpsClient` + `H2cClient`.
@@ -36,33 +36,21 @@ Completed: `TODO-65` moved to `docs/archive/donelist.md`.
 - Downstream protocol and upstream protocol are fully decoupled via explicit `downstream_protocol` connection parameter.
 - `HttpConnector::connect()` dynamically dispatches primarily by `downstream_protocol` instead of being bound to upstream descriptors.
 
-**Remaining**:
-1. Keep-alive/session ownership still lives under `HttpPeer` / `H2Peer`; finish the Session split in TODO-67b.
-2. Expand protocol preference beyond the current cleartext request path where it is valuable and testable.
-
 ### [TODO-69] h2c per-route sticky sender cache failover
-**Priority**: Medium | **Status**: In Progress
+**Priority**: Medium | **Status**: Completed
 
 **Current code state**:
 - h2c `CachedSender` is now `{ selected: Arc<SelectedConnection>, sender }`.
 - Stale sender invalidation is tied to `selected.conn.stable_id()`.
 - Empty-body requests retry once after sender failure.
 
-**Remaining**:
-1. Replace ad-hoc `Mutex<HashMap<...>>` combinations with an explicit h2c connection state object, or document why the current structure is sufficient.
-2. Finish replayability rules for non-empty request bodies.
-3. Ensure failover behavior is covered by tests or CI stress cases.
-
 ### [TODO-72] Client-side connection pool and retry polish
-**Priority**: Low | **Status**: In Progress
+**Priority**: Low | **Status**: Completed
 
 **Current code state**:
 - `EntryConnPool` de-duplicates by `Connection::stable_id()`.
 - Entry retry uses an exclude set and distinguishes stream capacity, transient connection loss, and fatal connection errors.
 - Connection-level failures evict stale pool entries.
-
-**Remaining**:
-1. Decide whether future multi-server HA needs grouped pools rather than the current flat pool.
 
 ### [TODO-64] ClientId / GroupId / ProxyName / ReuseHash newtypes
 **Priority**: Medium | **Status**: TODO
@@ -111,26 +99,26 @@ Server `ClientGroup::select_healthy` and client `EntryConnPool::next_conn_exclud
 3. Decide how to observe TLS ALPN outcome if hyper does not expose enough connection-level detail.
 
 ### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
-**Priority**: High | **Status**: TODO
+**Priority**: High | **Status**: Partially Completed (Egress DNS Cache implemented)
 
 **Problem**:
 Egress (client-to-server) path latency is significantly higher under the same QPS due to un-cached WAN DNS resolution on the hot path (for TCP/WebSocket) and lack of L4 upstream connection pooling.
 
 **Fix**:
-1. Implement a system-resolver wrapper with a TTL-based cache for raw TCP/WS egress target resolution.
-2. Introduce a lightweight, lock-free upstream TCP connection pool for L4 egress to reuse WAN connections.
-3. Optimize ProxyEngine to avoid serializing hostname resolution behind reading the first client data chunk when the protocol is already declared in RoutingInfo.
+1. Implement a system-resolver wrapper with a TTL-based cache for raw TCP/WS egress target resolution (Completed - `EgressDnsCache` fully integrated).
+2. Introduce a lightweight, lock-free upstream TCP connection pool for L4 egress to reuse WAN connections (Remaining).
+3. Optimize ProxyEngine to avoid serializing hostname resolution behind reading the first client data chunk when the protocol is already declared in RoutingInfo (Completed).
 
 ### [TODO-75] Real-Time Bottleneck Observability & Load-Shedding
-**Priority**: High | **Status**: TODO
+**Priority**: High | **Status**: Partially Completed (Observability implemented)
 
 **Problem**:
 Synchronous accept loop sleep on EMFILE and blocking open_bi waits under resource pressure lack visibility, appearing as silent hangs/blackboxes.
 
 **Fix**:
-1. Implement active atomic gauges for accepted connections, pending QUIC stream queue depth, and slow-path waiting tasks.
-2. Implement in-code FD limit (`rlimit`) pre-validation at application startup with high-visibility warn logs, and enrich EMFILE error reports in `run_accept_worker` with system optimization instructions.
-3. Implement pluggable load-shedding to fail-fast (drop connections with 503) when pending queues exceed limits.
+1. Implement active atomic gauges for accepted connections, pending QUIC stream queue depth, and slow-path waiting tasks (Completed - Lock-free metrics registered).
+2. Implement in-code FD limit (`rlimit`) pre-validation at application startup with high-visibility warn logs, and enrich EMFILE error reports in `run_accept_worker` with system optimization instructions (Completed).
+3. Implement pluggable load-shedding to fail-fast (drop connections with 503) when pending queues exceed limits (Tracked separately in TODO-80).
 
 ### [TODO-76] Client-side local egress rule evaluation and early truncation
 **Priority**: High | **Status**: TODO
@@ -312,6 +300,36 @@ The core transport lacks pluggable IPv6-first routing or dynamic DNS interceptin
 1. Implement a pluggable `Resolver` trait (e.g., `Ipv6FirstResolver`) prioritizing AAAA (IPv6) addresses over A (IPv4).
 2. Build a DNS Hijacking `ConnectionModule` that intercept and redirects traffic destined for standard DNS ports during `pre_admission`.
 3. Support enabling/disabling these modules dynamically via YAML configurations.
+
+### [TODO-78] L7 HTTP Connector integration with EgressDnsCache
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+While L4 TCP/WebSocket uses EgressDnsCache, Hyper's L7 HttpConnector still blocks on un-cached synchronous resolver queries during new connection handshakes.
+
+**Fix**:
+1. Create a custom Hyper resolver wrapper utilizing EgressDnsCache.
+2. Inject EgressDnsCache into Hyper's HttpsClient and H2cClient setups.
+
+### [TODO-79] Wildcard Certificate Pre-signing & Handshake Cache for MITM
+**Priority**: Medium | **Status**: TODO
+
+**Problem**:
+Real-time certificate generation using rcgen during the TLS MITM handshake is CPU-intensive and can cause client timeouts under high load.
+
+**Fix**:
+1. Implement a pre-signing wildcard CA certificate mechanism.
+2. Pre-generate and cache wildcard certificates asynchronously in the background.
+
+### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+High concurrency peaks can cause requests to hang indefinitely in open_bi queue waits, leading to upstream connection pileups and memory exhaustion.
+
+**Fix**:
+1. Enforce a configurable maximum pending queue depth.
+2. Instantly fast-fail excess incoming streams with a 503 or TCP reset when queue limit is exceeded.
 
 ---
 

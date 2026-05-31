@@ -34,17 +34,29 @@ pub async fn run_accept_worker<H, Fut>(
                 match result {
                     Ok((stream, peer_addr)) => {
                         debug!(tag = tag, peer_addr = %peer_addr, "accepted connection");
-                        tokio::spawn(on_conn(AcceptedConn {
-                            stream,
-                            peer_addr,
-                            accepted_at: Instant::now(),
-                            listener_tag: tag,
-                        }));
+                        crate::infra::metrics::METRICS.accepted_connections_active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let on_conn = on_conn.clone();
+                        tokio::spawn(async move {
+                            let _guard = crate::infra::metrics::ConnActiveGuard;
+                            on_conn(AcceptedConn {
+                                stream,
+                                peer_addr,
+                                accepted_at: Instant::now(),
+                                listener_tag: tag,
+                            }).await;
+                        });
                     }
                     Err(e) => {
                         let os_err = e.raw_os_error();
                         if os_err == Some(24) || os_err == Some(23) {
-                            warn!(tag = tag, "accept: too many open files, backing off");
+                            warn!(
+                                tag = tag,
+                                error = %e,
+                                "Accept worker stalled due to FD exhaustion (EMFILE / errno 24). \
+                                Pausing accept loop for {}ms to prevent CPU thrashing. \
+                                Raise file descriptor limits immediately to recover (e.g. run 'ulimit -n 65536').",
+                                emfile_backoff.as_millis()
+                            );
                             tokio::select! {
                                 _ = cancel.cancelled() => {
                                     debug!(tag = tag, "accept worker cancelled during backoff");

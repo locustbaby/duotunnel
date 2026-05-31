@@ -24,6 +24,8 @@ pub struct TlsPeerSpec {
 pub struct BasicPeerSpec {
     pub target_addr: SocketAddr,
     pub tls: Option<TlsPeerSpec>,
+    pub upstream_name: Option<String>,
+    pub upstream_addr_str: Option<String>,
 }
 
 impl BasicPeerSpec {

@@ -26,11 +26,11 @@ impl IngressProtocolHandler for TcpPassHandler {
         let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let hint = ctx.hint.as_ref();
         let host = hint.and_then(|h| h.sni.clone().or_else(|| h.authority.clone()));
-        let initial_data = hint.map(|h| h.raw_preface.to_vec()).unwrap_or_default();
+        let initial_len = hint.map(|h| h.raw_preface.len()).unwrap_or(0);
 
         debug!(
             host = ?host,
-            initial_len = initial_data.len(),
+            initial_len = initial_len,
             "TCP passthrough"
         );
 

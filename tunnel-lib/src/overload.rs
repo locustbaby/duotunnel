@@ -70,6 +70,16 @@ pub async fn maybe_slow_path(
     if cur < limits.inflight_yield_threshold {
         return;
     }
+
+    crate::infra::metrics::METRICS.slowpath_waiting_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    struct SlowpathGuard;
+    impl Drop for SlowpathGuard {
+        fn drop(&mut self) {
+            crate::infra::metrics::METRICS.slowpath_waiting_tasks.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _guard = SlowpathGuard;
+
     let notify = inflight_notify(table, slot_id);
     if cur < limits.inflight_sleep_threshold {
         let notified = notify.notified();

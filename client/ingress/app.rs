@@ -169,6 +169,8 @@ impl UpstreamResolver for ClientApp {
                     } else {
                         None
                     },
+                    upstream_name: None,
+                    upstream_addr_str: None,
                 };
                 Ok(PeerSpec::Tcp(spec))
             }
@@ -194,6 +196,8 @@ impl UpstreamResolver for ClientApp {
                     let spec = BasicPeerSpec {
                         target_addr,
                         tls: None,
+                        upstream_name: None,
+                        upstream_addr_str: None,
                     };
                     Ok(PeerSpec::Tcp(spec))
                 }

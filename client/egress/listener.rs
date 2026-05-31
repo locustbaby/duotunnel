@@ -102,11 +102,10 @@ async fn handle_entry_connection(
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
     let mut buf = peek_pool.take();
-    let n = local_stream.read(&mut buf).await?;
-    let initial_bytes = bytes::Bytes::copy_from_slice(&buf[..n]);
+    let n = local_stream.peek(&mut buf).await?;
+    let (protocol, host) = detect_protocol_and_host(&buf[..n]);
     peek_pool.put(buf);
 
-    let (protocol, host) = detect_protocol_and_host(&initial_bytes);
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
     let pool_size = pool.pool_size();
@@ -140,9 +139,6 @@ async fn handle_entry_connection(
                     host,
                 };
                 send_routing_info(&mut send, &routing_info).await?;
-                if !initial_bytes.is_empty() {
-                    send.write_all(&initial_bytes).await?;
-                }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 debug!(
                     sent = sent, received = received, protocol = ? protocol,

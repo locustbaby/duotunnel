@@ -26,6 +26,8 @@ pub use inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
     InflightGuard, InflightSlotId, InflightTable,
 };
+pub use infra::dns_cache::EgressDnsCache;
+pub use infra::metrics::METRICS;
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
