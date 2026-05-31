@@ -70,9 +70,19 @@ async fn watch_loop(
                     }
                     Err(e) => {
                         error!(error = %e, addr = %ctld_addr, "ctld watch connection failed");
+                        let jittered = {
+                            let min_ms = backoff.as_millis() as u64 / 2;
+                            let max_ms = backoff.as_millis() as u64;
+                            let ms = if min_ms >= max_ms {
+                                min_ms
+                            } else {
+                                min_ms + (fastrand::u64(..) % (max_ms - min_ms + 1))
+                            };
+                            Duration::from_millis(ms)
+                        };
                         tokio::select! {
                             _ = shutdown.cancelled() => return,
-                            _ = tokio::time::sleep(backoff) => {}
+                            _ = tokio::time::sleep(jittered) => {}
                         }
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                     }
@@ -124,6 +134,8 @@ async fn connect_and_watch(
                 if let Some(snapshot) = current_snapshot.as_mut() {
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
                     apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await;
+                } else {
+                    warn!(resource_version = v, "received Patch before Snapshot; patch dropped, routing may be stale");
                 }
                 *last_version = v;
             }

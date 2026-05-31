@@ -127,7 +127,7 @@ fn random_delay_up_to(cap: Duration) -> Duration {
 }
 pub fn classify_login_failure(resp_error: Option<&str>) -> ConnectError {
     let msg = resp_error.unwrap_or("unknown login error");
-    if msg.contains("timeout") || msg.contains("unexpected message type") {
+    if msg.contains("timeout") || msg.contains("unexpected message type") || msg.contains("registration failed") {
         ConnectError::transient(anyhow!("login rejected by server: {}", msg))
     } else {
         ConnectError::fatal(anyhow!("login rejected by server: {}", msg))

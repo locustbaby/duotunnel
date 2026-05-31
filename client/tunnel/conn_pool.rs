@@ -45,6 +45,7 @@ impl EntryConnPool {
                 conn_id = stable_id,
                 "Inflight slot table exhausted"
             );
+            g.ids.remove(&stable_id);
             return;
         };
         g.conns.push(Arc::new(PooledConnection {

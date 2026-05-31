@@ -36,6 +36,7 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
             metrics::quic_connection_closed();
         });
     }
+    endpoint.close(0u32.into(), b"server shutting down");
     Ok(())
 }
 async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
@@ -129,15 +130,30 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
         build_client_config_for_group(&routing.tunnel_management, &client_group).unwrap_or_default()
     };
     let conn_id = uuid::Uuid::new_v4().to_string();
-    send_message(
+    if let Err(e) = state
+        .registry
+        .register(conn_id.clone(), client_group.clone(), conn.clone())
+    {
+        warn!(conn_id = %conn_id, error = %e, "failed to register client connection");
+        let _ = send_message(
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure("registration failed: slot table exhausted"),
+        )
+        .await;
+        conn.close(0u32.into(), b"registration failed");
+        return Err(anyhow::anyhow!("registration failed: {}", e));
+    }
+    if let Err(e) = send_message(
         &mut send,
         MessageType::LoginResp,
         &LoginResp::success(client_config, client_group.clone()),
     )
-    .await?;
-    state
-        .registry
-        .register(conn_id.clone(), client_group.clone(), conn.clone());
+    .await
+    {
+        state.registry.unregister(&conn_id);
+        return Err(e.into());
+    }
     metrics::client_registered(&client_group);
     let mut revocation_rx = state.revocation_tx.subscribe();
     loop {
@@ -184,7 +200,10 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                             }
                         }
                     }
-                    Err(RecvError::Closed) => {}
+                    Err(RecvError::Closed) => {
+                        debug!(conn_id = %conn_id, "revocation channel closed, tearing down connection");
+                        break;
+                    }
                 }
             }
         }

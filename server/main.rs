@@ -517,6 +517,25 @@ async fn background_main(
     };
 
     let name = svc.name();
+
+    let registry = state.registry.clone();
+    let purge_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = purge_shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    let purged = registry.purge_dead();
+                    if purged > 0 {
+                        info!(purged, "registry: purged dead connections");
+                    }
+                }
+            }
+        }
+    });
+
     if let Err(e) = svc.run(state, shutdown, proxy_handle).await {
         error!(service = name, error = %e, "background service exited with error");
     }

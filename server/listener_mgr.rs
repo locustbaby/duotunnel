@@ -67,7 +67,7 @@ async fn spawn_single_listener(
     let generation = state.listeners.next_generation();
     let cancel = CancellationToken::new();
     let drained = Arc::new(Notify::new());
-    let remaining = Arc::new(AtomicUsize::new(accept_workers));
+    let remaining = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(accept_workers);
     let kind = match &listener.mode {
         IngressMode::Http(_) => ListenerKind::Http,
@@ -81,7 +81,14 @@ async fn spawn_single_listener(
         IngressMode::Http(_) => {
             for _ in 0..accept_workers {
                 let s = state.clone();
-                let listener_socket = match tunnel_lib::build_reuseport_listener(addr.parse().unwrap()) {
+                let addr_parsed = match addr.parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        error!(port = %port, error = %e, "failed to parse bind address");
+                        break;
+                    }
+                };
+                let listener_socket = match tunnel_lib::build_reuseport_listener(addr_parsed) {
                     Ok(listener_socket) => Arc::new(listener_socket),
                     Err(e) => {
                         error!(port = %port, error = %e, "failed to bind http worker listener");
@@ -111,7 +118,14 @@ async fn spawn_single_listener(
         IngressMode::Tcp(cfg) => {
             for _ in 0..accept_workers {
                 let s = state.clone();
-                let listener_socket = match tunnel_lib::build_reuseport_listener(addr.parse().unwrap()) {
+                let addr_parsed = match addr.parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        error!(port = %port, error = %e, "failed to parse bind address");
+                        break;
+                    }
+                };
+                let listener_socket = match tunnel_lib::build_reuseport_listener(addr_parsed) {
                     Ok(listener_socket) => Arc::new(listener_socket),
                     Err(e) => {
                         error!(port = %port, error = %e, "failed to bind tcp worker listener");
@@ -148,6 +162,7 @@ async fn spawn_single_listener(
         cancel.cancel();
         return;
     }
+    remaining.store(handles.len(), Ordering::Release);
 
     let entry = ListenerEntry {
         generation,
