@@ -152,7 +152,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     .await
     {
         state.registry.unregister(&conn_id);
-        return Err(e.into());
+        return Err(e);
     }
     metrics::client_registered(&client_group);
     let mut revocation_rx = state.revocation_tx.subscribe();
