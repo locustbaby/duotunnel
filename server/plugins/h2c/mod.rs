@@ -294,6 +294,7 @@ impl IngressProtocolHandler for H2cHandler {
                             &route_target,
                             sender_entry.selected.conn.stable_id(),
                         );
+                        registry.unregister(&sender_entry.selected.conn_id);
 
                         if let Some(template) = retryable_request.as_ref() {
                             if let Some(retry_entry) =
@@ -326,6 +327,7 @@ impl IngressProtocolHandler for H2cHandler {
                                             &route_target,
                                             retry_entry.selected.conn.stable_id(),
                                         );
+                                        registry.unregister(&retry_entry.selected.conn_id);
                                         let err = ProxyError::h2c_forward(retry_err.to_string());
                                         observe_h2c_error(&metrics, &err);
                                         tracing::error!(

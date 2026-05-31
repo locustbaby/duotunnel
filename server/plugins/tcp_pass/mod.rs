@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 use tunnel_lib::ProxyError;
@@ -35,10 +35,6 @@ impl IngressProtocolHandler for TcpPassHandler {
         );
 
         let (group_id, proxy_name) = (route.group_id, route.proxy_name);
-        let selected = self
-            .registry
-            .select_client_for_group(&group_id)
-            .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
         let routing_info = tunnel_lib::RoutingInfo {
             proxy_name: proxy_name.to_string(),
@@ -48,18 +44,44 @@ impl IngressProtocolHandler for TcpPassHandler {
             host,
         };
 
-        tunnel_lib::maybe_slow_path(&selected.inflight_table, selected.slot_id, &ctx.overload)
-            .await;
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let opened = loop {
+            attempts += 1;
+            let selected = self
+                .registry
+                .select_client_for_group(&group_id)
+                .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
-        let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
-        let opened = tunnel_lib::open_bi_guarded(
-            &selected.conn,
-            &selected.inflight_table,
-            selected.slot_id,
-            open_timeout,
-            |_elapsed, _outcome| {},
-        )
-        .await?;
+            tunnel_lib::maybe_slow_path(&selected.inflight_table, selected.slot_id, &ctx.overload)
+                .await;
+
+            let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
+            match tunnel_lib::open_bi_guarded(
+                &selected.conn,
+                &selected.inflight_table,
+                selected.slot_id,
+                open_timeout,
+                |_elapsed, _outcome| {},
+            )
+            .await
+            {
+                Ok(opened) => break opened,
+                Err(e) => {
+                    warn!(
+                        conn_id = %selected.conn_id,
+                        group_id = %group_id,
+                        attempt = attempts,
+                        error = %e,
+                        "failed to open QUIC stream on selected passthrough TCP connection, unregistering and retrying"
+                    );
+                    self.registry.unregister(&selected.conn_id);
+                    if attempts >= max_attempts {
+                        return Err(e.into());
+                    }
+                }
+            }
+        };
 
         let mut send = opened.send;
         let recv = opened.recv;

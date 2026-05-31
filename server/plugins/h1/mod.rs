@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 use tunnel_lib::ProxyError;
@@ -52,19 +52,54 @@ impl IngressProtocolHandler for H1Handler {
         debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, byte-level forwarding");
 
         let (group_id, proxy_name) = (route.group_id, route.proxy_name);
-        let selected = self
-            .registry
-            .select_client_for_group(&group_id)
-            .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
-
-        tunnel_lib::maybe_slow_path(&selected.inflight_table, selected.slot_id, &ctx.overload)
-            .await;
 
         let mut discard = [0u8; tunnel_lib::plugin::SNIFF_LIMIT];
         stream
             .read_exact(&mut discard[..initial_data.len()])
             .await?;
 
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let opened = loop {
+            attempts += 1;
+            let selected = self
+                .registry
+                .select_client_for_group(&group_id)
+                .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
+
+            tunnel_lib::maybe_slow_path(&selected.inflight_table, selected.slot_id, &ctx.overload)
+                .await;
+
+            let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
+            match tunnel_lib::open_bi_guarded(
+                &selected.conn,
+                &selected.inflight_table,
+                selected.slot_id,
+                open_timeout,
+                |_elapsed, _outcome| {},
+            )
+            .await
+            {
+                Ok(opened) => break opened,
+                Err(e) => {
+                    warn!(
+                        conn_id = %selected.conn_id,
+                        group_id = %group_id,
+                        attempt = attempts,
+                        error = %e,
+                        "failed to open QUIC stream on selected H1 connection, unregistering and retrying"
+                    );
+                    self.registry.unregister(&selected.conn_id);
+                    if attempts >= max_attempts {
+                        return Err(e.into());
+                    }
+                }
+            }
+        };
+
+        let mut send = opened.send;
+        let recv = opened.recv;
+        let _inflight_guard = opened.inflight;
         let routing_info = tunnel_lib::RoutingInfo {
             proxy_name: proxy_name.to_string(),
             src_addr: ctx.peer_addr.ip().to_string(),
@@ -72,20 +107,6 @@ impl IngressProtocolHandler for H1Handler {
             protocol,
             host: Some(host),
         };
-
-        let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
-        let opened = tunnel_lib::open_bi_guarded(
-            &selected.conn,
-            &selected.inflight_table,
-            selected.slot_id,
-            open_timeout,
-            |_elapsed, _outcome| {},
-        )
-        .await?;
-
-        let mut send = opened.send;
-        let recv = opened.recv;
-        let _inflight_guard = opened.inflight;
         tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
         tunnel_lib::proxy::forward_with_initial_data(
             send,

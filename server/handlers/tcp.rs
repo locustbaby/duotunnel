@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tunnel_lib::{
     maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome,
 };
@@ -64,10 +64,7 @@ async fn handle_tcp_connection(
     let (protocol, host) = detect_protocol_and_host(&buf[..n]);
     pool.put(buf);
     debug!(protocol = ? protocol, host = ? host, "detected protocol on tcp listener");
-    let selected = state
-        .registry
-        .select_client_for_group(&group_id)
-        .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name,
         src_addr: peer_addr.ip().to_string(),
@@ -75,27 +72,56 @@ async fn handle_tcp_connection(
         protocol,
         host,
     };
-    maybe_slow_path(
-        &selected.inflight_table,
-        selected.slot_id,
-        &state.overload_limits,
-    )
-    .await;
-    let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
-    let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
-    let opened = open_bi_guarded(
-        &selected.conn,
-        &selected.inflight_table,
-        selected.slot_id,
-        open_timeout,
-        |elapsed, outcome| {
-            metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
-            if matches!(outcome, OpenBiOutcome::TimedOut) {
-                metrics::open_bi_timed_out();
+
+    let mut attempts = 0;
+    let max_attempts = 3;
+    let opened = loop {
+        attempts += 1;
+        let selected = state
+            .registry
+            .select_client_for_group(&group_id)
+            .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
+
+        maybe_slow_path(
+            &selected.inflight_table,
+            selected.slot_id,
+            &state.overload_limits,
+        )
+        .await;
+
+        let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
+        let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
+        match open_bi_guarded(
+            &selected.conn,
+            &selected.inflight_table,
+            selected.slot_id,
+            open_timeout,
+            |elapsed, outcome| {
+                metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
+                if matches!(outcome, OpenBiOutcome::TimedOut) {
+                    metrics::open_bi_timed_out();
+                }
+            },
+        )
+        .await
+        {
+            Ok(opened) => break opened,
+            Err(e) => {
+                warn!(
+                    conn_id = %selected.conn_id,
+                    group_id = %group_id,
+                    attempt = attempts,
+                    error = %e,
+                    "failed to open QUIC stream on selected TCP proxy connection, unregistering and retrying"
+                );
+                state.registry.unregister(&selected.conn_id);
+                if attempts >= max_attempts {
+                    return Err(e.into());
+                }
             }
-        },
-    )
-    .await?;
+        }
+    };
+
     let mut send = opened.send;
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
