@@ -28,6 +28,12 @@ impl ResourceMetrics {
     }
 }
 
+impl Default for ResourceMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub static METRICS: ResourceMetrics = ResourceMetrics::new();
 
 pub struct ConnActiveGuard;

@@ -216,7 +216,7 @@ impl UpstreamResolver for ServerEgressMap {
                                             current_spec.upstream_addr_str = Some(current_failed.clone());
                                         }
                                         Err(resolve_err) => {
-                                            last_err = Some(std::io::Error::new(std::io::ErrorKind::Other, resolve_err.to_string()));
+                                            last_err = Some(std::io::Error::other(resolve_err.to_string()));
                                         }
                                     }
                                 } else {

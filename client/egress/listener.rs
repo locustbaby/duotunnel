@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -91,7 +90,7 @@ pub async fn start_entry_listener(
 
 async fn handle_entry_connection(
     pool: Arc<EntryConnPool>,
-    mut local_stream: TcpStream,
+    local_stream: TcpStream,
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
