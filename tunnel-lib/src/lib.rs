@@ -25,7 +25,7 @@ pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
-    InflightGuard, InflightSlotId, InflightTable,
+    pick_p2c_inflight, InflightGuard, InflightSlotId, InflightTable,
 };
 pub use infra::dns_cache::EgressDnsCache;
 pub use infra::metrics::METRICS;
