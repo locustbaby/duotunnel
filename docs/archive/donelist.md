@@ -25,6 +25,7 @@
 - [x] **CR-NEW-C — TcpPeer/TlsTcpPeer 合并**: TCP peer 已收敛为 `TcpPeer { tls: Option<TlsConfig> }` / `BasicPeerSpec { tls: Option<TlsPeerSpec> }` 形态。
 
 ## Pingora-inspired Proxy Refactor ✅
+- [x] **TODO-71 — P2C pick algorithm**: Implemented generic bounded P2C routing in `tunnel-lib/src/inflight.rs` via `pick_p2c_inflight`. Extracted $O(1)$ fast paths for `Server::ClientGroup::select_healthy` and `client::EntryConnPool::next_conn_excluding`.
 
 - [x] **TODO-63 — Peer 描述符化**: 执行链路已从 `UpstreamResolver -> PeerKind` 切到 `UpstreamResolver -> PeerSpec -> connect_peer`，client MITM 路径不再依赖 `PeerKind::Dyn`。
 - [x] **TODO-65 — Hot-path structured errors**: `ProxyError / ErrorKind / ErrorSource / RetryType` 已覆盖 `open_bi_guarded`、server/client `UpstreamResolver`、H1/H2c/TLS/TCP ingress 热路径和共享 proxy error metrics。

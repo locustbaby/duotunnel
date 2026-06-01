@@ -164,3 +164,53 @@ where
     }
     best_item
 }
+
+/// Uses the Power of Two Choices (P2C) algorithm for large lists.
+/// For lists smaller than or equal to `threshold`, delegates to `pick_least_inflight` (O(N) scan).
+/// For larger lists, it randomly picks two items and returns the healthier one with lower inflight.
+/// If neither item is healthy, it will retry up to `max_retries` times.
+/// If all retries fail to find a healthy item, it will fallback to the O(N) scan `pick_least_inflight`.
+pub fn pick_p2c_inflight<T, H, I>(items: &[T], threshold: usize, max_retries: usize, is_healthy: H, inflight: I) -> Option<&T>
+where
+    H: Fn(&T) -> bool,
+    I: Fn(&T) -> usize,
+{
+    let len = items.len();
+    if len <= threshold || len < 2 {
+        return pick_least_inflight(items, is_healthy, inflight);
+    }
+
+    // Attempt P2C bounded by `max_retries`
+    for _ in 0..=max_retries {
+        let idx1 = fastrand::usize(..len);
+        let idx2 = {
+            let r = fastrand::usize(..len - 1);
+            if r >= idx1 {
+                r + 1
+            } else {
+                r
+            }
+        };
+
+        let c1 = &items[idx1];
+        let c2 = &items[idx2];
+        let c1_healthy = is_healthy(c1);
+        let c2_healthy = is_healthy(c2);
+
+        match (c1_healthy, c2_healthy) {
+            (true, true) => {
+                if inflight(c1) <= inflight(c2) {
+                    return Some(c1);
+                } else {
+                    return Some(c2);
+                }
+            }
+            (true, false) => return Some(c1),
+            (false, true) => return Some(c2),
+            (false, false) => continue, // both unhealthy, try again
+        }
+    }
+
+    // All random P2C picks were unhealthy, fallback to O(N) scan
+    pick_least_inflight(items, is_healthy, inflight)
+}

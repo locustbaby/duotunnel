@@ -101,13 +101,10 @@ h2c still carries per-connection request lifecycle state inside the handler (`fi
 Keep per-request routing for h2c, but centralize request lifecycle state and response mapping. Do not introduce a single selected-client fast path that would break multi-authority h2c connections.
 
 ### [TODO-71] P2C pick algorithm
-**Priority**: Low | **Status**: TODO
+**Priority**: Low | **Status**: Completed
 
-**Trigger condition**:
-Only do this when a group has enough clients for linear least-inflight scans to show up in profiles. Until then, `pick_least_inflight` is simpler and adequate.
-
-**Scope**:
-Server `ClientGroup::select_healthy` and client `EntryConnPool::next_conn_excluding`.
+**Fix**:
+Implemented generic bounded P2C routing in `tunnel-lib/src/inflight.rs` via `pick_p2c_inflight`. Extracted $O(1)$ fast paths for `Server::ClientGroup::select_healthy` and `client::EntryConnPool::next_conn_excluding`, avoiding $O(N)$ scanning degradation and eliminating related CPU spikes during load balancing.
 
 ### [TODO-62] Full per-peer protocol capability memory
 **Priority**: Medium | **Status**: Partially covered by TODO-66

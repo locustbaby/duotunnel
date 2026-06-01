@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use quinn::Connection;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::{inflight_load, new_inflight_table, pick_least_inflight, InflightSlotId, InflightTable};
+use tunnel_lib::{inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable};
 
 struct ClientInfo {
     group_id: String,
@@ -111,73 +111,27 @@ impl ClientGroup {
         dead
     }
 
-    /// Select the healthy connection with the fewest in-flight streams (least-inflight).
+    /// Select the healthy connection with the fewest in-flight streams.
     ///
-    /// Reads are allocation-free: one atomic pointer load from the RCU snapshot,
-    /// then a linear scan over healthy connections comparing `AtomicUsize` inflight counts.
+    /// For small groups, it performs a linear least-inflight scan.
+    /// For larger groups (> 32), it uses the Power of Two Choices (P2C) algorithm
+    /// to avoid O(N) CPU spikes while bounding retries.
     pub fn select_healthy(&self) -> Option<Arc<SelectedConnection>> {
         let conns = self.snapshot.load();
-        let len = conns.len();
-        if len > 32 {
-            let idx1 = fastrand::usize(..len);
-            let idx2 = {
-                let r = fastrand::usize(..len - 1);
-                if r >= idx1 {
-                    r + 1
-                } else {
-                    r
-                }
-            };
-            let c1 = &conns[idx1];
-            let c2 = &conns[idx2];
-            let c1_healthy = c1.conn.close_reason().is_none();
-            let c2_healthy = c2.conn.close_reason().is_none();
-            match (c1_healthy, c2_healthy) {
-                (true, true) => {
-                    if inflight_load(
-                        &c1.inflight_table,
-                        c1.slot_id,
-                        std::sync::atomic::Ordering::Relaxed,
-                    ) <= inflight_load(
-                        &c2.inflight_table,
-                        c2.slot_id,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    {
-                        Some(c1.clone())
-                    } else {
-                        Some(c2.clone())
-                    }
-                }
-                (true, false) => Some(c1.clone()),
-                (false, true) => Some(c2.clone()),
-                (false, false) => pick_least_inflight(
-                    conns.as_slice(),
-                    |c| c.conn.close_reason().is_none(),
-                    |c| {
-                        inflight_load(
-                            &c.inflight_table,
-                            c.slot_id,
-                            std::sync::atomic::Ordering::Relaxed,
-                        )
-                    },
+        pick_p2c_inflight(
+            conns.as_slice(),
+            32,
+            3, // Max 3 P2C retries (examining up to 8 connections) before falling back
+            |c| c.conn.close_reason().is_none(),
+            |c| {
+                inflight_load(
+                    &c.inflight_table,
+                    c.slot_id,
+                    std::sync::atomic::Ordering::Relaxed,
                 )
-                .cloned(),
-            }
-        } else {
-            pick_least_inflight(
-                conns.as_slice(),
-                |c| c.conn.close_reason().is_none(),
-                |c| {
-                    inflight_load(
-                        &c.inflight_table,
-                        c.slot_id,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                },
-            )
-            .cloned()
-        }
+            },
+        )
+        .cloned()
     }
 }
 
