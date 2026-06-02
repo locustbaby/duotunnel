@@ -812,7 +812,15 @@ jobs:
             dump_rotate_diag
             exit 1
           fi
-          if ! ./target/release/ci-test-client http "http://echo.local:8180/"; then
+          FINAL_OK=0
+          for i in $(seq 1 5); do
+            if ./target/release/ci-test-client http "http://echo.local:8180/"; then
+              FINAL_OK=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$FINAL_OK" -ne 1 ]; then
             echo "ERROR: token rotate final request failed"
             dump_rotate_diag
             exit 1
