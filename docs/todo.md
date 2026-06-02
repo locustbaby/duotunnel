@@ -21,7 +21,7 @@
 
 #### 赛道一：核心代理、会话与协议控制 (Core Proxy & Protocol)
 聚焦于底层中继、协议嗅探、高并发多路复用与会话生命周期管理。
-- **关联 TODO**：`[TODO-64]`, `[TODO-67b]`, `[TODO-68]`, `[TODO-71]`, `[TODO-62]`, `[TODO-76]`, `[TODO-77]`, `[TODO-78]`, `[TODO-81]`, `[TODO-89]`, `[TODO-86]`, `[TODO-CR-AUDIT-11]`
+- **关联 TODO**：`[TODO-64]`, `[TODO-67b]`, `[TODO-68]`, `[TODO-71]`, `[TODO-62]`, `[TODO-76]`, `[TODO-77]`, `[TODO-78]`, `[TODO-81]`, `[TODO-89]`, `[TODO-86]`
 
 #### 赛道二：控制面、安全凭证与动态配置 (Control Plane & Config)
 聚焦于控制面去状态化设计、敏感凭证脱敏安全、高效率的增量差分推送。
@@ -49,18 +49,25 @@ graph TD
     TODO-67b[TODO-67b keep-alive下沉至Session] -->|前置依赖| TODO-36[TODO-36 消除PeerKind动态分派]
     TODO-64[TODO-64 ID类型安全Newtype] -->|提升边界安全性| TODO-77[TODO-77 Pingora式统一会话]
     TODO-77 -->|决定Hyper客户端集成方式| TODO-78[TODO-78 L7 Hyper 注入DNS缓存]
-    TODO-81[TODO-81 ProxyEngine 零拷贝] <-->|修改同一处 Sniff 逻辑| TODO-CR-AUDIT-11[CR-AUDIT-11 Peek-Read 零拷贝重构]
+    TODO-81[TODO-81 ProxyEngine 零拷贝]
+    TODO-77 -->|收敛协议握手边界| TODO-CR-AUDIT-18[CR-AUDIT-18 协议嗅探硬超时]
     
     %% 赛道二
     TODO-82[TODO-82 边缘节点去 SQLite 状态] -->|前置依赖 - 消除/平移DB逻辑| TODO-84[TODO-84 CP 选路同步]
     TODO-82 -->|平移 SQLite 瓶颈到控制面| TODO-CR-AUDIT-9[CR-AUDIT-9 WAL 并发连接数限制]
     TODO-82 -->|定义同步协议边界| TODO-CR-AUDIT-15[CR-AUDIT-15 增量/差分配置推送]
+    TODO-82 -->|前置控制面API整合| TODO-CR-AUDIT-19[CR-AUDIT-19 CP重连限流]
+    TODO-64 -->|提供强类型安全边界| TODO-CR-AUDIT-17[CR-AUDIT-17 DashMap死锁修复]
     TODO-53D[TODO-53D 移除静态Token Map] -->|简化Token源| TODO-51[TODO-51 Token本地增量更新]
     TODO-51 -->|流式基础| TODO-CR5[TODO-CR5 配置流式模型]
 
     %% 赛道三
     TODO-75[TODO-75 实时资源Gauge指标] -->|提供过载触发阈值| TODO-80[TODO-80 主动限流降级/503]
     TODO-CR-AUDIT-12[CR-AUDIT-12 open_bi 阻塞Span监控] -->|增强阻塞等待观测| TODO-80
+    TODO-86[TODO-86 消除split锁竞争] <-->|修改同一中继物理层| TODO-CR-AUDIT-16[CR-AUDIT-16 engine全局Mutex优化]
+
+    %% 赛道五
+    TODO-CR-AUDIT-21[CR-AUDIT-21 SIGTERM优雅排空] -->|前置进程信号排空机制| TODO-37[TODO-37 进程平滑替换]
 ```
 
 ---
@@ -346,13 +353,10 @@ Build a dedicated event-driven `AsyncListenerReconciler` executing reconciliatio
 
 
 ### [TODO-94] Improve JitterBackoff Jitter Range Bounds
-**Priority**: Low | **Status**: TODO
-
-**Problem**:
-`JitterBackoff::next_delay` uses `random_delay_up_to(cap)` which generates delays between `1ms` and `cap`. Even after multiple retries when the `cap` grows to tens of seconds, it has a high probability of generating a tiny delay (e.g. 1ms), hammering the server under pressure.
+**Priority**: Low | **Status**: Completed
 
 **Fix**:
-Implement a lower bound on the jitter range, such as `random_range(cap / 2 ..= cap)`, ensuring that the backoff delay lower limit scales up proportionally with retry attempts.
+已在 `client/tunnel/supervisor.rs` 中通过 `random_delay_range(min_delay, cap)` (其中 `min_delay = cap / 2`) 实现了指数退避的下限控制，从而彻底消除了重试后期的瞬时高频重试风暴问题。
 
 ---
 
@@ -639,9 +643,10 @@ The maximum connection pool size for SQLite WAL mode is hardcoded to 5. Under hi
 The server configuration mapping helper executes extensive `clone()` calls on every HashMap iteration during reload, generating transient memory churn.
 
 ### [TODO-CR-AUDIT-11] 极度低效的“Peek + Read_exact 丢弃”双重 I/O 系统调用开销
-**Priority**: High | **Status**: TODO
-**Problem**:
-`handle_entry_connection` peeks first bytes, copies them, and then issues a `read_exact` to discard the read-ahead buffer, forcing redundant kernel-to-user context switches. The initial buffer should be wrapped inside a `PrefixedReadWrite` stream.
+**Priority**: High | **Status**: Completed
+
+**Fix**:
+已通过重构 `SniffRuntime::sniff` 消除该开销。当前直接使用原生 `stream.read()` 读取并缓存前缀，无多余系统调用。并在首段完成 `initial_bytes` 的 QUIC 发送，省去了不必要的 `PrefixedReadWrite` 包装与复杂零拷贝机制。
 
 ### [TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi
 **Priority**: Medium | **Status**: TODO
@@ -670,3 +675,89 @@ Refactor `client_status` and `token_status` to lightweight, single-byte compile-
 `WatchEvent::Patch` is currently defined but maps internally to a full `Snapshot` re-push. In large clusters, small routing or token updates force re-sending megabytes of configurations, leading to high CPU and network load spikes.
 **Fix**:
 Implement incremental updates using differential patching or version-pruned updates for `WatchEvent::Patch`.
+
+### [TODO-CR-AUDIT-16] False Global Bottleneck in Forwarding Engine Buffer Pool
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+In `engine/copy.rs`, the thread-local buffer pool `LOCAL_POOL` falls back to `global_pool().lock()` when empty or if the capacity does not match. Under massive concurrent forwarding workloads, this `parking_lot::Mutex` becomes a central bottleneck, causing serious CPU thread starvation and high latency spikes.
+
+**Fix**:
+1. Remove the global `Mutex<Vec<Vec<u8>>>` buffer pool.
+2. Use a lock-free concurrent queue (such as `crossbeam_queue::SegQueue`) for global fallback buffers, or increase the local capacity limit to 256.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: Thread-local buffering is designed to avoid locks in the hot data relay path. However, when the local pool of 8 elements is exhausted, falling back to a standard global Mutex creates a false illusion of scalability, transferring the contention directly to a single CPU lock.
+- **如何改造 (Refactoring Strategy)**: Shift from lock-based sharing to a completely lock-free segment queue (`SegQueue`) or thread-local expansion to guarantee wait-free buffer allocation under maximum concurrent streams.
+- **影响 (Architectural Impact)**: Eliminates thread contention on global buffer allocation, ensuring linear scaling of data plane throughput across multiple CPU cores.
+
+### [TODO-CR-AUDIT-17] DashMap Lock Ordering Inversion in Client Registry
+**Priority**: Critical | **Status**: TODO
+
+**Problem**:
+In `server/registry.rs`, `replace_or_register` acquires a write lock on the `groups` DashMap bucket via `.entry()`, and while holding it, attempts to acquire a write lock on the `clients` DashMap entry. This lock ordering inversion can easily lead to a fatal runtime deadlock under concurrent client registration and unregistration.
+
+**Fix**:
+Avoid nesting locks on distinct `DashMap` or `Mutex` structures. Extract required fields from `groups`, drop the entry write lock explicitly, and then perform operations on `clients`.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: DashMap bucket locks are held implicitly as long as `Entry` references (`RefMut`) are in scope. Doing cross-map operations inside the scope of another map's entry lock naturally results in circular lock dependencies.
+- **如何改造 (Refactoring Strategy)**: Strictly isolate the scopes of different DashMap operations. Fetch/rebuild values in localized scopes, drop locks immediately, and execute consecutive updates sequentially rather than nested.
+- **影响 (Architectural Impact)**: Guaranteed deadlock-free client registration and unregistration, securing high system availability under massive connection churn.
+
+### [TODO-CR-AUDIT-18] Sniffer Slowloris Vulnerability in Protocol Detection
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+In `sniff.rs`, the `SniffRuntime::sniff` loop reads incoming data stream chunks to detect protocols (HTTP/1, H2c, TLS SNI). However, it lacks an absolute temporal timeout constraint. A slow-sending malicious client can keep the sniffer task indefinitely `Pending` on `stream.read()`, causing resource exhaustion (Slowloris attack).
+
+**Fix**:
+Wrap the sniffing operation in `client/egress/listener.rs` and `server` in a hard timeout (e.g., `Duration::from_secs(3)`) using `tokio::time::timeout`.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: Sniffer restricts only read byte count and round limits, but not time. Slow networks or slow-rate attackers can easily leverage this to tie down worker threads and exhaust connection slots.
+- **如何改造 (Refactoring Strategy)**: Enforce a strict edge admission timeout. Any connection that fails to present a recognizable protocol preamble within 3 seconds is immediately dropped.
+- **影响 (Architectural Impact)**: Significantly hardens the edge proxy against slowloris resource-exhaustion attacks, ensuring resilience under hostile network conditions.
+
+### [TODO-CR-AUDIT-19] Control Plane DB Connection Storm Rate-Limiting
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+The control plane lacks rate-limiting mechanisms on client registration and query routing. During wide-area network reconnect storms, thousands of edge nodes querying SQLite databases simultaneously will quickly exhaust SQLite connection pools and WAL limits, leading to gateway query failures.
+
+**Fix**:
+Implement an active rate-limiting filter or token bucket on the control plane gRPC/HTTP API interface before executing database queries.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: Edge stateless nodes offload database pressure to the control plane, but without admission control, reconnect storms will push the database to its concurrency limits.
+- **如何改造 (Refactoring Strategy)**: Establish a token-bucket rate limiter at the ingress of control plane APIs, rejecting excess sync requests with structured backoff instructions.
+- **影响 (Architectural Impact)**: Protects SQLite database pools from cascading failures, ensuring the control plane remains stable during cluster-wide network recoveries.
+
+### [TODO-CR-AUDIT-20] Fuzz Testing for Sniffing and Lock-Free Structures
+**Priority**: Medium | **Status**: TODO
+
+**Problem**:
+DuoTunnel parses raw application preambles (HTTP/1, H2c, TLS SNI) and uses lock-free `ArcSwap`/`InflightTable` registry structures. These hot components are prone to subtle parsing panics or lock-free concurrency memory safety bugs, yet they completely lack fuzzing validation.
+
+**Fix**:
+Integrate `cargo-fuzz` and write target fuzzer test suites for `sniff.rs` protocol parsers and concurrent `SelectedConnection` registry loops.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: Hand-crafted byte-level sniffers are highly vulnerable to malicious payloads. Standard unit tests cannot explore the space of malformed byte structures.
+- **如何改造 (Refactoring Strategy)**: Implement LibFuzzer targets feeding arbitrary byte sequences into `detect_protocol_and_host` and concurrent registry write loops.
+- **影响 (Architectural Impact)**: Discovers edge parsing panics and concurrency state mismatches proactively, securing robust production deployments.
+
+### [TODO-CR-AUDIT-21] SIGTERM Graceful Connection Draining
+**Priority**: High | **Status**: TODO
+
+**Problem**:
+The server and client binaries lack standard signal handling and graceful connection draining. A `SIGTERM` kills processes abruptly, cutting off thousands of active client streams and causing immediate transaction failures.
+
+**Fix**:
+Implement signal traps for `SIGTERM`/`SIGINT`, invoke graceful shutdown, stop accepting new connections, and wait for existing streams to complete or reach a maximum draining timeout.
+
+**Closed-Loop & Resilience Paradigm Analysis**:
+- **前因后果 (Context & Background)**: Abrupt process termination damages service reliability and transactional integrity. Edge nodes need symmetric connection draining before restarts.
+- **如何改造 (Refactoring Strategy)**: Capture system signals, use `CancellationToken` to stop accept loops immediately, allow ongoing streams to finish, and force-kill remaining connections after a 30-second grace window.
+- **影响 (Architectural Impact)**: Achieves zero-downtime rolling deployments, ensuring client traffic is completely uninterrupted during edge server upgrades.
+
