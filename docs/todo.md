@@ -661,11 +661,10 @@ The server configuration mapping helper executes extensive `clone()` calls on ev
 已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小，使发送与接收窗口可以根据广域网特性实施不对称独立参数调优。
 
 ### [TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety
-**Priority**: Low | **Status**: TODO
-**Problem**:
-In `TokenListEntry` (`tunnel-store/src/traits.rs`), `client_status` and `token_status` are declared as plain `String` types, causing redundant heap allocations and type safety gaps under high QPS.
+**Priority**: Low | **Status**: Completed
+
 **Fix**:
-Refactor `client_status` and `token_status` to lightweight, single-byte compile-time safe enums (`ClientStatus`, `TokenStatus`).
+`TokenListEntry` 已经使用强类型轻量级枚举 `ClientStatus` 和 `TokenStatus`。为进一步消除反序列化热路径上的 String 堆分配，我们重构了 `tunnel-store/src/sqlite.rs` 中的字段读取机制，将原本的 `row.get::<String>` 和 `try_get::<String>` 全部优化为直接读取零拷贝的借用型 `row.get::<&str>` / `try_get::<&str>`，完全避开了状态解析中的堆内存分配开销。
 
 ### [TODO-CR-AUDIT-15] Incremental / Delta Configuration Push (WatchEvent::Patch)
 **Priority**: High | **Status**: TODO
