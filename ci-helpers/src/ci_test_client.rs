@@ -68,6 +68,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
     let mut method = "GET".to_string();
     let mut body_str: Option<String> = None;
     let mut extra_headers: Vec<(String, String)> = Vec::new();
+    let mut explicit_host: Option<String> = None;
     let mut expect_body: Option<String> = None;
     let mut allow_statuses: Vec<u16> = Vec::new();
 
@@ -86,7 +87,13 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
                 i += 1;
                 let kv = &args[i];
                 let colon = kv.find(':').ok_or_else(|| format!("bad header: {kv}"))?;
-                extra_headers.push((kv[..colon].to_string(), kv[colon + 1..].trim().to_string()));
+                let k = kv[..colon].to_string();
+                let v = kv[colon + 1..].trim().to_string();
+                if k.eq_ignore_ascii_case("host") {
+                    explicit_host = Some(v);
+                } else {
+                    extra_headers.push((k, v));
+                }
             }
             "--expect-body" => {
                 i += 1;
@@ -124,16 +131,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
     let body_bytes = body_str.map(|s| s.into_bytes()).unwrap_or_default();
 
     // If --header "Host: ..." was given, use that as the Host header; otherwise use URI host.
-    let effective_host = extra_headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| host.clone());
-    // Remove Host from extra_headers to avoid duplicate Host header
-    let non_host_headers: Vec<_> = extra_headers
-        .iter()
-        .filter(|(k, _)| !k.eq_ignore_ascii_case("host"))
-        .collect();
+    let effective_host = explicit_host.unwrap_or_else(|| host.clone());
 
     if force_h2 {
         // h2c upgrade: send HTTP/1.1 with Upgrade: h2c so the server's byte-level
@@ -158,7 +156,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
             .header("upgrade", "h2c")
             .header("http2-settings", "AAMAAABkAAQAAP__")
             .header("connection", "Upgrade, HTTP2-Settings");
-        for (k, v) in &non_host_headers {
+        for (k, v) in &extra_headers {
             req = req.header(k.as_str(), v.as_str());
         }
         let req = req
@@ -201,7 +199,7 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
             .uri(path)
             .header("host", &effective_host)
             .header("content-type", "application/json");
-        for (k, v) in &non_host_headers {
+        for (k, v) in &extra_headers {
             req = req.header(k.as_str(), v.as_str());
         }
         let req = req
@@ -234,6 +232,7 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
     let mut method = "GET".to_string();
     let mut body_str: Option<String> = None;
     let mut extra_headers: Vec<(String, String)> = Vec::new();
+    let mut explicit_host: Option<String> = None;
     let mut expect_body: Option<String> = None;
     let mut allow_statuses: Vec<u16> = Vec::new();
 
@@ -252,7 +251,13 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
                 i += 1;
                 let kv = &args[i];
                 let colon = kv.find(':').ok_or_else(|| format!("bad header: {kv}"))?;
-                extra_headers.push((kv[..colon].to_string(), kv[colon + 1..].trim().to_string()));
+                let k = kv[..colon].to_string();
+                let v = kv[colon + 1..].trim().to_string();
+                if k.eq_ignore_ascii_case("host") {
+                    explicit_host = Some(v);
+                } else {
+                    extra_headers.push((k, v));
+                }
             }
             "--expect-body" => {
                 i += 1;
@@ -296,11 +301,7 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
         .map_err(|e| format!("h2 handshake: {e}"))?;
     tokio::spawn(conn);
 
-    let effective_host = extra_headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| host.clone());
+    let effective_host = explicit_host.unwrap_or_else(|| host.clone());
 
     let body_bytes = body_str.map(|s| s.into_bytes()).unwrap_or_default();
 
@@ -314,9 +315,7 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
         .uri(&target_uri)
         .header("content-type", "application/json");
     for (k, v) in &extra_headers {
-        if !k.eq_ignore_ascii_case("host") {
-            req = req.header(k.as_str(), v.as_str());
-        }
+        req = req.header(k.as_str(), v.as_str());
     }
     let req = req
         .body(Full::new(Bytes::from(body_bytes)))
