@@ -414,3 +414,83 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         egress_vhost_rules,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tunnel_lib::{SharedOverloadMode, BackoffStrategy as LibBackoffStrategy};
+
+    #[test]
+    fn test_overload_config_resolve_default_percents() {
+        // Test normal percent resolution
+        let config = OverloadConfig {
+            mode: OverloadMode::InflightSlowpath,
+            emfile_backoff_ms: 100,
+            inflight_yield_threshold: 100,
+            inflight_sleep_threshold: 200,
+            inflight_sleep_ms: 5,
+            inflight_yield_pct: Some(0.5),
+            inflight_sleep_pct: Some(0.8),
+            backoff_strategy: BackoffStrategy::Exponential,
+        };
+
+        let max_streams = 1000;
+        let limits = config.resolve(max_streams);
+
+        // Expect yield_threshold = 0.5 * 1000 = 500
+        // Expect sleep_threshold = 0.8 * 1000 = 800
+        assert_eq!(limits.mode, SharedOverloadMode::InflightSlowpath);
+        assert_eq!(limits.inflight_yield_threshold, 500);
+        assert_eq!(limits.inflight_sleep_threshold, 800);
+        assert_eq!(limits.inflight_sleep_budget, Duration::from_millis(5));
+        assert_eq!(limits.backoff, LibBackoffStrategy::Exponential);
+    }
+
+    #[test]
+    fn test_overload_config_resolve_fallback_absolutes() {
+        // Test fallback to absolute thresholds when percents are None
+        let config = OverloadConfig {
+            mode: OverloadMode::Burst,
+            emfile_backoff_ms: 100,
+            inflight_yield_threshold: 150,
+            inflight_sleep_threshold: 250,
+            inflight_sleep_ms: 10,
+            inflight_yield_pct: None,
+            inflight_sleep_pct: None,
+            backoff_strategy: BackoffStrategy::Fixed,
+        };
+
+        let limits = config.resolve(1000);
+
+        assert_eq!(limits.mode, SharedOverloadMode::Burst);
+        assert_eq!(limits.inflight_yield_threshold, 150);
+        assert_eq!(limits.inflight_sleep_threshold, 250);
+        assert_eq!(limits.inflight_sleep_budget, Duration::from_millis(10));
+        assert_eq!(limits.backoff, LibBackoffStrategy::Fixed);
+    }
+
+    #[test]
+    fn test_overload_config_resolve_clamp_and_yield_greater_than_sleep() {
+        // Test percentage clamping and yield > sleep logic
+        let config = OverloadConfig {
+            mode: OverloadMode::InflightSlowpath,
+            emfile_backoff_ms: 100,
+            inflight_yield_threshold: 100,
+            inflight_sleep_threshold: 200,
+            inflight_sleep_ms: 5,
+            // 1.5 should clamp to 1.0 -> 1000.
+            // 0.5 should be 500.
+            // Resulting yield (1000) > sleep (500), so yield should be clamped down to sleep (500).
+            inflight_yield_pct: Some(1.5),
+            inflight_sleep_pct: Some(0.5),
+            backoff_strategy: BackoffStrategy::None,
+        };
+
+        let limits = config.resolve(1000);
+
+        assert_eq!(limits.inflight_yield_threshold, 500);
+        assert_eq!(limits.inflight_sleep_threshold, 500);
+        assert_eq!(limits.backoff, LibBackoffStrategy::None);
+    }
+}
