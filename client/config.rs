@@ -481,4 +481,28 @@ mod tests {
         assert_eq!(limits.inflight_sleep_threshold, 500); // 1000 * 0.5
         assert_eq!(limits.inflight_yield_threshold, 500); // Clamped to 500
     }
+
+    #[test]
+    fn test_tls_server_name_returns_explicit_name() {
+        let config = create_mock_config("example.com", 443, Some("custom.example.com".to_string()));
+        assert_eq!(config.tls_server_name(), "custom.example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_trims_explicit_name() {
+        let config = create_mock_config("example.com", 443, Some("  custom.example.com  ".to_string()));
+        assert_eq!(config.tls_server_name(), "custom.example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_falls_back_to_server_addr() {
+        let config = create_mock_config("example.com", 443, None);
+        assert_eq!(config.tls_server_name(), "example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_trims_fallback_server_addr() {
+        let config = create_mock_config("  example.com  ", 443, None);
+        assert_eq!(config.tls_server_name(), "example.com");
+    }
 }
