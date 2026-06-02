@@ -29,16 +29,15 @@ impl PeekBufPool {
     }
 
     /// Take a buffer of exactly `buf_size` bytes from the pool (or allocate fresh).
-    ///
-    /// # Safety
-    /// The returned slice is **uninitialized**. The caller must overwrite all bytes
-    /// before reading any of them.
     pub fn take(&self) -> Vec<u8> {
         PEEK_BUF_POOL.with(|cell| {
             let buf = cell.borrow_mut().pop();
             match buf {
                 Some(mut b) if b.capacity() >= self.buf_size => {
-                    unsafe { b.set_len(self.buf_size) };
+                    b.truncate(self.buf_size);
+                    if b.len() < self.buf_size {
+                        b.resize(self.buf_size, 0);
+                    }
                     b
                 }
                 _ => vec![0u8; self.buf_size],
@@ -51,8 +50,11 @@ impl PeekBufPool {
         if buf.capacity() < self.buf_size {
             return; // undersized — drop
         }
-        // Reset length so the next take() can safely set_len without stale data.
-        buf.truncate(0);
+        // Maintain the length up to buf_size so we don't have to resize it later.
+        buf.truncate(self.buf_size);
+        if buf.len() < self.buf_size {
+            buf.resize(self.buf_size, 0);
+        }
         PEEK_BUF_POOL.with(|cell| {
             let mut pool = cell.borrow_mut();
             if pool.len() < Self::MAX_IDLE_PER_THREAD {
