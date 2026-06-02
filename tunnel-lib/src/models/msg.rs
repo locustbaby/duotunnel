@@ -128,9 +128,7 @@ where
         return Err(anyhow!("Message too large: {} bytes", len));
     }
     let mut buf = AlignedVec::<16>::with_capacity(len);
-    unsafe {
-        buf.set_len(len);
-    }
+    buf.resize(len, 0);
     reader.read_exact(&mut buf[..]).await?;
     let archived = rkyv::access::<M::Archived, rancor::Error>(&buf[..])
         .map_err(|e| anyhow!("rkyv access failed: {e}"))?;
