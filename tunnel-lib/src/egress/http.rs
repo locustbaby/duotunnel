@@ -23,16 +23,10 @@ async fn read_into_bytes_mut(
     dst: &mut BytesMut,
     max_read: usize,
 ) -> std::result::Result<Option<usize>, quinn::ReadError> {
-    dst.reserve(max_read);
-    let start = dst.len();
-    let spare = dst.spare_capacity_mut();
-    let take = spare.len().min(max_read);
-    let raw = spare.as_mut_ptr().cast::<u8>();
-    let out = unsafe { std::slice::from_raw_parts_mut(raw, take) };
-    match recv.read(out).await? {
-        Some(n) => {
-            unsafe { dst.set_len(start + n) };
-            Ok(Some(n))
+    match recv.read_chunk(max_read, true).await? {
+        Some(chunk) => {
+            dst.extend_from_slice(&chunk.bytes);
+            Ok(Some(chunk.bytes.len()))
         }
         None => Ok(None),
     }
