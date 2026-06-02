@@ -135,9 +135,9 @@ impl AuthStore for SqliteAuthStore {
                 .try_into()
                 .map_err(|_| AuthError::Internal(anyhow!("invalid stored hash length")))?;
             if candidate.as_ref().ct_eq(stored.as_ref()).unwrap_u8() == 1 {
-                let client_status = ClientStatus::parse(&row.get::<String, _>("client_status"))
+                let client_status = ClientStatus::parse(row.get::<&str, _>("client_status"))
                     .ok_or_else(|| AuthError::Internal(anyhow!("invalid client status")))?;
-                let token_status = TokenStatus::parse(&row.get::<String, _>("token_status"))
+                let token_status = TokenStatus::parse(row.get::<&str, _>("token_status"))
                     .ok_or_else(|| AuthError::Internal(anyhow!("invalid token status")))?;
                 matched = Some((
                     row.get("client_name"),
@@ -224,13 +224,13 @@ impl AuthStore for SqliteAuthStore {
                 let token_id: Option<i64> = r.get("token_id");
                 TokenListEntry {
                     client_name: r.get("name"),
-                    client_status: ClientStatus::parse(&r.get::<String, _>("client_status"))
+                    client_status: ClientStatus::parse(r.get::<&str, _>("client_status"))
                         .unwrap_or(ClientStatus::Disabled),
                     token_id: token_id.unwrap_or(-1),
                     token_status: r
-                        .try_get::<String, _>("token_status")
+                        .try_get::<&str, _>("token_status")
                         .ok()
-                        .and_then(|value| TokenStatus::parse(&value)),
+                        .and_then(|value| TokenStatus::parse(value)),
                     created_at: r
                         .try_get::<String, _>("created_at")
                         .unwrap_or_else(|_| "-".into()),
