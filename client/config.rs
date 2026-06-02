@@ -335,3 +335,55 @@ impl ClientConfigFile {
             .unwrap_or_else(|| self.server_addr.trim())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to create a minimal config for testing
+    fn mock_config(server_addr: &str, tls_server_name: Option<&str>) -> ClientConfigFile {
+        ClientConfigFile {
+            server_addr: server_addr.to_string(),
+            server_port: 443,
+            auth_token: "test_token".to_string(),
+            log_level: None,
+            trace_enabled: false,
+            entry: Default::default(),
+            metrics_port: None,
+            tls_skip_verify: false,
+            tls_ca_cert: None,
+            tls_server_name: tls_server_name.map(|s| s.to_string()),
+            allow_insecure_fallback: false,
+            quic: Default::default(),
+            tcp: Default::default(),
+            http_pool: Default::default(),
+            proxy_buffers: Default::default(),
+            reconnect: Default::default(),
+            overload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_tls_server_name_returns_explicit_name() {
+        let config = mock_config("example.com", Some("custom.example.com"));
+        assert_eq!(config.tls_server_name(), "custom.example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_trims_explicit_name() {
+        let config = mock_config("example.com", Some("  custom.example.com  "));
+        assert_eq!(config.tls_server_name(), "custom.example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_falls_back_to_server_addr() {
+        let config = mock_config("example.com", None);
+        assert_eq!(config.tls_server_name(), "example.com");
+    }
+
+    #[test]
+    fn test_tls_server_name_trims_fallback_server_addr() {
+        let config = mock_config("  example.com  ", None);
+        assert_eq!(config.tls_server_name(), "example.com");
+    }
+}
