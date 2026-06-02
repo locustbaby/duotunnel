@@ -50,7 +50,9 @@ where
 
     let started = Instant::now();
     crate::infra::metrics::METRICS.stream_pending_queue_depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let result = timeout(stream_timeout, conn.open_bi()).await;
+    let wait_span = tracing::debug_span!("waiting_for_stream_credit", conn_id = %conn.stable_id());
+    use tracing::Instrument;
+    let result = timeout(stream_timeout, conn.open_bi().instrument(wait_span)).await;
     crate::infra::metrics::METRICS.stream_pending_queue_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let elapsed = started.elapsed();
     match result {
