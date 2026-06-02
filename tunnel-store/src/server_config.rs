@@ -294,13 +294,18 @@ impl ServerConfigFile {
         if self.server.open_stream_timeout_ms == 0 {
             errors.push("server.open_stream_timeout_ms must be >= 1".into());
         }
-        if self.server.overload.inflight_yield_threshold > self.server.overload.inflight_sleep_threshold {
+        if self.server.overload.inflight_yield_threshold
+            > self.server.overload.inflight_sleep_threshold
+        {
             errors.push(format!(
                 "server.overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
                 self.server.overload.inflight_yield_threshold, self.server.overload.inflight_sleep_threshold
             ));
         }
-        if let (Some(ypct), Some(spct)) = (self.server.overload.inflight_yield_pct, self.server.overload.inflight_sleep_pct) {
+        if let (Some(ypct), Some(spct)) = (
+            self.server.overload.inflight_yield_pct,
+            self.server.overload.inflight_sleep_pct,
+        ) {
             if ypct > spct {
                 errors.push(format!(
                     "server.overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",
@@ -412,5 +417,204 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         client_groups,
         egress_upstreams,
         egress_vhost_rules,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_routing_data_from_server_config_empty() {
+        // Create an empty ServerConfigFile using default values for everything
+        // Note: ServerConfigFile doesn't have a Default implementation, so we build it.
+        let cfg = ServerConfigFile {
+            server: ServerBasicConfig {
+                tunnel_port: 8080,
+                log_level: None,
+                trace_enabled: false,
+                database_url: "".to_string(),
+                metrics_port: None,
+                quic: Default::default(),
+                tcp: Default::default(),
+                http_pool: Default::default(),
+                proxy_buffers: Default::default(),
+                pki: Default::default(),
+                login_timeout_secs: 10,
+                open_stream_timeout_ms: 5000,
+                h2_single_authority: true,
+                accept_workers: None,
+                overload: Default::default(),
+            },
+            server_egress_upstream: Default::default(),
+            tunnel_management: Default::default(),
+        };
+
+        let routing_data = routing_data_from_server_config(&cfg);
+
+        assert!(routing_data.ingress_listeners.is_empty());
+        assert!(routing_data.client_groups.is_empty());
+        assert!(routing_data.egress_upstreams.is_empty());
+        assert!(routing_data.egress_vhost_rules.is_empty());
+    }
+
+    #[test]
+    fn test_routing_data_from_server_config_populated() {
+        let mut client_upstreams = HashMap::new();
+        client_upstreams.insert(
+            "client_up_1".to_string(),
+            UpstreamDef {
+                servers: vec![ServerDef {
+                    address: "10.0.0.1:80".to_string(),
+                    resolve: true,
+                }],
+                lb_policy: "round_robin".to_string(),
+            },
+        );
+
+        let mut groups = HashMap::new();
+        groups.insert(
+            "group_a".to_string(),
+            GroupConfig {
+                config_version: "v1".to_string(),
+                upstreams: client_upstreams,
+            },
+        );
+
+        let mut egress_upstreams = HashMap::new();
+        egress_upstreams.insert(
+            "egress_up_1".to_string(),
+            UpstreamDef {
+                servers: vec![ServerDef {
+                    address: "20.0.0.1:443".to_string(),
+                    resolve: false,
+                }],
+                lb_policy: "least_conn".to_string(),
+            },
+        );
+
+        let cfg = ServerConfigFile {
+            server: ServerBasicConfig {
+                tunnel_port: 8080,
+                log_level: None,
+                trace_enabled: false,
+                database_url: "".to_string(),
+                metrics_port: None,
+                quic: Default::default(),
+                tcp: Default::default(),
+                http_pool: Default::default(),
+                proxy_buffers: Default::default(),
+                pki: Default::default(),
+                login_timeout_secs: 10,
+                open_stream_timeout_ms: 5000,
+                h2_single_authority: true,
+                accept_workers: None,
+                overload: Default::default(),
+            },
+            server_egress_upstream: ServerEgressUpstream {
+                upstreams: egress_upstreams,
+                rules: EgressRules {
+                    vhost: vec![EgressHttpRule {
+                        match_host: "example.com".to_string(),
+                        action_upstream: "egress_up_1".to_string(),
+                    }],
+                },
+            },
+            tunnel_management: TunnelManagement {
+                server_ingress_routing: IngressRouting {
+                    listeners: vec![
+                        IngressListenerDef {
+                            port: 80,
+                            mode: IngressModeDef::Http(HttpListenerDef {
+                                vhost: vec![VhostRuleDef {
+                                    match_host: "test.local".to_string(),
+                                    client_group: "group_a".to_string(),
+                                    proxy_name: "proxy_1".to_string(),
+                                }],
+                            }),
+                        },
+                        IngressListenerDef {
+                            port: 443,
+                            mode: IngressModeDef::Tcp(TcpListenerDef {
+                                client_group: "group_b".to_string(),
+                                proxy_name: "proxy_2".to_string(),
+                            }),
+                        },
+                    ],
+                },
+                client_configs: ClientConfigs { groups },
+            },
+        };
+
+        let routing_data = routing_data_from_server_config(&cfg);
+
+        // Assert Ingress Listeners
+        assert_eq!(routing_data.ingress_listeners.len(), 2);
+
+        let http_listener = routing_data
+            .ingress_listeners
+            .iter()
+            .find(|l| l.port == 80)
+            .unwrap();
+        assert_eq!(
+            http_listener.id, 0,
+            "IngressListener ID should be initialized to 0 for DB auto-assignment"
+        );
+        if let IngressListenerMode::Http { vhost } = &http_listener.mode {
+            assert_eq!(vhost.len(), 1);
+            assert_eq!(vhost[0].match_host, "test.local");
+            assert_eq!(vhost[0].group_id, "group_a");
+            assert_eq!(vhost[0].proxy_name, "proxy_1");
+        } else {
+            panic!("Expected Http mode");
+        }
+
+        let tcp_listener = routing_data
+            .ingress_listeners
+            .iter()
+            .find(|l| l.port == 443)
+            .unwrap();
+        assert_eq!(
+            tcp_listener.id, 0,
+            "IngressListener ID should be initialized to 0 for DB auto-assignment"
+        );
+        if let IngressListenerMode::Tcp {
+            group_id,
+            proxy_name,
+        } = &tcp_listener.mode
+        {
+            assert_eq!(group_id, "group_b");
+            assert_eq!(proxy_name, "proxy_2");
+        } else {
+            panic!("Expected Tcp mode");
+        }
+
+        // Assert Client Groups
+        assert_eq!(routing_data.client_groups.len(), 1);
+        let group = &routing_data.client_groups[0];
+        assert_eq!(group.group_id, "group_a");
+        assert_eq!(group.config_version, "v1");
+        assert_eq!(group.upstreams.len(), 1);
+        let up = &group.upstreams[0];
+        assert_eq!(up.name, "client_up_1");
+        assert_eq!(up.lb_policy, "round_robin");
+        assert_eq!(up.servers.len(), 1);
+        assert_eq!(up.servers[0].address, "10.0.0.1:80");
+        assert_eq!(up.servers[0].resolve, true);
+
+        // Assert Egress Upstreams
+        assert_eq!(routing_data.egress_upstreams.len(), 1);
+        let eup = &routing_data.egress_upstreams[0];
+        assert_eq!(eup.name, "egress_up_1");
+        assert_eq!(eup.lb_policy, "least_conn");
+        assert_eq!(eup.servers.len(), 1);
+        assert_eq!(eup.servers[0].address, "20.0.0.1:443");
+        assert_eq!(eup.servers[0].resolve, false);
+
+        // Assert Egress Vhost Rules
+        assert_eq!(routing_data.egress_vhost_rules.len(), 1);
+        let erule = &routing_data.egress_vhost_rules[0];
+        assert_eq!(erule.match_host, "example.com");
+        assert_eq!(erule.action_upstream, "egress_up_1");
     }
 }
