@@ -414,3 +414,33 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         egress_vhost_rules,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tunnel_management_is_empty() {
+        let mut tm = TunnelManagement::default();
+        assert!(tm.is_empty(), "Expected empty TunnelManagement to return true for is_empty");
+
+        tm.server_ingress_routing.listeners.push(IngressListenerDef {
+            port: 8080,
+            mode: IngressModeDef::Http(HttpListenerDef::default()),
+        });
+        assert!(!tm.is_empty(), "Expected non-empty listeners to return false for is_empty");
+
+        let mut tm = TunnelManagement::default();
+        tm.client_configs.groups.insert("group1".to_string(), GroupConfig {
+            config_version: "v1".to_string(),
+            upstreams: HashMap::new(),
+        });
+        assert!(!tm.is_empty(), "Expected non-empty groups to return false for is_empty");
+
+        tm.server_ingress_routing.listeners.push(IngressListenerDef {
+            port: 8080,
+            mode: IngressModeDef::Http(HttpListenerDef::default()),
+        });
+        assert!(!tm.is_empty(), "Expected both non-empty listeners and groups to return false for is_empty");
+    }
+}
