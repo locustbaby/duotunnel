@@ -308,7 +308,10 @@ impl ClientConfigFile {
                 self.overload.inflight_yield_threshold, self.overload.inflight_sleep_threshold
             ));
         }
-        if let (Some(ypct), Some(spct)) = (self.overload.inflight_yield_pct, self.overload.inflight_sleep_pct) {
+        if let (Some(ypct), Some(spct)) = (
+            self.overload.inflight_yield_pct,
+            self.overload.inflight_sleep_pct,
+        ) {
             if ypct > spct {
                 errors.push(format!(
                     "overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",
@@ -333,5 +336,69 @@ impl ClientConfigFile {
             .as_deref()
             .map(str::trim)
             .unwrap_or_else(|| self.server_addr.trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_mock_config(
+        server_addr: &str,
+        server_port: u16,
+        tls_server_name: Option<String>,
+    ) -> ClientConfigFile {
+        ClientConfigFile {
+            server_addr: server_addr.to_string(),
+            server_port,
+            auth_token: "test_token".to_string(),
+            log_level: None,
+            trace_enabled: false,
+            entry: Default::default(),
+            metrics_port: None,
+            tls_skip_verify: false,
+            tls_ca_cert: None,
+            tls_server_name,
+            allow_insecure_fallback: false,
+            quic: Default::default(),
+            tcp: Default::default(),
+            http_pool: Default::default(),
+            proxy_buffers: Default::default(),
+            reconnect: Default::default(),
+            overload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_server_address() {
+        let config = create_mock_config("example.com", 443, None);
+        assert_eq!(config.server_address(), "example.com:443");
+
+        let config_ip = create_mock_config("127.0.0.1", 8080, None);
+        assert_eq!(config_ip.server_address(), "127.0.0.1:8080");
+
+        let config_ipv6 = create_mock_config("[::1]", 8443, None);
+        assert_eq!(config_ipv6.server_address(), "[::1]:8443");
+    }
+
+    #[test]
+    fn test_tls_server_name() {
+        // Fallback to server_addr when tls_server_name is None
+        let config = create_mock_config("example.com", 443, None);
+        assert_eq!(config.tls_server_name(), "example.com");
+
+        // Should trim server_addr when falling back
+        let config_space = create_mock_config(" example.com ", 443, None);
+        assert_eq!(config_space.tls_server_name(), "example.com");
+
+        // Use tls_server_name when provided
+        let config_override =
+            create_mock_config("example.com", 443, Some("tls.example.com".to_string()));
+        assert_eq!(config_override.tls_server_name(), "tls.example.com");
+
+        // Should trim tls_server_name when provided
+        let config_override_space =
+            create_mock_config("example.com", 443, Some(" tls.example.com ".to_string()));
+        assert_eq!(config_override_space.tls_server_name(), "tls.example.com");
     }
 }
