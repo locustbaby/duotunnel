@@ -2,7 +2,9 @@ use arc_swap::ArcSwap;
 use quinn::Connection;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tunnel_lib::{inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable};
+use tunnel_lib::{
+    inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable,
+};
 
 pub struct PooledConnection {
     pub conn: Connection,
@@ -41,10 +43,7 @@ impl EntryConnPool {
             return;
         }
         let Some(slot_id) = self.inflight_table.alloc_slot() else {
-            tracing::error!(
-                conn_id = stable_id,
-                "Inflight slot table exhausted"
-            );
+            tracing::error!(conn_id = stable_id, "Inflight slot table exhausted");
             g.ids.remove(&stable_id);
             return;
         };
@@ -75,7 +74,13 @@ impl EntryConnPool {
             32,
             3,
             |c| c.conn.close_reason().is_none() && !excluded.contains(&c.conn.stable_id()),
-            |c| inflight_load(&c.inflight_table, c.slot_id, std::sync::atomic::Ordering::Relaxed),
+            |c| {
+                inflight_load(
+                    &c.inflight_table,
+                    c.slot_id,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+            },
         )
         .cloned()
     }

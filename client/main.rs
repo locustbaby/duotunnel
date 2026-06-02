@@ -6,8 +6,8 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{anyhow, Result};
-use rustls::pki_types::pem::PemObject;
 use clap::Parser;
+use rustls::pki_types::pem::PemObject;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -119,7 +119,7 @@ async fn async_main() -> Result<()> {
     tunnel_lib::infra::observability::init_tracing(log_level);
     info!("Starting DuoTunnel Client");
     info!(server = % config.server_address(), "Configuration loaded");
-    let endpoint = build_quic_endpoint(&config)?;
+    let endpoint = build_quic_endpoint(&config).await?;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     crate::spawn_task(async move {
@@ -132,7 +132,8 @@ async fn async_main() -> Result<()> {
     if let Some(port) = config.metrics_port {
         crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
-    let entry_pool = EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
+    let entry_pool =
+        EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
     let mut engine = ClientEngine::new(cancel.clone());
 
     if let Some(entry_port) = config.entry.port {
@@ -231,8 +232,8 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     }
     result
 }
-fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
-    let mut crypto = build_tls_config(config)?;
+async fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
+    let mut crypto = build_tls_config(config).await?;
     crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
@@ -427,7 +428,7 @@ async fn resolve_server_addresses(
     }
     Ok(addrs)
 }
-fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
+async fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
     if config.tls_skip_verify {
         warn!("TLS certificate verification is DISABLED - this is insecure!");
         return Ok(rustls::ClientConfig::builder()
@@ -437,9 +438,10 @@ fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientConfig> {
     }
     let mut root_store = rustls::RootCertStore::empty();
     if let Some(ca_path) = &config.tls_ca_cert {
-        let ca_file = std::fs::File::open(ca_path)
-            .map_err(|e| anyhow::anyhow!("Failed to open CA cert file {}: {}", ca_path, e))?;
-        let mut reader = std::io::BufReader::new(ca_file);
+        let ca_file_bytes = tokio::fs::read(ca_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read CA cert file {}: {}", ca_path, e))?;
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(ca_file_bytes));
         let certs = rustls::pki_types::CertificateDer::pem_reader_iter(&mut reader)
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
