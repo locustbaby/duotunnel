@@ -649,18 +649,16 @@ The server configuration mapping helper executes extensive `clone()` calls on ev
 已通过重构 `SniffRuntime::sniff` 消除该开销。当前直接使用原生 `stream.read()` 读取并缓存前缀，无多余系统调用。并在首段完成 `initial_bytes` 的 QUIC 发送，省去了不必要的 `PrefixedReadWrite` 包装与复杂零拷贝机制。
 
 ### [TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi
-**Priority**: Medium | **Status**: TODO
-**Problem**:
-Wait states inside `open_bi_guarded` lack instrumented tracing spans, making it difficult for tools like `tokio-console` to identify parked/waiting tasks under load.
+**Priority**: Medium | **Status**: Completed
+
 **Fix**:
-Instrument the connection wait state with a tracing span, e.g. `let wait_span = tracing::debug_span!("waiting_for_stream_credit", conn_id = %conn.stable_id());` and execute `conn.open_bi().await` under it.
+已在 `tunnel-lib/src/open_bi.rs` 的 `open_bi_guarded` 中，对 `conn.open_bi()` 的等待期注入了 `waiting_for_stream_credit` 的 tracing debug span，使得外部调试工具如 `tokio-console` 能清晰观测挂起协程。
 
 ### [TODO-CR-AUDIT-13] Asymmetric Window Coupling in QUIC Configuration
-**Priority**: Medium | **Status**: TODO
-**Problem**:
-In `tunnel-lib/src/config/quic.rs`, `send_window_bytes` is directly coupled and set to `connection_window_mb` (receive window). On asymmetric WAN links, this prevents optimal sliding window tuning.
+**Priority**: Medium | **Status**: Completed
+
 **Fix**:
-Decouple `send_window_bytes` into an independent server-side configuration parameter.
+已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小，使发送与接收窗口可以根据广域网特性实施不对称独立参数调优。
 
 ### [TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety
 **Priority**: Low | **Status**: TODO
