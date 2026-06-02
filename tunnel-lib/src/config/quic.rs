@@ -28,7 +28,6 @@ impl From<&QuicConfig> for QuicTransportParams {
                 .unwrap_or(d.connection_receive_window_bytes),
             send_window_bytes: c
                 .send_window_mb
-                .or(c.connection_window_mb)
                 .map(|mb| mb.saturating_mul(1024 * 1024))
                 .unwrap_or(d.send_window_bytes),
             keepalive_secs: c.keepalive_secs.unwrap_or(d.keepalive_secs),
