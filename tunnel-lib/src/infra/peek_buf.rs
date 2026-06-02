@@ -10,11 +10,7 @@ thread_local! {
 /// Callers `take()` a buffer sized to `buf_size`, use it for a single peek/read,
 /// then `put()` it back so the allocation is reused on the next call.
 ///
-/// # Safety invariant
-/// `take()` sets the buffer length to `buf_size` via `set_len`. The caller **must**
-/// overwrite every byte before reading (e.g. pass the slice to `recv.read()` or
-/// `stream.peek()`). `put()` resets the length before returning to the pool so the
-/// next `take()` can safely `set_len` again without re-zeroing.
+/// `take()` guarantees returning a zeroed buffer, ensuring no stale memory is leaked.
 pub struct PeekBufPool {
     buf_size: usize,
 }
@@ -30,15 +26,13 @@ impl PeekBufPool {
 
     /// Take a buffer of exactly `buf_size` bytes from the pool (or allocate fresh).
     ///
-    /// # Safety
-    /// The returned slice is **uninitialized**. The caller must overwrite all bytes
-    /// before reading any of them.
+    /// The returned buffer is zero-initialized to prevent exposing stale data.
     pub fn take(&self) -> Vec<u8> {
         PEEK_BUF_POOL.with(|cell| {
             let buf = cell.borrow_mut().pop();
             match buf {
                 Some(mut b) if b.capacity() >= self.buf_size => {
-                    unsafe { b.set_len(self.buf_size) };
+                    b.resize(self.buf_size, 0);
                     b
                 }
                 _ => vec![0u8; self.buf_size],
@@ -59,5 +53,32 @@ impl PeekBufPool {
                 pool.push(buf);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_take_returns_zeroed_buffer() {
+        let pool = PeekBufPool::new(10);
+
+        // Take a buffer, it should be zeroed (or freshly allocated and zeroed)
+        let mut buf = pool.take();
+        assert_eq!(buf.len(), 10);
+        assert!(buf.iter().all(|&b| b == 0));
+
+        // Fill it with stale data
+        buf.fill(0xFF);
+
+        // Put it back to the pool
+        pool.put(buf);
+
+        // Take it again, we expect it to be zeroed out
+        let buf = pool.take();
+        assert_eq!(buf.len(), 10);
+        // If it wasn't correctly zeroed (e.g. by resize), it would contain 0xFF.
+        assert!(buf.iter().all(|&b| b == 0));
     }
 }
