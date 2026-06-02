@@ -401,4 +401,84 @@ mod tests {
             create_mock_config("example.com", 443, Some(" tls.example.com ".to_string()));
         assert_eq!(config_override_space.tls_server_name(), "tls.example.com");
     }
+
+    #[test]
+    fn test_overload_config_resolve_absolute() {
+        let config = OverloadConfig {
+            mode: OverloadMode::Burst,
+            inflight_yield_threshold: 100,
+            inflight_sleep_threshold: 200,
+            inflight_sleep_ms: 10,
+            inflight_yield_pct: None,
+            inflight_sleep_pct: None,
+            backoff_strategy: BackoffStrategy::Fixed,
+        };
+
+        let limits = config.resolve(1000);
+
+        assert_eq!(limits.mode, tunnel_lib::SharedOverloadMode::Burst);
+        assert_eq!(limits.inflight_yield_threshold, 100);
+        assert_eq!(limits.inflight_sleep_threshold, 200);
+        assert_eq!(limits.backoff, tunnel_lib::BackoffStrategy::Fixed);
+        assert_eq!(limits.inflight_sleep_budget, std::time::Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_overload_config_resolve_percentage() {
+        let config = OverloadConfig {
+            mode: OverloadMode::InflightSlowpath,
+            inflight_yield_threshold: 10, // These should be overridden
+            inflight_sleep_threshold: 20, // These should be overridden
+            inflight_sleep_ms: 5,
+            inflight_yield_pct: Some(0.5),
+            inflight_sleep_pct: Some(0.8),
+            backoff_strategy: BackoffStrategy::Exponential,
+        };
+
+        let limits = config.resolve(1000);
+
+        assert_eq!(limits.mode, tunnel_lib::SharedOverloadMode::InflightSlowpath);
+        assert_eq!(limits.inflight_yield_threshold, 500); // 1000 * 0.5
+        assert_eq!(limits.inflight_sleep_threshold, 800); // 1000 * 0.8
+        assert_eq!(limits.backoff, tunnel_lib::BackoffStrategy::Exponential);
+        assert_eq!(limits.inflight_sleep_budget, std::time::Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_overload_config_resolve_clamp_yield() {
+        let config = OverloadConfig {
+            mode: OverloadMode::InflightSlowpath,
+            inflight_yield_threshold: 500,
+            inflight_sleep_threshold: 100,
+            inflight_sleep_ms: 5,
+            inflight_yield_pct: None,
+            inflight_sleep_pct: None,
+            backoff_strategy: BackoffStrategy::None,
+        };
+
+        let limits = config.resolve(1000);
+
+        // Yield should be clamped to sleep threshold if it exceeds it.
+        assert_eq!(limits.inflight_sleep_threshold, 100);
+        assert_eq!(limits.inflight_yield_threshold, 100);
+    }
+
+    #[test]
+    fn test_overload_config_resolve_pct_clamp_yield() {
+        let config = OverloadConfig {
+            mode: OverloadMode::InflightSlowpath,
+            inflight_yield_threshold: 0,
+            inflight_sleep_threshold: 0,
+            inflight_sleep_ms: 5,
+            inflight_yield_pct: Some(0.9),
+            inflight_sleep_pct: Some(0.5),
+            backoff_strategy: BackoffStrategy::None,
+        };
+
+        let limits = config.resolve(1000);
+
+        // Yield should be clamped to sleep threshold if it exceeds it.
+        assert_eq!(limits.inflight_sleep_threshold, 500); // 1000 * 0.5
+        assert_eq!(limits.inflight_yield_threshold, 500); // Clamped to 500
+    }
 }
