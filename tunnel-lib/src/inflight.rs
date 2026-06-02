@@ -170,7 +170,13 @@ where
 /// For larger lists, it randomly picks two items and returns the healthier one with lower inflight.
 /// If neither item is healthy, it will retry up to `max_retries` times.
 /// If all retries fail to find a healthy item, it will fallback to the O(N) scan `pick_least_inflight`.
-pub fn pick_p2c_inflight<T, H, I>(items: &[T], threshold: usize, max_retries: usize, is_healthy: H, inflight: I) -> Option<&T>
+pub fn pick_p2c_inflight<T, H, I>(
+    items: &[T],
+    threshold: usize,
+    max_retries: usize,
+    is_healthy: H,
+    inflight: I,
+) -> Option<&T>
 where
     H: Fn(&T) -> bool,
     I: Fn(&T) -> usize,

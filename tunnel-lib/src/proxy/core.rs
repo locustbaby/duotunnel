@@ -65,7 +65,8 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             (p, None)
         } else {
             let pool = stream_peek_pool();
-            let runtime = SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
+            let runtime =
+                SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
             let sniffed = runtime.sniff(&mut recv, pool).await?;
             if sniffed.bytes_read > 0 {
                 (sniffed.hint.protocol, Some(sniffed.prefix.into_bytes()))

@@ -28,7 +28,6 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
         tokio::task::spawn(async move {
-
             metrics::quic_connection_opened();
             if let Err(e) = handle_quic_connection(state, incoming).await {
                 error!(error = % e, "QUIC connection error");

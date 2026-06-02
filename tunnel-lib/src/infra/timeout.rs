@@ -47,8 +47,7 @@ where
             return Poll::Ready(Ok(value));
         }
         if this.timer.as_ref().as_pin_ref().is_none() {
-            this.timer
-                .set(Some(tokio::time::sleep(*this.duration)));
+            this.timer.set(Some(tokio::time::sleep(*this.duration)));
         }
         match this.timer.as_mut().as_pin_mut() {
             Some(timer) => match timer.poll(cx) {
@@ -67,10 +66,7 @@ where
     Timeout::new(duration, future)
 }
 
-pub fn tokio_timeout<F>(
-    duration: Duration,
-    future: F,
-) -> tokio::time::Timeout<F>
+pub fn tokio_timeout<F>(duration: Duration, future: F) -> tokio::time::Timeout<F>
 where
     F: Future,
 {

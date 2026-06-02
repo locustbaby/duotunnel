@@ -100,12 +100,6 @@ impl IngressProtocolHandler for H1Handler {
             host: Some(host),
         };
         tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-        tunnel_lib::proxy::forward_prefixed_to_client(
-            send,
-            recv,
-            stream,
-            ctx.relay_buf_size,
-        )
-        .await
+        tunnel_lib::proxy::forward_prefixed_to_client(send, recv, stream, ctx.relay_buf_size).await
     }
 }

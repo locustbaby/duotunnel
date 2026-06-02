@@ -53,10 +53,8 @@ pub async fn relay_with_first_data(
         tcp_stream.write_all(data).await?;
     }
     let (tcp_read, tcp_write) = tcp_stream.into_split();
-    let quic_to_tcp =
-        copy_buffered_then_shutdown(quic_recv, tcp_write, DEFAULT_RELAY_BUF_SIZE);
-    let tcp_to_quic =
-        copy_buffered_then_finish(tcp_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
+    let quic_to_tcp = copy_buffered_then_shutdown(quic_recv, tcp_write, DEFAULT_RELAY_BUF_SIZE);
+    let tcp_to_quic = copy_buffered_then_finish(tcp_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(quic_to_tcp, tcp_to_quic) {
         Ok((sent, recv)) => {
             debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);

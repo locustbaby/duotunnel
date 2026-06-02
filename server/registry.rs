@@ -4,7 +4,9 @@ use parking_lot::Mutex;
 use quinn::Connection;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use tunnel_lib::{inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable};
+use tunnel_lib::{
+    inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable,
+};
 
 struct ClientInfo {
     group_id: String,
@@ -148,9 +150,15 @@ impl ClientRegistry {
         }
     }
 
-    fn replace_or_register(&self, client_id: String, group_id: String, conn: Connection) -> Result<(), &'static str> {
+    fn replace_or_register(
+        &self,
+        client_id: String,
+        group_id: String,
+        conn: Connection,
+    ) -> Result<(), &'static str> {
         use dashmap::mapref::entry::Entry;
-        let group = self.groups
+        let group = self
+            .groups
             .entry(group_id.clone())
             .or_insert_with(|| Arc::new(ClientGroup::new()));
         if group.set(client_id.clone(), conn.clone()).is_none() {
@@ -188,7 +196,12 @@ impl ClientRegistry {
         Ok(())
     }
 
-    pub fn register(&self, client_id: String, group_id: String, conn: Connection) -> Result<(), &'static str> {
+    pub fn register(
+        &self,
+        client_id: String,
+        group_id: String,
+        conn: Connection,
+    ) -> Result<(), &'static str> {
         info!(client_id = %client_id, group_id = %group_id, "registering client");
         self.replace_or_register(client_id, group_id, conn)
     }
@@ -225,11 +238,7 @@ impl ClientRegistry {
 
     pub fn purge_dead(&self) -> usize {
         let mut total_purged = 0usize;
-        let group_ids: Vec<String> = self
-            .groups
-            .iter()
-            .map(|r| r.key().clone())
-            .collect();
+        let group_ids: Vec<String> = self.groups.iter().map(|r| r.key().clone()).collect();
         for gid in group_ids {
             if let Some(group) = self.groups.get(&gid) {
                 let dead_ids = group.purge_dead();

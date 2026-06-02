@@ -115,7 +115,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReadHalf<R> {
     }
 }
 impl PrefixedReadWrite<tokio::net::TcpStream> {
-    pub fn into_split(self) -> (PrefixedReadHalf<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf) {
+    pub fn into_split(
+        self,
+    ) -> (
+        PrefixedReadHalf<tokio::net::tcp::OwnedReadHalf>,
+        tokio::net::tcp::OwnedWriteHalf,
+    ) {
         let (r, w) = self.stream.into_split();
         (
             PrefixedReadHalf {

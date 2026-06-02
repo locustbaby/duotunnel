@@ -88,5 +88,10 @@ impl ProtocolHint {
 #[async_trait]
 pub trait IngressProtocolHandler: Send + Sync + 'static {
     fn protocol_kind(&self) -> ProtocolKind;
-    async fn handle(&self, stream: crate::PrefixedReadWrite<tokio::net::TcpStream>, route: Option<Route>, ctx: &ServerCtx) -> Result<()>;
+    async fn handle(
+        &self,
+        stream: crate::PrefixedReadWrite<tokio::net::TcpStream>,
+        route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()>;
 }

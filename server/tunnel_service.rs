@@ -28,11 +28,17 @@ impl TunnelService for DefaultTunnelService {
             let (status, error_kind) = if let Some(err_str) = &outcome.error {
                 let mut kind = "unknown";
                 let err_lower = err_str.to_lowercase();
-                if err_lower.contains("quic open timed out") || err_lower.contains("open_bi timed out") {
+                if err_lower.contains("quic open timed out")
+                    || err_lower.contains("open_bi timed out")
+                {
                     kind = "quic_open_timed_out";
-                } else if err_lower.contains("quic connection lost") || err_lower.contains("connection lost") {
+                } else if err_lower.contains("quic connection lost")
+                    || err_lower.contains("connection lost")
+                {
                     kind = "quic_connection_lost";
-                } else if err_lower.contains("quic connection fatal") || err_lower.contains("fatal connection error") {
+                } else if err_lower.contains("quic connection fatal")
+                    || err_lower.contains("fatal connection error")
+                {
                     kind = "quic_connection_fatal";
                 } else if err_lower.contains("route not found") {
                     kind = "route_not_found";
@@ -40,7 +46,9 @@ impl TunnelService for DefaultTunnelService {
                     kind = "no_client_available";
                 } else if err_lower.contains("resolve") || err_lower.contains("dns") {
                     kind = "resolve_upstream";
-                } else if err_lower.contains("upstream connect") || err_lower.contains("connect failed") {
+                } else if err_lower.contains("upstream connect")
+                    || err_lower.contains("connect failed")
+                {
                     kind = "upstream_connect";
                 } else if err_lower.contains("forward") {
                     kind = "upstream_forward";

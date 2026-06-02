@@ -308,7 +308,10 @@ impl ClientConfigFile {
                 self.overload.inflight_yield_threshold, self.overload.inflight_sleep_threshold
             ));
         }
-        if let (Some(ypct), Some(spct)) = (self.overload.inflight_yield_pct, self.overload.inflight_sleep_pct) {
+        if let (Some(ypct), Some(spct)) = (
+            self.overload.inflight_yield_pct,
+            self.overload.inflight_sleep_pct,
+        ) {
             if ypct > spct {
                 errors.push(format!(
                     "overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",

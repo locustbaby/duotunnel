@@ -24,7 +24,12 @@ impl IngressProtocolHandler for TlsHandler {
         ProtocolKind::Tls
     }
 
-    async fn handle(&self, stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>, route: Option<Route>, ctx: &ServerCtx) -> Result<()> {
+    async fn handle(
+        &self,
+        stream: tunnel_lib::PrefixedReadWrite<tokio::net::TcpStream>,
+        route: Option<Route>,
+        ctx: &ServerCtx,
+    ) -> Result<()> {
         let route = route.ok_or_else(ProxyError::routing_missing_info)?;
         let host = ctx
             .hint
@@ -50,8 +55,9 @@ impl IngressProtocolHandler for TlsHandler {
         let target_host = host.clone();
 
         let registry = self.registry.clone();
-        let sender_cache: Arc<parking_lot::Mutex<std::collections::HashMap<String, tunnel_lib::H2Sender>>> =
-            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let sender_cache: Arc<
+            parking_lot::Mutex<std::collections::HashMap<String, tunnel_lib::H2Sender>>,
+        > = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -112,7 +118,8 @@ impl IngressProtocolHandler for TlsHandler {
 
                     let sender = {
                         let mut guard = sender_cache.lock();
-                        guard.entry(selected.conn_id.to_string())
+                        guard
+                            .entry(selected.conn_id.to_string())
                             .or_insert_with(tunnel_lib::new_h2_sender)
                             .clone()
                     };
@@ -122,7 +129,9 @@ impl IngressProtocolHandler for TlsHandler {
                     } else if let Some(template) = &retryable_request {
                         build_retry_request(template)
                     } else {
-                        let err = ProxyError::upstream_forward("cannot retry request with body".to_string());
+                        let err = ProxyError::upstream_forward(
+                            "cannot retry request with body".to_string(),
+                        );
                         return Ok(error_response(&err));
                     };
 

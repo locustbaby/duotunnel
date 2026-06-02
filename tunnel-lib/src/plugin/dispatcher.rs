@@ -29,12 +29,17 @@ fn safe_logging(svc: &dyn TunnelService, ctx: &ServerCtx, outcome: &PhaseOutcome
 /// relay) without hard-coding the number.
 pub const SNIFF_LIMIT: usize = 4096;
 
-async fn sniff(mut stream: TcpStream) -> Result<(ProtocolHint, crate::PrefixedReadWrite<TcpStream>)> {
+async fn sniff(
+    mut stream: TcpStream,
+) -> Result<(ProtocolHint, crate::PrefixedReadWrite<TcpStream>)> {
     let runtime = SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors());
     let pool = crate::PeekBufPool::new(SNIFF_LIMIT);
     let sniffed = runtime.sniff(&mut stream, &pool).await?;
     let mut hint = sniffed.hint.clone();
-    if hint.kind == ProtocolKind::Tcp && sniffed.bytes_read > 0 && sniffed.prefix.as_bytes()[0] == 0x16 {
+    if hint.kind == ProtocolKind::Tcp
+        && sniffed.bytes_read > 0
+        && sniffed.prefix.as_bytes()[0] == 0x16
+    {
         hint.kind = ProtocolKind::Tls;
     }
     let prefixed = sniffed.into_stream(stream);

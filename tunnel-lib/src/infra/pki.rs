@@ -68,7 +68,8 @@ impl CertState {
 
     fn insert(&mut self, host: String, server_config: Arc<rustls::ServerConfig>) {
         let ttl = self.ttl;
-        self.entries.retain(|_, entry| entry.created_at.elapsed() < ttl);
+        self.entries
+            .retain(|_, entry| entry.created_at.elapsed() < ttl);
         self.entries.insert(
             host,
             CachedEntry {
@@ -135,9 +136,10 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
         .await
         .map_err(|_| anyhow!("pki generation limiter closed"))?;
     let host_owned = host.to_string();
-    let config = tokio::task::spawn_blocking(move || build_server_config_with_permit(host_owned, permit))
-        .await
-        .map_err(|e| anyhow!("pki generation join error: {e}"))??;
+    let config =
+        tokio::task::spawn_blocking(move || build_server_config_with_permit(host_owned, permit))
+            .await
+            .map_err(|e| anyhow!("pki generation join error: {e}"))??;
     let config = Arc::new(config);
 
     let mut guard = CERT_STATE.write().unwrap();

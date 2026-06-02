@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
-use tunnel_lib::{ClientStatus, TokenStatus};
 use tracing::{info, warn};
+use tunnel_lib::{ClientStatus, TokenStatus};
 pub async fn open_sqlite_pool(database_url: &str, max_connections: u32) -> Result<SqlitePool> {
     if let Some(path) = database_url
         .strip_prefix("sqlite://")
@@ -139,11 +139,7 @@ impl AuthStore for SqliteAuthStore {
                     .ok_or_else(|| AuthError::Internal(anyhow!("invalid client status")))?;
                 let token_status = TokenStatus::parse(row.get::<&str, _>("token_status"))
                     .ok_or_else(|| AuthError::Internal(anyhow!("invalid token status")))?;
-                matched = Some((
-                    row.get("client_name"),
-                    client_status,
-                    token_status,
-                ));
+                matched = Some((row.get("client_name"), client_status, token_status));
             }
         }
         let (client_group, client_status, token_status) = match matched {

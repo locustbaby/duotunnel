@@ -40,6 +40,8 @@ pub struct ConnActiveGuard;
 
 impl Drop for ConnActiveGuard {
     fn drop(&mut self) {
-        METRICS.accepted_connections_active.fetch_sub(1, Ordering::Relaxed);
+        METRICS
+            .accepted_connections_active
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }

@@ -1,8 +1,8 @@
+use crate::proxy::tcp::UpstreamScheme;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use crate::proxy::tcp::UpstreamScheme;
 
 pub struct UpstreamGroup {
     pub servers: Vec<String>,
@@ -25,7 +25,7 @@ impl UpstreamGroup {
             return;
         }
         map.insert(server.to_string(), Instant::now() + Duration::from_secs(10));
-        
+
         let server_clone = server.to_string();
         let unhealthy_clone = self.unhealthy.clone();
         tokio::spawn(async move {
@@ -34,7 +34,10 @@ impl UpstreamGroup {
             for _ in 0..5 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>() {
-                    if tokio::time::timeout(probe_timeout, tokio::net::TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok()) {
+                    if tokio::time::timeout(probe_timeout, tokio::net::TcpStream::connect(addr))
+                        .await
+                        .is_ok_and(|r| r.is_ok())
+                    {
                         let mut map = unhealthy_clone.write().unwrap();
                         map.remove(&server_clone);
                         tracing::info!(server = %server_clone, "active health probe succeeded, backend restored to pool early");
@@ -44,9 +47,17 @@ impl UpstreamGroup {
                     let mut parts = connect_addr_str.rsplitn(2, ':');
                     if let (Some(port_str), Some(host_str)) = (parts.next(), parts.next()) {
                         if let Ok(port) = port_str.parse::<u16>() {
-                            if let Ok(resolved) = tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
+                            if let Ok(resolved) =
+                                tokio::net::lookup_host(format!("{}:{}", host_str, port)).await
+                            {
                                 if let Some(addr) = resolved.collect::<Vec<_>>().first() {
-                                    if tokio::time::timeout(probe_timeout, tokio::net::TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok()) {
+                                    if tokio::time::timeout(
+                                        probe_timeout,
+                                        tokio::net::TcpStream::connect(addr),
+                                    )
+                                    .await
+                                    .is_ok_and(|r| r.is_ok())
+                                    {
                                         let mut map = unhealthy_clone.write().unwrap();
                                         map.remove(&server_clone);
                                         tracing::info!(server = %server_clone, "active health probe succeeded, backend restored to pool early");
