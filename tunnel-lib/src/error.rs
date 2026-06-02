@@ -330,6 +330,31 @@ impl ProxyError {
             | ErrorKind::QuicConnectionFatal => return None,
         })
     }
+
+    pub fn error_code(&self) -> &'static str {
+        match self.kind {
+            ErrorKind::QuicOpenTimedOut => "ERR_QUIC_OPEN_TIMED_OUT",
+            ErrorKind::QuicConnectionLost => "ERR_QUIC_CONNECTION_LOST",
+            ErrorKind::QuicConnectionFatal => "ERR_QUIC_CONNECTION_FATAL",
+            ErrorKind::HttpUpstreamRequest => "ERR_HTTP_UPSTREAM_REQUEST",
+            ErrorKind::RoutingMissingInfo => "ERR_ROUTING_MISSING_INFO",
+            ErrorKind::RoutingMissingHost => "ERR_ROUTING_MISSING_HOST",
+            ErrorKind::RouteNotFound => "ERR_ROUTE_NOT_FOUND",
+            ErrorKind::NoClientAvailable => "ERR_NO_CLIENT_AVAILABLE",
+            ErrorKind::ResolveUpstream => "ERR_RESOLVE_UPSTREAM",
+            ErrorKind::UnsupportedProtocol => "ERR_UNSUPPORTED_PROTOCOL",
+            ErrorKind::DownstreamConnection => "ERR_DOWNSTREAM_CONNECTION",
+            ErrorKind::UpstreamConnect => "ERR_UPSTREAM_CONNECT",
+            ErrorKind::UpstreamForward => "ERR_UPSTREAM_FORWARD",
+            ErrorKind::TlsHandshake => "ERR_TLS_HANDSHAKE",
+            ErrorKind::H2cMissingAuthority => "ERR_H2C_MISSING_AUTHORITY",
+            ErrorKind::H2cMisdirected => "ERR_H2C_MISDIRECTED",
+            ErrorKind::H2cRouteResolve => "ERR_H2C_ROUTE_RESOLVE",
+            ErrorKind::H2cNoRoute => "ERR_H2C_NO_ROUTE",
+            ErrorKind::H2cNoClient => "ERR_H2C_NO_CLIENT",
+            ErrorKind::H2cForward => "ERR_H2C_FORWARD",
+        }
+    }
 }
 
 impl fmt::Display for ProxyError {

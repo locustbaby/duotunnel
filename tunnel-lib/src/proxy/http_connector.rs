@@ -74,7 +74,7 @@ impl HttpConnector {
                     .map_err(|never| match never {})
                     .boxed(),
             )
-            .unwrap();
+            .expect("Failed to build retry request");
         *req.headers_mut() = template.headers.clone();
         req
     }

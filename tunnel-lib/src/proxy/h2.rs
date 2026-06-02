@@ -36,7 +36,7 @@ where
                     .unwrap_or("/")
             )
             .parse()
-            .unwrap();
+            .expect("failed to parse valid uri");
             parts.uri = target_uri;
             if let Ok(hv) = spec.target_host.parse() {
                 parts.headers.insert(hyper::header::HOST, hv);
@@ -54,18 +54,25 @@ where
                         error = %proxy_err,
                         "H2 forward: upstream request failed"
                     );
+                    let payload = serde_json::json!({
+                        "error_code": proxy_err.error_code(),
+                        "message": proxy_err.to_string(),
+                    });
+                    let body_bytes = Bytes::from(serde_json::to_vec(&payload).unwrap_or_default());
+
                     Ok(Response::builder()
                         .status(
                             proxy_err
                                 .http_status()
                                 .unwrap_or(hyper::StatusCode::BAD_GATEWAY),
                         )
+                        .header(hyper::header::CONTENT_TYPE, "application/json")
                         .body(
-                            http_body_util::Full::new(Bytes::from("Bad Gateway"))
+                            http_body_util::Full::new(body_bytes)
                                 .map_err(|never| match never {})
                                 .boxed(),
                         )
-                        .unwrap())
+                        .expect("failed to build default response"))
                 }
             }
         }

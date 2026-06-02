@@ -82,11 +82,11 @@ mod tests {
         let data = b"hello world";
         let (mut client, mut server) = tokio::io::duplex(64);
         tokio::spawn(async move {
-            client.write_all(data).await.unwrap();
-            client.shutdown().await.unwrap();
+            client.write_all(data).await.expect("test failed");
+            client.shutdown().await.expect("test failed");
         });
         let mut buf = Vec::new();
-        server.read_to_end(&mut buf).await.unwrap();
+        server.read_to_end(&mut buf).await.expect("test failed");
         assert_eq!(&buf, data);
     }
     #[tokio::test]
@@ -94,22 +94,22 @@ mod tests {
         let data = b"count me";
         let (mut src, dst) = tokio::io::duplex(64);
         tokio::spawn(async move {
-            src.write_all(data).await.unwrap();
-            src.shutdown().await.unwrap();
+            src.write_all(data).await.expect("test failed");
+            src.shutdown().await.expect("test failed");
         });
         let (mut sink_read, sink_write) = tokio::io::duplex(64);
-        let count = relay_unidirectional(dst, sink_write).await.unwrap();
+        let count = relay_unidirectional(dst, sink_write).await.expect("test failed");
         assert_eq!(count, data.len() as u64);
         let mut received = Vec::new();
-        sink_read.read_to_end(&mut received).await.unwrap();
+        sink_read.read_to_end(&mut received).await.expect("test failed");
         assert_eq!(&received, data);
     }
     #[tokio::test]
     async fn test_relay_unidirectional_empty_stream() {
         let (mut src, dst) = tokio::io::duplex(64);
-        src.shutdown().await.unwrap();
+        src.shutdown().await.expect("test failed");
         let (_, sink_write) = tokio::io::duplex(64);
-        let count = relay_unidirectional(dst, sink_write).await.unwrap();
+        let count = relay_unidirectional(dst, sink_write).await.expect("test failed");
         assert_eq!(count, 0, "empty stream must transfer 0 bytes");
     }
     #[tokio::test]
@@ -121,21 +121,21 @@ mod tests {
         let (mut side_a_read, mut side_a_write) = tokio::io::split(side_a);
         let (mut side_b_read, mut side_b_write) = tokio::io::split(side_b);
         tokio::spawn(async move {
-            side_a_write.write_all(a_data).await.unwrap();
-            side_a_write.shutdown().await.unwrap();
+            side_a_write.write_all(a_data).await.expect("test failed");
+            side_a_write.shutdown().await.expect("test failed");
         });
         tokio::spawn(async move {
-            side_b_write.write_all(b_data).await.unwrap();
-            side_b_write.shutdown().await.unwrap();
+            side_b_write.write_all(b_data).await.expect("test failed");
+            side_b_write.shutdown().await.expect("test failed");
         });
-        let (sent, recv) = relay(relay_a, relay_b).await.unwrap();
+        let (sent, recv) = relay(relay_a, relay_b).await.expect("test failed");
         assert_eq!(sent, a_data.len() as u64, "sent byte count mismatch");
         assert_eq!(recv, b_data.len() as u64, "recv byte count mismatch");
         let mut a_received = Vec::new();
-        side_a_read.read_to_end(&mut a_received).await.unwrap();
+        side_a_read.read_to_end(&mut a_received).await.expect("test failed");
         assert_eq!(&a_received, b_data);
         let mut b_received = Vec::new();
-        side_b_read.read_to_end(&mut b_received).await.unwrap();
+        side_b_read.read_to_end(&mut b_received).await.expect("test failed");
         assert_eq!(&b_received, a_data);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -149,29 +149,29 @@ mod tests {
         let (mut side_b_read, mut side_b_write) = tokio::io::split(side_b);
         let a_clone = a_data.clone();
         let a_writer = tokio::spawn(async move {
-            side_a_write.write_all(&a_clone).await.unwrap();
-            side_a_write.shutdown().await.unwrap();
+            side_a_write.write_all(&a_clone).await.expect("test failed");
+            side_a_write.shutdown().await.expect("test failed");
         });
         let b_clone = b_data.clone();
         let b_writer = tokio::spawn(async move {
-            side_b_write.write_all(&b_clone).await.unwrap();
-            side_b_write.shutdown().await.unwrap();
+            side_b_write.write_all(&b_clone).await.expect("test failed");
+            side_b_write.shutdown().await.expect("test failed");
         });
         let a_reader = tokio::spawn(async move {
             let mut buf = Vec::new();
-            side_a_read.read_to_end(&mut buf).await.unwrap();
+            side_a_read.read_to_end(&mut buf).await.expect("test failed");
             buf
         });
         let b_reader = tokio::spawn(async move {
             let mut buf = Vec::new();
-            side_b_read.read_to_end(&mut buf).await.unwrap();
+            side_b_read.read_to_end(&mut buf).await.expect("test failed");
             buf
         });
-        let (sent, recv) = relay(relay_a, relay_b).await.unwrap();
-        a_writer.await.unwrap();
-        b_writer.await.unwrap();
-        let a_received = a_reader.await.unwrap();
-        let b_received = b_reader.await.unwrap();
+        let (sent, recv) = relay(relay_a, relay_b).await.expect("test failed");
+        a_writer.await.expect("test failed");
+        b_writer.await.expect("test failed");
+        let a_received = a_reader.await.expect("test failed");
+        let b_received = b_reader.await.expect("test failed");
         assert_eq!(sent, size as u64, "a→b byte count");
         assert_eq!(recv, size as u64, "b→a byte count");
         assert_eq!(b_received, a_data, "side_b received a_data");
@@ -183,9 +183,9 @@ mod tests {
         let (side_b, relay_b) = tokio::io::duplex(64);
         let (_, mut side_a_write) = tokio::io::split(side_a);
         let (_, mut side_b_write) = tokio::io::split(side_b);
-        side_a_write.shutdown().await.unwrap();
-        side_b_write.shutdown().await.unwrap();
-        let (sent, recv) = relay(relay_a, relay_b).await.unwrap();
+        side_a_write.shutdown().await.expect("test failed");
+        side_b_write.shutdown().await.expect("test failed");
+        let (sent, recv) = relay(relay_a, relay_b).await.expect("test failed");
         assert_eq!(sent, 0);
         assert_eq!(recv, 0);
     }

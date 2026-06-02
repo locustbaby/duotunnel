@@ -118,11 +118,11 @@ mod tests {
     async fn always_allow_service_passes_admission() {
         let svc = AlwaysAllowService;
         let req = AdmissionReq {
-            peer_addr: "127.0.0.1:1234".parse().unwrap(),
+            peer_addr: "127.0.0.1:1234".parse().expect("test failed"),
             hint: None,
             token: None,
         };
-        let result = svc.admission(&req).await.unwrap();
+        let result = svc.admission(&req).await.expect("test failed");
         assert!(result.is_continue());
     }
 
@@ -164,10 +164,10 @@ mod tests {
         let hint = ProtocolHint::new(ProtocolKind::Http1, bytes::Bytes::new());
         let ctx = RouteCtx {
             listener_port: 8080,
-            client_addr: "127.0.0.1:1234".parse().unwrap(),
+            client_addr: "127.0.0.1:1234".parse().expect("test failed"),
             hint,
         };
-        let result = resolver.resolve(&ctx).await.unwrap();
+        let result = resolver.resolve(&ctx).await.expect("test failed");
         match result {
             PhaseResult::Reject { status, .. } => assert_eq!(status, 404),
             _ => panic!("expected Reject"),
