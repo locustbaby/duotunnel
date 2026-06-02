@@ -82,12 +82,13 @@ async fn read_into_bytes_mut(
     recv: &mut RecvStream,
     dst: &mut BytesMut,
     max_read: usize,
-) -> Result<Option<usize>> {
-    dst.reserve(max_read);
-    let mut chunk = dst.limit(max_read);
-    match tokio::io::AsyncReadExt::read_buf(recv, &mut chunk).await? {
-        0 => Ok(None),
-        n => Ok(Some(n)),
+) -> std::result::Result<Option<usize>, quinn::ReadError> {
+    match recv.read_chunk(max_read, true).await? {
+        Some(chunk) => {
+            dst.extend_from_slice(&chunk.bytes);
+            Ok(Some(chunk.bytes.len()))
+        }
+        None => Ok(None),
     }
 }
 struct ParsedHead {

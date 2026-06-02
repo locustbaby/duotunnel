@@ -1,7 +1,7 @@
 use crate::protocol::rewrite::Rewriter;
 use crate::transport::addr::parse_upstream;
 use anyhow::Result;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::{header, HeaderMap, Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -22,12 +22,13 @@ async fn read_into_bytes_mut(
     recv: &mut RecvStream,
     dst: &mut BytesMut,
     max_read: usize,
-) -> Result<Option<usize>> {
-    dst.reserve(max_read);
-    let mut chunk = dst.limit(max_read);
-    match tokio::io::AsyncReadExt::read_buf(recv, &mut chunk).await? {
-        0 => Ok(None),
-        n => Ok(Some(n)),
+) -> std::result::Result<Option<usize>, quinn::ReadError> {
+    match recv.read_chunk(max_read, true).await? {
+        Some(chunk) => {
+            dst.extend_from_slice(&chunk.bytes);
+            Ok(Some(chunk.bytes.len()))
+        }
+        None => Ok(None),
     }
 }
 #[derive(Debug, Clone)]
