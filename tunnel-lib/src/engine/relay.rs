@@ -24,8 +24,7 @@ where
     }
     let quic_to_stream =
         copy_buffered_then_shutdown(quic_recv, stream_write, DEFAULT_RELAY_BUF_SIZE);
-    let stream_to_quic =
-        copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
+    let stream_to_quic = copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(quic_to_stream, stream_to_quic) {
         Ok((a, b)) => {
             debug!(quic_to_stream = a, stream_to_quic = b, "relay completed");
@@ -54,8 +53,7 @@ pub async fn relay_tcp_bidirectional(
     let (stream_read, stream_write) = tokio::io::split(stream);
     let quic_to_stream =
         copy_buffered_then_shutdown(quic_recv, stream_write, DEFAULT_RELAY_BUF_SIZE);
-    let stream_to_quic =
-        copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
+    let stream_to_quic = copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     let (a, b) = tokio::try_join!(quic_to_stream, stream_to_quic)?;
     debug!(quic_to_stream = a, stream_to_quic = b, "relay completed");
     Ok((a, b))

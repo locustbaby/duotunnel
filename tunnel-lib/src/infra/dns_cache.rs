@@ -28,7 +28,7 @@ impl EgressDnsCache {
 
     pub async fn resolve(&self, host: &str, port: u16) -> anyhow::Result<SocketAddr> {
         let key = (host.to_string(), port);
-        
+
         {
             let map = self.cache.read().unwrap();
             if let Some(entry) = map.get(&key) {

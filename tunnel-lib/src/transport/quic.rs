@@ -59,7 +59,10 @@ fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTranspor
         }
     }
 }
-pub fn build_udp_socket(addr: SocketAddr, params: &QuicTransportParams) -> Result<std::net::UdpSocket> {
+pub fn build_udp_socket(
+    addr: SocketAddr,
+    params: &QuicTransportParams,
+) -> Result<std::net::UdpSocket> {
     let domain = Domain::for_address(addr);
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;

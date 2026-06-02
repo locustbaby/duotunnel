@@ -6,8 +6,8 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{anyhow, Result};
-use rustls::pki_types::pem::PemObject;
 use clap::Parser;
+use rustls::pki_types::pem::PemObject;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -132,7 +132,8 @@ async fn async_main() -> Result<()> {
     if let Some(port) = config.metrics_port {
         crate::spawn_task(run_healthz_server(port, ready.clone()));
     }
-    let entry_pool = EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
+    let entry_pool =
+        EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
     let mut engine = ClientEngine::new(cancel.clone());
 
     if let Some(entry_port) = config.entry.port {

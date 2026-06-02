@@ -7,10 +7,7 @@ pub fn detect_protocol_and_host(data: &[u8]) -> (Protocol, Option<String>) {
     for detector in default_ingress_detectors() {
         match detector.detect(data) {
             SniffOutcome::Matched(hint) => {
-                return (
-                    hint.protocol,
-                    hint.sni.or(hint.authority),
-                );
+                return (hint.protocol, hint.sni.or(hint.authority));
             }
             SniffOutcome::NeedMore => need_more = true,
             SniffOutcome::NoMatch => {}

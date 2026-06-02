@@ -4,8 +4,8 @@ use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -51,11 +51,7 @@ impl ListenerManager {
     }
 }
 
-async fn spawn_single_listener(
-    state: Arc<ServerState>,
-    port: u16,
-    listener: IngressListener,
-) {
+async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: IngressListener) {
     let accept_workers = state
         .config
         .server
@@ -200,7 +196,10 @@ async fn sync_listeners_inner(
             Some(listener) => match (&map[&port].kind, &listener.mode) {
                 (ListenerKind::Http, IngressMode::Http(_)) => false,
                 (
-                    ListenerKind::Tcp { group_id, proxy_name },
+                    ListenerKind::Tcp {
+                        group_id,
+                        proxy_name,
+                    },
                     IngressMode::Tcp(cfg),
                 ) => group_id != &cfg.client_group || proxy_name != &cfg.proxy_name,
                 _ => true,

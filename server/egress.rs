@@ -72,16 +72,21 @@ impl UpstreamResolver for ServerEgressMap {
             .as_deref()
             .ok_or_else(ProxyError::routing_missing_host)?;
         let host = host_raw.split(':').next().unwrap_or(host_raw);
-        let upstream_name = self.http_rules.get(host).cloned().ok_or_else(|| {
-            ProxyError::route_not_found(format!("host={host}"))
-        })?;
+        let upstream_name = self
+            .http_rules
+            .get(host)
+            .cloned()
+            .ok_or_else(|| ProxyError::route_not_found(format!("host={host}")))?;
         let group = self.upstreams.get(&upstream_name).ok_or_else(|| {
             ProxyError::route_not_found(format!("upstream_group={upstream_name}"))
         })?;
-        let upstream_addr = group.next_healthy().ok_or_else(|| {
-            ProxyError::route_not_found(format!("no healthy backends for host={host}"))
-        })?.clone();
-        
+        let upstream_addr = group
+            .next_healthy()
+            .ok_or_else(|| {
+                ProxyError::route_not_found(format!("no healthy backends for host={host}"))
+            })?
+            .clone();
+
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         match context.protocol {
@@ -93,19 +98,26 @@ impl UpstreamResolver for ServerEgressMap {
                 } else {
                     let mut parts = connect_addr_str.rsplitn(2, ':');
                     let port_str = parts.next().ok_or_else(|| {
-                        ProxyError::resolve_upstream(format!("missing port in {}", connect_addr_str))
+                        ProxyError::resolve_upstream(format!(
+                            "missing port in {}",
+                            connect_addr_str
+                        ))
                     })?;
                     let host_str = parts.next().ok_or_else(|| {
-                        ProxyError::resolve_upstream(format!("missing host in {}", connect_addr_str))
+                        ProxyError::resolve_upstream(format!(
+                            "missing host in {}",
+                            connect_addr_str
+                        ))
                     })?;
                     let port = port_str.parse::<u16>().map_err(|_| {
-                        ProxyError::resolve_upstream(format!("invalid port {} in {}", port_str, connect_addr_str))
+                        ProxyError::resolve_upstream(format!(
+                            "invalid port {} in {}",
+                            port_str, connect_addr_str
+                        ))
                     })?;
-                    self.dns_cache.resolve(host_str, port)
-                        .await
-                        .map_err(|e| {
-                            ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
-                        })?
+                    self.dns_cache.resolve(host_str, port).await.map_err(|e| {
+                        ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
+                    })?
                 };
                 let spec = BasicPeerSpec {
                     target_addr,
@@ -158,20 +170,23 @@ impl UpstreamResolver for ServerEgressMap {
     ) -> Result<(), ProxyError> {
         match peer {
             PeerSpec::Tcp(spec) => {
-                let (tcp_stream, final_tls) = if let (Some(upstream_name), Some(failed_addr)) = (&spec.upstream_name, &spec.upstream_addr_str) {
+                let (tcp_stream, final_tls) = if let (Some(upstream_name), Some(failed_addr)) =
+                    (&spec.upstream_name, &spec.upstream_addr_str)
+                {
                     let group = self.upstreams.get(upstream_name).ok_or_else(|| {
                         ProxyError::route_not_found(format!("upstream={upstream_name}"))
                     })?;
                     let mut last_err = None;
                     let mut current_failed = failed_addr.clone();
                     let mut current_spec = spec.clone();
-                    
+
                     let mut connected = None;
                     for _ in 0..group.servers.len().max(1) {
-                        let tcp_peer = current_spec.clone()
+                        let tcp_peer = current_spec
+                            .clone()
                             .into_tcp_peer(tunnel_lib::TcpParams::default())
                             .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
-                        
+
                         match tokio::net::TcpStream::connect(tcp_peer.target_addr).await {
                             Ok(stream) => {
                                 group.mark_healthy(&current_failed);
@@ -182,30 +197,42 @@ impl UpstreamResolver for ServerEgressMap {
                                 warn!(server = %current_failed, error = %e, "connection to upstream failed, marking unhealthy");
                                 group.mark_unhealthy(&current_failed);
                                 last_err = Some(e);
-                                
+
                                 if let Some(next_addr) = group.next_healthy() {
                                     current_failed = next_addr.clone();
-                                    let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&current_failed);
+                                    let (scheme, connect_addr_str, tls_host) =
+                                        UpstreamScheme::from_address(&current_failed);
                                     let is_https = scheme.requires_tls();
-                                    
-                                    match if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>() {
+
+                                    match if let Ok(addr) =
+                                        connect_addr_str.parse::<std::net::SocketAddr>()
+                                    {
                                         Ok(addr)
                                     } else {
                                         let mut parts = connect_addr_str.rsplitn(2, ':');
                                         let port_str = parts.next().ok_or_else(|| {
-                                            ProxyError::resolve_upstream(format!("missing port in {}", connect_addr_str))
+                                            ProxyError::resolve_upstream(format!(
+                                                "missing port in {}",
+                                                connect_addr_str
+                                            ))
                                         })?;
                                         let host_str = parts.next().ok_or_else(|| {
-                                            ProxyError::resolve_upstream(format!("missing host in {}", connect_addr_str))
+                                            ProxyError::resolve_upstream(format!(
+                                                "missing host in {}",
+                                                connect_addr_str
+                                            ))
                                         })?;
                                         let port = port_str.parse::<u16>().map_err(|_| {
-                                            ProxyError::resolve_upstream(format!("invalid port {} in {}", port_str, connect_addr_str))
+                                            ProxyError::resolve_upstream(format!(
+                                                "invalid port {} in {}",
+                                                port_str, connect_addr_str
+                                            ))
                                         })?;
-                                        self.dns_cache.resolve(host_str, port)
-                                            .await
-                                            .map_err(|e| {
-                                                ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
-                                            })
+                                        self.dns_cache.resolve(host_str, port).await.map_err(|e| {
+                                            ProxyError::resolve_upstream(format!(
+                                                "{connect_addr_str}: {e}"
+                                            ))
+                                        })
                                     } {
                                         Ok(addr) => {
                                             current_spec.target_addr = addr;
@@ -213,10 +240,13 @@ impl UpstreamResolver for ServerEgressMap {
                                                 host: tls_host.unwrap_or_default(),
                                                 alpn: scheme.alpn(),
                                             });
-                                            current_spec.upstream_addr_str = Some(current_failed.clone());
+                                            current_spec.upstream_addr_str =
+                                                Some(current_failed.clone());
                                         }
                                         Err(resolve_err) => {
-                                            last_err = Some(std::io::Error::other(resolve_err.to_string()));
+                                            last_err = Some(std::io::Error::other(
+                                                resolve_err.to_string(),
+                                            ));
                                         }
                                     }
                                 } else {
@@ -225,9 +255,11 @@ impl UpstreamResolver for ServerEgressMap {
                             }
                         }
                     }
-                    
+
                     let (stream, tls) = connected.ok_or_else(|| {
-                        ProxyError::upstream_connect(last_err.map(|e| e.to_string()).unwrap_or_default())
+                        ProxyError::upstream_connect(
+                            last_err.map(|e| e.to_string()).unwrap_or_default(),
+                        )
                     })?;
                     (stream, tls)
                 } else {
@@ -239,23 +271,37 @@ impl UpstreamResolver for ServerEgressMap {
                         .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
                     (stream, tcp_peer.tls)
                 };
-                
+
                 let tcp_params = tunnel_lib::TcpParams::default();
-                tcp_params.apply(&tcp_stream).map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
-                
+                tcp_params
+                    .apply(&tcp_stream)
+                    .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
+
                 match final_tls {
                     None => {
-                        tunnel_lib::engine::bridge::relay_with_first_data(recv, send, tcp_stream, initial_data.as_deref())
-                            .await
-                            .map_err(|e| ProxyError::upstream_forward(e.to_string()))?;
+                        tunnel_lib::engine::bridge::relay_with_first_data(
+                            recv,
+                            send,
+                            tcp_stream,
+                            initial_data.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| ProxyError::upstream_forward(e.to_string()))?;
                     }
                     Some(tls) => {
                         let server_name = rustls::pki_types::ServerName::try_from(tls.host.clone())
-                            .map_err(|e| ProxyError::upstream_connect(format!("invalid TLS server name: {}", e)))?;
-                        let tls_stream = tls.connector.connect(server_name, tcp_stream)
+                            .map_err(|e| {
+                                ProxyError::upstream_connect(format!(
+                                    "invalid TLS server name: {}",
+                                    e
+                                ))
+                            })?;
+                        let tls_stream = tls
+                            .connector
+                            .connect(server_name, tcp_stream)
                             .await
                             .map_err(|e| ProxyError::tls_handshake(e.to_string()))?;
-                        
+
                         tunnel_lib::engine::relay::relay_with_initial(
                             recv,
                             send,

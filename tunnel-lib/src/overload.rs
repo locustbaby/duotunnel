@@ -71,11 +71,15 @@ pub async fn maybe_slow_path(
         return;
     }
 
-    crate::infra::metrics::METRICS.slowpath_waiting_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::infra::metrics::METRICS
+        .slowpath_waiting_tasks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     struct SlowpathGuard;
     impl Drop for SlowpathGuard {
         fn drop(&mut self) {
-            crate::infra::metrics::METRICS.slowpath_waiting_tasks.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            crate::infra::metrics::METRICS
+                .slowpath_waiting_tasks
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
     let _guard = SlowpathGuard;

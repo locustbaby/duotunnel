@@ -1,8 +1,7 @@
 use crate::models::msg::{recv_message_type, send_message, MessageType, MAX_MESSAGE_BYTES};
 use crate::shared::{
-    ClientGroupDef, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef,
-    IngressListenerDef, IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef,
-    UpstreamServerDef,
+    ClientGroupDef, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef, IngressListenerDef,
+    IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef, UpstreamServerDef,
 };
 use anyhow::{anyhow, Result};
 use rkyv::{
@@ -112,7 +111,11 @@ where
 {
     let msg_type = recv_message_type(reader).await?;
     if msg_type != MessageType::ConfigPush {
-        return Err(anyhow!("expected {:?}, got {:?}", MessageType::ConfigPush, msg_type));
+        return Err(anyhow!(
+            "expected {:?}, got {:?}",
+            MessageType::ConfigPush,
+            msg_type
+        ));
     }
     let len = reader.read_u32().await? as usize;
     if len > MAX_MESSAGE_BYTES {

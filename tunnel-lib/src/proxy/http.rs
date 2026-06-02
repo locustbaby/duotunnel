@@ -1,8 +1,8 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::timeout as lazy_timeout;
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
+use crate::timeout as lazy_timeout;
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;

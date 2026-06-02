@@ -1,11 +1,18 @@
-use rkyv::{
-    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
-};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
     RkyvDeserialize,
 )]
 pub enum ClientStatus {
@@ -37,7 +44,16 @@ impl fmt::Display for ClientStatus {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
     RkyvDeserialize,
 )]
 pub enum TokenStatus {
@@ -81,8 +97,13 @@ pub struct IngressVhostRuleDef {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum IngressListenerModeDef {
-    Http { vhost: Vec<IngressVhostRuleDef> },
-    Tcp { group_id: String, proxy_name: String },
+    Http {
+        vhost: Vec<IngressVhostRuleDef>,
+    },
+    Tcp {
+        group_id: String,
+        proxy_name: String,
+    },
 }
 
 #[derive(

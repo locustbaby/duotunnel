@@ -294,13 +294,18 @@ impl ServerConfigFile {
         if self.server.open_stream_timeout_ms == 0 {
             errors.push("server.open_stream_timeout_ms must be >= 1".into());
         }
-        if self.server.overload.inflight_yield_threshold > self.server.overload.inflight_sleep_threshold {
+        if self.server.overload.inflight_yield_threshold
+            > self.server.overload.inflight_sleep_threshold
+        {
             errors.push(format!(
                 "server.overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
                 self.server.overload.inflight_yield_threshold, self.server.overload.inflight_sleep_threshold
             ));
         }
-        if let (Some(ypct), Some(spct)) = (self.server.overload.inflight_yield_pct, self.server.overload.inflight_sleep_pct) {
+        if let (Some(ypct), Some(spct)) = (
+            self.server.overload.inflight_yield_pct,
+            self.server.overload.inflight_sleep_pct,
+        ) {
             if ypct > spct {
                 errors.push(format!(
                     "server.overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",

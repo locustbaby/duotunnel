@@ -121,10 +121,7 @@ impl ProtocolDetector for H2cDetector {
             return SniffOutcome::NoMatch;
         }
         if &buf[..HTTP2_PREFACE.len()] == HTTP2_PREFACE {
-            return SniffOutcome::Matched(ProtocolHint::new(
-                ProtocolKind::H2c,
-                Bytes::new(),
-            ));
+            return SniffOutcome::Matched(ProtocolHint::new(ProtocolKind::H2c, Bytes::new()));
         }
         SniffOutcome::NoMatch
     }

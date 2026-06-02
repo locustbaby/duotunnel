@@ -33,11 +33,9 @@ pub fn build_patch(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> ConfigPa
         client_groups: diff_by_key(&previous.client_groups, &next.client_groups, |item| {
             item.group_id.clone()
         }),
-        egress_upstreams: diff_by_key(
-            &previous.egress_upstreams,
-            &next.egress_upstreams,
-            |item| item.name.clone(),
-        ),
+        egress_upstreams: diff_by_key(&previous.egress_upstreams, &next.egress_upstreams, |item| {
+            item.name.clone()
+        }),
         egress_vhost_rules: diff_by_key(
             &previous.egress_vhost_rules,
             &next.egress_vhost_rules,
@@ -62,7 +60,9 @@ where
     let mut ops = Vec::new();
     for key in keys {
         match (prev_map.get(&key), next_map.get(&key)) {
-            (Some(prev), Some(next)) if *prev != *next => ops.push(ResourceOp::Upsert((*next).clone())),
+            (Some(prev), Some(next)) if *prev != *next => {
+                ops.push(ResourceOp::Upsert((*next).clone()))
+            }
             (None, Some(next)) => ops.push(ResourceOp::Upsert((*next).clone())),
             (Some(_), None) => ops.push(ResourceOp::Delete { key }),
             _ => {}

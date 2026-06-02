@@ -5,9 +5,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use tunnel_lib::{
-    maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome,
-};
+use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
@@ -20,33 +18,27 @@ pub async fn run_tcp_accept_loop(
     let addr = listener.local_addr()?;
     let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
     info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
-    run_accept_worker(
-        listener,
-        cancel,
-        emfile_backoff,
-        "tcp",
-        move |accepted| {
-            let state = state.clone();
-            let proxy_name = proxy_name.clone();
-            let group_id = group_id.clone();
-            async move {
-                let stream = accepted.stream;
-                if let Err(e) = state.tcp_params.apply(&stream) {
-                    debug!(error = %e, "tcp_params.apply failed");
-                    return;
-                }
-                metrics::tcp_connection_opened();
-                let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
-                if let Err(e) = &result {
-                    debug!(error = %e, "TCP connection error");
-                    metrics::request_failed("tcp", e);
-                } else {
-                    metrics::request_completed("tcp", "success");
-                }
-                metrics::tcp_connection_closed();
+    run_accept_worker(listener, cancel, emfile_backoff, "tcp", move |accepted| {
+        let state = state.clone();
+        let proxy_name = proxy_name.clone();
+        let group_id = group_id.clone();
+        async move {
+            let stream = accepted.stream;
+            if let Err(e) = state.tcp_params.apply(&stream) {
+                debug!(error = %e, "tcp_params.apply failed");
+                return;
             }
-        },
-    )
+            metrics::tcp_connection_opened();
+            let result = handle_tcp_connection(state, stream, proxy_name, group_id).await;
+            if let Err(e) = &result {
+                debug!(error = %e, "TCP connection error");
+                metrics::request_failed("tcp", e);
+            } else {
+                metrics::request_completed("tcp", "success");
+            }
+            metrics::tcp_connection_closed();
+        }
+    })
     .await;
     Ok(())
 }
@@ -133,5 +125,11 @@ async fn handle_tcp_connection(
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-    proxy::forward_prefixed_to_client(send, recv, prefixed_stream, state.proxy_buffer_params.relay_buf_size).await
+    proxy::forward_prefixed_to_client(
+        send,
+        recv,
+        prefixed_stream,
+        state.proxy_buffer_params.relay_buf_size,
+    )
+    .await
 }

@@ -16,10 +16,12 @@ fn mask_token_in_str(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if i + 3 <= chars.len() && chars[i] == 'd' && chars[i+1] == 't' && chars[i+2] == '_' {
+        if i + 3 <= chars.len() && chars[i] == 'd' && chars[i + 1] == 't' && chars[i + 2] == '_' {
             let start = i;
             i += 3;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '-' || chars[i] == '_')
+            {
                 i += 1;
             }
             let token_len = i - start;

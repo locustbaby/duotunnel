@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 /// ControlClient: connects to tunnel-ctld and maintains the list-watch stream.
 ///
 /// On connect:
@@ -6,7 +7,6 @@
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
@@ -135,7 +135,10 @@ async fn connect_and_watch(
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
                     apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await;
                 } else {
-                    warn!(resource_version = v, "received Patch before Snapshot; patch dropped, routing may be stale");
+                    warn!(
+                        resource_version = v,
+                        "received Patch before Snapshot; patch dropped, routing may be stale"
+                    );
                 }
                 *last_version = v;
             }
@@ -154,7 +157,10 @@ async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
     state.routing.store(Arc::new(routing_snapshot));
 }
 
-fn update_token_cache(entries: &[tunnel_lib::shared::TokenCacheEntryDef], state: &Arc<ServerState>) {
+fn update_token_cache(
+    entries: &[tunnel_lib::shared::TokenCacheEntryDef],
+    state: &Arc<ServerState>,
+) {
     if let Some(cache) = state.local_token_cache.as_ref() {
         let entries: Vec<CacheEntry> = entries
             .iter()
