@@ -58,9 +58,9 @@ mod tests {
         let lb = RoundRobinLb::new();
         let targets = vec![target("a"), target("b"), target("c")];
         let ctx = PickCtx {
-            client_addr: "127.0.0.1:1".parse().unwrap(),
+            client_addr: "127.0.0.1:1".parse().expect("test failed"),
         };
-        let idxs: Vec<usize> = (0..6).map(|_| lb.pick(&targets, &ctx).unwrap()).collect();
+        let idxs: Vec<usize> = (0..6).map(|_| lb.pick(&targets, &ctx).expect("test failed")).collect();
         assert_eq!(idxs, vec![0, 1, 2, 0, 1, 2]);
     }
 
@@ -68,7 +68,7 @@ mod tests {
     fn round_robin_empty_returns_none() {
         let lb = RoundRobinLb::new();
         let ctx = PickCtx {
-            client_addr: "127.0.0.1:1".parse().unwrap(),
+            client_addr: "127.0.0.1:1".parse().expect("test failed"),
         };
         assert!(lb.pick(&[], &ctx).is_none());
     }

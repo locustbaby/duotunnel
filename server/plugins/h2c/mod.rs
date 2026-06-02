@@ -36,14 +36,21 @@ struct RetryableRequest {
 
 fn error_response(err: &ProxyError) -> Response<tunnel_lib::proxy::h2_proxy::BoxBody> {
     let status = err.http_status().unwrap_or(StatusCode::BAD_GATEWAY);
+    let payload = serde_json::json!({
+        "error_code": err.error_code(),
+        "message": err.to_string(),
+    });
+    let body_bytes = bytes::Bytes::from(serde_json::to_vec(&payload).unwrap_or_default());
+
     Response::builder()
         .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(
-            Full::new(bytes::Bytes::from(err.to_string()))
+            Full::new(body_bytes)
                 .map_err(|never| match never {})
                 .boxed(),
         )
-        .unwrap()
+        .expect("Failed to build error response")
 }
 
 fn error_status_label(err: &ProxyError) -> &'static str {
@@ -133,7 +140,7 @@ fn build_retry_request(
                 .map_err(|never| match never {})
                 .boxed(),
         )
-        .unwrap();
+        .expect("Failed to build retry request");
     *req.headers_mut() = template.headers.clone();
     req
 }
