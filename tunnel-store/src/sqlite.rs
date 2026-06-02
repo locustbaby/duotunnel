@@ -230,7 +230,7 @@ impl AuthStore for SqliteAuthStore {
                     token_status: r
                         .try_get::<&str, _>("token_status")
                         .ok()
-                        .and_then(|value| TokenStatus::parse(value)),
+                        .and_then(TokenStatus::parse),
                     created_at: r
                         .try_get::<String, _>("created_at")
                         .unwrap_or_else(|_| "-".into()),
