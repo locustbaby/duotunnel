@@ -168,7 +168,8 @@ impl SqliteRuleStore {
             .iter()
             .map(|listener| (listener.port, listener))
             .collect();
-        let desired_ports: HashSet<u16> = desired.ingress_listeners.iter().map(|l| l.port).collect();
+        let desired_ports: HashSet<u16> =
+            desired.ingress_listeners.iter().map(|l| l.port).collect();
         let delete_ports = current
             .ingress_listeners
             .iter()
@@ -180,10 +181,8 @@ impl SqliteRuleStore {
             .iter()
             .cloned()
             .map(|listener| {
-                let delete_vhosts = match (
-                    current_listener_map.get(&listener.port),
-                    &listener.mode,
-                ) {
+                let delete_vhosts = match (current_listener_map.get(&listener.port), &listener.mode)
+                {
                     (Some(existing), IngressListenerMode::Http { vhost }) => {
                         let desired_hosts: HashSet<&str> =
                             vhost.iter().map(|rule| rule.match_host.as_str()).collect();
@@ -210,8 +209,11 @@ impl SqliteRuleStore {
             .iter()
             .map(|group| (group.group_id.as_str(), group))
             .collect();
-        let desired_group_ids: HashSet<&str> =
-            desired.client_groups.iter().map(|group| group.group_id.as_str()).collect();
+        let desired_group_ids: HashSet<&str> = desired
+            .client_groups
+            .iter()
+            .map(|group| group.group_id.as_str())
+            .collect();
         let delete_groups = current
             .client_groups
             .iter()
@@ -224,8 +226,11 @@ impl SqliteRuleStore {
             .cloned()
             .map(|group| {
                 let existing_group = current_group_map.get(group.group_id.as_str()).copied();
-                let desired_upstream_names: HashSet<&str> =
-                    group.upstreams.iter().map(|upstream| upstream.name.as_str()).collect();
+                let desired_upstream_names: HashSet<&str> = group
+                    .upstreams
+                    .iter()
+                    .map(|upstream| upstream.name.as_str())
+                    .collect();
                 let delete_upstreams = existing_group
                     .map(|existing| {
                         existing
@@ -561,30 +566,27 @@ impl RuleStore for SqliteRuleStore {
             let l = &listener_plan.listener;
             let (mode, tcp_group, tcp_proxy) = match &l.mode {
                 IngressListenerMode::Http { .. } => ("http", None, None),
-                IngressListenerMode::Tcp { group_id, proxy_name } => {
-                    ("tcp", Some(group_id.as_str()), Some(proxy_name.as_str()))
-                }
+                IngressListenerMode::Tcp {
+                    group_id,
+                    proxy_name,
+                } => ("tcp", Some(group_id.as_str()), Some(proxy_name.as_str())),
             };
-            sqlx::query(
+            let lid: i64 = sqlx::query_scalar(
                 "INSERT INTO ingress_listeners (port, mode, tcp_group, tcp_proxy)
                  VALUES (?, ?, ?, ?)
                  ON CONFLICT(port) DO UPDATE SET
                      mode = excluded.mode,
                      tcp_group = excluded.tcp_group,
-                     tcp_proxy = excluded.tcp_proxy",
+                     tcp_proxy = excluded.tcp_proxy
+                 RETURNING id",
             )
             .bind(l.port as i64)
             .bind(mode)
             .bind(tcp_group)
             .bind(tcp_proxy)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await
-            .context("upsert ingress listener")?;
-            let lid: i64 = sqlx::query_scalar("SELECT id FROM ingress_listeners WHERE port = ?")
-                .bind(l.port as i64)
-                .fetch_one(&mut *tx)
-                .await
-                .context("select ingress listener id")?;
+            .context("upsert ingress listener and returning id")?;
             for match_host in &listener_plan.delete_vhosts {
                 sqlx::query(
                     "DELETE FROM ingress_vhost_rules WHERE listener_id = ? AND match_host = ?",
@@ -629,11 +631,11 @@ impl RuleStore for SqliteRuleStore {
                  ON CONFLICT(group_id) DO UPDATE SET
                      config_version = excluded.config_version",
             )
-                .bind(&g.group_id)
-                .bind(&g.config_version)
-                .execute(&mut *tx)
-                .await
-                .context("upsert client group")?;
+            .bind(&g.group_id)
+            .bind(&g.config_version)
+            .execute(&mut *tx)
+            .await
+            .context("upsert client group")?;
             for upstream_name in &group_plan.delete_upstreams {
                 sqlx::query("DELETE FROM client_upstreams WHERE group_id = ? AND name = ?")
                     .bind(&g.group_id)
@@ -661,11 +663,11 @@ impl RuleStore for SqliteRuleStore {
                     sqlx::query(
                         "DELETE FROM client_upstream_servers WHERE upstream_id = ? AND address = ?",
                     )
-                        .bind(uid)
-                        .bind(address)
-                        .execute(&mut *tx)
-                        .await
-                        .context("delete stale client upstream server")?;
+                    .bind(uid)
+                    .bind(address)
+                    .execute(&mut *tx)
+                    .await
+                    .context("delete stale client upstream server")?;
                 }
                 for s in &u.servers {
                     sqlx::query(
@@ -707,11 +709,11 @@ impl RuleStore for SqliteRuleStore {
                 sqlx::query(
                     "DELETE FROM egress_upstream_servers WHERE upstream_id = ? AND address = ?",
                 )
-                    .bind(uid)
-                    .bind(address)
-                    .execute(&mut *tx)
-                    .await
-                    .context("delete stale egress server")?;
+                .bind(uid)
+                .bind(address)
+                .execute(&mut *tx)
+                .await
+                .context("delete stale egress server")?;
             }
             for s in &u.servers {
                 sqlx::query(
@@ -721,10 +723,10 @@ impl RuleStore for SqliteRuleStore {
                 )
                 .bind(uid)
                 .bind(&s.address)
-                    .bind(s.resolve as i64)
-                    .execute(&mut *tx)
-                    .await
-                    .context("insert egress server")?;
+                .bind(s.resolve as i64)
+                .execute(&mut *tx)
+                .await
+                .context("insert egress server")?;
             }
         }
         for match_host in plan.egress.delete_vhosts {
