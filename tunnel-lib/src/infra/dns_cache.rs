@@ -1,41 +1,51 @@
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Clone)]
 pub struct DnsEntry {
     pub addrs: Vec<SocketAddr>,
     pub expires_at: Instant,
 }
 
 pub struct EgressDnsCache {
-    cache: RwLock<HashMap<(String, u16), DnsEntry>>,
+    cache: ArcSwap<HashMap<(String, u16), DnsEntry>>,
+    write_lock: tokio::sync::Mutex<()>,
     ttl: Duration,
 }
 
 impl EgressDnsCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: ArcSwap::from_pointee(HashMap::new()),
+            write_lock: tokio::sync::Mutex::new(()),
             ttl,
         }
     }
 
     fn get_stale(&self, key: &(String, u16)) -> Option<SocketAddr> {
-        let map = self.cache.read().unwrap();
-        map.get(key).and_then(|entry| entry.addrs.first().cloned())
+        self.cache.load().get(key).and_then(|entry| entry.addrs.first().cloned())
     }
 
     pub async fn resolve(&self, host: &str, port: u16) -> anyhow::Result<SocketAddr> {
         let key = (host.to_string(), port);
 
-        {
-            let map = self.cache.read().unwrap();
-            if let Some(entry) = map.get(&key) {
-                if Instant::now() < entry.expires_at {
-                    if let Some(&addr) = entry.addrs.first() {
-                        return Ok(addr);
-                    }
+        if let Some(entry) = self.cache.load().get(&key) {
+            if Instant::now() < entry.expires_at {
+                if let Some(&addr) = entry.addrs.first() {
+                    return Ok(addr);
+                }
+            }
+        }
+
+        let _guard = self.write_lock.lock().await;
+
+        if let Some(entry) = self.cache.load().get(&key) {
+            if Instant::now() < entry.expires_at {
+                if let Some(&addr) = entry.addrs.first() {
+                    return Ok(addr);
                 }
             }
         }
@@ -50,16 +60,15 @@ impl EgressDnsCache {
                     return Err(anyhow::anyhow!("no resolved IP for {}:{}", host, port));
                 }
                 let addr = resolved_vec[0];
-                {
-                    let mut map = self.cache.write().unwrap();
-                    map.insert(
-                        key,
-                        DnsEntry {
-                            addrs: resolved_vec,
-                            expires_at: Instant::now() + self.ttl,
-                        },
-                    );
-                }
+                let mut map = (**self.cache.load()).clone();
+                map.insert(
+                    key,
+                    DnsEntry {
+                        addrs: resolved_vec,
+                        expires_at: Instant::now() + self.ttl,
+                    },
+                );
+                self.cache.store(Arc::new(map));
                 Ok(addr)
             }
             Err(e) => {
