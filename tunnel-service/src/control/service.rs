@@ -13,7 +13,7 @@ use tunnel_store::{AuthStore, RuleStore, TokenListEntry};
 pub struct ControlService {
     auth_store: Arc<dyn AuthStore>,
     rule_store: Arc<dyn RuleStore>,
-    token_cache: Arc<dyn TokenCacheProvider>,
+    pub(crate) token_cache: Arc<dyn TokenCacheProvider>,
     current_snapshot: arc_swap::ArcSwap<ConfigSnapshot>,
     /// Monotonically increasing; incremented on every mutation.
     resource_version: std::sync::atomic::AtomicU64,
