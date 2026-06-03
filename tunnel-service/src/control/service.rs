@@ -1,5 +1,5 @@
-use crate::proto::{build_patch, ConfigSnapshot, WatchEvent};
-use crate::token::cache::TokenCacheProvider;
+use crate::control::proto::{build_patch, ConfigSnapshot, TokenCacheEntry, WatchEvent};
+use crate::control::token::cache::TokenCacheProvider;
 use anyhow::Result;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -50,15 +50,15 @@ impl ControlService {
         // Spawn the debounce task. Uses a Weak reference so the task exits cleanly
         // when the last strong Arc<ControlService> is dropped.
         let weak = Arc::downgrade(&svc);
-        tokio::spawn(crate::reactor::debounce_publish_task(
+        tokio::spawn(crate::control::reactor::debounce_publish_task(
             weak.clone(),
             publish_rx,
         ));
-        tokio::spawn(crate::reactor::db_poll_task(weak));
+        tokio::spawn(crate::control::reactor::db_poll_task(weak));
         Ok(svc)
     }
 
-    pub async fn load_token_cache(&self) -> Result<Vec<crate::proto::TokenCacheEntry>> {
+    pub async fn load_token_cache(&self) -> Result<Vec<TokenCacheEntry>> {
         self.token_cache.load_token_cache().await
     }
 
@@ -82,7 +82,7 @@ impl ControlService {
         let routing = rule_store.load_routing().await?;
         let token_cache = token_cache_provider.load_token_cache().await?;
         let (ingress_listeners, client_groups, egress_upstreams, egress_vhost_rules) =
-            crate::proto::routing_data_to_proto(&routing);
+            crate::control::proto::routing_data_to_proto(&routing);
         Ok(ConfigSnapshot {
             resource_version: version,
             ingress_listeners,

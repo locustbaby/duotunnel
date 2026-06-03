@@ -2,7 +2,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::service::ControlService;
+use crate::control::service::ControlService;
 
 const PUBLISH_DEBOUNCE_MS: u64 = 50;
 const POLL_INTERVAL_MS: u64 = 1500;

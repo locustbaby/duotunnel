@@ -132,6 +132,25 @@ tunnel/
 │   └── egress/
 │       └── mod.rs                 # Outbound routing (HttpConnector wrapper)
 │
+├── tunnel-service/                # Control service
+│   └── src/
+│       ├── main.rs                # Thin binary entry
+│       ├── lib.rs                 # Ctld runtime facade
+│       ├── bootstrap/
+│       │   ├── cli.rs             # CLI parsing
+│       │   ├── config.rs          # Config loading
+│       │   └── mod.rs             # Bootstrap assembly
+│       ├── runtime/
+│       │   ├── app.rs             # Startup orchestration
+│       │   └── mod.rs             # Tokio runtime entry
+│       └── control/
+│           ├── proto.rs           # Snapshot / patch conversion
+│           ├── reactor.rs         # Publish debounce and DB poll tasks
+│           ├── service.rs         # Control service state and mutations
+│           ├── watch.rs           # Watch TCP server
+│           └── token/
+│               └── cache.rs       # Token cache provider
+│
 └── client/                        # Client
     ├── main.rs                    # Thin binary entry
     ├── lib.rs                     # Client runtime facade

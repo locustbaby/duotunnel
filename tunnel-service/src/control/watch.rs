@@ -1,5 +1,5 @@
-use crate::proto::WatchEvent;
-use crate::service::ControlService;
+use crate::control::proto::WatchEvent;
+use crate::control::service::ControlService;
 use anyhow::Result;
 /// WatchServer: TCP listener that implements the ctld-side of the list-watch protocol.
 ///

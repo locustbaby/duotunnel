@@ -1,4 +1,4 @@
-use crate::proto::TokenCacheEntry;
+use crate::control::proto::TokenCacheEntry;
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::Row;

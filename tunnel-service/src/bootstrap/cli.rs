@@ -6,10 +6,10 @@
 /// SQLite pool as the server process so commands can be run from the same
 /// binary without a separate RPC layer.
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Parser, Subcommand};
 
-#[derive(Debug, Subcommand)]
-pub enum CliCommand {
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum CliCommand {
     /// Create a new client and print its bearer token.
     CreateClient {
         /// Unique client name / group identifier.
@@ -29,7 +29,27 @@ pub enum CliCommand {
     ListTokens,
 }
 
-pub async fn run_cli(cmd: CliCommand, svc: &crate::service::ControlService) -> Result<()> {
+#[derive(Debug, Parser)]
+#[command(name = "tunnel-ctld", about = "Tunnel control daemon")]
+pub(crate) struct Args {
+    #[arg(short, long, default_value = "ctld.yaml")]
+    pub(crate) config: String,
+
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum Command {
+    Serve,
+    #[command(subcommand)]
+    Client(CliCommand),
+}
+
+pub(crate) async fn run_cli(
+    cmd: CliCommand,
+    svc: &crate::control::service::ControlService,
+) -> Result<()> {
     match cmd {
         CliCommand::CreateClient { name } => {
             let token = svc.create_client(&name).await?;
