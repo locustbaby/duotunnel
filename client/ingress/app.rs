@@ -3,7 +3,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 use tunnel_lib::plugin::{LoadBalancer, PickCtx, Resolver, Target};
 use tunnel_lib::proxy::core::{Context as ProxyContext, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
@@ -11,28 +11,24 @@ use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, MitmPeerSpec, PeerSp
 use tunnel_lib::proxy::tcp::UpstreamScheme;
 use tunnel_lib::{ClientConfig, HttpClientParams, ProxyError};
 
-/// One named upstream group. `raw` is the source-of-truth address list in
-/// `scheme://host:port` form. `targets` is a parallel view built at config
-/// load time for the `LoadBalancer` plugin; the LB returns an index into the
-/// slice which we use directly into `raw`.
-struct UpstreamGroup {
+struct UpstreamGroup<L> {
     raw: Vec<String>,
     targets: Vec<Target>,
-    lb: Arc<dyn LoadBalancer>,
+    lb: Arc<L>,
 }
 
-pub struct LocalProxyMap {
-    upstreams: HashMap<String, UpstreamGroup>,
-    resolver: Arc<dyn Resolver>,
+pub struct LocalProxyMap<L, R> {
+    upstreams: HashMap<String, UpstreamGroup<L>>,
+    resolver: Arc<R>,
     pub http_connector: SharedHttpConnector,
 }
 
-impl LocalProxyMap {
+impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
     pub fn from_config(
         config: &ClientConfig,
         http_params: &HttpClientParams,
-        lb: Arc<dyn LoadBalancer>,
-        resolver: Arc<dyn Resolver>,
+        lb: Arc<L>,
+        resolver: Arc<R>,
     ) -> Self {
         let mut upstreams = HashMap::new();
         for upstream in &config.upstreams {
@@ -69,8 +65,6 @@ impl LocalProxyMap {
         }
     }
 
-    /// Returns the raw upstream address (still in `scheme://host:port` form)
-    /// chosen by the `LoadBalancer` plugin for `proxy_name`.
     pub fn get_local_address(&self, proxy_name: &str, client_addr: SocketAddr) -> Option<String> {
         let group = self.upstreams.get(proxy_name)?;
         let ctx = PickCtx { client_addr };
@@ -80,9 +74,6 @@ impl LocalProxyMap {
         Some(addr)
     }
 
-    /// Resolve `connect_addr_str` (either an IP literal `host:port` or a
-    /// hostname `host:port`) to a single `SocketAddr` via the `Resolver`
-    /// plugin.
     pub async fn resolve_addr(&self, connect_addr_str: &str) -> Result<SocketAddr> {
         if let Ok(addr) = connect_addr_str.parse::<SocketAddr>() {
             return Ok(addr);
@@ -98,16 +89,18 @@ impl LocalProxyMap {
     }
 }
 
-pub struct IngressClientApp {
-    map: Arc<LocalProxyMap>,
+pub struct IngressClientApp<L, R> {
+    map: Arc<LocalProxyMap<L, R>>,
     tcp_params: tunnel_lib::TcpParams,
 }
-impl IngressClientApp {
-    pub fn new(map: Arc<LocalProxyMap>, tcp_params: tunnel_lib::TcpParams) -> Self {
+
+impl<L, R> IngressClientApp<L, R> {
+    pub fn new(map: Arc<LocalProxyMap<L, R>>, tcp_params: tunnel_lib::TcpParams) -> Self {
         Self { map, tcp_params }
     }
 }
-impl UpstreamResolver for IngressClientApp {
+
+impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
     async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerSpec, ProxyError> {
         let routing = context
             .routing_info
@@ -149,7 +142,6 @@ impl UpstreamResolver for IngressClientApp {
                 Ok(PeerSpec::Http(spec))
             }
             Protocol::WebSocket => {
-                info!("WebSocket protocol detected, using TCP relay");
                 let target_addr = self
                     .map
                     .resolve_addr(&connect_addr_str)
@@ -175,15 +167,10 @@ impl UpstreamResolver for IngressClientApp {
                 Ok(PeerSpec::Tcp(spec))
             }
             Protocol::Tcp => {
-                info!("TCP protocol detected (opaque TLS)");
                 if is_https {
                     let spec = MitmPeerSpec {
                         tls_host: tls_host.as_deref().unwrap_or("localhost").to_string(),
                     };
-                    info!(
-                        "Terminating ingress TLS to fix SNI for upstream {}",
-                        spec.tls_host
-                    );
                     Ok(PeerSpec::MitmH2(spec))
                 } else {
                     let target_addr =
@@ -243,10 +230,6 @@ impl UpstreamResolver for IngressClientApp {
                 let accepted_stream = acceptor.accept(stream).await.map_err(|e| {
                     ProxyError::tls_handshake(format!("failed to accept ingress TLS for MITM: {e}"))
                 })?;
-                info!(
-                    "MITM H2: TLS handshake accepted, starting H2 server for {}",
-                    spec.tls_host
-                );
                 self.map
                     .http_connector
                     .serve_h2(

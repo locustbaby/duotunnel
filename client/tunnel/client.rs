@@ -67,10 +67,8 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
-    let lb: Arc<dyn tunnel_lib::plugin::LoadBalancer> =
-        Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
-    let resolver: Arc<dyn tunnel_lib::plugin::Resolver> =
-        Arc::new(plugins::resolver_cached::CachedResolver::new());
+    let lb = Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
+    let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
     let proxy_map = Arc::new(LocalProxyMap::from_config(
         &resp.config,
         &tunnel_lib::HttpClientParams::from(&config.http_pool),
@@ -80,7 +78,7 @@ pub(crate) async fn run_client(
     let session_cancel = CancellationToken::new();
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
-    entry_pool.push(conn.clone());
+    entry_pool.push(conn.clone()).await;
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
@@ -109,7 +107,7 @@ pub(crate) async fn run_client(
         }
     };
     session_cancel.cancel();
-    entry_pool.remove(&conn);
+    entry_pool.remove(&conn).await;
     ready.store(false, Ordering::Release);
     tokio::select! {
         _ = shutdown.cancelled() => {}

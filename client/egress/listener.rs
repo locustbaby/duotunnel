@@ -114,11 +114,11 @@ async fn handle_entry_connection(
 
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
-    let pool_size = pool.pool_size();
+    let pool_size = pool.pool_size().await;
     let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
-        let conn = match pool.next_conn_excluding(&tried_conn_ids) {
+        let conn = match pool.next_conn_excluding(tried_conn_ids.clone()).await {
             Some(c) => c,
             None => break,
         };
@@ -163,12 +163,12 @@ async fn handle_entry_connection(
                 }
                 ErrorKind::QuicConnectionLost => {
                     warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit stale connection, evicting pool entry");
-                    pool.remove(&conn.conn);
+                    pool.remove(&conn.conn).await;
                     last_err = with_conn_detail(conn.conn.stable_id(), e).into();
                 }
                 ErrorKind::QuicConnectionFatal => {
                     warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit fatal connection error");
-                    pool.remove(&conn.conn);
+                    pool.remove(&conn.conn).await;
                     return Err(with_conn_detail(conn.conn.stable_id(), e).into());
                 }
                 _ => {

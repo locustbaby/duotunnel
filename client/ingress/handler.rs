@@ -3,12 +3,14 @@ use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
 use tracing::debug;
+use tunnel_lib::plugin::{LoadBalancer, Resolver};
 use tunnel_lib::proxy::core::ProxyEngine;
 use tunnel_lib::recv_routing_info;
-pub async fn handle_work_stream(
+
+pub async fn handle_work_stream<L: LoadBalancer, R: Resolver>(
     send: SendStream,
     mut recv: RecvStream,
-    proxy_map: Arc<LocalProxyMap>,
+    proxy_map: Arc<LocalProxyMap<L, R>>,
     tcp_params: tunnel_lib::TcpParams,
 ) -> Result<()> {
     let routing_info = recv_routing_info(&mut recv).await?;
