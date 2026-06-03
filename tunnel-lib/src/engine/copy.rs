@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use crossbeam_queue::SegQueue;
 use quinn::SendStream;
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -8,9 +8,9 @@ thread_local! {
     static LOCAL_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
-fn global_pool() -> &'static Mutex<Vec<Vec<u8>>> {
-    static GLOBAL_POOL: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
-    GLOBAL_POOL.get_or_init(|| Mutex::new(Vec::new()))
+fn global_pool() -> &'static SegQueue<Vec<u8>> {
+    static GLOBAL_POOL: OnceLock<SegQueue<Vec<u8>>> = OnceLock::new();
+    GLOBAL_POOL.get_or_init(SegQueue::new)
 }
 
 fn take_buffer(buffer_size: usize) -> Vec<u8> {
@@ -22,13 +22,14 @@ fn take_buffer(buffer_size: usize) -> Vec<u8> {
             return buf;
         }
     }
-    let mut global = global_pool().lock();
-    if let Some(index) = global.iter().position(|buf| buf.capacity() == buffer_size) {
-        let mut buf = global.swap_remove(index);
-        if buf.len() != buffer_size {
-            buf.resize(buffer_size, 0);
+    let global = global_pool();
+    while let Some(mut buf) = global.pop() {
+        if buf.capacity() == buffer_size {
+            if buf.len() != buffer_size {
+                buf.resize(buffer_size, 0);
+            }
+            return buf;
         }
-        return buf;
     }
     vec![0; buffer_size]
 }
@@ -53,7 +54,7 @@ fn return_buffer(buf: Vec<u8>, buffer_size: usize) {
         return;
     }
     if let Some(b) = maybe_buf {
-        let mut global = global_pool().lock();
+        let global = global_pool();
         if global.len() < 256 {
             global.push(b);
         }

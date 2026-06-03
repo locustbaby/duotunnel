@@ -26,6 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 http = "1.0"
 arc-swap = "1.9"
 crossbeam-utils = "0.8"
+crossbeam-queue = "0.3"
 dashmap = "6.1"
 parking_lot = "0.12"
 tokio-rustls = "0.26"
