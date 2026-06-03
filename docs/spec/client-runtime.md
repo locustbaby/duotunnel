@@ -79,18 +79,20 @@ Must not own:
 
 ### 4. Tunnel / Services
 
+`client/tunnel/endpoint.rs`
+`client/tunnel/client.rs`
 `client/tunnel/*`
 `client/egress/listener.rs`
 
 Owns:
 
-- QUIC endpoint construction
-- server connect/login flow
+- QUIC endpoint and TLS config construction (`endpoint.rs` — startup-time)
+- server connect/login flow and session loop (`client.rs` — request-time)
 - reconnect supervision
 - connection pool lifecycle
 - reverse entry listener lifecycle
 
-These modules are for process-lifetime tunnel work, not CLI/bootstrap concerns.
+Boundary rule: `endpoint.rs` is startup-time only; `client.rs` is request-time only. These modules are for process-lifetime tunnel work, not CLI/bootstrap concerns.
 
 ## Request Path
 
