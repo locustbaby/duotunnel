@@ -70,13 +70,13 @@ enum RegistryMsg {
 }
 
 pub struct ClientRegistry {
-    groups: DashMap<String, Arc<ClientGroup>>,
+    groups: Arc<DashMap<String, Arc<ClientGroup>>>,
     tx: mpsc::Sender<RegistryMsg>,
 }
 
 impl ClientRegistry {
     pub fn new() -> Self {
-        let groups = DashMap::new();
+        let groups = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
         let (tx, mut rx) = mpsc::channel(1024);
         let groups_clone = groups.clone();
