@@ -1,4 +1,4 @@
-use crate::inflight::{inflight_load, inflight_notify, InflightSlotId, InflightTable};
+use crate::lb::inflight::{inflight_load, inflight_notify, InflightSlotId, InflightTable};
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1,5 +1,5 @@
 use crate::error::ProxyError;
-use crate::inflight::{begin_inflight, InflightGuard, InflightSlotId, InflightTable};
+use crate::lb::inflight::{begin_inflight, InflightGuard, InflightSlotId, InflightTable};
 use crate::timeout;
 use futures_util::FutureExt;
 use quinn::{Connection, RecvStream, SendStream};

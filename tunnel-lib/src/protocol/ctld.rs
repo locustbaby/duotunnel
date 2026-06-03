@@ -1,5 +1,5 @@
 use crate::models::msg::{recv_message_type, send_message, MessageType, MAX_MESSAGE_BYTES};
-use crate::shared::{
+use crate::models::defs::{
     ClientGroupDef, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef, IngressListenerDef,
     IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef, UpstreamServerDef,
 };

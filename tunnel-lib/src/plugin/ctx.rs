@@ -1,4 +1,4 @@
-use crate::overload::OverloadLimits;
+use crate::lb::overload::OverloadLimits;
 use crate::transport::tcp_params::TcpParams;
 use bytes::Bytes;
 use std::net::SocketAddr;

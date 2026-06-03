@@ -1,5 +1,5 @@
 use crate::proxy::core::Protocol;
-use crate::sniff::{default_ingress_detectors, SniffOutcome};
+use super::sniff::{default_ingress_detectors, SniffOutcome};
 
 pub fn detect_protocol_and_host(data: &[u8]) -> (Protocol, Option<String>) {
     let mut need_more = false;
