@@ -1,10 +1,11 @@
-use crate::config::ClientConfigFile;
-use crate::engine::ClientService;
+use crate::bootstrap::config::ClientConfigFile;
+use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+pub mod client;
 pub mod conn_pool;
 pub mod pool;
 pub mod supervisor;

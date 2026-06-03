@@ -8,9 +8,9 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 (Consumer / Used by) | 默认值 / 其他值 | YAML 路径 | 阈值影响 (Impact) | 排查手段 (Debugging / Logs) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **accept_workers** | `server/ingress/listener_mgr.rs`: `sync_listeners` / `client/entry.rs` | 默认: 4 (client `DEFAULT_ACCEPT_WORKERS`; server `Option<usize>`, None → 4) | `entry.accept_workers` (client) / `server.accept_workers` (server) | Accept 串行化；突发流量下建连延迟 (Sync 延迟) | 指标: `connection_latency`; 代码见 `server/ingress/listener_mgr.rs` |
+| **accept_workers** | `server/ingress/listener_mgr.rs`: `sync_listeners` / `client/egress/listener.rs` | 默认: 4 (client `DEFAULT_ACCEPT_WORKERS`; server `Option<usize>`, None → 4) | `entry.accept_workers` (client) / `server.accept_workers` (server) | Accept 串行化；突发流量下建连延迟 (Sync 延迟) | 指标: `connection_latency`; 代码见 `server/ingress/listener_mgr.rs` |
 | **Listen backlog** | `tunnel-lib/transport/listener.rs`: `listen(4096)` | 4096 | ❌ (硬编码) | 内核丢弃新连接；报 `ECONNREFUSED` | 命令: `netstat -s \| grep "SYNs to LISTEN sockets dropped"` |
-| **EMFILE backoff** | `entry.rs`: `EMFILE_BACKOFF_MS` | 100ms | ❌ (client 常量) / `overload.emfile_backoff_ms` (server) | errno 24 (Too many open files) 时暂停 Accept | 日志: `entry accept: too many open files, backing off` |
+| **EMFILE backoff** | `client/egress/listener.rs`: `EMFILE_BACKOFF_MS` | 100ms | ❌ (client 常量) / `overload.emfile_backoff_ms` (server) | errno 24 (Too many open files) 时暂停 Accept | 日志: `entry accept: too many open files, backing off` |
 | **peek_buf_size** | `PeekBufPool::new(size)` | 16 KiB | `proxy_buffers.peek_buf_size` | 缓冲区不足会导致协议识别失败 (Protocol::Unknown) | 日志: `detected protocol: Unknown`; 代码见 `core.rs:48` |
 | **http_header_buf_size** | `Http1Driver` header 解析缓冲 | 8 KiB | `proxy_buffers.http_header_buf_size` | HTTP header 最大尺寸；过小会拒绝带大 Cookie 的请求 | 代码见 `proxy_buffers.rs:18` |
 | **entry.port / http_entry_port** | client `EntryConfig.port` / client 顶层 `http_entry_port` | None / 未启用 | `entry.port` / `http_entry_port` | Client 本地 TCP/HTTP 入口端口；未配置则不起入口 | `config/client.yaml:19` |
@@ -22,14 +22,14 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 (Consumer / Used by) | 默认值 / 其他值 | YAML 路径 | 阈值影响 (Impact) | 排查手段 (Debugging / Logs) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **max_concurrent_streams** | `quinn::TransportConfig`: `max_concurrent_bidi_streams` | **server default: 1000**；**client default: 100** (code) / 1000 (示例 yaml) / CI: 1000 | `quic.max_concurrent_streams` | `open_bi()` 等待空闲槽位；压力过大导致超时失败。**注意 client 代码 default 与 yaml 示例不一致** | 指标: `open_bi_wait_ms`; 代码见 `quic.rs:30`, `client/config.rs:43` |
-| **open_stream_timeout** | `client/entry.rs`: `tokio::time::timeout` / server 对称 | 5s / CI: 5s | client: `reconnect.open_stream_timeout_ms`；server: `server.open_stream_timeout_ms` | 超过此值放弃当前 QUIC 连接并尝试下一个；最终 client 报超时。⚠️ `client/config.rs:177` docstring 写 3000ms，与实际 default 5000ms 不符（源码注释 bug） | 日志: `open_bi timed out after ...`; 见 `entry.rs:104` |
+| **max_concurrent_streams** | `quinn::TransportConfig`: `max_concurrent_bidi_streams` | **server default: 1000**；**client default: 100** (code) / 1000 (示例 yaml) / CI: 1000 | `quic.max_concurrent_streams` | `open_bi()` 等待空闲槽位；压力过大导致超时失败。**注意 client 代码 default 与 yaml 示例不一致** | 指标: `open_bi_wait_ms`; 代码见 `quic.rs:30`, `client/bootstrap/config.rs:43` |
+| **open_stream_timeout** | `client/egress/listener.rs`: `tokio::time::timeout` / server 对称 | 5s / CI: 5s | client: `reconnect.open_stream_timeout_ms`；server: `server.open_stream_timeout_ms` | 超过此值放弃当前 QUIC 连接并尝试下一个；最终 client 报超时。⚠️ `client/bootstrap/config.rs:177` docstring 写 3000ms，与实际 default 5000ms 不符（源码注释 bug） | 日志: `open_bi timed out after ...`; 见 `client/egress/listener.rs` |
 | **stream_window** | `quinn::TransportConfig`: `stream_receive_window` | 4 MiB | `quic.stream_window_mb` | 单个流的流量窗口，耗尽时发送端挂起 (L4 背压) | 指标: `quic_stream_data_blocked` |
 | **connection_window** | `quinn::TransportConfig`: `receive_window` (连接聚合流控) | 32 MiB | `quic.connection_window_mb` | 一条 QUIC 连接上所有流共享的总接收窗口；小于 N × stream_window 会提前阻塞 | 代码见 `transport/quic.rs:21` |
-| **send_window** | `quinn::TransportConfig`: `send_window` | 8 MiB (client 回退到 `connection_window_mb`) | `quic.send_window_mb` (仅 client) | 本端发送缓冲上限；非对称链路（上下行差异大）时可独立设置 | 代码见 `client/config.rs:67-71` |
+| **send_window** | `quinn::TransportConfig`: `send_window` | 8 MiB (client 回退到 `connection_window_mb`) | `quic.send_window_mb` (仅 client) | 本端发送缓冲上限；非对称链路（上下行差异大）时可独立设置 | 代码见 `client/bootstrap/config.rs:67-71` |
 | **keepalive_secs** | `quinn::TransportConfig.keep_alive_interval` | 20s | `quic.keepalive_secs` | QUIC 心跳 PING 间隔；必须 < `idle_timeout_secs` 否则空闲连接会被关 | 代码见 `transport/quic.rs:35` |
 | **idle_timeout_secs** | `quinn::TransportConfig.max_idle_timeout` | 60s | `quic.idle_timeout_secs` | 空闲 QUIC 连接被关闭的阈值；同步日志阻塞时可能先触发 | §4 Logging Latency 相关 |
-| **connections** | `client/worker.rs`: 启动 supervisor 的数量 | 1 / CI: 4 | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | 见 `client/app.rs` 的 slot 启动逻辑 |
+| **connections** | `client/tunnel/pool.rs`: 启动 supervisor 的数量 | 1 / CI: 4 | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | 见 `client/tunnel/pool.rs` 的 slot 启动逻辑 |
 | **congestion_controller** | `quinn::BbrConfig` / `CubicConfig` / `NewRenoConfig` | bbr | `quic.congestion` | 丢包重传与吞吐爬坡算法；bbr 适合高带宽波动链路；未知值 fallback 到 quinn 默认（NewReno） | 代码见 `quic.rs:41-54` |
 | **login_timeout_secs** | `server/ingress/handlers/quic.rs` | 10s | `server.login_timeout_secs` | 服务端对 client QUIC 登录握手超时；与 client `reconnect.login_timeout_ms` (5000ms) **不对称** | 代码见 `tunnel-store/src/server_config.rs:143` |
 | **udp_recv_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_RCVBUF` | 8 MiB | `quic.udp_recv_buf_mb` | Linux 内核将请求值翻倍（受 `net.core.rmem_max` 上限约束）。过小导致高 RPS 下 UDP 丢包（`recvmsg ENOBUFS`），是 8000 RPS 延迟尖刺主因之一 | `ss -udp -e` 看 `rmem`；`/proc/net/udp` 的 `drops` 列 |
@@ -40,15 +40,15 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 ## 2.5 过载保护 (Overload Protection)
 
-当 QUIC 流槽位接近 `max_concurrent_streams` 上限时，两侧在 `open_bi()` 前通过 `maybe_slow_path` 主动让渡或短暂睡眠，避免 open_bi 堆积超时。Client 侧计数器挂在 `EntryConnPool` 的每条 QUIC 连接上 (`client/conn_pool.rs:7`)，Server 侧挂在 `ClientRegistry` 的 `SelectedConnection` 上 (`server/ingress/registry.rs`)。
+当 QUIC 流槽位接近 `max_concurrent_streams` 上限时，两侧在 `open_bi()` 前通过 `maybe_slow_path` 主动让渡或短暂睡眠，避免 open_bi 堆积超时。Client 侧计数器挂在 `EntryConnPool` 的每条 QUIC 连接上 (`client/tunnel/conn_pool.rs:7`)，Server 侧挂在 `ClientRegistry` 的 `SelectedConnection` 上 (`server/ingress/registry.rs`)。
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 (Consumer / Used by) | 默认值 / 其他值 | YAML 路径 | 阈值影响 (Impact) | 排查手段 (Debugging / Logs) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **overload.mode** | `client/entry.rs:31` `maybe_slow_path`; server ingress handlers 同名路径 | `inflight_slowpath` / `burst` | `overload.mode` | `burst` 直接 bypass 阻塞逻辑，任由 QUIC 层排队或 `open_bi` 超时 | 搜代码路径 `OverloadMode::Burst` |
+| **overload.mode** | `client/egress/listener.rs` `maybe_slow_path`; server ingress handlers 同名路径 | `inflight_slowpath` / `burst` | `overload.mode` | `burst` 直接 bypass 阻塞逻辑，任由 QUIC 层排队或 `open_bi` 超时 | 搜代码路径 `OverloadMode::Burst` |
 | **overload.inflight_yield_threshold** | 同上 `maybe_slow_path` inflight 比较 | 800 (两侧一致) | `overload.inflight_yield_threshold` | 在途流 ≥ 该值时每次 `open_bi` 前 `tokio::task::yield_now()`；值过低会频繁让出 runtime 拉低吞吐 | 指标: `inflight` / `max_concurrent_streams` 占比 |
 | **overload.inflight_sleep_threshold** | 同上 `maybe_slow_path` inflight 比较 | 950 (两侧一致) | `overload.inflight_sleep_threshold` | 在途流 ≥ 该值时进入 backoff 循环（具体由 `backoff_strategy` 决定） | 指标: p99 latency 与 inflight 曲线同步上抬 |
 | **overload.inflight_sleep_ms** | 同上 `maybe_slow_path` 总时长预算 | 2ms (两侧一致) | `overload.inflight_sleep_ms` | backoff 循环的**总超时预算**；超过后放行到 `open_bi`（与 `backoff_strategy` 配合） | tracing span 中 `maybe_slow_path` 前后时间差 |
-| **overload.inflight_yield_pct** | 同上，**优先级高于**绝对阈值 | 0.80 (两侧一致) | `overload.inflight_yield_pct` | 相对 `max_concurrent_streams` 的比例阈值；设置后覆盖 `inflight_yield_threshold` | `client/config.rs:126` / `server_config.rs:84` |
+| **overload.inflight_yield_pct** | 同上，**优先级高于**绝对阈值 | 0.80 (两侧一致) | `overload.inflight_yield_pct` | 相对 `max_concurrent_streams` 的比例阈值；设置后覆盖 `inflight_yield_threshold` | `client/bootstrap/config.rs:126` / `server_config.rs:84` |
 | **overload.inflight_sleep_pct** | 同上 | 0.95 (两侧一致) | `overload.inflight_sleep_pct` | 同上，覆盖 `inflight_sleep_threshold` | 同上 |
 | **overload.backoff_strategy** | `tunnel-lib/src/overload.rs` `maybe_slow_path` | `exponential` (默认) / `fixed` / `none` | `overload.backoff_strategy` | `exponential`: 每轮重查 inflight，从 `budget/16` 翻倍到 `budget/4`，槽位一空立刻返回；`fixed`: 直接 sleep 一整个 budget；`none`: 不等，交给 QUIC 背压 | 代码见 `exponential_backoff` |
 | **overload.emfile_backoff_ms** (仅 server) | `server/ingress/handlers/tcp.rs` 与 `server/ingress/handlers/http.rs` accept 循环 | 100ms | `overload.emfile_backoff_ms` | EMFILE 时暂停 accept 的时长；偏低会 CPU 打满，偏高丢连接 | 日志: `too many open files, backing off` |
@@ -85,10 +85,10 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 | 默认值 | YAML 路径 | 阈值影响 | 排查手段 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **tls_skip_verify** | `client/main.rs:427` | false (yaml 示例: true) | `tls_skip_verify` (client) | 跳过服务端证书校验，仅供开发 | — |
-| **tls_ca_cert** | `client/main.rs:435` | None | `tls_ca_cert` (client) | 自定义 CA 路径；为空时走系统根 | — |
-| **tls_server_name** | `ClientConfigFile::tls_server_name()` | None → fallback 到 `server_addr` | `tls_server_name` (client) | SNI 覆盖；与证书 CN 不匹配时握手失败 | `client/config.rs:308` |
-| **allow_insecure_fallback** | `client/main.rs:460` | false | `allow_insecure_fallback` (client) | 系统无根证书时是否允许降级为 insecure；生产应保持 false | — |
+| **tls_skip_verify** | `client/tunnel/client.rs` | false (yaml 示例: true) | `tls_skip_verify` (client) | 跳过服务端证书校验，仅供开发 | — |
+| **tls_ca_cert** | `client/tunnel/client.rs` | None | `tls_ca_cert` (client) | 自定义 CA 路径；为空时走系统根 | — |
+| **tls_server_name** | `ClientConfigFile::tls_server_name()` | None → fallback 到 `server_addr` | `tls_server_name` (client) | SNI 覆盖；与证书 CN 不匹配时握手失败 | `client/bootstrap/config.rs:308` |
+| **allow_insecure_fallback** | `client/tunnel/client.rs` | false | `allow_insecure_fallback` (client) | 系统无根证书时是否允许降级为 insecure；生产应保持 false | — |
 | **pki.cert_cache_ttl_secs** | `PkiParams`, `init_cert_cache` | 3600s | `server.pki.cert_cache_ttl_secs` | 自生成证书缓存存活；过短会在高并发下反复签发消耗 CPU | `tunnel-lib/src/infra/pki.rs:11` |
 
 ---
@@ -128,7 +128,7 @@ Client → Server QUIC 建连与登录握手的时间预算。`initial_delay_ms 
 | **Routing Selection** | `ClientGroup::select_healthy` | O(N) 线性扫描 | Client 数 (N) | **CPU 尖峰**: 当分组内 Client 连接 > 500 时，单次转发选路开销显著上升 | CPU Profile (火焰图) 见 `select_healthy`; `registry.rs:104` |
 | **RCU Rebuild Cost** | `ClientGroup::snapshot.store` | Vec Clone + Swap | 注册/注销频率 (Churn) | **转发抖动**: 频繁重连导致 forward 路径短时间停顿/分配大量小对象 | 日志: `registering/unregistering client` 频率 |
 | **Initial Data Copy** | `ProxyEngine::run_stream` | `copy_from_slice` | 请求到达频率 | **内存毛刺**: 每请求一次额外分配；虽量小但并发高时影响 GC/RSS | 代码见 `core.rs:52` |
-| **Server Overload** | server ingress handlers + 对称的 `client/entry.rs:30` | yield/sleep 逻辑 | In-flight 总数 vs. 阈值 `overload.inflight_{yield,sleep}_threshold` (§2.5) | **延迟突增**: 触发过载保护时系统主动挂起请求 | 指标: `inflight_requests`; `system_overload_count` |
+| **Server Overload** | server ingress handlers + 对称的 `client/egress/listener.rs` | yield/sleep 逻辑 | In-flight 总数 vs. 阈值 `overload.inflight_{yield,sleep}_threshold` (§2.5) | **延迟突增**: 触发过载保护时系统主动挂起请求 | 指标: `inflight_requests`; `system_overload_count` |
 | **Logging Latency** | `relay.rs`: `debug!` / `tracing` | 同步阻塞写入 | `log_level: info` | **吞吐硬封顶**: 同步日志写磁盘导致 Worker 线程挂起，QUIC 会发生 Idle Timeout | 火焰图见 `std::io::Write` 阻塞热点 |
 
 ---
@@ -177,9 +177,9 @@ duotunnel 当前只有**全局一份**（`ClientConfigFile` / `ServerConfigFile`
 
 ### 5.3 当前文档化已发现的不一致
 
-1. **`max_concurrent_streams` client 代码 default=100，yaml 示例=1000**（`client/config.rs:43` vs `config/client.yaml:25`）
+1. **`max_concurrent_streams` client 代码 default=100，yaml 示例=1000**（`client/bootstrap/config.rs:43` vs `config/client.yaml:25`）
 2. **`max_idle_per_host` 代码 default=128，yaml 示例=10**（`http_pool.rs:14` vs `config/server.yaml:43`）
-3. **`open_stream_timeout_ms` 源码 docstring 写 3000ms，实际 default=5000ms**（`client/config.rs:177`）
+3. **`open_stream_timeout_ms` 源码 docstring 写 3000ms，实际 default=5000ms**（`client/bootstrap/config.rs:177`）
 4. **`login_timeout` 两侧不对称**：server 10s，client 5s
 5. **`max_connections` / `max_tcp_connections`** YAML 注释里有但代码无消费者，是死配置
 

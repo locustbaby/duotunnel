@@ -420,7 +420,10 @@ mod tests {
         assert_eq!(limits.inflight_yield_threshold, 100);
         assert_eq!(limits.inflight_sleep_threshold, 200);
         assert_eq!(limits.backoff, tunnel_lib::BackoffStrategy::Fixed);
-        assert_eq!(limits.inflight_sleep_budget, std::time::Duration::from_millis(10));
+        assert_eq!(
+            limits.inflight_sleep_budget,
+            std::time::Duration::from_millis(10)
+        );
     }
 
     #[test]
@@ -437,11 +440,17 @@ mod tests {
 
         let limits = config.resolve(1000);
 
-        assert_eq!(limits.mode, tunnel_lib::SharedOverloadMode::InflightSlowpath);
+        assert_eq!(
+            limits.mode,
+            tunnel_lib::SharedOverloadMode::InflightSlowpath
+        );
         assert_eq!(limits.inflight_yield_threshold, 500); // 1000 * 0.5
         assert_eq!(limits.inflight_sleep_threshold, 800); // 1000 * 0.8
         assert_eq!(limits.backoff, tunnel_lib::BackoffStrategy::Exponential);
-        assert_eq!(limits.inflight_sleep_budget, std::time::Duration::from_millis(5));
+        assert_eq!(
+            limits.inflight_sleep_budget,
+            std::time::Duration::from_millis(5)
+        );
     }
 
     #[test]
@@ -490,7 +499,11 @@ mod tests {
 
     #[test]
     fn test_tls_server_name_trims_explicit_name() {
-        let config = create_mock_config("example.com", 443, Some("  custom.example.com  ".to_string()));
+        let config = create_mock_config(
+            "example.com",
+            443,
+            Some("  custom.example.com  ".to_string()),
+        );
         assert_eq!(config.tls_server_name(), "custom.example.com");
     }
 

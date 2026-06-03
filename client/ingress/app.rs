@@ -98,16 +98,16 @@ impl LocalProxyMap {
     }
 }
 
-pub struct ClientApp {
+pub struct IngressClientApp {
     map: Arc<LocalProxyMap>,
     tcp_params: tunnel_lib::TcpParams,
 }
-impl ClientApp {
+impl IngressClientApp {
     pub fn new(map: Arc<LocalProxyMap>, tcp_params: tunnel_lib::TcpParams) -> Self {
         Self { map, tcp_params }
     }
 }
-impl UpstreamResolver for ClientApp {
+impl UpstreamResolver for IngressClientApp {
     async fn upstream_peer(&self, context: &mut ProxyContext) -> Result<PeerSpec, ProxyError> {
         let routing = context
             .routing_info

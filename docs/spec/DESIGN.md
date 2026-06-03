@@ -133,12 +133,27 @@ tunnel/
 │       └── mod.rs                 # Outbound routing (HttpConnector wrapper)
 │
 └── client/                        # Client
-    ├── main.rs                    # Entry + reconnection logic
-    ├── config.rs                  # Configuration parsing
-    ├── app.rs                     # LocalProxyMap
-    ├── conn_pool.rs               # Multi QUIC connection pool (RCU + Round-Robin)
-    ├── proxy.rs                   # Workflow handling
-    └── entry.rs                   # Reverse proxy entry (with retry logic)
+    ├── main.rs                    # Thin binary entry
+    ├── lib.rs                     # Client runtime facade
+    ├── bootstrap/
+    │   ├── cli.rs                 # CLI parsing
+    │   ├── config.rs              # Configuration parsing
+    │   └── mod.rs                 # Bootstrap assembly
+    ├── runtime/
+    │   ├── app.rs                 # Startup orchestration
+    │   ├── engine.rs              # Runtime service engine
+    │   └── mod.rs                 # Runtime entry and task spawning
+    ├── tunnel/
+    │   ├── client.rs              # QUIC connect/login/TLS path
+    │   ├── conn_pool.rs           # Multi QUIC connection pool (RCU + Round-Robin)
+    │   ├── pool.rs                # Pool startup helpers
+    │   └── supervisor.rs          # Reconnect supervision
+    ├── ingress/
+    │   ├── app.rs                 # LocalProxyMap
+    │   └── handler.rs             # Local service handler
+    ├── egress/
+    │   └── listener.rs            # Reverse proxy entry listener
+    └── plugins/                   # Client-side adapters
 ```
 
 ---

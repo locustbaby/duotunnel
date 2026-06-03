@@ -8,12 +8,12 @@ pub trait ClientService: Send + Sync {
     async fn start(&self, shutdown: CancellationToken) -> anyhow::Result<()>;
 }
 
-pub struct ClientEngine {
+pub struct RuntimeEngine {
     services: Vec<Arc<dyn ClientService>>,
     shutdown: CancellationToken,
 }
 
-impl ClientEngine {
+impl RuntimeEngine {
     pub fn new(shutdown: CancellationToken) -> Self {
         Self {
             services: Vec::new(),
@@ -26,7 +26,7 @@ impl ClientEngine {
     }
 
     pub async fn run_until_shutdown(self) -> anyhow::Result<()> {
-        let ClientEngine { services, shutdown } = self;
+        let RuntimeEngine { services, shutdown } = self;
         use futures_util::StreamExt;
         let mut handles = futures_util::stream::FuturesUnordered::new();
         for service in services {
