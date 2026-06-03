@@ -1,4 +1,4 @@
-use crate::engine::ClientService;
+use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -53,7 +53,7 @@ pub async fn start_entry_listener(
         let tcp_params = tcp_params.clone();
         let cancel_token = cancel_token.clone();
         let overload = overload.clone();
-        handles.push(crate::spawn_task(async move {
+        handles.push(crate::runtime::spawn_task(async move {
             run_accept_worker(
                 listener,
                 cancel_token,

@@ -1,4 +1,5 @@
-use crate::config::ClientConfigFile;
+use crate::bootstrap::config::ClientConfigFile;
+use crate::tunnel::client::run_client;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::{anyhow, Result};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -69,7 +70,7 @@ pub async fn run_supervisor(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => { info!(server = % config.server_address(),
-            "shutdown signal received"); return Ok(()); } result = crate::run_client(&
+            "shutdown signal received"); return Ok(()); } result = run_client(&
             config, &endpoint, cancel.clone(), ready.clone(), entry_pool.clone()) => { match result { Ok(_) => { backoff.reset();
             info!(server = % config.server_address(),
             "connection ended, restarting loop"); } Err(e) => { if e.class() ==

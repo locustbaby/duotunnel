@@ -105,7 +105,10 @@ mod tests {
     #[tokio::test]
     async fn ip_literal_resolves_without_cache() {
         let resolver = CachedResolver::new();
-        let out = resolver.resolve("127.0.0.1", 8080).await.expect("test failed");
+        let out = resolver
+            .resolve("127.0.0.1", 8080)
+            .await
+            .expect("test failed");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].port(), 8080);
         assert!(resolver.cache.is_empty());

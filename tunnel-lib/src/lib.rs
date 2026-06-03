@@ -1,21 +1,15 @@
-pub mod accept;
 pub mod config;
-pub mod ctld_proto;
 pub mod egress;
 pub mod engine;
 pub mod error;
-pub mod inflight;
 pub mod infra;
+pub mod lb;
 pub mod models;
-pub mod open_bi;
-pub mod overload;
 pub mod plugin;
 pub mod protocol;
 pub mod proxy;
-pub mod shared;
-pub mod sniff;
 pub mod transport;
-pub use accept::{run_accept_worker, AcceptedConn};
+
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 pub use egress::http::{
     create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
@@ -23,44 +17,52 @@ pub use egress::http::{
 };
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
-pub use inflight::{
-    begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
-    pick_p2c_inflight, InflightGuard, InflightSlotId, InflightTable,
-};
 pub use infra::dns_cache::EgressDnsCache;
 pub use infra::metrics::METRICS;
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
+pub use lb::inflight::{
+    begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
+    pick_p2c_inflight, InflightGuard, InflightSlotId, InflightTable,
+};
+pub use lb::overload::{
+    maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
+};
+pub use models::defs::{
+    ClientGroupDef, ClientStatus, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef,
+    IngressListenerDef, IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef,
+    TokenStatus, UpstreamServerDef,
+};
 pub use models::msg::{
     recv_message, recv_message_type, recv_routing_info, recv_typed_message, send_message,
     send_routing_info, ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig,
     UpstreamServer,
 };
-pub use open_bi::{open_bi_guarded, OpenBiOutcome, OpenedStream};
-pub use overload::{
-    maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
-};
 pub use protocol::detect::detect_protocol_and_host;
-pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
-pub use proxy::ProxyBufferParams;
-pub use proxy::UpstreamGroup;
-pub use shared::{
-    ClientGroupDef, ClientStatus, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef,
-    IngressListenerDef, IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef,
-    TokenStatus, UpstreamServerDef,
-};
-pub use transport::listener::{
-    build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
-    DEFAULT_ACCEPT_WORKERS,
-};
-pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};
-
-pub use sniff::{
+pub use protocol::sniff::{
     default_client_detectors, default_ingress_detectors, default_proxyengine_detectors,
     H2cDetector, Http1Detector, ProtocolDetector, SniffOutcome, SniffPolicy, SniffPrefix,
     SniffResult, SniffRuntime, SniffStream, TlsClientHelloDetector,
 };
+pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
+pub use proxy::ProxyBufferParams;
+pub use proxy::UpstreamGroup;
+pub use transport::accept::{run_accept_worker, AcceptedConn};
+pub use transport::listener::{
+    build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
+    DEFAULT_ACCEPT_WORKERS,
+};
+pub use transport::open_bi::{open_bi_guarded, OpenBiOutcome, OpenedStream};
+pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;
+
+pub mod ctld_proto {
+    pub use crate::protocol::ctld::*;
+}
+
+pub mod shared {
+    pub use crate::models::defs::*;
+}

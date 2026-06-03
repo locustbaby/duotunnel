@@ -1,4 +1,4 @@
-use crate::config::ClientConfigFile;
+use crate::bootstrap::config::ClientConfigFile;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::sync::{atomic::AtomicBool, Arc};

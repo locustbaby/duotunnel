@@ -1,4 +1,4 @@
-use crate::ingress::app::{ClientApp, LocalProxyMap};
+use crate::ingress::app::{IngressClientApp, LocalProxyMap};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub async fn handle_work_stream(
         .parse::<std::net::IpAddr>()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let client_addr = std::net::SocketAddr::new(ip, routing_info.src_port);
-    let app = ClientApp::new(proxy_map, tcp_params);
+    let app = IngressClientApp::new(proxy_map, tcp_params);
     let engine = ProxyEngine::new(app);
     engine
         .run_stream(send, recv, client_addr, Some(routing_info))

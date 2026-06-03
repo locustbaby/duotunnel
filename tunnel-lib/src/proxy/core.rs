@@ -1,7 +1,7 @@
 use super::peers::PeerSpec;
 use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
-use crate::sniff::{default_proxyengine_detectors, SniffPolicy, SniffRuntime};
+use crate::protocol::sniff::{default_proxyengine_detectors, SniffPolicy, SniffRuntime};
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;

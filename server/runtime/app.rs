@@ -1,0 +1,165 @@
+use anyhow::Result;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+use crate::bootstrap::cli::{Cli, Commands, TokenAction};
+use crate::bootstrap::config::ServerConfigFile;
+use crate::bootstrap::{build_server_state, ServerBootstrap, ServerState};
+use crate::ingress::{handlers, sync_listeners};
+use crate::runtime;
+use crate::runtime::metrics;
+use crate::runtime::supervisor::{
+    BackgroundComponent, ComponentContext, MetricsComponent, ServerSupervisor,
+};
+use tunnel_store::AuthStore;
+
+pub(crate) struct ServerApp {
+    cli: Cli,
+}
+
+struct ServerRuntime {
+    state: Arc<ServerState>,
+    shutdown: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    proxy_handle: tokio::runtime::Handle,
+}
+
+impl ServerApp {
+    pub(crate) fn new(cli: Cli) -> Self {
+        Self { cli }
+    }
+
+    pub(crate) async fn run(self) -> Result<()> {
+        let bootstrap = ServerBootstrap::from_cli(&self.cli)?;
+        runtime::init_observability(bootstrap.log_level());
+        match self.cli.command {
+            Some(Commands::Token { action }) => {
+                handle_token_command(bootstrap.config_path(), action).await
+            }
+            Some(Commands::Run) | None => run_server(bootstrap).await,
+        }
+    }
+}
+
+impl ServerRuntime {
+    async fn build(bootstrap: &ServerBootstrap) -> Result<Self> {
+        Ok(Self {
+            state: build_server_state(bootstrap).await?,
+            shutdown: CancellationToken::new(),
+            ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            proxy_handle: tokio::runtime::Handle::current(),
+        })
+    }
+}
+
+async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
+    let config = ServerConfigFile::load(config_path)?;
+    let pool = tunnel_store::open_sqlite_pool(&config.server.database_url, 16).await?;
+    let auth = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool);
+    auth.migrate().await?;
+    let store = Arc::new(auth) as Arc<dyn AuthStore>;
+    match action {
+        TokenAction::Create { name } => {
+            let token = store.create_client(&name).await?;
+            println!("{}", token);
+        }
+        TokenAction::List => {
+            let entries = store.list_tokens().await?;
+            println!(
+                "{:<20} {:<10} {:<8} {:<10} {:<20} REVOKED",
+                "NAME", "CLIENT", "TOKEN_ID", "STATUS", "CREATED"
+            );
+            for e in entries {
+                println!(
+                    "{:<20} {:<10} {:<8} {:<10} {:<20} {}",
+                    e.client_name,
+                    e.client_status,
+                    e.token_id,
+                    e.token_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    e.created_at,
+                    e.revoked_at.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        TokenAction::Revoke { name } => {
+            store.revoke_token(&name).await?;
+            println!("token revoked for '{}'", name);
+        }
+        TokenAction::Rotate { name } => {
+            let token = store.rotate_token(&name).await?;
+            println!("{}", token);
+        }
+    }
+    Ok(())
+}
+
+async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
+    bootstrap.validate()?;
+    info!("Starting DuoTunnel Server");
+    info!(
+        tunnel_port = %bootstrap.tunnel_port(),
+        "Configuration loaded"
+    );
+    tunnel_lib::init_cert_cache(bootstrap.pki());
+    {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        let handle = PrometheusBuilder::new()
+            .install_recorder()
+            .expect("failed to install prometheus recorder");
+        metrics::set_handle(handle);
+    }
+
+    let runtime = ServerRuntime::build(&bootstrap).await?;
+    let bootstrap = Arc::new(bootstrap);
+    let supervisor = start_supervisor(bootstrap.clone(), &runtime);
+    let result = proxy_main(
+        runtime.state.clone(),
+        runtime.shutdown.clone(),
+        runtime.ready.clone(),
+    )
+    .await;
+    runtime.shutdown.cancel();
+    supervisor.shutdown();
+    result
+}
+
+fn start_supervisor(bootstrap: Arc<ServerBootstrap>, runtime: &ServerRuntime) -> ServerSupervisor {
+    let mut components: Vec<Box<dyn crate::runtime::supervisor::ServerComponent>> =
+        vec![Box::new(BackgroundComponent)];
+    if bootstrap.metrics_port().is_some() {
+        components.push(Box::new(MetricsComponent));
+    }
+    let ctx = ComponentContext {
+        state: runtime.state.clone(),
+        bootstrap,
+        shutdown: runtime.shutdown.clone(),
+        ready: runtime.ready.clone(),
+        proxy_handle: runtime.proxy_handle.clone(),
+    };
+    ServerSupervisor::start(components, ctx)
+}
+
+async fn proxy_main(
+    state: Arc<ServerState>,
+    shutdown: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    let listeners = state.ingress_listeners();
+    sync_listeners(&state, &listeners).await;
+
+    let quic_state = state.clone();
+    let quic_handle =
+        runtime::spawn_task(
+            async move { handlers::quic::run_quic_server(quic_state, ready).await },
+        );
+
+    tokio::select! {
+        r = quic_handle => { r??; }
+        _ = shutdown.cancelled() => {}
+    }
+    Ok(())
+}

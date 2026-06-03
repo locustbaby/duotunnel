@@ -10,7 +10,7 @@ use super::ingress::{ProtocolHint, ProtocolKind};
 use super::metrics::observe_proxy_error;
 use super::registry::PluginRegistry;
 use super::service::TunnelService;
-use crate::sniff::{default_ingress_detectors, SniffPolicy, SniffRuntime};
+use crate::protocol::sniff::{default_ingress_detectors, SniffPolicy, SniffRuntime};
 use crate::ProxyError;
 
 /// Call `svc.logging` inside `catch_unwind` so a broken implementation can't

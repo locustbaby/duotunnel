@@ -1,0 +1,210 @@
+use crate::egress::EgressProxy;
+use crate::ingress::tunnel_handler;
+use crate::runtime::metrics;
+use crate::ServerState;
+use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
+use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
+pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) -> Result<()> {
+    let addr = state.tunnel_addr();
+    let quic_params = state.quic_transport_params();
+    let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
+    let udp_socket = tunnel_lib::build_udp_socket(addr, &quic_params)?;
+    let endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        udp_socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
+    ready.store(true, Ordering::Release);
+    info!(
+        addr = %addr,
+        udp_recv_buf_mb = quic_params.udp_recv_buf_bytes / (1024 * 1024),
+        udp_send_buf_mb = quic_params.udp_send_buf_bytes / (1024 * 1024),
+        "QUIC server listening"
+    );
+    while let Some(incoming) = endpoint.accept().await {
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            metrics::quic_connection_opened();
+            if let Err(e) = handle_quic_connection(state, incoming).await {
+                error!(error = % e, "QUIC connection error");
+            }
+            metrics::quic_connection_closed();
+        });
+    }
+    endpoint.close(0u32.into(), b"server shutting down");
+    Ok(())
+}
+async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
+    let conn = incoming.await?;
+    let remote_addr = conn.remote_address();
+    info!(addr = % remote_addr, "new QUIC connection");
+    let login_timeout = state.login_timeout();
+    let (mut send, mut recv) = match tunnel_lib::timeout(login_timeout, conn.accept_bi()).await {
+        Ok(Ok(streams)) => streams,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_elapsed) => {
+            warn!(
+                addr = % remote_addr,
+                "login handshake timed out waiting for login stream"
+            );
+            conn.close(0u32.into(), b"login timeout");
+            return Ok(());
+        }
+    };
+    let msg_type = match tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            warn!(
+                addr = % remote_addr,
+                "login handshake timed out waiting for message type"
+            );
+            if let Err(e) = send_message(
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure("login timeout"),
+            )
+            .await
+            {
+                debug!(addr = %remote_addr, error = %e, "send login timeout response failed");
+            }
+            return Ok(());
+        }
+    };
+    if msg_type != MessageType::Login {
+        warn!(addr = % remote_addr, msg_type = ? msg_type, "expected Login message");
+        if let Err(e) = send_message(
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure(format!("unexpected message type: {:?}", msg_type)),
+        )
+        .await
+        {
+            debug!(addr = %remote_addr, error = %e, "send unexpected-msg-type response failed");
+        }
+        return Ok(());
+    }
+    let login: Login = match tunnel_lib::timeout(login_timeout, recv_message(&mut recv)).await {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            warn!(
+                addr = % remote_addr, "login handshake timed out waiting for login body"
+            );
+            if let Err(e) = send_message(
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure("login timeout"),
+            )
+            .await
+            {
+                debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
+            }
+            return Ok(());
+        }
+    };
+    let auth_result = match state.auth_store().authenticate(&login.token).await {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(addr = % remote_addr, error = % e, "authentication failed");
+            metrics::auth_failure("unknown");
+            send_message(
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure(e.to_string()),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let client_group = auth_result.client_group;
+    info!(addr = % remote_addr, client_group = % client_group, "authenticated");
+    metrics::auth_success(&client_group);
+    let client_config = state.client_config_for_group(&client_group);
+    let conn_id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = state
+        .registry()
+        .register(conn_id.clone(), client_group.clone(), conn.clone())
+    {
+        warn!(conn_id = %conn_id, error = %e, "failed to register client connection");
+        let _ = send_message(
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure("registration failed: slot table exhausted"),
+        )
+        .await;
+        conn.close(0u32.into(), b"registration failed");
+        return Err(anyhow::anyhow!("registration failed: {}", e));
+    }
+    if let Err(e) = send_message(
+        &mut send,
+        MessageType::LoginResp,
+        &LoginResp::success(client_config, client_group.clone()),
+    )
+    .await
+    {
+        state.registry().unregister(&conn_id);
+        return Err(e);
+    }
+    metrics::client_registered(&client_group);
+    let mut revocation_rx = state.revocation_tx().subscribe();
+    loop {
+        tokio::select! {
+            _ = conn.closed() => {
+                info!(conn_id = %conn_id, "connection closed");
+                break;
+            }
+            result = conn.accept_bi() => {
+                match result {
+                    Ok((send, recv)) => {
+                        debug!("accepted reverse stream from client");
+                        let state = state.clone();
+                        tokio::task::spawn(async move {
+                            let egress_map = state.egress_map();
+                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
+                                debug!(error = %e, "egress stream error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "accept_bi error");
+                        break;
+                    }
+                }
+            }
+            recv_result = revocation_rx.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                match recv_result {
+                    Ok(revoked_name) if revoked_name == client_group => {
+                        warn!(conn_id = %conn_id, client_group = %client_group, "closing connection: token revoked");
+                        conn.close(0u32.into(), b"token revoked");
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(n)) => {
+                        warn!(conn_id = %conn_id, skipped = n, "revocation channel lagged; re-validating token");
+                        match state.auth_store().authenticate(&login.token).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(conn_id = %conn_id, error = %e, "token no longer valid after lag; closing connection");
+                                conn.close(0u32.into(), b"token revoked");
+                                break;
+                            }
+                        }
+                    }
+                    Err(RecvError::Closed) => {
+                        debug!(conn_id = %conn_id, "revocation channel closed, tearing down connection");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    state.registry().unregister(&conn_id);
+    metrics::client_unregistered(&client_group);
+    Ok(())
+}

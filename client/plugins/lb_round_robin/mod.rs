@@ -60,7 +60,9 @@ mod tests {
         let ctx = PickCtx {
             client_addr: "127.0.0.1:1".parse().expect("test failed"),
         };
-        let idxs: Vec<usize> = (0..6).map(|_| lb.pick(&targets, &ctx).expect("test failed")).collect();
+        let idxs: Vec<usize> = (0..6)
+            .map(|_| lb.pick(&targets, &ctx).expect("test failed"))
+            .collect();
         assert_eq!(idxs, vec![0, 1, 2, 0, 1, 2]);
     }
 
