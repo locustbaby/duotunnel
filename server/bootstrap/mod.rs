@@ -4,17 +4,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::cli::Cli;
-use crate::config::{
+pub(crate) mod cli;
+pub(crate) mod config;
+
+use self::cli::Cli;
+use self::config::{
     ConfigSource, DbSource, FileSource, IngressListener, IngressMode, MergedSource,
     ServerConfigFile, ServerEgressUpstream, TunnelManagement,
 };
+use crate::control::local_auth;
+use crate::control::null_stores::{NullConfigSource, NullRuleStore};
 use crate::egress;
-use crate::listener_mgr;
-use crate::local_auth;
-use crate::null_stores::{NullConfigSource, NullRuleStore};
-use crate::plugins;
-use crate::registry::{new_shared_registry, SharedRegistry};
+use crate::ingress::listener_mgr;
+use crate::ingress::plugins;
+use crate::ingress::registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, RouteTarget, VhostRouter};
 use tunnel_store::{AuthStore, RuleStore};
 
@@ -82,7 +85,7 @@ impl ServerBootstrap {
         if self.is_ctld_managed() {
             return Ok(());
         }
-        crate::config::validate_server_config(&self.config)
+        self::config::validate_server_config(&self.config)
     }
 }
 
@@ -103,7 +106,7 @@ impl RoutingSnapshot {
         &self,
         group_id: &str,
     ) -> Option<tunnel_lib::ClientConfig> {
-        crate::config::build_client_config_for_group(&self.tunnel_management, group_id)
+        self::config::build_client_config_for_group(&self.tunnel_management, group_id)
     }
 
     pub(crate) fn route_target(&self, listener_port: u16, host: &str) -> Option<RouteTarget> {
@@ -277,7 +280,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         match rule_store.is_routing_empty().await {
             Ok(true) => {
                 if let Err(e) =
-                    crate::config::sync_file_to_db(&bootstrap.config, rule_store.as_ref()).await
+                    self::config::sync_file_to_db(&bootstrap.config, rule_store.as_ref()).await
                 {
                     tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
                 } else {

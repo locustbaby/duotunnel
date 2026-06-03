@@ -1,4 +1,4 @@
-use crate::config::{IngressListener, IngressMode};
+use crate::bootstrap::config::{IngressListener, IngressMode};
 use crate::ServerState;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, HashSet};
@@ -101,7 +101,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let drained = drained.clone();
                 let remaining = remaining.clone();
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = crate::handlers::http::run_http_accept_loop(
+                    if let Err(e) = crate::ingress::handlers::http::run_http_accept_loop(
                         listener_socket,
                         s,
                         port,
@@ -135,7 +135,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let group_id = cfg.client_group.clone();
                 let proxy_name = cfg.proxy_name.clone();
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = crate::handlers::tcp::run_tcp_accept_loop(
+                    if let Err(e) = crate::ingress::handlers::tcp::run_tcp_accept_loop(
                         listener_socket,
                         s,
                         port,

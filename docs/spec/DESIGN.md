@@ -98,26 +98,39 @@ tunnel/
 ├── server/                        # Server
 │   ├── main.rs                    # Thin binary entry
 │   ├── lib.rs                     # Server runtime facade
-│   ├── cli.rs                     # CLI parsing
-│   ├── bootstrap.rs               # Mode resolution and runtime assembly
-│   ├── app.rs                     # Startup orchestration
-│   ├── runtime.rs                 # Runtime entry and observability
-│   ├── supervisor.rs              # Long-running component lifecycle
-│   ├── config.rs                  # Config loading and sources
-│   ├── registry.rs                # ClientRegistry (DashMap)
-│   ├── listener_mgr.rs            # Ingress listener lifecycle
-│   ├── egress.rs                  # Outbound routing (HttpConnector wrapper)
-│   ├── plugins/                   # Ingress protocol plugins
-│   │   ├── h1/                    # HTTP/1.1 protocol plugin
-│   │   ├── h2c/                   # H2c protocol plugin (with CachedSender)
-│   │   ├── tls/                   # TLS termination / MITM plugin
-│   │   ├── tcp_pass/              # TCP passthrough plugin
-│   │   └── prometheus/            # Prometheus metrics plugin
-│   └── handlers/
-│       ├── quic.rs                # QUIC connection & Login handling
-│       ├── http.rs                # Ingress HTTP server handler
-│       ├── tcp.rs                 # Ingress TCP listener handler
-│       └── metrics.rs             # Prometheus metrics service
+│   ├── bootstrap/
+│   │   ├── cli.rs                 # CLI parsing
+│   │   ├── config.rs              # Config loading and sources
+│   │   └── mod.rs                 # Mode resolution and runtime assembly
+│   ├── runtime/
+│   │   ├── app.rs                 # Startup orchestration
+│   │   ├── metrics.rs             # Metrics helpers
+│   │   ├── mod.rs                 # Runtime entry and observability
+│   │   └── supervisor.rs          # Long-running component lifecycle
+│   ├── control/
+│   │   ├── control_client.rs      # Ctld watch client
+│   │   ├── hot_reload.rs          # File-watch reload path
+│   │   ├── local_auth.rs          # Managed-mode token cache auth
+│   │   ├── null_stores.rs         # Managed-mode null stores
+│   │   └── service.rs             # Background service trait
+│   ├── ingress/
+│   │   ├── handlers/
+│   │   │   ├── quic.rs            # QUIC connection & Login handling
+│   │   │   ├── http.rs            # Ingress HTTP server handler
+│   │   │   ├── tcp.rs             # Ingress TCP listener handler
+│   │   │   └── metrics.rs         # Prometheus metrics service
+│   │   ├── plugins/               # Ingress protocol plugins
+│   │   │   ├── h1/                # HTTP/1.1 protocol plugin
+│   │   │   ├── h2c/               # H2c protocol plugin (with CachedSender)
+│   │   │   ├── tls/               # TLS termination / MITM plugin
+│   │   │   ├── tcp_pass/          # TCP passthrough plugin
+│   │   │   └── prometheus/        # Prometheus metrics plugin
+│   │   ├── listener_mgr.rs        # Ingress listener lifecycle
+│   │   ├── registry.rs            # ClientRegistry (DashMap)
+│   │   ├── tunnel_handler.rs      # Reverse stream handling
+│   │   └── tunnel_service.rs      # Tunnel service implementation
+│   └── egress/
+│       └── mod.rs                 # Outbound routing (HttpConnector wrapper)
 │
 └── client/                        # Client
     ├── main.rs                    # Entry + reconnection logic

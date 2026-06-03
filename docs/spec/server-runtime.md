@@ -22,7 +22,7 @@ The `server` crate is organized into four runtime layers.
 
 ### 1. CLI
 
-`server/cli.rs`
+`server/bootstrap/cli.rs`
 
 Owns:
 
@@ -39,7 +39,7 @@ Must not own:
 
 ### 2. Bootstrap
 
-`server/bootstrap.rs`
+`server/bootstrap/mod.rs`
 
 Owns:
 
@@ -59,8 +59,8 @@ Bootstrap is the composition root for server runtime dependencies.
 
 ### 3. App / Runtime
 
-`server/app.rs`
-`server/runtime.rs`
+`server/runtime/app.rs`
+`server/runtime/mod.rs`
 
 Owns:
 
@@ -81,7 +81,7 @@ Must not own:
 
 ## 4. Supervisor / Components
 
-`server/supervisor.rs`
+`server/runtime/supervisor.rs`
 
 Owns:
 
@@ -99,11 +99,11 @@ Request handling belongs below the startup layers.
 
 Main ingress/runtime modules:
 
-- `server/handlers/*`
-- `server/listener_mgr.rs`
-- `server/control_client.rs`
-- `server/hot_reload.rs`
-- `server/plugins/*`
+- `server/ingress/handlers/*`
+- `server/ingress/listener_mgr.rs`
+- `server/control/control_client.rs`
+- `server/control/hot_reload.rs`
+- `server/ingress/plugins/*`
 
 These modules consume runtime capabilities from `ServerState` and should not perform top-level runtime assembly.
 
@@ -154,7 +154,7 @@ Expected uses:
 
 ## Listener Management
 
-`server/listener_mgr.rs` is the owner of ingress listener lifecycle.
+`server/ingress/listener_mgr.rs` is the owner of ingress listener lifecycle.
 
 Rules:
 

@@ -18,7 +18,7 @@ use tunnel_lib::plugin::{
 use tunnel_lib::transport::listener::RouteTarget;
 use tunnel_lib::ProxyError;
 
-use crate::registry::{SelectedConnection, SharedRegistry};
+use crate::ingress::registry::{SelectedConnection, SharedRegistry};
 
 #[derive(Clone)]
 struct CachedSender {

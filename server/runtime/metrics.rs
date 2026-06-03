@@ -1,4 +1,4 @@
-use crate::plugins::prometheus::PrometheusSink;
+use crate::ingress::plugins::prometheus::PrometheusSink;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::OnceLock;
 use tunnel_lib::ProxyError;

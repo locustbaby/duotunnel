@@ -12,7 +12,7 @@ use tracing::{debug, info};
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 use tunnel_lib::ProxyError;
 
-use crate::registry::SharedRegistry;
+use crate::ingress::registry::SharedRegistry;
 
 pub struct TlsHandler {
     pub registry: SharedRegistry,

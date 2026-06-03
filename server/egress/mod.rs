@@ -1,4 +1,4 @@
-use crate::config::ServerEgressUpstream;
+use crate::bootstrap::config::ServerEgressUpstream;
 use bytes::Bytes;
 use std::collections::HashMap;
 use tracing::{info, warn};

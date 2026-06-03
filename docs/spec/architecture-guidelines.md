@@ -60,6 +60,16 @@ Prefer modules that reflect runtime responsibility:
 - request handlers
 - control/background services
 
+When a layer has more than a couple of files, prefer directory grouping over flat root-level files.
+
+Example:
+
+- `bootstrap/`
+- `runtime/`
+- `control/`
+- `ingress/`
+- `egress/`
+
 Avoid modules that mix:
 
 - config loading

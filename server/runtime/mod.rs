@@ -5,9 +5,15 @@ use std::path::PathBuf;
 #[cfg(feature = "dial9-telemetry")]
 use tracing::{error, info};
 
+mod app;
+pub(crate) mod metrics;
+pub(crate) mod supervisor;
+
 #[cfg(feature = "dial9-telemetry")]
 static DIAL9_HANDLE: std::sync::OnceLock<dial9_tokio_telemetry::telemetry::TelemetryHandle> =
     std::sync::OnceLock::new();
+
+pub(crate) use app::ServerApp;
 
 pub(crate) fn run(fut: impl Future<Output = Result<()>>) -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()

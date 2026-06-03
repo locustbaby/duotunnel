@@ -1,4 +1,4 @@
-use crate::config::{ConfigSource, ServerEgressUpstream, TunnelManagement};
+use crate::bootstrap::config::{ConfigSource, ServerEgressUpstream, TunnelManagement};
 /// Stub implementations of RuleStore and ConfigSource used in ctld-managed mode.
 /// In this mode the server receives all config via the ctld watch stream and never
 /// queries SQLite directly; these satisfy the ServerState trait bounds without

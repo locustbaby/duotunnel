@@ -3,14 +3,15 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::bootstrap::cli::{Cli, Commands, TokenAction};
+use crate::bootstrap::config::ServerConfigFile;
 use crate::bootstrap::{build_server_state, ServerBootstrap, ServerState};
-use crate::cli::{Cli, Commands, TokenAction};
-use crate::handlers;
+use crate::ingress::{handlers, sync_listeners};
 use crate::runtime;
-use crate::supervisor::{
+use crate::runtime::metrics;
+use crate::runtime::supervisor::{
     BackgroundComponent, ComponentContext, MetricsComponent, ServerSupervisor,
 };
-use crate::{metrics, sync_listeners};
 use tunnel_store::AuthStore;
 
 pub(crate) struct ServerApp {
@@ -53,7 +54,7 @@ impl ServerRuntime {
 }
 
 async fn handle_token_command(config_path: &str, action: TokenAction) -> Result<()> {
-    let config = crate::config::ServerConfigFile::load(config_path)?;
+    let config = ServerConfigFile::load(config_path)?;
     let pool = tunnel_store::open_sqlite_pool(&config.server.database_url, 16).await?;
     let auth = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool);
     auth.migrate().await?;
@@ -127,7 +128,7 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
 }
 
 fn start_supervisor(bootstrap: Arc<ServerBootstrap>, runtime: &ServerRuntime) -> ServerSupervisor {
-    let mut components: Vec<Box<dyn crate::supervisor::ServerComponent>> =
+    let mut components: Vec<Box<dyn crate::runtime::supervisor::ServerComponent>> =
         vec![Box::new(BackgroundComponent)];
     if bootstrap.metrics_port().is_some() {
         components.push(Box::new(MetricsComponent));

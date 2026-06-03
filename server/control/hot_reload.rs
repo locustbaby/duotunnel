@@ -1,5 +1,6 @@
-use crate::config::ServerConfigFile;
-use crate::service::BackgroundService;
+use crate::bootstrap::config::{self, ServerConfigFile};
+use crate::control::service::BackgroundService;
+use crate::ingress::sync_listeners;
 use crate::{build_routing_snapshot, ServerState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Arc;
@@ -91,8 +92,7 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
     let http_params = state.http_client_params();
     let (tm, egress) = match ServerConfigFile::load(config_path) {
         Ok(new_config) => {
-            if let Err(e) =
-                crate::config::sync_file_to_db(&new_config, state.rule_store().as_ref()).await
+            if let Err(e) = config::sync_file_to_db(&new_config, state.rule_store().as_ref()).await
             {
                 warn!(error = %e, "failed to sync updated YAML to DB");
             }
@@ -109,6 +109,6 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
     let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     state.replace_routing(snapshot);
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
-    crate::sync_listeners(state, &listeners).await;
+    sync_listeners(state, &listeners).await;
     Ok(())
 }

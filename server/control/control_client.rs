@@ -19,13 +19,13 @@ use tunnel_lib::ctld_proto::{
 };
 use tunnel_lib::models::msg::{recv_typed_message, MessageType};
 
-use crate::config::{
+use crate::bootstrap::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
     IngressMode, IngressRouting, ServerDef, ServerEgressUpstream, TcpListenerConfig,
     TunnelManagement, UpstreamDef, VhostRule,
 };
-use crate::local_auth::CacheEntry;
-use crate::service::BackgroundService;
+use crate::control::local_auth::CacheEntry;
+use crate::control::service::BackgroundService;
 use crate::{build_routing_snapshot, ServerState};
 use tokio_util::sync::CancellationToken;
 
@@ -153,7 +153,7 @@ async fn connect_and_watch(
 async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
     update_token_cache(&snap.token_cache, state);
     let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state);
-    crate::sync_all_listeners(state, &listeners).await;
+    crate::ingress::sync_all_listeners(state, &listeners).await;
     state.replace_routing(routing_snapshot);
 }
 
@@ -216,7 +216,7 @@ async fn apply_patch_to_runtime(
     }
     let (listeners, routing_snapshot) = build_runtime_snapshot(snapshot, state);
     if !patch.ingress_listeners.is_empty() {
-        crate::sync_listener_subset(state, &listeners, affected_ports).await;
+        crate::ingress::sync_listener_subset(state, &listeners, affected_ports).await;
     }
     state.replace_routing(routing_snapshot);
 }

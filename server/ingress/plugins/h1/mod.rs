@@ -6,19 +6,20 @@ use tracing::{debug, warn};
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 use tunnel_lib::ProxyError;
 
-use crate::registry::SharedRegistry;
+use crate::ingress::registry::SharedRegistry;
 
-/// Passthrough TCP handler: forwards raw bytes without protocol inspection.
+/// Handles HTTP/1.x and WebSocket connections using byte-level forwarding.
 ///
-/// Used for opaque TLS or any unrecognised protocol (ProtocolKind::Tcp).
-pub struct TcpPassHandler {
+/// Replays the peeked preface bytes into the QUIC tunnel so the client sees
+/// the full original request.
+pub struct H1Handler {
     pub registry: SharedRegistry,
 }
 
 #[async_trait]
-impl IngressProtocolHandler for TcpPassHandler {
+impl IngressProtocolHandler for H1Handler {
     fn protocol_kind(&self) -> ProtocolKind {
-        ProtocolKind::Tcp
+        ProtocolKind::Http1
     }
 
     async fn handle(
@@ -28,25 +29,26 @@ impl IngressProtocolHandler for TcpPassHandler {
         ctx: &ServerCtx,
     ) -> Result<()> {
         let route = route.ok_or_else(ProxyError::routing_missing_info)?;
-        let hint = ctx.hint.as_ref();
-        let host = hint.and_then(|h| h.sni.clone().or_else(|| h.authority.clone()));
-        let initial_len = hint.map(|h| h.raw_preface.len()).unwrap_or(0);
+        let hint = ctx
+            .hint
+            .as_ref()
+            .ok_or_else(ProxyError::routing_missing_info)?;
 
-        debug!(
-            host = ?host,
-            initial_len = initial_len,
-            "TCP passthrough"
-        );
+        let host = hint
+            .authority
+            .clone()
+            .ok_or_else(ProxyError::routing_missing_host)?;
+
+        let protocol = match hint.protocol {
+            tunnel_lib::proxy::core::Protocol::WebSocket => {
+                tunnel_lib::proxy::core::Protocol::WebSocket
+            }
+            _ => tunnel_lib::proxy::core::Protocol::H1,
+        };
+
+        debug!(host = %host, protocol = ?protocol, "plaintext H1/WS, byte-level forwarding");
 
         let (group_id, proxy_name) = (route.group_id, route.proxy_name);
-
-        let routing_info = tunnel_lib::RoutingInfo {
-            proxy_name: proxy_name.to_string(),
-            src_addr: ctx.peer_addr.ip().to_string(),
-            src_port: ctx.peer_addr.port(),
-            protocol: tunnel_lib::proxy::core::Protocol::Tcp,
-            host,
-        };
 
         let mut attempts = 0;
         let max_attempts = 3;
@@ -77,7 +79,7 @@ impl IngressProtocolHandler for TcpPassHandler {
                         group_id = %group_id,
                         attempt = attempts,
                         error = %e,
-                        "failed to open QUIC stream on selected passthrough TCP connection, unregistering and retrying"
+                        "failed to open QUIC stream on selected H1 connection, unregistering and retrying"
                     );
                     self.registry.unregister(&selected.conn_id);
                     if attempts >= max_attempts {
@@ -90,6 +92,13 @@ impl IngressProtocolHandler for TcpPassHandler {
         let mut send = opened.send;
         let recv = opened.recv;
         let _inflight_guard = opened.inflight;
+        let routing_info = tunnel_lib::RoutingInfo {
+            proxy_name: proxy_name.to_string(),
+            src_addr: ctx.peer_addr.ip().to_string(),
+            src_port: ctx.peer_addr.port(),
+            protocol,
+            host: Some(host),
+        };
         tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
         tunnel_lib::proxy::forward_prefixed_to_client(send, recv, stream, ctx.relay_buf_size).await
     }

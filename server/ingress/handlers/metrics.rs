@@ -1,4 +1,4 @@
-use crate::metrics;
+use crate::runtime::metrics;
 use anyhow::Result;
 use http_body_util::Full;
 use hyper::server::conn::http1;

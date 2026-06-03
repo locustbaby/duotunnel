@@ -1,5 +1,7 @@
 use crate::egress::EgressProxy;
-use crate::{metrics, tunnel_handler, ServerState};
+use crate::ingress::tunnel_handler;
+use crate::runtime::metrics;
+use crate::ServerState;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

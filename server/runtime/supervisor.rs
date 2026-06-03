@@ -1,7 +1,8 @@
 use crate::bootstrap::{ServerBootstrap, ServerState};
-use crate::handlers;
-use crate::service::BackgroundService;
-use crate::{control_client, hot_reload};
+use crate::control::control_client;
+use crate::control::hot_reload;
+use crate::control::service::BackgroundService;
+use crate::ingress::handlers;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

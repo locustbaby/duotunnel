@@ -1,4 +1,5 @@
-use crate::{metrics, ServerState};
+use crate::runtime::metrics;
+use crate::ServerState;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -40,7 +41,7 @@ pub async fn run_http_accept_loop(
             }
             metrics::tcp_connection_opened();
 
-            let svc = crate::tunnel_service::DefaultTunnelService;
+            let svc = crate::ingress::tunnel_service::DefaultTunnelService;
             let timeouts = Timeouts {
                 open_stream_ms: state.open_stream_timeout().as_millis() as u64,
                 ..Timeouts::default()
