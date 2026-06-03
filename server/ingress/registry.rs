@@ -4,6 +4,7 @@ use quinn::Connection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use tracing::info;
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable,
 };
@@ -101,6 +102,7 @@ impl ClientRegistry {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     RegistryMsg::Register { client_id, group_id, conn, reply } => {
+                        info!(client_id = %client_id, group_id = %group_id, "registering client");
                         let group = groups_clone
                             .entry(group_id.clone())
                             .or_insert_with(|| Arc::new(ClientGroup::new()));
@@ -140,6 +142,10 @@ impl ClientRegistry {
                     }
                     RegistryMsg::Unregister { client_id } => {
                         if let Some(info) = clients.remove(&client_id) {
+                            info!(
+                                client_id = %client_id, group_id = %info.group_id,
+                                "unregistering client"
+                            );
                             if let Some(idx) = group_conns.get_mut(&info.group_id) {
                                 if let Some((_, slot_id)) = idx.remove(&client_id) {
                                     inflight_table.free_slot(slot_id);
@@ -180,7 +186,12 @@ impl ClientRegistry {
                         }
 
                         for cid in dead_clients {
-                            clients.remove(&cid);
+                            if let Some(info) = clients.remove(&cid) {
+                                info!(
+                                    client_id = %cid, group_id = %info.group_id,
+                                    "unregistering client"
+                                );
+                            }
                         }
 
                         let empty_gids: Vec<String> = groups_clone

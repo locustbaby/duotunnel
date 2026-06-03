@@ -129,7 +129,7 @@ pkill -f "client.*local-test-client"      2>/dev/null || true
 sleep 0.5
 
 # Remove stale DBs so ctld seeds routing fresh
-rm -f "$REPO/data/local-test.db" "$REPO/data/duotunnel-local-test.db"
+rm -f "$REPO/data/local-test.db"* "$REPO/data/duotunnel-local-test.db"*
 
 # ─── Start the full tunnel stack (backends + ctld + server + client) ──────────
 stack_start_backends
