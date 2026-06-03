@@ -129,6 +129,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     if let Err(e) = state
         .registry()
         .register(conn_id.clone(), client_group.clone(), conn.clone())
+        .await
     {
         warn!(conn_id = %conn_id, error = %e, "failed to register client connection");
         let _ = send_message(

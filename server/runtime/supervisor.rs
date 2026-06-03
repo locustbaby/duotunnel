@@ -221,7 +221,7 @@ async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
             tokio::select! {
                 _ = purge_shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    let purged = registry.purge_dead();
+                    let purged = registry.purge_dead().await;
                     if purged > 0 {
                         info!(purged, "registry: purged dead connections");
                     }
