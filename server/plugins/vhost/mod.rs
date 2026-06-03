@@ -27,10 +27,7 @@ impl RouteResolver for VhostPlugin {
             .unwrap_or_default();
 
         let snapshot = self.routing.load();
-        let target = snapshot
-            .http_routers
-            .get(&ctx.listener_port)
-            .and_then(|router| router.get(&host));
+        let target = snapshot.route_target(ctx.listener_port, &host);
 
         match target {
             Some(t) => Ok(PhaseResult::Continue(Route::new(

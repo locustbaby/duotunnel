@@ -7,7 +7,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use tunnel_lib::HttpClientParams;
 
 pub struct HotReloadService {
     pub config_path: String,
@@ -89,11 +88,11 @@ async fn watch_loop(
 }
 
 async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
-    let http_params = HttpClientParams::from(&state.config.server.http_pool);
+    let http_params = state.http_client_params();
     let (tm, egress) = match ServerConfigFile::load(config_path) {
         Ok(new_config) => {
             if let Err(e) =
-                crate::config::sync_file_to_db(&new_config, state.rule_store.as_ref()).await
+                crate::config::sync_file_to_db(&new_config, state.rule_store().as_ref()).await
             {
                 warn!(error = %e, "failed to sync updated YAML to DB");
             }
@@ -104,11 +103,11 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
         }
         Err(e) => {
             warn!(error = %e, "could not re-read config file; reloading from DB");
-            state.config_source.load().await?
+            state.config_source().load().await?
         }
     };
     let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
-    state.routing.store(Arc::new(snapshot));
+    state.replace_routing(snapshot);
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
     crate::sync_listeners(state, &listeners).await;
     Ok(())

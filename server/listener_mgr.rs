@@ -5,27 +5,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-pub struct ListenerEntry {
-    pub generation: u64,
-    pub kind: ListenerKind,
-    pub state: ListenerState,
-    pub cancel: CancellationToken,
-    pub drained: Arc<Notify>,
-    pub handles: Vec<JoinHandle<()>>,
+struct ListenerEntry {
+    kind: ListenerKind,
+    state: ListenerState,
+    cancel: CancellationToken,
+    drained: Arc<Notify>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ListenerState {
-    Starting,
+enum ListenerState {
     Active,
     Draining,
 }
 
-pub enum ListenerKind {
+enum ListenerKind {
     Http,
     Tcp {
         group_id: String,
@@ -33,34 +29,49 @@ pub enum ListenerKind {
     },
 }
 
-pub struct ListenerManager {
+pub(crate) struct ListenerManager {
     next_generation: AtomicU64,
-    pub map: ParkingMutex<HashMap<u16, ListenerEntry>>,
+    map: ParkingMutex<HashMap<u16, ListenerEntry>>,
 }
 
 impl ListenerManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next_generation: AtomicU64::new(1),
             map: ParkingMutex::new(HashMap::new()),
         }
     }
 
-    fn next_generation(&self) -> u64 {
+    pub(crate) fn next_generation(&self) -> u64 {
         self.next_generation.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn lock_map(&self) -> parking_lot::MutexGuard<'_, HashMap<u16, ListenerEntry>> {
+        self.map.lock()
+    }
+
+    fn activate(
+        &self,
+        port: u16,
+        kind: ListenerKind,
+        cancel: CancellationToken,
+        drained: Arc<Notify>,
+    ) {
+        self.map.lock().insert(
+            port,
+            ListenerEntry {
+                kind,
+                state: ListenerState::Active,
+                cancel,
+                drained,
+            },
+        );
     }
 }
 
 async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: IngressListener) {
-    let accept_workers = state
-        .config
-        .server
-        .accept_workers
-        .unwrap_or(tunnel_lib::DEFAULT_ACCEPT_WORKERS)
-        .max(1);
-
-    let addr = format!("0.0.0.0:{port}");
-    let generation = state.listeners.next_generation();
+    let accept_workers = state.accept_workers();
+    let generation = state.listeners().next_generation();
     let cancel = CancellationToken::new();
     let drained = Arc::new(Notify::new());
     let remaining = Arc::new(AtomicUsize::new(0));
@@ -77,14 +88,9 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
         IngressMode::Http(_) => {
             for _ in 0..accept_workers {
                 let s = state.clone();
-                let addr_parsed = match addr.parse() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!(port = %port, error = %e, "failed to parse bind address");
-                        break;
-                    }
-                };
-                let listener_socket = match tunnel_lib::build_reuseport_listener(addr_parsed) {
+                let listener_socket = match tunnel_lib::build_reuseport_listener(
+                    std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+                ) {
                     Ok(listener_socket) => Arc::new(listener_socket),
                     Err(e) => {
                         error!(port = %port, error = %e, "failed to bind http worker listener");
@@ -114,14 +120,9 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
         IngressMode::Tcp(cfg) => {
             for _ in 0..accept_workers {
                 let s = state.clone();
-                let addr_parsed = match addr.parse() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!(port = %port, error = %e, "failed to parse bind address");
-                        break;
-                    }
-                };
-                let listener_socket = match tunnel_lib::build_reuseport_listener(addr_parsed) {
+                let listener_socket = match tunnel_lib::build_reuseport_listener(
+                    std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+                ) {
                     Ok(listener_socket) => Arc::new(listener_socket),
                     Err(e) => {
                         error!(port = %port, error = %e, "failed to bind tcp worker listener");
@@ -160,16 +161,8 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
     }
     remaining.store(handles.len(), Ordering::Release);
 
-    let entry = ListenerEntry {
-        generation,
-        kind,
-        state: ListenerState::Active,
-        cancel,
-        drained,
-        handles,
-    };
     info!(port = %port, generation, "listener active");
-    state.listeners.map.lock().insert(port, entry);
+    state.listeners().activate(port, kind, cancel, drained);
 }
 
 async fn sync_listeners_inner(
@@ -183,7 +176,7 @@ async fn sync_listeners_inner(
         .map(|l| (l.port, l))
         .collect();
 
-    let mut map = state.listeners.map.lock();
+    let mut map = state.listeners().lock_map();
     let existing_ports: Vec<u16> = map
         .keys()
         .copied()
@@ -233,11 +226,11 @@ async fn sync_listeners_inner(
     }
 }
 
-pub async fn sync_all_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
+pub(crate) async fn sync_all_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
     sync_listeners_inner(state, desired, None).await;
 }
 
-pub async fn sync_listener_subset(
+pub(crate) async fn sync_listener_subset(
     state: &Arc<ServerState>,
     desired: &[IngressListener],
     affected_ports: &HashSet<u16>,
@@ -248,6 +241,6 @@ pub async fn sync_listener_subset(
     sync_listeners_inner(state, desired, Some(affected_ports)).await;
 }
 
-pub async fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
+pub(crate) async fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
     sync_all_listeners(state, desired).await;
 }

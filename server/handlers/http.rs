@@ -1,7 +1,6 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -15,11 +14,14 @@ pub async fn run_http_accept_loop(
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
-    let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
+    let emfile_backoff = state.emfile_backoff();
     info!(addr = %addr, "http accept loop started");
 
-    let dispatcher = Arc::new(IngressDispatcher::new(state.plugin_registry.clone(), port));
-    let metrics_sink = state.plugin_registry.metrics_sink.clone();
+    let dispatcher = Arc::new(IngressDispatcher::new(
+        state.plugin_registry().clone(),
+        port,
+    ));
+    let metrics_sink = state.plugin_registry().metrics_sink.clone();
 
     run_accept_worker(listener, cancel, emfile_backoff, "http", move |accepted| {
         let state = state.clone();
@@ -32,7 +34,7 @@ pub async fn run_http_accept_loop(
                 accepted_at,
                 ..
             } = accepted;
-            if let Err(e) = state.tcp_params.apply(&stream) {
+            if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;
             }
@@ -40,17 +42,17 @@ pub async fn run_http_accept_loop(
 
             let svc = crate::tunnel_service::DefaultTunnelService;
             let timeouts = Timeouts {
-                open_stream_ms: state.config.server.open_stream_timeout_ms,
+                open_stream_ms: state.open_stream_timeout().as_millis() as u64,
                 ..Timeouts::default()
             };
             let mut ctx = ServerCtx::new(
                 peer_addr,
                 metrics_sink,
-                Arc::new(state.tcp_params.clone()),
-                state.overload_limits.clone(),
+                Arc::new(state.tcp_params().clone()),
+                state.overload_limits().clone(),
                 timeouts,
                 port,
-                state.proxy_buffer_params.relay_buf_size,
+                state.relay_buf_size(),
             );
             ctx.timing.accepted_at = accepted_at;
 

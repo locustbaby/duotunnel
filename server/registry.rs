@@ -10,7 +10,6 @@ use tunnel_lib::{
 
 struct ClientInfo {
     group_id: String,
-    conn: Connection,
 }
 
 #[derive(Clone)]
@@ -173,7 +172,6 @@ impl ClientRegistry {
                 let old_group_id = occ.get().group_id.clone();
                 occ.insert(ClientInfo {
                     group_id: group_id.clone(),
-                    conn: conn.clone(),
                 });
                 if old_group_id != group_id {
                     if let Some(grp) = self.groups.get(&old_group_id) {
@@ -189,7 +187,6 @@ impl ClientRegistry {
             Entry::Vacant(vac) => {
                 vac.insert(ClientInfo {
                     group_id: group_id.clone(),
-                    conn: conn.clone(),
                 });
             }
         }
@@ -205,11 +202,6 @@ impl ClientRegistry {
         info!(client_id = %client_id, group_id = %group_id, "registering client");
         self.replace_or_register(client_id, group_id, conn)
     }
-
-    pub fn get_client_connection(&self, client_id: &str) -> Option<Connection> {
-        self.clients.get(client_id).map(|info| info.conn.clone())
-    }
-
     pub fn unregister(&self, client_id: &str) {
         if let Some((_, info)) = self.clients.remove(client_id) {
             info!(

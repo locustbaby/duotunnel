@@ -1,7 +1,7 @@
 use crate::config::ServerEgressUpstream;
 use bytes::Bytes;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
 use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, PeerSpec, TlsPeerSpec};
@@ -44,21 +44,6 @@ impl ServerEgressMap {
             http_connector,
             dns_cache: tunnel_lib::EgressDnsCache::new(std::time::Duration::from_secs(30)),
         }
-    }
-    pub fn get_upstream_address(&self, host: &str) -> Option<String> {
-        if let Some(upstream_name) = self.http_rules.get(host) {
-            if let Some(group) = self.upstreams.get(upstream_name) {
-                if let Some(server) = group.next_healthy() {
-                    debug!(
-                        host = % host, upstream = % upstream_name, server = %
-                        server, "matched egress rule (round-robin)"
-                    );
-                    return Some(server.clone());
-                }
-            }
-        }
-        warn!(host = % host, "no egress rule matched");
-        None
     }
 }
 impl UpstreamResolver for ServerEgressMap {

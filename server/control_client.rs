@@ -154,14 +154,14 @@ async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
     update_token_cache(&snap.token_cache, state);
     let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state);
     crate::sync_all_listeners(state, &listeners).await;
-    state.routing.store(Arc::new(routing_snapshot));
+    state.replace_routing(routing_snapshot);
 }
 
 fn update_token_cache(
     entries: &[tunnel_lib::shared::TokenCacheEntryDef],
     state: &Arc<ServerState>,
 ) {
-    if let Some(cache) = state.local_token_cache.as_ref() {
+    if let Some(cache) = state.local_token_cache() {
         let entries: Vec<CacheEntry> = entries
             .iter()
             .filter_map(|e| {
@@ -194,7 +194,7 @@ fn build_runtime_snapshot(
 ) -> (Vec<IngressListener>, crate::RoutingSnapshot) {
     let tm = proto_to_tunnel_management(&snap.ingress_listeners, &snap.client_groups);
     let egress = proto_to_server_egress(&snap.egress_upstreams, &snap.egress_vhost_rules);
-    let http_params = tunnel_lib::HttpClientParams::from(&state.config.server.http_pool);
+    let http_params = state.http_client_params();
     let routing_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
     let listeners = tm.server_ingress_routing.listeners.clone();
     (listeners, routing_snapshot)
@@ -218,7 +218,7 @@ async fn apply_patch_to_runtime(
     if !patch.ingress_listeners.is_empty() {
         crate::sync_listener_subset(state, &listeners, affected_ports).await;
     }
-    state.routing.store(Arc::new(routing_snapshot));
+    state.replace_routing(routing_snapshot);
 }
 
 fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {

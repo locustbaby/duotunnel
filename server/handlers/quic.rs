@@ -1,17 +1,15 @@
-use crate::config::build_client_config_for_group;
 use crate::egress::EgressProxy;
 use crate::{metrics, tunnel_handler, ServerState};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", state.config.server.tunnel_port);
-    let quic_params = tunnel_lib::QuicTransportParams::from(&state.config.server.quic);
+    let addr = state.tunnel_addr();
+    let quic_params = state.quic_transport_params();
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
-    let udp_socket = tunnel_lib::build_udp_socket(addr.parse()?, &quic_params)?;
+    let udp_socket = tunnel_lib::build_udp_socket(addr, &quic_params)?;
     let endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
         Some(server_config),
@@ -42,7 +40,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
-    let login_timeout = Duration::from_secs(state.config.server.login_timeout_secs);
+    let login_timeout = state.login_timeout();
     let (mut send, mut recv) = match tunnel_lib::timeout(login_timeout, conn.accept_bi()).await {
         Ok(Ok(streams)) => streams,
         Ok(Err(e)) => return Err(e.into()),
@@ -107,7 +105,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
             return Ok(());
         }
     };
-    let auth_result = match state.auth_store.authenticate(&login.token).await {
+    let auth_result = match state.auth_store().authenticate(&login.token).await {
         Ok(result) => result,
         Err(e) => {
             warn!(addr = % remote_addr, error = % e, "authentication failed");
@@ -124,13 +122,10 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     let client_group = auth_result.client_group;
     info!(addr = % remote_addr, client_group = % client_group, "authenticated");
     metrics::auth_success(&client_group);
-    let client_config = {
-        let routing = state.routing.load();
-        build_client_config_for_group(&routing.tunnel_management, &client_group).unwrap_or_default()
-    };
+    let client_config = state.client_config_for_group(&client_group);
     let conn_id = uuid::Uuid::new_v4().to_string();
     if let Err(e) = state
-        .registry
+        .registry()
         .register(conn_id.clone(), client_group.clone(), conn.clone())
     {
         warn!(conn_id = %conn_id, error = %e, "failed to register client connection");
@@ -150,11 +145,11 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     )
     .await
     {
-        state.registry.unregister(&conn_id);
+        state.registry().unregister(&conn_id);
         return Err(e);
     }
     metrics::client_registered(&client_group);
-    let mut revocation_rx = state.revocation_tx.subscribe();
+    let mut revocation_rx = state.revocation_tx().subscribe();
     loop {
         tokio::select! {
             _ = conn.closed() => {
@@ -167,7 +162,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                         debug!("accepted reverse stream from client");
                         let state = state.clone();
                         tokio::task::spawn(async move {
-                            let egress_map = state.routing.load().egress_map.clone();
+                            let egress_map = state.egress_map();
                             if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
                                 debug!(error = %e, "egress stream error");
                             }
@@ -190,7 +185,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                     Ok(_) => {}
                     Err(RecvError::Lagged(n)) => {
                         warn!(conn_id = %conn_id, skipped = n, "revocation channel lagged; re-validating token");
-                        match state.auth_store.authenticate(&login.token).await {
+                        match state.auth_store().authenticate(&login.token).await {
                             Ok(_) => {}
                             Err(e) => {
                                 warn!(conn_id = %conn_id, error = %e, "token no longer valid after lag; closing connection");
@@ -207,7 +202,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
             }
         }
     }
-    state.registry.unregister(&conn_id);
+    state.registry().unregister(&conn_id);
     metrics::client_unregistered(&client_group);
     Ok(())
 }

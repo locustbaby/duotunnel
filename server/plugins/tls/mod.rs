@@ -125,7 +125,9 @@ impl IngressProtocolHandler for TlsHandler {
                     };
 
                     let req_to_send = if attempts == 1 {
-                        current_req.take().expect("current_req should be available on attempt 1")
+                        current_req
+                            .take()
+                            .expect("current_req should be available on attempt 1")
                     } else if let Some(template) = &retryable_request {
                         build_retry_request(template)
                     } else {
@@ -215,10 +217,6 @@ fn error_response(err: &ProxyError) -> Response<tunnel_lib::proxy::h2_proxy::Box
     Response::builder()
         .status(err.http_status().unwrap_or(StatusCode::BAD_GATEWAY))
         .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(
-            Full::new(body_bytes)
-                .map_err(|_| unreachable!())
-                .boxed(),
-        )
+        .body(Full::new(body_bytes).map_err(|_| unreachable!()).boxed())
         .expect("Failed to build error response")
 }

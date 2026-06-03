@@ -1,7 +1,6 @@
 use crate::{metrics, ServerState};
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -16,7 +15,7 @@ pub async fn run_tcp_accept_loop(
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
-    let emfile_backoff = Duration::from_millis(state.config.server.overload.emfile_backoff_ms);
+    let emfile_backoff = state.emfile_backoff();
     info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
     run_accept_worker(listener, cancel, emfile_backoff, "tcp", move |accepted| {
         let state = state.clone();
@@ -24,7 +23,7 @@ pub async fn run_tcp_accept_loop(
         let group_id = group_id.clone();
         async move {
             let stream = accepted.stream;
-            if let Err(e) = state.tcp_params.apply(&stream) {
+            if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;
             }
@@ -49,7 +48,7 @@ async fn handle_tcp_connection(
     group_id: String,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
-    let pool = &state.peek_buf_pool;
+    let pool = state.peek_buf_pool();
     let runtime = tunnel_lib::SniffRuntime::new(
         tunnel_lib::SniffPolicy::default(),
         tunnel_lib::default_ingress_detectors(),
@@ -77,18 +76,18 @@ async fn handle_tcp_connection(
     let opened = loop {
         attempts += 1;
         let selected = state
-            .registry
+            .registry()
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
         maybe_slow_path(
             &selected.inflight_table,
             selected.slot_id,
-            &state.overload_limits,
+            state.overload_limits(),
         )
         .await;
 
-        let open_timeout = Duration::from_millis(state.config.server.open_stream_timeout_ms);
+        let open_timeout = state.open_stream_timeout();
         let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
         match open_bi_guarded(
             &selected.conn,
@@ -113,7 +112,7 @@ async fn handle_tcp_connection(
                     error = %e,
                     "failed to open QUIC stream on selected TCP proxy connection, unregistering and retrying"
                 );
-                state.registry.unregister(&selected.conn_id);
+                state.registry().unregister(&selected.conn_id);
                 if attempts >= max_attempts {
                     return Err(e.into());
                 }
@@ -125,11 +124,5 @@ async fn handle_tcp_connection(
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
     tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
-    proxy::forward_prefixed_to_client(
-        send,
-        recv,
-        prefixed_stream,
-        state.proxy_buffer_params.relay_buf_size,
-    )
-    .await
+    proxy::forward_prefixed_to_client(send, recv, prefixed_stream, state.relay_buf_size()).await
 }

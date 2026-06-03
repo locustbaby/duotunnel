@@ -96,10 +96,16 @@ tunnel/
 │           └── observability.rs   # Logging and tracing
 │
 ├── server/                        # Server
-│   ├── main.rs                    # Multi-worker runtime (proxy, metrics, bg)
-│   ├── config.rs                  # Configuration parsing
+│   ├── main.rs                    # Thin binary entry
+│   ├── lib.rs                     # Server runtime facade
+│   ├── cli.rs                     # CLI parsing
+│   ├── bootstrap.rs               # Mode resolution and runtime assembly
+│   ├── app.rs                     # Startup orchestration
+│   ├── runtime.rs                 # Runtime entry and observability
+│   ├── supervisor.rs              # Long-running component lifecycle
+│   ├── config.rs                  # Config loading and sources
 │   ├── registry.rs                # ClientRegistry (DashMap)
-│   ├── listener_mgr.rs            # Ingress listener manager (RCU and reuseport)
+│   ├── listener_mgr.rs            # Ingress listener lifecycle
 │   ├── egress.rs                  # Outbound routing (HttpConnector wrapper)
 │   ├── plugins/                   # Ingress protocol plugins
 │   │   ├── h1/                    # HTTP/1.1 protocol plugin
