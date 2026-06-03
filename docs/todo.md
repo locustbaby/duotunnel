@@ -183,6 +183,7 @@ Currently, egress outbound routing rules are resolved entirely on the server sid
 1. Synchronize or distribute the egress outbound rules down to the client configuration.
 2. In `client/egress/listener.rs`, evaluate the matching rules *locally* right after sniffing the host/protocol.
 3. If no matching rule exists, immediately truncate/reject the request locally (e.g. close local TCP stream or respond with 502/404) and avoid opening a QUIC stream.
+4. Keep server-side egress rule enforcement active as a security boundary (Defense in Depth) to prevent bypasses from modified or malicious clients.
 
 ### [TODO-77] Unified multi-protocol session handling inspired by Pingora
 **Priority**: Medium | **Status**: TODO
