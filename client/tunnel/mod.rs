@@ -7,14 +7,15 @@ use tracing::info;
 
 pub mod client;
 pub mod conn_pool;
+pub mod endpoint;
 pub mod pool;
 pub mod supervisor;
 
-pub struct TunnelPoolService {
-    pub config: ClientConfigFile,
-    pub endpoint: quinn::Endpoint,
-    pub entry_pool: Arc<EntryConnPool>,
-    pub ready: Arc<AtomicBool>,
+pub(crate) struct TunnelPoolService {
+    pub(crate) config: ClientConfigFile,
+    pub(crate) endpoint: quinn::Endpoint,
+    pub(crate) entry_pool: Arc<EntryConnPool>,
+    pub(crate) ready: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]

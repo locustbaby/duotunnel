@@ -32,7 +32,7 @@ impl ClientApp {
 
 async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     let config = bootstrap.config().clone();
-    let endpoint = crate::tunnel::client::build_quic_endpoint(&config).await?;
+    let endpoint = crate::tunnel::endpoint::build_quic_endpoint(&config).await?;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     spawn_task(async move {
