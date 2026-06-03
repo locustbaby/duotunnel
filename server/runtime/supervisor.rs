@@ -214,24 +214,29 @@ async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
     let name = svc.name();
     let registry = ctx.state.registry().clone();
     let purge_shutdown = ctx.shutdown.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = purge_shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    let purged = registry.purge_dead().await;
-                    if purged > 0 {
-                        info!(purged, "registry: purged dead connections");
-                    }
-                }
-            }
-        }
-    });
+    tokio::spawn(purge_loop(registry, purge_shutdown));
 
     if let Err(e) = svc.run(ctx.state, ctx.shutdown, ctx.proxy_handle).await {
         error!(service = name, error = %e, "background service exited with error");
     }
     Ok(())
+}
+
+async fn purge_loop(
+    registry: crate::ingress::registry::SharedRegistry,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = interval.tick() => {
+                let purged = registry.purge_dead().await;
+                if purged > 0 {
+                    info!(purged, "registry: purged dead connections");
+                }
+            }
+        }
+    }
 }
