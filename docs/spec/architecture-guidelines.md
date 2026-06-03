@@ -187,3 +187,70 @@ When major module boundaries change:
 - update the relevant spec in `docs/spec`
 - keep file structure examples current
 - prefer concise invariants over prose-heavy explanation
+
+## 13. Three-Lens Architectural Evaluation Framework
+
+When evaluating how to structure or refactor a module, apply these three lenses in order. Each lens targets a different class of problem.
+
+### Lens A — Component & Service-Oriented (OO / Layered)
+
+**When to use**: Long-lived state, dependency injection, service lifecycle, multi-caller shared capability.
+
+Characteristics:
+
+- encapsulates state and business behavior inside long-lived objects
+- uses `Arc<dyn Trait>` for decoupling
+- dependency injection at composition root only
+- capability exposed through methods, not field access
+
+Applies to:
+
+- `bootstrap/` (composition roots)
+- `runtime/app.rs` (orchestrators)
+- `runtime/supervisor.rs` (component lifecycle)
+- `infra/` (infrastructure services)
+- `plugin/` (plugin registry)
+- `control/service.rs` (control plane coordinator)
+
+### Lens B — Pipeline / Phase-Hook
+
+**When to use**: Data-plane hot paths, request processing stages, protocol detection sequences.
+
+Characteristics:
+
+- stateless or minimally stateful transformation stages
+- data flows through a defined sequence of phases
+- each phase receives input, produces output or a decision
+- no shared mutable state on the hot path
+
+Applies to:
+
+- `egress/listener.rs`, `ingress/app.rs` (accept loops)
+- `protocol/sniff.rs` (protocol detection pipeline)
+- `engine/bridge.rs` (relay loop)
+- `proxy/core.rs` (upstream proxy stages)
+- `control/watch.rs` (per-connection event stream)
+- `control/proto.rs` (pure data transformation)
+
+### Lens C — Actor Model
+
+**When to use**: Exclusive mutable state that must be serialized, ownership must not be shared, mutation races must be prevented structurally.
+
+Characteristics:
+
+- single owner of mutable state (the actor task)
+- external callers send messages via `mpsc` channel
+- reads served via `ArcSwap` snapshot (lock-free)
+- actor responds via `oneshot` reply channel
+
+Applies to:
+
+- `ingress/registry.rs` (`ClientRegistry` — register/unregister/purge via mpsc)
+- `tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
+
+### Applying the Framework
+
+1. Identify the dominant runtime characteristic of the module under review.
+2. Apply the matching lens to evaluate its current design.
+3. Flag violations: startup-time code in request-time paths, mutable state accessed without serialization, anonymous long-running spawns without lifecycle ownership.
+4. Refactor toward the lens — do not mix lens patterns within a single module unless there is an explicit boundary between them (e.g., startup + actor handoff).

@@ -90,8 +90,11 @@ Owns:
 - component state tracking
 - background component hosting
 - metrics component hosting
+- named background tasks (e.g. `purge_loop`) with lifecycle ownership
 
 Components are for process-lifetime tasks, not request handlers.
+
+Background tasks spawned inside components must be named functions, not anonymous closures, to satisfy lifecycle ownership (Guideline §7).
 
 ## Request Path
 
