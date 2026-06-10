@@ -92,6 +92,40 @@ rathole 是一款极其轻量且追求极致延迟与内存占用的 NAT 穿透�
   - 彻底用有界的无锁环形队列 `crossbeam_queue::ArrayQueue<Vec<u8>>` 替代 [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 中底层的 `crossbeam_queue::SegQueue`。
   - 由于 `ArrayQueue` 具有常数时间复杂度，其 `push` 与 `pop` 均为 $O(1)$ 操作。在归还缓冲区时，若队列已满，则直接丢弃（由垃圾回收器回收），规避了 `SegQueue::len()` 在并发冲突时由于不断遍历链表导致 CPU 暴涨的问题。
   - 更进一步地，对于可以直读直写的网络协议栈，仿照 wstunnel 重新设计转发流水线，将网络数据通过 `read_buf` 直接导入到 `BytesMut` 中，完全省去多线程借还 `Vec<u8>` 缓冲池的机制，达到零 CPU 一级缓存污染。
+  - ⚠️ **注意**：`read_buf` 零拷贝模式依赖 writer 内部可寻址的 `BytesMut`，而 `quinn::SendStream` 不暴露此接口，该方向对 QUIC 数据面**可能不可行**，详见 `deep_arch_comparison.md §2.1`。
+
+#### 【Bug A】 `egress/http.rs` body streaming 路径存在多余堆分配
+- **问题**：[egress/http.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/egress/http.rs) 第 200–203 行在 HTTP 请求 body 流式转发时使用 `recv.read(&mut buf[..])` + `Bytes::copy_from_slice(&buf[..n])`，每个 QUIC chunk 都触发一次堆分配。
+- **对照**：同文件 header 阶段已正确使用 `recv.read_chunk(max_read, true)` 返回 `Bytes`（零拷贝引用计数切片），body 路径退回了低效模式。
+- **修复方向**：body unfold 循环同样改用 `recv.read_chunk()` 直接产出 `chunk.bytes`，消除 `copy_from_slice` 分配：
+  ```rust
+  // 现在（低效）
+  let chunk = Bytes::copy_from_slice(&buf[..n]);
+  // 改为
+  match recv.read_chunk(buf.len().min(remaining), true).await {
+      Ok(Some(chunk)) => { read += chunk.bytes.len(); Ok(Some(...chunk.bytes...)) }
+      ...
+  }
+  ```
+
+#### 【Bug B】 buffer pool capacity 匹配过严，命中率低
+- **问题**：[copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 第 18 行 `take_buffer` 用 `buf.capacity() == buffer_size` 精确匹配，若调用方传入不同 `buffer_size`（如 header 解析 8 KB、body relay 64 KB），池中缓冲区无法复用，大量重新分配。
+- **修复方向**：改为 `capacity >= buffer_size` 宽松匹配，并用 `unsafe { buf.set_len(buffer_size) }` 替代 `resize(..., 0)` 避免无意义的内存零化（后续 `read()` 会立即覆盖）：
+  ```rust
+  fn take_buffer(buffer_size: usize) -> Vec<u8> {
+      if let Some(mut buf) = LOCAL_POOL.with(|p| p.borrow_mut().pop()) {
+          if buf.capacity() >= buffer_size {
+              // SAFETY: capacity >= buffer_size，后续立即由 reader.read() 写入覆盖
+              unsafe { buf.set_len(buffer_size) };
+              return buf;
+          }
+      }
+      // ... fallback
+      let mut buf = Vec::with_capacity(buffer_size);
+      unsafe { buf.set_len(buffer_size) };
+      buf
+  }
+  ```
 
 ---
 

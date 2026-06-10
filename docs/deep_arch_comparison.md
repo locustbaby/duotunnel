@@ -56,7 +56,7 @@ pub fn build_proxy_runtime_with_flavor(flavor: RuntimeFlavor) -> tokio::runtime:
 
 ## 二、I/O Copy 引擎与缓冲区策略
 
-### 2.1 wstunnel：零分配 ReadBuf 模式
+### 2.1 wstunnel：零分配 ReadBuf 模式 ⚠️ *（移植至 duotunnel 可能不可行，见分析）*
 
 wstunnel 的 `propagate_local_to_remote` 使用 `read_buf` 直接写入 `BytesMut`：
 
@@ -71,6 +71,17 @@ let read_len = select! {
 ```
 
 `buf_mut()` 返回的 `&mut BytesMut` 在 websocket/http2 writer 内部初始化，数据直接写入帧缓冲区，省去了一次中间 Vec 拷贝。此外 wstunnel 复用 `MAX_PACKET_LENGTH = 64KB` 的帧对齐，与网络 MTU 配合良好。
+
+**可行性分析（duotunnel 适配难点）**：
+
+| 维度 | wstunnel | duotunnel |
+|---|---|---|
+| 传输层 Writer | 自定义 WebSocket/HTTP2 writer，内置 `BytesMut`，可暴露 `buf_mut()` | `quinn::SendStream`（外部 crate），无法暴露内部帧缓冲 |
+| Writer 接口 | 完全自控，可实现 `read_buf` target | quinn API 只提供 `write_all(&[u8])`，无 uninit buffer 写入接口 |
+| 帧边界对齐 | WebSocket 有明确 64KB 帧，对齐复用收益大 | QUIC 自行管帧，`SendStream` 内部已有缓冲层，再加一层收益有限 |
+| 双向对称性 | 单向 propagate，路径简单 | `try_join!` 双向并发，split 后各自独立，无共享帧缓冲 |
+
+**结论**：quinn `SendStream` 不开放内部 `BytesMut`，无法实现 `read_buf` 直写帧缓冲的 trick。强行仿制需要 fork quinn 或引入 unsafe 的 transmute，风险高、收益存疑。**暂不建议移植此模式**，优先推进 2.3/2.4 节的 buffer pool 改进（同样能降低内存开销，且风险低）。
 
 ### 2.2 pingora：ArrayQueue + LRU 连接池缓冲复用
 
@@ -618,7 +629,7 @@ graph TD
 
 | 精华特性 | 来源 | 是否已被 duotunnel 采纳 | 建议 |
 |---|---|---|---|
-| `read_buf` 零中间拷贝写帧 | wstunnel | ❌ | 参考实现于 copy 引擎 |
+| `read_buf` 零中间拷贝写帧 | wstunnel | ❌ ⚠️ 可能不可行 | quinn `SendStream` 不暴露内部缓冲，见 §2.1 分析，暂不建议移植 |
 | `ArrayQueue` 热路径无锁池 | pingora | ❌（用了 SegQueue） | **立即替换** |
 | DashMap + LRU 连接池 | pingora | ❌（无 Egress 池） | P1 实现 |
 | `idle_poll` 连接健康监测 | pingora | ❌ | 配合连接池实现 |
