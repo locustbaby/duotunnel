@@ -49,6 +49,6 @@ figment = { version = "0.10", features = ["yaml", "env"] }
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
 fastrand = "2.0"
-tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
+mimalloc = "0.1"
 dial9-tokio-telemetry = { version = "0.3.11", features = ["cpu-profiling"], optional = true }
 serde_json = "1.0.150"
