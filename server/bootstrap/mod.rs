@@ -213,6 +213,10 @@ impl ServerState {
         self.ingress.proxy_buffer_params.relay_buf_size
     }
 
+    pub(crate) fn sniff_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ingress.proxy_buffer_params.sniff_timeout_ms)
+    }
+
     pub(crate) fn peek_buf_pool(&self) -> &crate::PeekBufPool {
         &self.ingress.peek_buf_pool
     }

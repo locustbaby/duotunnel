@@ -35,9 +35,22 @@ impl MessageType {
         }
     }
 }
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Clone, Archive, Serialize, Deserialize)]
 pub struct Login {
     pub token: String,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked = if self.token.starts_with("dt_") && self.token.len() >= 10 {
+            "dt_masked_...".to_string()
+        } else {
+            "***".to_string()
+        };
+        f.debug_struct("Login")
+            .field("token", &masked)
+            .finish()
+    }
 }
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct LoginResp {

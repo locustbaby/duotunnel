@@ -36,6 +36,7 @@ pub struct Timeouts {
     pub login_ms: u64,
     pub connect_ms: u64,
     pub resolve_ms: u64,
+    pub sniff_ms: u64,
 }
 
 impl Default for Timeouts {
@@ -45,6 +46,7 @@ impl Default for Timeouts {
             login_ms: 10_000,
             connect_ms: 10_000,
             resolve_ms: 5_000,
+            sniff_ms: 5_000,
         }
     }
 }

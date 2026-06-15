@@ -54,7 +54,10 @@ async fn handle_tcp_connection(
         tunnel_lib::SniffPolicy::default(),
         tunnel_lib::default_ingress_detectors(),
     );
-    let sniffed = runtime.sniff(&mut stream, pool).await?;
+    let sniffed = match tokio::time::timeout(state.sniff_timeout(), runtime.sniff(&mut stream, pool)).await {
+        Ok(res) => res?,
+        Err(_) => return Err(anyhow::anyhow!("protocol sniffing timed out (Slowloris protection)")),
+    };
     let protocol = if sniffed.bytes_read == 0 {
         tunnel_lib::proxy::core::Protocol::Unknown
     } else {

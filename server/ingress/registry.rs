@@ -103,9 +103,12 @@ impl ClientRegistry {
                 match msg {
                     RegistryMsg::Register { client_id, group_id, conn, reply } => {
                         info!(client_id = %client_id, group_id = %group_id, "registering client");
-                        let group = groups_clone
-                            .entry(group_id.clone())
-                            .or_insert_with(|| Arc::new(ClientGroup::new()));
+                        let group = {
+                            let entry = groups_clone
+                                .entry(group_id.clone())
+                                .or_insert_with(|| Arc::new(ClientGroup::new()));
+                            entry.value().clone()
+                        };
 
                         let idx = group_conns.entry(group_id.clone()).or_default();
                         let slot_id = if let Some((_, existing_slot)) = idx.get(&client_id) {
@@ -150,12 +153,14 @@ impl ClientRegistry {
                                 if let Some((_, slot_id)) = idx.remove(&client_id) {
                                     inflight_table.free_slot(slot_id);
                                 }
-                                if let Some(group) = groups_clone.get(&info.group_id) {
+                                let should_remove = if let Some(group) = groups_clone.get(&info.group_id) {
                                     group.snapshot.store(Arc::new(build_snapshot(&inflight_table, idx)));
-                                    if group.is_empty() {
-                                        drop(group);
-                                        groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
-                                    }
+                                    group.is_empty()
+                                } else {
+                                    false
+                                };
+                                if should_remove {
+                                    groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
                                 }
                             }
                         }

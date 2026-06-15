@@ -31,6 +31,7 @@ pub struct EntryListenerConfig {
     pub open_stream_timeout: Duration,
     pub accept_workers: usize,
     pub overload: Arc<OverloadLimits>,
+    pub sniff_timeout: Duration,
 }
 
 pub async fn start_entry_listener(
@@ -44,6 +45,7 @@ pub async fn start_entry_listener(
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
     let tcp_params = Arc::new(cfg.tcp_params);
     let overload = cfg.overload;
+    let sniff_timeout = cfg.sniff_timeout;
     info!(addr = %addr, accept_workers = %accept_workers, "client entry listener started");
 
     let mut handles = Vec::with_capacity(accept_workers);
@@ -72,6 +74,7 @@ pub async fn start_entry_listener(
                             tcp_params,
                             open_stream_timeout,
                             &overload,
+                            sniff_timeout,
                         )
                         .await
                         {
@@ -95,13 +98,19 @@ async fn handle_entry_connection(
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
     overload: &OverloadLimits,
+    sniff_timeout: Duration,
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
     let runtime = SniffRuntime::new(SniffPolicy::default(), default_client_detectors());
-    let sniffed = runtime.sniff(&mut local_stream, peek_pool).await?;
+    let sniffed = match tokio::time::timeout(sniff_timeout, runtime.sniff(&mut local_stream, peek_pool)).await {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(anyhow::anyhow!("protocol sniffing timed out (Slowloris protection)"));
+        }
+    };
     let (protocol, host, initial_bytes) = if sniffed.bytes_read > 0 {
         (
             sniffed.hint.protocol,

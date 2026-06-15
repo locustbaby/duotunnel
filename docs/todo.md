@@ -1,761 +1,493 @@
 # Tunnel TODO
 
-> Last synced against code: 2026-05-20.
+> Last synced against code: 2026-06-15.
 >
-> This file is the source of truth for unfinished work. Completed or stale items were moved to `docs/archive/donelist.md`. Detailed design notes remain in the topical docs, especially `docs/archive/pingora-tasks.md` and `docs/spec/parameters.md`.
+> This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
 ---
 
-## 📌 全量 TODO 赛道分类与依赖关系治理规范
+## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
-### 1. ⚠️ 后续增加 TODO 的规范准则
-> [!IMPORTANT]
-> 任何开发人员或智能 Agent 在本文件中新增 TODO 时，必须强制遵循以下规则：
-> 1. **赛道归类**：新增的 TODO 必须明确归入本节定义的五大技术赛道之一。
-> 2. **声明依赖**：必须明确梳理并声明新 TODO 与现有 TODO 之间的依赖关系或并联耦合关系。
-> 3. **更新依赖图**：如新增了关键依赖，需按需同步更新下方的 `Mermaid` 依赖关系图。
+为了提高系统的安全性、稳定性与超高并发吞吐，DuoTunnel 的待办事项（TODO）被重新梳理并归纳为以下四个实施阶段：
 
----
-
-### 2. 五大技术赛道分类清单
-
-#### 赛道一：核心代理、会话与协议控制 (Core Proxy & Protocol)
-聚焦于底层中继、协议嗅探、高并发多路复用与会话生命周期管理。
-- **关联 TODO**：`[TODO-64]`, `[TODO-67b]`, `[TODO-68]`, `[TODO-71]`, `[TODO-62]`, `[TODO-76]`, `[TODO-77]`, `[TODO-78]`, `[TODO-81]`, `[TODO-89]`, `[TODO-86]`
-
-#### 赛道二：控制面、安全凭证与动态配置 (Control Plane & Config)
-聚焦于控制面去状态化设计、敏感凭证脱敏安全、高效率的增量差分推送。
-- **关联 TODO**：`[TODO-82]`, `[TODO-84]`, `[TODO-53D]`, `[TODO-51]`, `[TODO-CR5]`, `[TODO-PARAM-1]`, `[TODO-CR-AUDIT-8]`, `[TODO-CR-AUDIT-9]`, `[TODO-CR-AUDIT-10]`, `[TODO-CR-AUDIT-14]`, `[TODO-CR-AUDIT-15]`
-
-#### 赛道三：高可用、防雪崩与系统可观测性 (HA, Overload & Observability)
-聚焦于极限并发下的过载保护（退避与熔断降级）与高精度系统透明度指标。
-- **关联 TODO**：`[TODO-75]`, `[TODO-80]`, `[TODO-CR4]`, `[TODO-88]`, `[TODO-CR-AUDIT-3]`, `[TODO-CR-AUDIT-12]`
-
-#### 赛道四：传输性能、连接 management 与底层吞吐优化 (Transport & Performance)
-消除 CPU 锁竞争、减少用户态-内核态切换开销、支持更广泛的传输特征（UDP/0-RTT等）。
-- **关联 TODO**：`[TODO-20]`, `[TODO-22/34]`, `[TODO-52]`, `[TODO-36]`, `[TODO-ENTRY-POOL]`, `[TODO-83]`, `[TODO-85]`, `[TODO-94]`, `[TODO-26]`, `[TODO-27]`, `[TODO-32]`, `[TODO-73]`, `[TODO-79]`, `[TODO-CR-AUDIT-1]`, `[TODO-CR-AUDIT-2]`, `[TODO-CR-AUDIT-4]`, `[TODO-CR-AUDIT-5]`, `[TODO-CR-AUDIT-6]`, `[TODO-CR-AUDIT-7]`, `[TODO-CR-AUDIT-13]`
-
-#### 赛道五：未来架构、硬件加速与集成机制 (Future/Research & CI)
-前瞻性极客优化（零拷贝、内核旁路、HugePages）、基准测试体系增强。
-- **关联 TODO**：`[TODO-28]`, `[TODO-29]`, `[TODO-30]`, `[TODO-31]`, `[TODO-35]`, `[TODO-37]`, `[TODO-38]`, `[TODO-44]`, `[TODO-39]`, `[TODO-40]`, `[TODO-42]`, `[TODO-43]`, `[TODO-45]`, `[TODO-46]`, `[TODO-47]`, `[TODO-CI-1]`, `[TODO-15]`
+1. **Phase 0: 关键安全防御、死锁修复与日志脱敏 (Critical Security & Stability)**
+   - 立即修复可能导致网关挂起的 `DashMap` 死锁，以及可能被恶意客户端利用的协议嗅探慢速攻击（Slowloris）。治理敏感 Token 的日志泄露风险。
+2. **Phase 1: 核心用户态零拷贝、并发无锁缓冲与连接重用 (High Priority: Performance & Zero-Copy)**
+   - 专注于消除底层复制引擎的全局 Mutex 争用、避免 memset 置零开销、实现 Quinn L7 用户态零拷贝（使用 `read_chunk`），以及建立 Egress 端 L4 连接池与无锁并发 DNS 缓存（DashMap + Single-Flight）。提供 UDP (QUIC Datagram) 代理原生支持。
+3. **Phase 2: 协程与局部性优化、长连接生命周期与架构重构 (Medium Priority: Architecture & Sessions)**
+   - 实施任务绑定缓冲区（Task-Bound Buffer）解决协程跨核调度导致的 CPU 缓存局部性变冷问题。消除 Generic `split` 带来的 Bilock 锁竞争，并落地类似 Pingora 的统一多协议 Session 管理架构。
+4. **Phase 3: 前瞻性性能实验与长尾微调 (Low Priority & Research)**
+   - 包括粗粒度单调时钟遥测、配置流式模型演进以及其他的内核旁路（io_uring/AF_XDP）前瞻性探索。
 
 ---
 
-### 3. 全量依赖关系网络图 (Mermaid)
+## 🗺️ 全量依赖与阶段流转图 (Mermaid)
 
 ```mermaid
-graph TD
-    %% 赛道一
-    TODO-67b[TODO-67b keep-alive下沉至Session] -->|前置依赖| TODO-36[TODO-36 消除PeerKind动态分派]
-    TODO-64[TODO-64 ID类型安全Newtype] -->|提升边界安全性| TODO-77[TODO-77 Pingora式统一会话]
-    TODO-77 -->|决定Hyper客户端集成方式| TODO-78[TODO-78 L7 Hyper 注入DNS缓存]
-    TODO-81[TODO-81 ProxyEngine 零拷贝]
-    TODO-77 -->|收敛协议握手边界| TODO-CR-AUDIT-18[CR-AUDIT-18 协议嗅探硬超时]
-    
-    %% 赛道二
-    TODO-82[TODO-82 边缘节点去 SQLite 状态] -->|前置依赖 - 消除/平移DB逻辑| TODO-84[TODO-84 CP 选路同步]
-    TODO-82 -->|平移 SQLite 瓶颈到控制面| TODO-CR-AUDIT-9[CR-AUDIT-9 WAL 并发连接数限制]
-    TODO-82 -->|定义同步协议边界| TODO-CR-AUDIT-15[CR-AUDIT-15 增量/差分配置推送]
-    TODO-82 -->|前置控制面API整合| TODO-CR-AUDIT-19[CR-AUDIT-19 CP重连限流]
-    TODO-64 -->|提供强类型安全边界| TODO-CR-AUDIT-17[CR-AUDIT-17 DashMap死锁修复]
-    TODO-53D[TODO-53D 移除静态Token Map] -->|简化Token源| TODO-51[TODO-51 Token本地增量更新]
-    TODO-51 -->|流式基础| TODO-CR5[TODO-CR5 配置流式模型]
+flowchart TD
+    subgraph Phase 0: Security & Stability
+        CR-AUDIT-17[TODO-CR-AUDIT-17 DashMap 死锁修复]
+        CR-AUDIT-18[TODO-CR-AUDIT-18 协议嗅探 5s 超时]
+        CR-AUDIT-8[TODO-CR-AUDIT-8 敏感凭证日志脱敏]
+    end
 
-    %% 赛道三
-    TODO-75[TODO-75 实时资源Gauge指标] -->|提供过载触发阈值| TODO-80[TODO-80 主动限流降级/503]
-    TODO-CR-AUDIT-12[CR-AUDIT-12 open_bi 阻塞Span监控] -->|增强阻塞等待观测| TODO-80
-    TODO-86[TODO-86 消除split锁竞争] <-->|修改同一中继物理层| TODO-CR-AUDIT-16[CR-AUDIT-16 engine全局Mutex优化]
+    subgraph Phase 1: High Priority Performance & Core Features
+        CR-AUDIT-16[TODO-CR-AUDIT-16 消除全局缓冲池锁竞争]
+        TODO-97[TODO-97 缓冲池宽松匹配与免 memset]
+        TODO-104[TODO-104 DNS 缓存去全局锁 DashMap+SingleFlight]
+        TODO-81[TODO-81 Peek 探测零拷贝]
+        TODO-74[TODO-74 Egress 路径 L4 连接池与 DNS]
+        TODO-76[TODO-76 客户端本地规则评估与截断]
+        TODO-82[TODO-82 边缘去 SQLite 状态]
+        TODO-26[TODO-26 QUIC Datagram 原生 UDP 代理]
+        TODO-64[TODO-64 ID 强类型 Newtype 封装]
+        
+        L7-ZC-1[performance §1: L7 Zero-Copy Body Streaming]
+        L7-ZC-2[performance §2: L7 Zero-Copy Response Writer]
+    end
 
-    %% 赛道五
-    TODO-CR-AUDIT-21[CR-AUDIT-21 SIGTERM优雅排空] -->|前置进程信号排空机制| TODO-37[TODO-37 进程平滑替换]
+    subgraph Phase 2: Medium Priority Architecture & Sessions
+        TODO-98[TODO-98 缓冲区生命周期绑定到 Async Task]
+        TODO-22_34_86[TODO-22/34/86 消除 Generic split Bilock 锁竞争]
+        TODO-77[TODO-77 统一多协议 Session 处理]
+        TODO-67b[TODO-67b H1 Keep-Alive 下沉至 Session]
+        TODO-68[TODO-68 Ingress 请求生命周期收敛]
+        TODO-62[TODO-62 Peer 协议记忆与 fallback 机制]
+        TODO-99[TODO-99 TLS 证书监听与热重载]
+        TODO-96[TODO-96 JoinSet 协程生命周期生命管控]
+    end
+
+    %% Dependencies
+    CR-AUDIT-17 -->|安全强类型设计依赖| TODO-64
+    CR-AUDIT-18 -->|嗅探超时阻断| TODO-80[TODO-80 主动限流降级/503]
+    CR-AUDIT-16 -->|物理半流转发特化前置| TODO-22_34_86
+    TODO-97 -->|提升任务缓冲区局部性前置| TODO-98
+    TODO-64 -->|ID 强类型统一| TODO-77
+    TODO-77 -->|需要 keepalive session| TODO-67b
+    TODO-82 -->|去 DB 瓶颈| TODO-84[TODO-84 CP 选路同步]
 ```
 
 ---
 
-## 1. Active Mainline: Pingora-Inspired HTTP / Proxy Refactor
-
-Recommended order: `64 -> 67b -> 68 -> 71 -> 76 -> 77 -> 78 -> 79 -> 80`.
-
-Completed: `TODO-54`, `TODO-65`, `TODO-66`, `TODO-69`, `TODO-72`, `TODO-87`, `TODO-90`, `TODO-91`, `TODO-92`, `TODO-93`, `TODO-95` moved to completed.
-
-### [TODO-64] ClientId / GroupId / ProxyName / ReuseHash newtypes
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-Hot paths still use bare `String` / `Arc<str>` for IDs. There is no `tunnel-lib/src/ids.rs` and no `ReuseHash` type.
-
-**Fix**:
-1. Introduce `ClientId`, `GroupId`, `ProxyName`, and `ReuseHash` as cheap cloneable newtypes.
-2. First apply them to in-memory hot paths: `server/registry.rs`, `client/conn_pool.rs`, `server/plugins/h2c/mod.rs`.
-3. Keep wire/config/storage schemas as strings initially; convert at boundaries.
-
-### [TODO-67b] Move keep-alive loop into Session layer
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-H1 keep-alive is still in `HttpPeer::connect_inner`, which mixes upstream description, connection reuse, and session loop behavior.
-
-**Fix**:
-Create `H1Session` / `H2Session` style ownership around request loops and reused connection metadata. This also gives TODO-65 a natural place to apply `RetryType::ReusedOnly`.
-
-### [TODO-68] Ingress request lifecycle convergence
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-h2c still carries per-connection request lifecycle state inside the handler (`first_authority`, `route_cache`, `sender_cache`). Error classification, retry, and failover are not yet aligned with TLS/H1 paths.
-
-**Fix**:
-Keep per-request routing for h2c, but centralize request lifecycle state and response mapping. Do not introduce a single selected-client fast path that would break multi-authority h2c connections.
-
-### [TODO-71] P2C pick algorithm
-**Priority**: Low | **Status**: Completed
-
-**Fix**:
-Implemented generic bounded P2C routing in `tunnel-lib/src/inflight.rs` via `pick_p2c_inflight`. Extracted $O(1)$ fast paths for `Server::ClientGroup::select_healthy` and `client::EntryConnPool::next_conn_excluding`, avoiding $O(N)$ scanning degradation and eliminating related CPU spikes during load balancing.
-
-### [TODO-62] Full per-peer protocol capability memory
-**Priority**: Medium | **Status**: Partially covered by TODO-66
-
-**Remaining beyond TODO-66 Phase 1**:
-1. Track upstream protocol capability per peer/reuse key, not only cleartext h2c fallback.
-2. Decouple downstream H1/H2 from upstream H1/H2 across both server egress and client egress.
-3. Decide how to observe TLS ALPN outcome if hyper does not expose enough connection-level detail.
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Currently, cleartext HTTP h2c would attempt an empty-body request and fallback to H1 upon error, marking `prefer_h1` with a TTL (implemented in `TODO-66`). However, protocol selection is not memorized or synchronized comprehensively across distinct connection-reuse keys. This means the gateway repeatedly falls back on new connections, inducing transient errors and increasing latency on downstream requests. Also, we lack deep mapping between downstream protocols (H1/H2) and upstream protocols (H1/H2) at both egress and ingress boundaries.
-- **如何改造 (Refactoring Strategy)**:
-  - *Error Classification & Memory*: Distinguish transient handshake/ALPN protocol negotiation failures from fatal network connectivity drops. Store dynamic protocol capability in a local thread-safe TTL-based cache mapped by reuse keys (e.g. `ArcSwap<HashMap<PeerKey, ProtocolCapability>>`).
-  - *Failure Probing & Self-Healing*: Actively probe peer capabilities. If an upstream's TLS ALPN outcome degrades or changes, evict the stale capability cache entry immediately to prevent black-holing.
-  - *Graceful Fallback*: If ALPN negotiation is uncertain or fails, fallback gracefully to safe default protocols (e.g., standard HTTP/1.1) rather than hard-failing or panicking.
-- **影响 (Architectural Impact)**:
-  - Eliminates repeated protocol negotiation penalties.
-  - Decreases downstream request latency by memorizing capability.
-  - Prevents downstream timeouts under high load by caching negotiation outcomes.
-
-### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
-**Priority**: High | **Status**: Partially Completed (Egress DNS Cache implemented)
-
-**Problem**:
-Egress (client-to-server) path latency is significantly higher under the same QPS due to un-cached WAN DNS resolution on the hot path (for TCP/WebSocket) and lack of L4 upstream connection pooling.
-
-**Fix**:
-1. Implement a system-resolver wrapper with a TTL-based cache for raw TCP/WS egress target resolution (Completed - `EgressDnsCache` fully integrated).
-2. Introduce a lightweight, lock-free upstream TCP connection pool for L4 egress to reuse WAN connections (Remaining).
-3. Optimize ProxyEngine to avoid serializing hostname resolution behind reading the first client data chunk when the protocol is already declared in RoutingInfo (Completed).
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: While `EgressDnsCache` is implemented to cache WAN DNS queries, L4 egress still has no connection pooling. Every TCP/WS egress request establishes a brand-new WAN TCP connection to the upstream. This incurs 3-way handshake overhead for every single transaction, resulting in severe latency spikes under high QPS. Additionally, if the upstream server is down or sluggish, the client has no connection pool eviction, leading to requests timing out inside the engine's serialization queues.
-- **如何改造 (Refactoring Strategy)**:
-  - *Resource Closed-Loop*: Build a lightweight, lock-free L4 connection pool (e.g. `ArcSwap` with RCU or lock-free queues of idle sockets). Establish strict maximum connection caps and idle timeouts (`idle_timeout`). Ensure that idle sockets are closed symmetrically and their file descriptors are guaranteed to be released upon shutdown or error.
-  - *Active Health Checking & Self-Healing*: Background tasks must actively send empty-byte probes or TCP keepalive/heartbeat packets on pooled idle connections. If a peer drops or fails, proactively evict the dead connection from the pool.
-  - *Differentiated Retries & Fallback*: Classify pool acquisition failures: if connection fails due to local slot exhaustion (transient), block or retry using exponential backoff; if the connection fails due to remote connection reset/auth failure (fatal), fail-fast immediately without polluting the pool or retrying.
-- **影响 (Architectural Impact)**:
-  - Eliminates TCP handshakes on hot egress paths, dramatically reducing latency.
-  - Prevents resource leaks (file descriptor exhaustion) through strict pool capacity management and symmetric teardown.
-
-### [TODO-75] Real-Time Bottleneck Observability & Load-Shedding
-**Priority**: High | **Status**: Partially Completed (Observability implemented)
-
-**Problem**:
-Synchronous accept loop sleep on EMFILE and blocking open_bi waits under resource pressure lack visibility, appearing as silent hangs/blackboxes.
-
-**Fix**:
-1. Implement active atomic gauges for accepted connections, pending QUIC stream queue depth, and slow-path waiting tasks (Completed - Lock-free metrics registered).
-2. Implement in-code FD limit (`rlimit`) pre-validation at application startup with high-visibility warn logs, and enrich EMFILE error reports in `run_accept_worker` with system optimization instructions (Completed).
-3. Implement pluggable load-shedding to fail-fast (drop connections with 503) when pending queues exceed limits (Tracked separately in TODO-80).
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: While live observability counters (gauges for accepted connections, pending QUIC queues, and rlimit validation) are now implemented, the system lacks dynamic closed-loop load-shedding. When resource capacity is exceeded, the server blindly accepts new streams only to block them indefinitely inside the stream allocator, resulting in request pileups, high tail latency, and eventual out-of-memory (OOM) crashes.
-- **如何改造 (Refactoring Strategy)**:
-  - *Transactional Integrity & Graceful Degradation*: Define explicit connection/stream admission limits. When the atomic gauges (implemented in Phase 1) exceed the high-watermark threshold, the proxy should immediately reject incoming streams.
-  - *Graceful Fallback*: Instead of dropping streams silently or crashing, immediately respond with a `503 Service Unavailable` (or TCP Reset for raw layers), keeping the server's resource queue bounded.
-  - *Hysteresis and Self-Healing*: The load-shedder must use hysteresis (e.g., lower and upper watermarks) to dynamically recover from degraded states and resume normal admission once resources drop below safe thresholds.
-- **影响 (Architectural Impact)**:
-  - Establishes a highly resilient guardrail against traffic spikes, protecting the server from memory exhaustion and cascaded connection drops.
-
-### [TODO-76] Client-side local egress rule evaluation and early truncation
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-Currently, egress outbound routing rules are resolved entirely on the server side (`ServerEgressMap::upstream_peer`). If a host does not match the egress rules, the client still establishes a QUIC connection/stream and relays data, only for the server to reject the stream with `route_not_found`. This wastes QUIC streams and WAN bandwidth.
-
-**Fix**:
-1. Synchronize or distribute the egress outbound rules down to the client configuration.
-2. In `client/egress/listener.rs`, evaluate the matching rules *locally* right after sniffing the host/protocol.
-3. If no matching rule exists, immediately truncate/reject the request locally (e.g. close local TCP stream or respond with 502/404) and avoid opening a QUIC stream.
-4. Keep server-side egress rule enforcement active as a security boundary (Defense in Depth) to prevent bypasses from modified or malicious clients.
-
-### [TODO-77] Unified multi-protocol session handling inspired by Pingora
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-Downstream traffic can be H1, H2, WebSockets, or potentially UDP in the future. The current driver approach (`Http1Driver`, etc.) is tightly coupled to specific protocol types and uses heavy L7 engines (Hyper) which makes multi-protocol extensions complex and computationally expensive on the server.
-
-**Proposed Architectural Directions (To be decided):**
-
-#### Direction A: Pingora-Inspired Stateful Decoupled Pipeline
-* **Design**:
-  1. **DownstreamSession Enum**: Wrap H1, H2, and WS protocol streams. Expose unified static dispatch methods (`read_request_header()`, `read_body_chunk()`, etc.) avoiding virtual dispatch.
-  2. **Channel-based Async Dual-Task Relay**: Set up a bidirectional bounded `mpsc::channel::<HttpTask>()` between two concurrent tasks (`Task Downstream` and `Task Upstream`). Use hyper's low-level `http1::handshake` for upstream connection and headers modification.
-  3. **WebSocket Hand-off**: Gracefully dismantle H1/L7 task state machines upon receiving `101 Switching Protocols` and hand the raw sockets to a pure L4 `bridge::relay`.
-* **Pros**: Standardized, clean multi-protocol encapsulation (easily supports H2 upstreams, transparent retries on connection pool stale FINs, and cookie/CORS/response header modifications).
-* **Cons**: Higher code complexity, channel scheduling overhead, and minor memory allocations.
-
-#### Direction B: DuoTunnel-Optimized Single Streamlined Async Function (Direct Relay)
-* **Design**:
-  1. **Single async fn handler**: Define a streamlined `async fn proxy_h1_quic_stream(...)`.
-  2. **Direct Pipeline**: Read headers from QUIC stream $\rightarrow$ zero-copy parse via `httparse` $\rightarrow$ rewrite headers $\rightarrow$ fetch TCP socket from custom pool $\rightarrow$ write headers $\rightarrow$ immediately call `bridge::relay_with_first_data(...)` (L4 raw bytes relay).
-  3. **Simplification**: No `mpsc::channel` buffer pipes, no `DownstreamSession` driver structs, no task spawning. Leverage the 1-to-1 QUIC Stream-to-Upstream connection invariant (no multi-stream load balancing required).
-* **Pros**: Ultimate zero-copy performance, minimum latency, tiny memory footprint, and extremely low code complexity.
-* **Cons**: Cannot easily intercept/rewrite HTTP Response Headers once L4 copy begins, and scaling to complex protocol upgrades (like nested HTTP/2 multiplexed connections) or transparent stale connection retries will lead to a nested spaghetti of async code.
-
----
-
-## 2. Control Plane, Auth, and Config
-
-### [TODO-53D] Remove legacy static token map
-**Priority**: High | **Status**: TODO
-
-Milestones A-C are done. Remaining work is Milestone D: remove the legacy static token map from server config, or keep it behind an explicit read-only compatibility window.
-
-### [TODO-51] LocalTokenCache incremental updates
-**Priority**: Low | **Status**: TODO
-
-**Current code state**:
-`LocalTokenCache::update()` rebuilds and atomically swaps the whole `HashMap<[u8; 32], CacheEntry>` on every snapshot/patch.
-
-**Fix**:
-1. Add a compatible `WatchEvent::TokenDelta { added, removed }`.
-2. Add `LocalTokenCache::patch(added, removed)`.
-3. Emit token deltas only for token-only changes; keep full routing snapshots for routing changes.
-
-### [TODO-CR5] Config stream model
-**Priority**: Low | **Status**: TODO
-
-Move from pull-style `ConfigSource::load()` snapshots toward a stream model such as `Stream<Item = RoutingSnapshot>`, so file/db/ctld/dynamic config sources share one update contract.
-
-### [TODO-PARAM-1] Unified parameter configuration schema
-**Priority**: Medium | **Status**: TODO
-
-Tracked in detail in `docs/spec/parameters.md`.
-
-**Steps**:
-1. Add top-level schema version.
-2. Clean dead config fields such as unused `max_connections` / `max_tcp_connections` comments.
-3. Normalize timeout naming and units.
-4. Split timeout semantics out of `reconnect.*`.
-5. Add per-upstream overrides for TCP, HTTP pool, timeout, H2 stream limits, and H2 ping behavior.
-6. Consider server-to-client delivery of recommended `overload.*` / `quic.*` values.
-
-### [TODO-82] Decouple SQLite from Edge Server (Stateless Edge)
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-The edge `server` directly compiles sqlite drivers (`tunnel-store`), preventing horizontal scaling.
-
-**Fix**:
-Transform `server` to be completely state-free, fetching dynamic rules and authenticating clients via a thin gRPC/HTTP Control Plane client interface rather than querying the local SQLite database.
-
-### [TODO-84] Event-driven Control Plane DB Synchronization
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-`tunnel-service` uses a 1500ms db polling reactor (`db_poll_task`) to detect database changes.
-
-**Fix**:
-Enable SQLite WAL mode and transition from active polling to file-system lock notifications or database change triggers to publish updates.
-
-
-
-## 3. Code Quality and Maintainability
-
-### [TODO-CR4] Decouple observability from business hot paths
-**Priority**: Low | **Status**: TODO
-
-**Current code state**:
-The plugin `MetricsSink` exists, but many server handlers still call `metrics::xxx()` directly.
-
-**Fix**:
-Emit tracing events or a thin async telemetry event, then aggregate metrics out of band. If using a tracing subscriber, `on_event` must only enqueue through a non-blocking channel; do not update Prometheus counters under subscriber locks.
-
-### [TODO-20] Bytes::copy_from_slice -> split_to().freeze()
-**Priority**: Medium | **Status**: TODO
-
-Remaining copy paths still exist in request/body handling, especially around H1 driver scratch buffers and initial bytes. Replace with ownership-preserving `BytesMut::split_to().freeze()` where lifetimes and buffer reuse make it safe.
-
-### [TODO-22 / TODO-34] Remove relay split overhead where possible
-**Priority**: Medium | **Status**: TODO / Partial
-
-**Current code state**:
-Some production paths use `into_split()`, but generic relay helpers still use `tokio::io::split()` where type constraints require it.
-
-**Fix**:
-1. Keep `tokio::io::split()` for stream types that do not support owned halves.
-2. Replace remaining concrete TCP/QUIC relay paths with `into_split()` where safe.
-3. Update or retire obsolete generic helpers that are only used in tests.
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: While `relay_with_first_data` currently utilizes concrete split structures like `tcp_stream.into_split()`, some generic proxy helper paths still fall back to `tokio::io::split()`. Because `tokio::io::split()` relies on internal `Arc<Mutex<...>>` locks to simulate duplex capability over generic types, it imposes severe CPU overhead and lock contention on concurrent read/write polling.
-- **如何改造 (Refactoring Strategy)**:
-  - *Resource Closed-Loop & Symmetric Teardown*: Replace software-lock generic streams with explicit concrete wrappers where possible (e.g. `TcpStream` splitting via `into_split`, `QuinnStream` splitting via owned read/write halves). Ensure that split halves are symmetrically tracked: if one half encounters an error or cancellation, the error must immediately propagate to terminate the other half (`tokio::try_join!`), triggering symmetric socket and buffer resource deallocation.
-- **影响 (Architectural Impact)**:
-  - Complete elimination of user-space mutex locks on all production data paths.
-  - Significant reduction in CPU contention and latency tail-spikes, while guaranteeing zero socket or file descriptor leaks.
-
-### [TODO-52] Route snapshot connection-level cache for H2
-**Priority**: Low | **Status**: TODO
-
-Cache `Arc<RoutingSnapshot>` at H2 connection scope when hot reload semantics allow old long-lived connections to keep using their initial routing snapshot.
-
-### [TODO-36] Finish static dispatch cleanup
-**Priority**: Low | **Status**: Partial
-
-`PeerKind::Dyn` / `UpstreamPeer` are gone from the live path, but `PeerKind::{Http,H2}` still box peer structs as a transitional execution enum. After TODO-66/67b, either remove `PeerKind` entirely or make it a pure enum with no heap boxing.
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Previously, dynamic dispatch (`Box<dyn UpstreamPeer>`) was heavily used, which introduced heap allocation and dynamic routing overhead. Although `PeerKind::Dyn` has been removed, the runtime execution enum `PeerKind` still contains boxed peer implementations for specialized protocols, which means connecting to HTTP/H2 upstreams still suffers from dynamic heap allocation overhead.
-- **如何改造 (Refactoring Strategy)**:
-  - *Resource Allocation Safety*: Redesign the connection pipeline to bypass heap allocations. Make `PeerKind` a pure, non-boxing enum or replace it entirely with static compile-time generics. Ensure all protocol-specific peer specs (e.g. `HttpPeerSpec`, `H2PeerSpec`) are resolved statically to eliminate runtime pointer chasing and dynamic heap allocations during connection establishment.
-- **影响 (Architectural Impact)**:
-  - Achieves absolute zero heap-allocation connection dispatch, reducing CPU L1 instruction cache misses and GC pressure.
-
-### [TODO-ENTRY-POOL] Remove redundant EntryConnPool mutable Vec
-**Priority**: Low | **Status**: TODO
-
-`EntryConnPool` still stores a writer-side `PoolState { conns, ids }` plus an `ArcSwap` snapshot. Since N is small this is not urgent, but it can be simplified to `ArcSwap` plus a write mutex if it stays useful.
-
-### [TODO-81] Optimize Peek Buffer Copy in ProxyEngine (Zero-Copy)
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-`ProxyEngine::run_stream` executes heap-allocated `Bytes::copy_from_slice` on every incoming stream where protocol is not pre-defined, causing significant GC pressure.
-
-**Fix**:
-Perform zero-copy slice peeking directly from `PeekBufPool` and avoid allocating intermediate `Bytes` wrappers on TCP/passthrough paths.
-
-### [TODO-83] Deconstruct tunnel-lib into targeted sub-crates
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-`tunnel-lib` is a bloated monolithic utility crate blending low-level Relays, QUIC wire types, and Client/Server-specific abstractions.
-
-**Fix**:
-Deconstruct it into smaller, decoupled packages: `tunnel-proto` (wire formats), `tunnel-engine` (relays & ring buffers), and `tunnel-plugins` (extensible plugin interfaces).
-
-### [TODO-85] Async Listener Reconciliation
-**Priority**: Low | **Status**: TODO
-
-**Problem**:
-`sync_listeners` in `server/listener_mgr.rs` uses synchronous Mutex locks and blocks the configuration orchestration thread during massive reloads.
-
-**Fix**:
-Build a dedicated event-driven `AsyncListenerReconciler` executing reconciliation commands asynchronously via command queues. Also resolve the port reuse/binding race condition: ensure that when a port is reloaded or removed, the new socket binding waits for the old listener task to gracefully exit and release the file descriptor, avoiding SO_REUSEPORT traffic splitting and `EADDRINUSE` errors.
-
-
-
-### [TODO-94] Improve JitterBackoff Jitter Range Bounds
-**Priority**: Low | **Status**: Completed
-
-**Fix**:
-已在 `client/tunnel/supervisor.rs` 中通过 `random_delay_range(min_delay, cap)` (其中 `min_delay = cap / 2`) 实现了指数退避的下限控制，从而彻底消除了重试后期的瞬时高频重试风暴问题。
-
----
-
-## 4. QUIC, Transport, and Major Features
-
-### [TODO-26] Native UDP proxy over QUIC Datagram
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-Currently, UDP proxying is a complete feature gap. While Quinn (QUIC) provides native unreliable Datagram (RFC 9221) support for WAN transport, DuoTunnel lacks both Client-side UDP socket binding/multiplexing and Server-side upstream UDP socket proxying and session tracking.
-
-**Fix**:
-1. **Client-side UDP Listener (Ingress/Entry)**:
-   - Implement `UdpListener` binding to configured local UDP ingress ports.
-   - Demultiplex incoming raw UDP packets, map them to an internal session key `(Client_Addr, Target_Addr)`.
-   - Wrap payload with metadata and send them via `quinn::Connection::send_datagram()`.
-2. **Server-side Stateful UDP Session Tracker (Upstream UDP)**:
-   - Implement `UdpSessionManager` storing active ephemeral upstream UDP sockets mapped by `(Client_QUIC_ID, Target_UDP_Addr)`.
-   - On incoming Datagram, reuse or bind a new ephemeral `tokio::net::UdpSocket` and relay via `send_to()`.
-   - For each ephemeral socket, spawn a background tokio task to loop on `recv_from()`, wrap responses, and send them back downstream via QUIC Datagrams.
-3. **UDP Session Idle Eviction (FD leak prevention)**:
-   - Track `last_active` timestamps on sessions.
-   - Run a periodic tick task to evict sessions inactive for > 30 seconds (evicting mapping and closing background sockets to prevent file descriptor leaks).
-
-### [TODO-27] QUIC certificate and 0-RTT persistence
-**Priority**: Medium | **Status**: TODO
-
-Persist server identity material and session ticket encryption keys so restarts do not break trust or disable 0-RTT. Include rotation strategy.
-
-### [TODO-32] Root CA signing mode for generated certs
-**Priority**: High | **Status**: TODO
-
-Current generated/self-signed certificate behavior is expensive and not persistence-friendly. Move to persistent root CA + per-host signing/caching.
-
-### [TODO-24] Multi-endpoint + thread-per-core architecture
-**Priority**: Medium | **Status**: Research
-
-Potential fix for `open_bi()` cross-thread wakeups and endpoint contention at very high QPS. This is an architectural change and should only start after profiling confirms the current runtime layout is the bottleneck.
-
-### [TODO-57] quinn stream-level lock research
-**Priority**: Low | **Status**: Research
-
-Research whether `quinn-proto` stream state can be sharded by stream ID without breaking connection-level flow control and congestion control.
-
-### [TODO-25] io_uring instead of epoll
-**Priority**: Low | **Status**: Deferred
-
-Deferred until native Tokio/io_uring support is mature enough to avoid disrupting the current `Send` task model.
-
-### [TODO-55] quinn ConnectionDriver debug_span per-poll overhead
-**Priority**: Low | **Status**: Deferred pending evidence
-
-Only patch or upstream this if a current flamegraph confirms the span construction is still a real hotspot.
-
-### [TODO-73] Plugin-based IPv6 support and DNS Hijacking connection interceptor
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-The core transport lacks pluggable IPv6-first routing or dynamic DNS intercepting/hijacking, making environment-specific networking setups rigid.
-
-**Fix**:
-1. Implement a pluggable `Resolver` trait (e.g., `Ipv6FirstResolver`) prioritizing AAAA (IPv6) addresses over A (IPv4).
-2. Build a DNS Hijacking `ConnectionModule` that intercept and redirects traffic destined for standard DNS ports during `pre_admission`.
-3. Support enabling/disabling these modules dynamically via YAML configurations.
-
-### [TODO-78] L7 HTTP Connector integration with EgressDnsCache
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-While L4 TCP/WebSocket uses EgressDnsCache, Hyper's L7 HttpConnector still blocks on un-cached synchronous resolver queries during new connection handshakes.
-
-**Fix**:
-1. Create a custom Hyper resolver wrapper utilizing EgressDnsCache.
-2. Inject EgressDnsCache into Hyper's HttpsClient and H2cClient setups.
-
-### [TODO-79] Wildcard Certificate Pre-signing & Handshake Cache for MITM
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-Real-time certificate generation using rcgen during the TLS MITM handshake is CPU-intensive and can cause client timeouts under high load.
-
-**Fix**:
-1. Implement a pre-signing wildcard CA certificate mechanism.
-2. Pre-generate and cache wildcard certificates asynchronously in the background.
-
-### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-High concurrency peaks can cause requests to hang indefinitely in open_bi queue waits, leading to upstream connection pileups and memory exhaustion.
-
-**Fix**:
-1. Enforce a configurable maximum pending queue depth.
-2. Instantly fast-fail excess incoming streams with a 503 or TCP reset when queue limit is exceeded.
-
-### [TODO-89] Support DNS Round-Robin and Fallback in Egress Dns Resolution
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-The DNS resolution in `client/ingress/app.rs` (`resolve_addr`) biasedly picks only the first resolved IP address: `addrs.into_iter().next()`. This completely ignores subsequent A/AAAA records returned by DNS servers, eliminating any capability for DNS-level round-robin load balancing or failover when the first IP is down.
-
-**Fix**:
-1. Retrieve and store all resolved IP addresses.
-2. Implement a fallback loop that tries subsequent IPs if the primary connection attempt fails.
-3. Add optional randomized round-robin selection of the target IP to balance load across upstream records.
-
----
-
-## 5. Performance Ideas and Future Architecture
-
-These are not on the immediate implementation path. Pull one forward only with a benchmark/profile that justifies it.
-
-### [TODO-28] Kernel-level zero-copy relay
-**Priority**: Medium | **Status**: TODO
-
-Evaluate splice/sendfile-style relay on Linux for TCP-heavy paths.
-
-### [TODO-29] Dynamic buffer/window tuning
-**Priority**: Medium | **Status**: TODO
-
-Tune relay buffers and QUIC/TCP windows for high-BDP links.
-
-### [TODO-30] Upstream pre-warming
-**Priority**: Low | **Status**: TODO
-
-Open upstream connections while protocol detection is in progress when the route is predictable enough to avoid wasted dials.
-
-### [TODO-31] VhostRouter wildcard trie/radix tree
-**Priority**: Medium | **Status**: TODO
-
-Move wildcard matching from linear scan to a trie/radix structure if wildcard count becomes large enough to show up in profiles.
-
-### [TODO-35] Two-tier upstream connection pool
-**Priority**: High | **Status**: TODO
-
-Use a small lock-free hot queue plus global pool for local egress TCP connections if upstream connection churn becomes a bottleneck.
-
-### [TODO-37] Seamless graceful handover / hot upgrades
-**Priority**: Medium | **Status**: TODO
-
-Explore listener fd transfer and graceful process replacement for long-lived deployments.
-
-### [TODO-38] Vectorized IO relaying / writev
-**Priority**: High | **Status**: TODO
-
-Combine header/body slices with vectored writes where the parser can preserve source-buffer references safely.
-
-### [TODO-44] Generalized lazy timers
-**Priority**: Medium | **Status**: Partial
-
-H1 keep-alive already has lazy timeout behavior. Generalize only where profiles show timer registration overhead remains meaningful.
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: High-frequency connections (like H1 keep-alive or transport level timeout trackers) register thousands of active timers per second inside the global runtime timer wheel. This creates massive timer lock contention and scheduling overhead under high load. Although H1 keep-alive uses lazy timeout updates, the rest of the proxy (e.g. general read/write timeouts, keep-alive loops, session timers) still registers aggressive active timers on every transaction.
-- **如何改造 (Refactoring Strategy)**:
-  - *Resource Closed-Loop & Smart Timer Management*: Generalize the "lazy timer" pattern. Instead of registering and canceling a distinct `tokio::time::sleep` on every request/transaction, maintain a single, long-running coarse ticking task per connection or thread. Waiting tasks register their deadline onto a lock-free link-list or ring buffer. The tick loop scans the collection at coarser intervals (e.g. 500ms), and cancels expired sessions. Symmetrically clear and drop registered timers when a connection is dropped or closed.
-- **影响 (Architectural Impact)**:
-  - Shrinks the number of active timer registrations inside Tokio's time wheel by orders of magnitude, completely eliminating timer thread spinlocks and scheduler bottlenecks under heavy concurrent load.
-
-### [TODO-39] TCP Fast Open for egress connections
-**Priority**: Medium | **Status**: TODO
-
-Evaluate TFO on local/remote upstream dials.
-
-### [TODO-40] Buffer slab allocator / arena
-**Priority**: Medium | **Status**: TODO
-
-Consider fixed-size thread-local buffer pools beyond current peek buffer reuse if allocation remains hot.
-
-### [TODO-42] Kernel bypass for QUIC
-**Priority**: Low | **Status**: Research
-
-AF_XDP/eBPF experiments only; high complexity and not on the current path.
-
-### [TODO-43] HugePages support
-**Priority**: Low | **Status**: TODO
-
-Evaluate only after memory profiles show TLB/cache pressure from buffers.
-
-### [TODO-45] Zero-copy HTTP header serialization
-**Priority**: Medium | **Status**: TODO
-
-Represent header fields as offsets into the original buffer and pair with vectored writes. Depends on a careful ownership model.
-
-### [TODO-46] Dynamic TCP congestion control and socket tuning
-**Priority**: Low | **Status**: TODO
-
-Expose per-connection/per-upstream socket tuning only if real deployments need it.
-
-### [TODO-47] Memory-efficient load balancing ring
-**Priority**: Low | **Status**: TODO
-
-Only relevant if DuoTunnel grows multi-replica upstream selection where consistent hashing is useful.
-
-### [TODO-86] Eliminate Generic tokio::io::split Lock Contention in Relay Paths
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-Generic stream relays use `tokio::io::split()`, which relies on `Arc<Mutex<...>>` to simulate duplex capability. In high-throughput hot paths, this introduces unnecessary lock contention under concurrent read/write polling.
-
-**Fix**:
-1. Leverage physical, lock-free split mechanisms (like `into_split()` for `TcpStream` and owned halves for `QuinnStream`) across all concrete relay paths.
-2. Minimize or retire generic helpers that force software-lock `tokio::io::split()` in production paths.
-
-
-
-### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
-**Priority**: Medium | **Status**: TODO
-
-**Problem**:
-Although `Instant::now()` is optimized via vDSO on Linux/macOS, high-frequency telemetry (millions of calls per second on hot data relay paths) still incurs significant CPU time/call overhead.
-
-**Fix**:
-Introduce a thread-local or global coarse monotonic clock cache that updates at coarser microsecond intervals to serve as a low-overhead time source for non-strict duration and metrics telemetry.
-
-
-
----
-
-## 6. Bench, CI, and Observability Follow-Ups
-
-### [TODO-CI-1] CI connection matrix
-**Priority**: Low | **Status**: TODO
-
-Run key benchmark cases with `connections=1/2/4` to validate whether multiple QUIC connections actually improve throughput and tail latency.
-
-### [TODO-15] egress_http_post phase boundary annotation
-**Priority**: Low | **Status**: TODO
-
-Fix benchmark chart annotation: `egress_http_post` extends beyond the "Basic" phase box. This affects chart readability, not raw data accuracy.
-
-
-
-## 7. Outstanding Code Review / Audit Tasks (From Archive Reviews)
-
-### [TODO-CR-AUDIT-1] 共享 Arc<TcpListener> 与 SO_REUSEPORT 概念背离
-**Priority**: Low | **Status**: TODO
-**Problem**:
-The cloning of `Arc<TcpListener>` across multiple workers only shares the same underlying socket file descriptor (concurrent polling). True system-level `SO_REUSEPORT` load balancing requires each worker thread to own and bind to its own independent file descriptor.
-
-### [TODO-CR-AUDIT-2] 缓存行填充与堆内存分离的开销权衡 (False Sharing vs Heap Allocation)
-**Priority**: Low | **Status**: TODO
-**Problem**:
-Using `CachePadded<AtomicUsize>` with `Arc` avoids CPU cache invalidation due to false sharing, but forces individual heap allocations. In million-PPS scenarios, these scattered pointer lookups could cause cache misses. Consider flat allocation in contiguous slots.
-
-### [TODO-CR-AUDIT-3] QuicConnectionFatal 的宏观责任划分缺陷
-**Priority**: Medium | **Status**: TODO
-**Problem**:
-`QuicConnectionFatal` is currently hardcoded under `ErrorSource::Internal`. Since QUIC connection drops are often caused by network routing drops or firewall blockades, they should be dynamically categorized as `Upstream`/`Downstream` depending on the request flow direction.
-
-### [TODO-CR-AUDIT-4] 高频 BufReader 用户态双重拷贝 (BufReader Double-Copy) 与内存压力
-**Priority**: Medium | **Status**: TODO
-**Problem**:
-`TcpStream` split read/write and `quinn::RecvStream` are wrapped in `BufReader`, forcing double copying (socket buffer -> heap buffer -> target socket buffer). For plain byte passthroughs, direct read/write loops should bypass user-space caching to reduce instruction cycles.
-
-### [TODO-CR-AUDIT-5] 潜在的整型乘法溢出漏洞
-**Priority**: Low | **Status**: TODO
-**Problem**:
-Standard `mb * 1024 * 1024` multiplication in configuration parsing can overflow and panic or truncate. Ensure all size parameter conversions utilize `saturating_mul` and pre-validation bounds.
-
-### [TODO-CR-AUDIT-6] 高并发连接管理器/线程池配置健壮性检验
-**Priority**: Low | **Status**: TODO
-**Problem**:
-The client configuration allows arbitrary settings for `pool_max_idle_per_host` and thread configurations without safe margins, which could crash the engine on startup or under high load.
-
-### [TODO-CR-AUDIT-7] 高频请求生命周期内 Engine 对象的动态实例化开销
-**Priority**: Low | **Status**: TODO
-**Problem**:
-`handle_work_stream` dynamically instantiates `ClientApp` and `ProxyEngine` on every incoming TCP passthrough request, causing garbage collection pressure. The forwarding engine should be shared/reused as a long-lived service.
-
-### [TODO-CR-AUDIT-8] 敏感凭证泄漏风险 (Security/Log Leakage in AuthError)
-**Priority**: High | **Status**: TODO
-**Problem**:
-`AuthError::Internal` wraps raw `anyhow::Error` which can leak plaintext tokens in trace logs during auth failures. Implement SHA-256 hashing or truncation/masking before logging or propagating auth errors.
-
-### [TODO-CR-AUDIT-9] 池化连接数限制与 WAL 读写并发上限瓶颈
-**Priority**: Medium | **Status**: TODO
-**Problem**:
-The maximum connection pool size for SQLite WAL mode is hardcoded to 5. Under high traffic, this can quickly deplete connection capacity and block incoming authentication requests, creating substantial tail latency.
-
-### [TODO-CR-AUDIT-10] 无条件堆分配的转换行为开销
-**Priority**: Low | **Status**: TODO
-**Problem**:
-The server configuration mapping helper executes extensive `clone()` calls on every HashMap iteration during reload, generating transient memory churn.
-
-### [TODO-CR-AUDIT-11] 极度低效的“Peek + Read_exact 丢弃”双重 I/O 系统调用开销
-**Priority**: High | **Status**: Completed
-
-**Fix**:
-已通过重构 `SniffRuntime::sniff` 消除该开销。当前直接使用原生 `stream.read()` 读取并缓存前缀，无多余系统调用。并在首段完成 `initial_bytes` 的 QUIC 发送，省去了不必要的 `PrefixedReadWrite` 包装与复杂零拷贝机制。
-
-### [TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi
-**Priority**: Medium | **Status**: Completed
-
-**Fix**:
-已在 `tunnel-lib/src/open_bi.rs` 的 `open_bi_guarded` 中，对 `conn.open_bi()` 的等待期注入了 `waiting_for_stream_credit` 的 tracing debug span，使得外部调试工具如 `tokio-console` 能清晰观测挂起协程。
-
-### [TODO-CR-AUDIT-13] Asymmetric Window Coupling in QUIC Configuration
-**Priority**: Medium | **Status**: Completed
-
-**Fix**:
-已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小，使发送与接收窗口可以根据广域网特性实施不对称独立参数调优。
-
-### [TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety
-**Priority**: Low | **Status**: Completed
-
-**Fix**:
-`TokenListEntry` 已经使用强类型轻量级枚举 `ClientStatus` 和 `TokenStatus`。为进一步消除反序列化热路径上的 String 堆分配，我们重构了 `tunnel-store/src/sqlite.rs` 中的字段读取机制，将原本的 `row.get::<String>` 和 `try_get::<String>` 全部优化为直接读取零拷贝的借用型 `row.get::<&str>` / `try_get::<&str>`，完全避开了状态解析中的堆内存分配开销。
-
-### [TODO-CR-AUDIT-15] Incremental / Delta Configuration Push (WatchEvent::Patch)
-**Priority**: High | **Status**: TODO
-**Problem**:
-`WatchEvent::Patch` is currently defined but maps internally to a full `Snapshot` re-push. In large clusters, small routing or token updates force re-sending megabytes of configurations, leading to high CPU and network load spikes.
-**Fix**:
-Implement incremental updates using differential patching or version-pruned updates for `WatchEvent::Patch`.
-
-### [TODO-CR-AUDIT-16] False Global Bottleneck in Forwarding Engine Buffer Pool
-**Priority**: High | **Status**: TODO
-
-**Problem**:
-In `engine/copy.rs`, the thread-local buffer pool `LOCAL_POOL` falls back to `global_pool().lock()` when empty or if the capacity does not match. Under massive concurrent forwarding workloads, this `parking_lot::Mutex` becomes a central bottleneck, causing serious CPU thread starvation and high latency spikes.
-
-**Fix**:
-1. Remove the global `Mutex<Vec<Vec<u8>>>` buffer pool.
-2. Use a lock-free concurrent queue (such as `crossbeam_queue::SegQueue`) for global fallback buffers, or increase the local capacity limit to 256.
-
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Thread-local buffering is designed to avoid locks in the hot data relay path. However, when the local pool of 8 elements is exhausted, falling back to a standard global Mutex creates a false illusion of scalability, transferring the contention directly to a single CPU lock.
-- **如何改造 (Refactoring Strategy)**: Shift from lock-based sharing to a completely lock-free segment queue (`SegQueue`) or thread-local expansion to guarantee wait-free buffer allocation under maximum concurrent streams.
-- **影响 (Architectural Impact)**: Eliminates thread contention on global buffer allocation, ensuring linear scaling of data plane throughput across multiple CPU cores.
+## 🚨 Phase 0: 关键安全防御、死锁修复与日志脱敏 (Critical Security & Stability)
 
 ### [TODO-CR-AUDIT-17] DashMap Lock Ordering Inversion in Client Registry
-**Priority**: Critical | **Status**: TODO
+* **Priority**: Critical | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**: 
+  在 [registry.rs](file:///Users/sexy/Documents/GitHub/duotunnel/server/src/registry.rs) 中，`replace_or_register` 函数通过 `.entry()` 获取了 `groups` DashMap 桶上的写锁，在持有该锁的同时，又尝试获取 `clients` DashMap 条目的写锁。这种嵌套锁的顺序在并发注册和注销时极易造成严重的运行时死锁，导致整个控制面服务挂起。
+* **Fix**:
+  避免嵌套锁住不同的 `DashMap` 或互斥结构。先从 `groups` 提取所需字段并显式释放该桶的写锁 guard，之后再对 `clients` 进行后续的写操作，确保锁级别平铺。
 
-**Problem**:
-In `server/registry.rs`, `replace_or_register` acquires a write lock on the `groups` DashMap bucket via `.entry()`, and while holding it, attempts to acquire a write lock on the `clients` DashMap entry. This lock ordering inversion can easily lead to a fatal runtime deadlock under concurrent client registration and unregistration.
+### [TODO-CR-AUDIT-18] Sniffer Slowloris Vulnerability in Protocol Detection (5s Timeout)
+* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Problem**: 
+  在协议探测模块中，`SniffRuntime::sniff` 循环读取入站数据流块来探测应用层协议（HTTP/1.1, H2c, TLS SNI）。然而，该过程缺乏绝对的时间超时限制。恶意客户端可以通过无限慢的速度发送极少字节（Slowloris 慢速攻击），让探测协程无限期 `Pending` 在 `stream.read()`，从而耗尽服务器的所有接收 Worker 资源。
+* **Fix**:
+  在 [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/egress/listener.rs) 与服务端的 Ingress 调度中，使用 `tokio::time::timeout(Duration::from_secs(5), ...)` 对嗅探操作包裹硬超时逻辑，超时未判定则立即断开。
 
-**Fix**:
-Avoid nesting locks on distinct `DashMap` or `Mutex` structures. Extract required fields from `groups`, drop the entry write lock explicitly, and then perform operations on `clients`.
+### [TODO-CR-AUDIT-8] 敏感凭证泄漏风险 (Security/Log Leakage in AuthError)
+* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  `AuthError::Internal` 内部直接包裹了 `anyhow::Error` 的原始上下文。当客户端授权失败触发异常日志时，敏感的明文 Auth Token 会伴随调用栈或者错误信息被直接输出到 Trace/Error 日志中，产生凭证泄露风险。
+* **Fix**:
+  在输出日志或向外部传播 Auth 错误之前，对 Token 执行 SHA-256 哈希或前缀截断掩码（如 `Token: abc...xyz`），禁止打印原始敏感明文。
 
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: DashMap bucket locks are held implicitly as long as `Entry` references (`RefMut`) are in scope. Doing cross-map operations inside the scope of another map's entry lock naturally results in circular lock dependencies.
-- **如何改造 (Refactoring Strategy)**: Strictly isolate the scopes of different DashMap operations. Fetch/rebuild values in localized scopes, drop locks immediately, and execute consecutive updates sequentially rather than nested.
-- **影响 (Architectural Impact)**: Guaranteed deadlock-free client registration and unregistration, securing high system availability under massive connection churn.
+---
 
-### [TODO-CR-AUDIT-18] Sniffer Slowloris Vulnerability in Protocol Detection
-**Priority**: High | **Status**: TODO
+## 🚀 Phase 1: 核心用户态零拷贝、内存池与高并发连接管理 (High Priority: Performance & Zero-Copy)
 
-**Problem**:
-In `sniff.rs`, the `SniffRuntime::sniff` loop reads incoming data stream chunks to detect protocols (HTTP/1, H2c, TLS SNI). However, it lacks an absolute temporal timeout constraint. A slow-sending malicious client can keep the sniffer task indefinitely `Pending` on `stream.read()`, causing resource exhaustion (Slowloris attack).
+### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
+* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  在 [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 中，Thread-local 的 `LOCAL_POOL` 在空或容量不匹配时会退退到全局的 `global_pool()`。目前 `global_pool()` 虽然是无锁的 `crossbeam_queue::SegQueue`，但代码中加入了 `global.len() < 256` 限制判断。**在 `SegQueue` 上调用 `len()` 是 $O(N)$ 复杂度的操作（需要遍历链表）**，高并发下这会导致严重的 CPU 缓存行争用和毛刺。
+* **Fix**:
+  彻底废除基于全局 SegQueue 且带有 $O(N)$ `len()` 判定限制的缓冲池，改用有界的、`len()` 为 $O(1)$ 的无锁并发 MPMC 队列 `crossbeam_queue::ArrayQueue<Vec<u8>>`。如果队列满则直接 drop 交给 GC，消除全局临界区争用。
 
-**Fix**:
-Wrap the sniffing operation in `client/egress/listener.rs` and `server` in a hard timeout (e.g., `Duration::from_secs(3)`) using `tokio::time::timeout`.
+### [TODO-97] Buffer pool capacity lax matching & uninitialized allocation
+* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 中的 `take_buffer` 使用了 `buf.capacity() == buffer_size` 强对齐匹配，造成不同 buffer_size 容器在池中大量失效并重新分配。另外，`resize` 操作无意义地对缓存 Vec 进行了 memset 置零，增加了总线吞吐负担。
+* **Fix**:
+  1. 将匹配条件放宽到 `buf.capacity() >= buffer_size`。
+  2. 取出后使用 `unsafe { buf.set_len(buffer_size) }` 替代 `resize(..., 0)`（后续读系统调用会立即覆盖这片内存，无安全泄露风险）。
 
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Sniffer restricts only read byte count and round limits, but not time. Slow networks or slow-rate attackers can easily leverage this to tie down worker threads and exhaust connection slots.
-- **如何改造 (Refactoring Strategy)**: Enforce a strict edge admission timeout. Any connection that fails to present a recognizable protocol preamble within 3 seconds is immediately dropped.
-- **影响 (Architectural Impact)**: Significantly hardens the edge proxy against slowloris resource-exhaustion attacks, ensuring resilience under hostile network conditions.
+### [performance_optimization_proposal.md §1] L7 Zero-Copy Body Streaming
+* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  L7 HTTP/1.x 转发中，网关需要将 Quinn 的 QUIC 数据流读取并写入 TCP 接口。目前仍然通过多步带内存拷贝的 Buffer 方式中转。
+* **Fix**:
+  在 `h1.rs` 和 `egress/http.rs` 的 Body 转发中，将 `recv.read()` 改为 `recv.read_chunk()`。Quinn 的 `read_chunk` 直接返回 RC 引用计数的 `bytes::Bytes`，可以绕过用户态缓冲区中转，实现真正的零拷贝网络数据中转。
 
-### [TODO-CR-AUDIT-19] Control Plane DB Connection Storm Rate-Limiting
-**Priority**: High | **Status**: TODO
+### [performance_optimization_proposal.md §2] L7 Zero-Copy Chunked Response Writer
+* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  在序列化 HTTP 分段响应（Chunked Response）时，由于需要计算并拼接十六进制的 Chunk 长度以及 `\r\n`，系统常会创建额外的中间缓冲区进行拷贝拼接。
+* **Fix**:
+  消除中间缓冲区拷贝。直接使用 stack-allocated 的前缀数组（约 32 字节）写入 hex 长度与 `\r\n`，随后直接 `write_all(chunk)` 写入主体负载，由 Quinn 在更底层自动拼包发送，实现 Payload 部分的零拷贝。
 
-**Problem**:
-The control plane lacks rate-limiting mechanisms on client registration and query routing. During wide-area network reconnect storms, thousands of edge nodes querying SQLite databases simultaneously will quickly exhaust SQLite connection pools and WAL limits, leading to gateway query failures.
+### [TODO-81] Optimize Peek Buffer Copy in ProxyEngine (Zero-Copy)
+* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**: 
+  `ProxyEngine::run_stream` 在判断应用层协议时，如果协议不是预定义的，会在每一条入站 Stream 上执行一次堆分配的 `Bytes::copy_from_slice` 拷贝，增加了 GC 压力。
+* **Fix**: 
+  改为直接从 [peek_buf.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/peek_buf.rs) 的 `PeekBufPool` 借出 raw slice 进行探测，避免在 TCP/Passthrough 路径上为了打包而创建和分配中间 `Bytes` 包装。
 
-**Fix**:
-Implement an active rate-limiting filter or token bucket on the control plane gRPC/HTTP API interface before executing database queries.
+### [TODO-104] EgressDnsCache global Mutex lock removal via DashMap & Single-Flight
+* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  在 [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/dns_cache.rs) 中，`EgressDnsCache` 使用了单一全局异步锁 `write_lock: tokio::sync::Mutex<()>` 来协调所有 DNS 未命中的解析，导致不同域名的并发查询全部串行化。此外，每次缓存更新都需要 clone 整个 `HashMap` 以便用 `ArcSwap` 替换，在大量域名解析时造成高内存分配开销。
+* **Fix**:
+  1. 移去全局 `write_lock`，将内部的 `ArcSwap<HashMap<...>>` 替换为并发安全的 `DashMap`。
+  2. 实现 Single-Flight 机制（基于 `broadcast::channel`），使对于同一个域名的 concurrent 查询仅发起一次真实外发 DNS 查询，其余并发请求共同等待该结果，但不同域名解析互不干扰地并行运行。
 
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Edge stateless nodes offload database pressure to the control plane, but without admission control, reconnect storms will push the database to its concurrency limits.
-- **如何改造 (Refactoring Strategy)**: Establish a token-bucket rate limiter at the ingress of control plane APIs, rejecting excess sync requests with structured backoff instructions.
-- **影响 (Architectural Impact)**: Protects SQLite database pools from cascading failures, ensuring the control plane remains stable during cluster-wide network recoveries.
+### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
+* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  Egress（客户端到服务器）路径在同一 QPS 下时延迟明显偏高，主要是因为 TCP/WebSocket 的热路径上缺乏 upstream TCP 连接复用池，导致每次都进行完整的物理连接握手。
+* **Fix**:
+  1. 引入轻量级、无锁的 TCP 连接池，供 L4 Egress 复用。
+  2. 设置最大空闲连接数与 `idle_timeout`。通过后台协程定期发送空包探测或 Keepalive，及时从连接池中剔除已死物理连接。
 
-### [TODO-CR-AUDIT-20] Fuzz Testing for Sniffing and Lock-Free Structures
-**Priority**: Medium | **Status**: TODO
+### [TODO-76] Client-side local egress rule evaluation and early truncation
+* **Priority**: High | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Problem**:
+  目前 Egress 出站路由规则是在服务端（`ServerEgressMap`）进行最终判定的。如果某个 Host 不匹配出站规则，客户端仍然会建立 QUIC 连接/流发送数据，然后被服务端以 `route_not_found` 拒绝，这浪费了 WAN 带宽与 QUIC 连接流资源。
+* **Fix**:
+  1. 将 Egress 规则下发到客户端的配置中。
+  2. 在 [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/egress/listener.rs) 中，于嗅探出 Host 后，立即在客户端本地匹配出站规则。
+  3. 若不匹配，则本地直接截断并断开 TCP 连接（返回 502/404 等），拒绝发起 QUIC Stream；同时服务器端保留最终防御判定（防篡改）。
 
-**Problem**:
-DuoTunnel parses raw application preambles (HTTP/1, H2c, TLS SNI) and uses lock-free `ArcSwap`/`InflightTable` registry structures. These hot components are prone to subtle parsing panics or lock-free concurrency memory safety bugs, yet they completely lack fuzzing validation.
+### [TODO-82] Decouple SQLite from Edge Server (Stateless Edge)
+* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  边缘节点 `server` 仍然需要直接编译 SQLite 驱动并查询 local `tunnel-store` 数据库，阻碍了边缘节点的去状态化横向伸缩。
+* **Fix**:
+  彻底解耦边缘节点的 SQLite 依赖，使其变成无状态节点。通过轻量级的 gRPC/HTTP 客户端，向中心控制面动态获取路由策略与鉴权凭证。
 
-**Fix**:
-Integrate `cargo-fuzz` and write target fuzzer test suites for `sniff.rs` protocol parsers and concurrent `SelectedConnection` registry loops.
+### [TODO-26] Native UDP proxy over QUIC Datagram
+* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  目前缺乏 UDP 代理的支持。虽然 Quinn 支持底层的不可靠 Datagram (RFC 9221)，但 DuoTunnel 尚未实现客户端 UDP 监听解包与服务端 UDP 会话保持与老化淘汰。
+* **Fix**:
+  1. **客户端 UDP 监听**：实现 `UdpListener`，将接收到的 UDP 数据包映射为会话键并打包送入 `quinn::Connection::send_datagram()`。
+  2. **服务端会话管理器**：绑定临时 `tokio::net::UdpSocket` 投递给 Upstream，并起后台 Task 监听回包转发给客户端。
+  3. **老化淘汰机制**：对 >30 秒无流量的 UDP socket 执行超时清理。
 
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Hand-crafted byte-level sniffers are highly vulnerable to malicious payloads. Standard unit tests cannot explore the space of malformed byte structures.
-- **如何改造 (Refactoring Strategy)**: Implement LibFuzzer targets feeding arbitrary byte sequences into `detect_protocol_and_host` and concurrent registry write loops.
-- **影响 (Architectural Impact)**: Discovers edge parsing panics and concurrency state mismatches proactively, securing robust production deployments.
+### [TODO-32] Root CA signing mode for generated certs
+* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  当前自签证书逻辑在每次请求时消耗大量 CPU，且对持久化不友好。
+* **Fix**:
+  将生成逻辑改造为：一次性建立持久化的 Root CA，后续根据不同 Host 异步动态生成、签署并缓存二级证书。
+
+### [TODO-53D] Remove legacy static token map
+* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  阶段 A-C 已经完成。剩余阶段 D 需要清理并彻底移除 server 配置中遗留的静态 token map。
+
+### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
+* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Problem**:
+  在并发高峰期，请求可能会在 open_bi 队列上无限期排队等待，引起 upstream 协程淤积和内存爆满。
+* **Fix**:
+  限制配置的最大排队深度。超过该队列阈值时，直接快速失败（Fast-Fail）丢弃或响应 503。
 
 ### [TODO-CR-AUDIT-21] SIGTERM Graceful Connection Draining
-**Priority**: High | **Status**: TODO
+* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Problem**:
+  Server 和 Client 均缺乏优雅停机机制，SIGTERM 信号会引发粗暴的进程退出，瞬间掐断成千上万个活跃会话。
+* **Fix**:
+  接入 `tokio::signal`，捕获 SIGTERM/SIGINT，停止接受新连接，并给存量会话设定最长可能如 30 秒的优雅漏斗释放时长。
 
-**Problem**:
-The server and client binaries lack standard signal handling and graceful connection draining. A `SIGTERM` kills processes abruptly, cutting off thousands of active client streams and causing immediate transaction failures.
+### [TODO-35] Two-tier upstream connection pool
+* **Priority**: High | **Status**: TODO | **Track**: Performance Ideas
+* **Fix**:
+  本地 Egress 侧采用“无锁热队列”加“全局冷池”的两级长连接连接池模型，减少连接竞争。
 
-**Fix**:
-Implement signal traps for `SIGTERM`/`SIGINT`, invoke graceful shutdown, stop accepting new connections, and wait for existing streams to complete or reach a maximum draining timeout.
+### [TODO-64] ClientId / GroupId / ProxyName / ReuseHash newtypes
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Problem**:
+  系统热路径（例如 registry、连接池、h2c）上依然使用裸 `String` / `Arc<str>` 作为 ID 标识，在多核处理器并发哈希和克隆时造成高开销，且缺乏强类型约束。
+* **Fix**:
+  引入专门的强类型 Newtype 封装（如 `ClientId`、`GroupId`、`ProxyName`、`ReuseHash`）。在内存热路径中使用轻量级包装，只在输入/输出的边界层做 String 编解码转换。
 
-**Closed-Loop & Resilience Paradigm Analysis**:
-- **前因后果 (Context & Background)**: Abrupt process termination damages service reliability and transactional integrity. Edge nodes need symmetric connection draining before restarts.
-- **如何改造 (Refactoring Strategy)**: Capture system signals, use `CancellationToken` to stop accept loops immediately, allow ongoing streams to finish, and force-kill remaining connections after a 30-second grace window.
-- **影响 (Architectural Impact)**: Achieves zero-downtime rolling deployments, ensuring client traffic is completely uninterrupted during edge server upgrades.
+---
 
+## 🧱 Phase 2: 协程与局部性优化、长连接生命周期与架构重构 (Medium Priority: Sessions)
+
+### [TODO-98] Bind buffer lifecycle to async tasks (Cache hit improvement)
+* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  在多线程 Tokio 协程调度下，中继 Task 经常会被 work-stealing 窃取到其他 CPU 核心执行。而目前的 `LOCAL_POOL`（`copy.rs`）是严格绑定在 Thread Local 上的。一旦 Task 被窃取到新线程，它在原线程 TLS 归还的 buffer 就会变成“冷池”，而在新线程需要重新从 TLS 获取，这会导致 **CPU L1/L2 缓存局部性变差**。
+* **Fix**:
+  重构 `relay_inner`，将两个方向的中继缓冲区生命周期直接通过 struct/Future 字段与中继 Task 绑定。让 Buffer 实体作为状态机一部分，随着 Task 本身在核心间调度转移，彻底解决 Thread-Local 缓冲池冷化问题。
+
+### [TODO-20] Bytes::copy_from_slice -> split_to().freeze() (消减 HTTP 驱动拷贝)
+* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  HTTP 转发在部分 H1 驱动中仍然执行了冗余的 `copy_from_slice` 动作，生成了新的堆分配。
+* **Fix**:
+  在保证生命周期和 Buffer 回收安全的前提下，将其全部改写为引用计数的 `BytesMut::split_to().freeze()`。
+
+### [TODO-22 / TODO-34 / TODO-86] 消除中继路径上的 Generic tokio::io::split 锁竞争
+* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  中继核心接口使用的是 Tokio 提供的通用 `tokio::io::split(stream)`。该通用接口在内部使用 `BiLock<Mutex>` 锁来在 Generic 抽象上模拟全双工，高负载下会导致严重的多核 CPU 锁争用。
+* **Fix**:
+  针对具体的套接字类型进行直接的类型特化。TCP 连接直接使用 `stream.into_split()`（操作系统层面的 FD 拆分），QUIC 连接直接使用拥有的 `SendStream` 和 `RecvStream`。避免引入任何用户态包装级互斥锁。
+
+### [TODO-77] Unified multi-protocol session handling inspired by Pingora
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Proposed Architectural Directions**:
+  * **方案 A**: 使用类似 Pingora 的 `DownstreamSession` Enum 封装 H1, H2, WS。利用 hyper 的底层 `http1::handshake` 获取 Upstream，用 low-level API 控制写入，支持灵活重试及 WebSockets 降级。
+  * **方案 B**: 极度简化的、针对 DuoTunnel 特化的 L4 级透传 async 方法。
+
+### [TODO-67b] Move keep-alive loop into Session layer
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Problem**:
+  H1 Keep-Alive 逻辑与 upstream 描述和建连代码耦合严重。
+* **Fix**:
+  创建 `H1Session` / `H2Session` 等生命周期宿主，使重试判定与会话逻辑拥有清晰的作用域。
+
+### [TODO-68] Ingress request lifecycle convergence
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Fix**:
+  收敛 h2c per-connection request 生命周期的异常重试逻辑，与 TLS/H1 通路对齐。
+
+### [TODO-62] Full per-peer protocol capability memory
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Problem**:
+  对上游节点的协议能力缺乏可靠的缓存记忆。遇到 ALPN 或 h2c 回退时，每次新请求都会试探并出错，带来严重的瞬时延迟和请求毛刺。
+* **Fix**:
+  实现一个全局 TTL 协议记忆组件（例如 `ArcSwap<HashMap<PeerKey, ProtocolCapability>>`），记录可用 ALPN 结果。当下游/上游 TLS 降级时立即刷新，避免再次探测产生黑洞。
+
+### [TODO-78] L7 HTTP Connector integration with EgressDnsCache
+* **Priority**: High | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Fix**:
+  让 Hyper 的 L7 HttpConnector 在建连时不再阻塞进行同步解析，改用自定义解析器注入 `EgressDnsCache`。
+
+### [TODO-79] Wildcard Certificate Pre-signing & Handshake Cache for MITM
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Fix**:
+  引入预生成通配符 CA 证书的机制，并在后台异步签署、缓存它们，解决实时生成 rcgen 对 CPU 的重度挤占问题。
+
+### [TODO-100] HTTP/2 over QUIC Selective Native Multiplexing Mode
+* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Fix**:
+  增加配置化多路复用选项。支持多流 H2 复用单一 QUIC 流（unary gRPC 延迟优），或对于大文件传输直接开启独立原生 QUIC 流（避免 H2 窗口阻塞）。
+
+### [TODO-84] Event-driven Control Plane DB Synchronization
+* **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  `tunnel-service` 使用 1500ms 的强轮询 `db_poll_task` 来同步数据更改。
+* **Fix**:
+  利用 SQLite 的 WAL 变更通知或文件系统锁变化（notify）机制，将拉取模式（Pull）改造为事件驱动（Push）推送。
+
+### [TODO-99] TLS certificate watch and hot reload
+* **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  更新证书目前需要物理重启 DuoTunnel 进程。
+* **Fix**:
+  配合 `notify` 监听本地证书文件的改变，在不切断存量连接的情况下动态 Swap acceptor。
+
+### [TODO-83] Deconstruct tunnel-lib into targeted sub-crates
+* **Priority**: Medium | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `tunnel-lib` 库趋向庞大混乱，混合了协议、中继以及 Client/Server 的具体实现。
+* **Fix**:
+  拆分为 `tunnel-proto` (协议帧), `tunnel-engine` (复制中继) 与 `tunnel-plugins` (接口插件)。
+
+### [TODO-96] JoinSet task lifetime tracking
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+* **Problem**:
+  散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。
+* **Fix**:
+  引入一个对 `JoinSet` 的弱 Arc 引用包装器，确保当父服务被 drop 之后，所有派生的异步协程自动级联 `abort_all` 取消。
+
+### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
+* **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Problem**:
+  即使有 vDSO 优化，在高频（每秒百万包）数据包中继流中调用 `Instant::now()` 获取指标时间仍会占据不少的 CPU 时间比例。
+* **Fix**:
+  设计一个微秒级更新的 thread-local 或全局粗粒度单调时钟缓存（Coarse Monotonic Clock），用于高频遥测下的时间戳计算，降低对 OS 内核的访问频次。
+
+### [TODO-CR-AUDIT-3] QuicConnectionFatal 的宏观责任划分缺陷
+* **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Fix**:
+  对 `QuicConnectionFatal` 异常进行细化归类，结合上下文流向区分其具体是属于 `Upstream` 还是 `Downstream`，防止由于网络异常误报核心故障。
+
+### [TODO-CR-AUDIT-4] 高频 BufReader 用户态双重拷贝 (BufReader Double-Copy) 与内存压力
+* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  `quinn::RecvStream` 常常被包在 `BufReader` 中，引发了无意义的双重拷贝（OS Socket -> 堆内存 Buffer -> 目的 Socket）。
+* **Fix**:
+  对于纯 Passthrough 流量，直接使用裸的 `read_buf` 循环写入，绕过 `BufReader` 这一层用户态中间缓存。
+
+### [TODO-27] QUIC certificate and 0-RTT persistence
+* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
+* **Fix**:
+  持久化服务端的身份凭证与 Session 门票加密 key，使得服务重启不会使客户端的 0-RTT 回退。
+
+### [TODO-73] Plugin-based IPv6 support and DNS Hijacking connection interceptor
+* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
+* **Fix**:
+  实现插拔式的 `Ipv6FirstResolver` 插件，以及可在 admission 阶段重定向 DNS 端口流量的劫持模块。
+
+### [TODO-89] Support DNS Round-Robin and Fallback in Egress Dns Resolution
+* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  目前的 `resolve_addr` 仅仅使用了解析地址列表的第一个 IP (`addrs.into_iter().next()`)。如果第一个 IP 失联，整个请求将挂掉。
+* **Fix**:
+  返回所有 IP 记录，并在连接首选 IP 失败时支持 Failover 回退尝试后备 IP；支持随机轮询负载均衡。
+
+### [TODO-CR-AUDIT-20] Fuzz Testing for Sniffing and Lock-Free Structures
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+* **Problem**:
+  DuoTunnel 核心逻辑直接暴露在未经校验的物理协议嗅探数据下，并且用到了许多复杂的无锁结构（如 `ArcSwap`/`InflightTable`），缺少模糊测试以确保鲁棒性。
+* **Fix**:
+  集成 `cargo-fuzz` 框架，为嗅探器和并发无锁表单独设计模糊测试靶标。
+
+### [TODO-24] Multi-endpoint + thread-per-core architecture
+* **Priority**: Medium | **Status**: Research | **Track**: Future/Research & CI
+* **Fix**:
+  为解决超大规模并发下 `open_bi` 的跨线程唤醒及端点锁竞争，探索 thread-per-core 架构的实现。
+
+---
+
+## 🍃 Phase 3: 前瞻性性能实验与长尾微调 (Low Priority & Research)
+
+### [TODO-51] LocalTokenCache incremental updates
+* **Priority**: Low | **Status**: TODO | **Track**: Control Plane & Config
+* **Fix**:
+  引入 `WatchEvent::TokenDelta { added, removed }` 实现局部的增量缓存 patch，而不用在每次小变动时全量 clone 重建大 HashMap。
+
+### [TODO-CR5] Config stream model
+* **Priority**: Low | **Status**: TODO | **Track**: Control Plane & Config
+* **Fix**:
+  从 pull 式的 snapshot 加载机制转向响应式的 `Stream<Item = RoutingSnapshot>` 订阅管道。
+
+### [TODO-102] Verify aws-lc-rs ALPN feature consistency in hyper-rustls
+* **Priority**: Low | **Status**: TODO | **Track**: Control Plane & Config
+* **Fix**:
+  对齐依赖包。检查并确保 `hyper-rustls` 和 Quinn 均只调用同一个 `aws-lc-rs` 密码引擎，防止编译进双份不同的加密组件，减小最终二进制的体积与常驻内存。
+
+### [TODO-101] Optional user-space spin-polling for copy loops
+* **Priority**: Low | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  Tokio 的默认 `epoll` 线程唤醒存在 10–20 微秒的固有延迟。
+* **Fix**:
+  支持配置自旋。在空闲时先调用 `.try_read()` 轮询自旋数十微秒（如 50us），若实在无包再释放控制权挂起，以硬件换极致低时延。
+
+### [TODO-CR4] Decouple observability from business hot paths
+* **Priority**: Low | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Fix**:
+  减少在热路径上直接调用 metrics。利用 trace 事件以非阻塞的 channel 异步收集指标，保证不在 Tracing 锁下更新 metrics 计数器。
+
+### [TODO-52] Route snapshot connection-level cache for H2
+* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
+* **Fix**:
+  在 H2 长连接范围中直接缓存 `Arc<RoutingSnapshot>`，防止重复读取。
+
+### [TODO-36] Finish static dispatch cleanup
+* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `PeerKind` 等运行时执行层依然保有 boxed upstream peer（动态堆分配封装）。
+* **Fix**:
+  用纯非 box 化的 Enum 或静态泛型将连接流水线全部重构为编译期静态分派，消灭虚函数及堆分配。
+
+### [TODO-ENTRY-POOL] Remove redundant EntryConnPool mutable Vec
+* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
+* **Fix**:
+  清理 `EntryConnPool` 的写侧缓存结构，简化为 `ArcSwap` 结合写锁控制。
+
+### [TODO-85] Async Listener Reconciliation
+* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  配置热加载重载监听器端口时，`sync_listeners` 使用了同步阻塞 Mutex，阻碍了编排协程。
+* **Fix**:
+  设计 `AsyncListenerReconciler` 以异步队列处理重绑定；并修复端口解绑时的 race 竞争，防止原 socket 没来得及释放导致的新连接 bind `EADDRINUSE` 故障。
+
+### [TODO-103] Expose active slowpath waiting tasks metric on /metrics
+* **Priority**: Low | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Fix**:
+  将内存中用于主动降级防御的慢速排队任务计数 `slowpath_waiting_tasks` 暴露给 Prometheus 端点。
+
+### [TODO-CR-AUDIT-1] 共享 Arc<TcpListener> 与 SO_REUSEPORT 概念背离
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  克隆 `Arc<TcpListener>` 在工作 Worker 之间只是共享同一个底层 Socket FD。真实的 `SO_REUSEPORT` 需要每个 Worker 独立绑定属于自己的独立文件描述符以做真正的内核负载分发。
+
+### [TODO-CR-AUDIT-2] 缓存行填充与堆内存分离的开销权衡 (False Sharing vs Heap Allocation)
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  使用 `CachePadded<AtomicUsize>` 包裹 `Arc` 可以防 False Sharing，但引发了多余的堆分配。
+
+### [TODO-CR-AUDIT-5] 潜在的整型乘法溢出漏洞
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  配置项中 `mb * 1024 * 1024` 的溢出可能导致恐慌。建议使用 `saturating_mul` 进行安全乘法保护。
+
+### [TODO-CR-AUDIT-6] 高并发连接管理器/线程池配置健壮性检验
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  参数缺少合理的静态验证边界。
+
+### [TODO-CR-AUDIT-7] 高频请求生命周期内 Engine 对象的动态实例化开销
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  在每次 TCP 连接请求时都会动态 new 出 `ClientApp` 与 `ProxyEngine` 对象，引起轻微的堆内存抖动。
+
+### [TODO-PARAM-1] Unified parameter configuration schema
+* **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
+* **Fix**:
+  根据 [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md) 进一步细化和合并 timeout、重连退避机制等字段。
+
+### [TODO-57] quinn stream-level lock research
+* **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
+
+### [TODO-25] io_uring instead of epoll
+* **Priority**: Low | **Status**: Deferred | **Track**: Future/Research & CI
+
+### [TODO-55] quinn ConnectionDriver debug_span per-poll overhead
+* **Priority**: Low | **Status**: Deferred pending evidence | **Track**: Future/Research & CI
+
+### [TODO-28] Kernel-level zero-copy relay
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+* **Fix**:
+  在单纯 TCP 的 Passthrough 通路上，在 Linux 下利用 splice/sendfile进行试验性零拷贝加速。
+
+### [TODO-29] Dynamic buffer/window tuning
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-30] Upstream pre-warming
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-31] VhostRouter wildcard trie/radix tree
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-37] Seamless graceful handover / hot upgrades
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-39] TCP Fast Open for egress connections
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-40] Buffer slab allocator / arena
+* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-42] Kernel bypass for QUIC
+* **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
+
+### [TODO-43] HugePages support
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-46] Dynamic TCP congestion control and socket tuning
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-47] Memory-efficient load balancing ring
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-CI-1] CI connection matrix
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-15] egress_http_post phase boundary annotation
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI

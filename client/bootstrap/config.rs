@@ -199,7 +199,7 @@ impl Default for ReconnectConfig {
         }
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ClientConfigFile {
     pub server_addr: String,
     pub server_port: u16,
@@ -233,6 +233,35 @@ pub struct ClientConfigFile {
     pub reconnect: ReconnectConfig,
     #[serde(default)]
     pub overload: OverloadConfig,
+}
+
+impl std::fmt::Debug for ClientConfigFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked_token = if self.auth_token.starts_with("dt_") && self.auth_token.len() >= 10 {
+            "dt_masked_...".to_string()
+        } else {
+            "***".to_string()
+        };
+        f.debug_struct("ClientConfigFile")
+            .field("server_addr", &self.server_addr)
+            .field("server_port", &self.server_port)
+            .field("auth_token", &masked_token)
+            .field("log_level", &self.log_level)
+            .field("trace_enabled", &self.trace_enabled)
+            .field("entry", &self.entry)
+            .field("metrics_port", &self.metrics_port)
+            .field("tls_skip_verify", &self.tls_skip_verify)
+            .field("tls_ca_cert", &self.tls_ca_cert)
+            .field("tls_server_name", &self.tls_server_name)
+            .field("allow_insecure_fallback", &self.allow_insecure_fallback)
+            .field("quic", &self.quic)
+            .field("tcp", &self.tcp)
+            .field("http_pool", &self.http_pool)
+            .field("proxy_buffers", &self.proxy_buffers)
+            .field("reconnect", &self.reconnect)
+            .field("overload", &self.overload)
+            .finish()
+    }
 }
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {

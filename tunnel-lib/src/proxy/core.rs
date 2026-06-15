@@ -67,7 +67,12 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             let pool = stream_peek_pool();
             let runtime =
                 SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
-            let sniffed = runtime.sniff(&mut recv, pool).await?;
+            let sniffed = match tokio::time::timeout(std::time::Duration::from_secs(5), runtime.sniff(&mut recv, pool)).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Err(anyhow::anyhow!("protocol sniffing timed out on QUIC stream"));
+                }
+            };
             if sniffed.bytes_read > 0 {
                 (sniffed.hint.protocol, Some(sniffed.prefix.into_bytes()))
             } else {

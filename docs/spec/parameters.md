@@ -13,6 +13,7 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **EMFILE backoff** | `client/egress/listener.rs`: `EMFILE_BACKOFF_MS` | 100ms | ❌ (client 常量) / `overload.emfile_backoff_ms` (server) | errno 24 (Too many open files) 时暂停 Accept | 日志: `entry accept: too many open files, backing off` |
 | **peek_buf_size** | `PeekBufPool::new(size)` | 16 KiB | `proxy_buffers.peek_buf_size` | 缓冲区不足会导致协议识别失败 (Protocol::Unknown) | 日志: `detected protocol: Unknown`; 代码见 `core.rs:48` |
 | **http_header_buf_size** | `Http1Driver` header 解析缓冲 | 8 KiB | `proxy_buffers.http_header_buf_size` | HTTP header 最大尺寸；过小会拒绝带大 Cookie 的请求 | 代码见 `proxy_buffers.rs:18` |
+| **sniff_timeout_ms** | `SniffRuntime::sniff` 嗅探超时 | 默认: 5000ms | `proxy_buffers.sniff_timeout_ms` | 协议识别的最大时间预算；超时会主动断开以防御 Slowloris 攻击 | 日志: `protocol sniffing timed out`; 见各 `sniff` 包装 |
 | **entry.port / http_entry_port** | client `EntryConfig.port` / client 顶层 `http_entry_port` | None / 未启用 | `entry.port` / `http_entry_port` | Client 本地 TCP/HTTP 入口端口；未配置则不起入口 | `config/client.yaml:19` |
 | **metrics_port** | server/client runtime startup | None | `metrics_port` (client 顶层 / server `server.metrics_port`) | Prometheus 指标端点；None = 不暴露 | `server/runtime/app.rs` |
 

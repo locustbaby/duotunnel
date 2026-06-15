@@ -70,6 +70,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
             open_stream_timeout,
             accept_workers: config.entry.accept_workers.max(1),
             overload: Arc::new(overload_limits),
+            sniff_timeout: Duration::from_millis(config.proxy_buffers.sniff_timeout_ms),
         };
 
         engine.add_service(Arc::new(crate::egress::listener::EgressListenerService {
