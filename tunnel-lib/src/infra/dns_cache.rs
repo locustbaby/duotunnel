@@ -9,9 +9,12 @@ pub struct DnsEntry {
     pub expires_at: Instant,
 }
 
+type DnsKey = (String, u16);
+type InflightTx = broadcast::Sender<Result<Vec<SocketAddr>, String>>;
+
 pub struct EgressDnsCache {
-    cache: DashMap<(String, u16), DnsEntry>,
-    inflight: DashMap<(String, u16), broadcast::Sender<Result<Vec<SocketAddr>, String>>>,
+    cache: DashMap<DnsKey, DnsEntry>,
+    inflight: DashMap<DnsKey, InflightTx>,
     ttl: Duration,
 }
 
