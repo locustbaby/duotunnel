@@ -13,6 +13,7 @@ fn global_pool() -> &'static ArrayQueue<Vec<u8>> {
     GLOBAL_POOL.get_or_init(|| ArrayQueue::new(1024))
 }
 
+#[allow(clippy::uninit_vec)]
 fn take_buffer(buffer_size: usize) -> Vec<u8> {
     if let Some(mut buf) = LOCAL_POOL.with(|pool| pool.borrow_mut().pop()) {
         if buf.capacity() >= buffer_size {
@@ -123,7 +124,7 @@ where
         // 4. We only read or write the slice of the buffer that has been successfully
         //    written to by the read operation: `&guard[..read]`.
         // 5. No uninitialized bytes are ever read.
-        let read = reader.read(&mut *guard).await?;
+        let read = reader.read(&mut guard).await?;
         if read == 0 {
             break;
         }
@@ -174,7 +175,7 @@ where
                 copied += chunk.bytes.len() as u64;
             }
             Ok(None) => break,
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            Err(e) => return Err(std::io::Error::other(e)),
         }
     }
     let _ = writer.shutdown().await;

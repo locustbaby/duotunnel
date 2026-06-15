@@ -201,7 +201,7 @@ pub async fn forward_http(
                         )))
                     }
                     Ok(None) => Ok(None),
-                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    Err(e) => Err(std::io::Error::other(e)),
                 }
             },
         );

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[serde(transparent)]
 pub struct ClientId(pub Arc<str>);
 
 impl ClientId {
@@ -62,6 +63,7 @@ impl Default for ClientId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[serde(transparent)]
 pub struct GroupId(pub Arc<str>);
 
 impl GroupId {
@@ -120,6 +122,7 @@ impl Default for GroupId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[serde(transparent)]
 pub struct ProxyName(pub Arc<str>);
 
 impl ProxyName {

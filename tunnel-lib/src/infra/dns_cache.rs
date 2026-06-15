@@ -43,13 +43,7 @@ impl EgressDnsCache {
         }
 
         loop {
-            let rx = {
-                if let Some(sender) = self.inflight.get(&key) {
-                    Some(sender.subscribe())
-                } else {
-                    None
-                }
-            };
+            let rx = self.inflight.get(&key).map(|sender| sender.subscribe());
 
             if let Some(mut rx) = rx {
                 // Wait for the in-flight resolution with a timeout

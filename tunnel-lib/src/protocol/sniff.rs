@@ -362,7 +362,7 @@ impl<'a> SniffRuntime<'a> {
             for detector in self.detectors {
                 match detector.detect(data) {
                     SniffOutcome::Matched(mut hint) => {
-                        let prefix = SniffPrefix::new_pooled(buf, total, pool.clone());
+                        let prefix = SniffPrefix::new_pooled(buf, total, *pool);
                         hint.raw_preface = prefix.clone();
                         return Ok(SniffResult {
                             hint,
@@ -382,7 +382,7 @@ impl<'a> SniffRuntime<'a> {
             target = self.policy.max_sniff_bytes;
         }
 
-        let prefix = SniffPrefix::new_pooled(buf, total, pool.clone());
+        let prefix = SniffPrefix::new_pooled(buf, total, *pool);
         Ok(SniffResult {
             hint: ProtocolHint::new(ProtocolKind::Tcp, prefix.clone()),
             prefix,

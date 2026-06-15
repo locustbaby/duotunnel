@@ -116,7 +116,12 @@ async fn run_http(url: &str, args: &[String], force_h2: bool) -> Result<String, 
     let uri: hyper::Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
     let host = uri.host().unwrap_or("localhost").to_string();
     let port = uri.port_u16().unwrap_or(80);
-    let addr = format!("{host}:{port}");
+    let resolved_host = if host.ends_with(".localtest.com") {
+        "127.0.0.1".to_string()
+    } else {
+        host.clone()
+    };
+    let addr = format!("{resolved_host}:{port}");
 
     let stream = tokio::time::timeout(
         Duration::from_secs(15),
@@ -279,7 +284,12 @@ async fn run_h2c_prior(url: &str, args: &[String]) -> Result<String, String> {
     let uri: hyper::Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
     let host = uri.host().unwrap_or("localhost").to_string();
     let port = uri.port_u16().unwrap_or(80);
-    let addr = format!("{host}:{port}");
+    let resolved_host = if host.ends_with(".localtest.com") {
+        "127.0.0.1".to_string()
+    } else {
+        host.clone()
+    };
+    let addr = format!("{resolved_host}:{port}");
 
     let stream = tokio::time::timeout(
         Duration::from_secs(15),
@@ -408,9 +418,34 @@ async fn run_ws(url: &str, args: &[String]) -> Result<String, String> {
         i += 1;
     }
 
+    let uri: hyper::http::Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    let host = uri.host().unwrap_or("localhost").to_string();
+    let port = uri.port_u16().unwrap_or(80);
+
+    let (connect_uri, host_header) = if host.ends_with(".localtest.com") {
+        let scheme = uri.scheme_str().unwrap_or("ws");
+        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        (
+            format!("{scheme}://127.0.0.1:{port}{path}"),
+            Some(format!("{host}:{port}")),
+        )
+    } else {
+        (url.to_string(), None)
+    };
+
+    let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(connect_uri.as_str())
+        .map_err(|e| format!("invalid ws url: {e}"))?;
+
+    if let Some(hh) = host_header {
+        request.headers_mut().insert(
+            hyper::http::header::HOST,
+            hyper::http::header::HeaderValue::from_str(&hh).unwrap(),
+        );
+    }
+
     let (mut ws, _) = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio_tungstenite::connect_async(url),
+        tokio_tungstenite::connect_async(request),
     )
     .await
     .map_err(|_| format!("WebSocket connect timeout to {url}"))?
@@ -467,16 +502,7 @@ async fn run_grpc(addr: &str, args: &[String]) -> Result<String, String> {
         i += 1;
     }
 
-    let endpoint = format!("http://{addr}");
-    let channel = tokio::time::timeout(
-        Duration::from_secs(15),
-        tonic::transport::Channel::from_shared(endpoint)
-            .map_err(|e| format!("invalid gRPC endpoint: {e}"))?
-            .connect(),
-    )
-    .await
-    .map_err(|_| format!("gRPC connect timeout to {addr}"))?
-    .map_err(|e| format!("gRPC connect error: {e}"))?;
+    let channel = connect_grpc_channel(addr, false).await?;
 
     let mut client = tonic_health::pb::health_client::HealthClient::new(channel);
     let request = tonic::Request::new(tonic_health::pb::HealthCheckRequest {
@@ -743,28 +769,34 @@ async fn connect_grpc_channel(
         format!("http://{addr}")
     };
 
-    if use_tls {
-        let tls_config = tonic::transport::ClientTlsConfig::new().with_native_roots();
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            tonic::transport::Channel::from_shared(endpoint_uri)
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .tls_config(tls_config)
-                .map_err(|e| format!("TLS config error: {e}"))?
-                .connect(),
-        )
-        .await
-        .map_err(|_| format!("gRPC connect timeout to {addr}"))?
-        .map_err(|e| format!("gRPC connect error: {e}"))
+    let original_uri: tonic::transport::Uri = endpoint_uri.parse().map_err(|e| format!("invalid URI: {e}"))?;
+    let host = original_uri.host().unwrap_or("localhost").to_string();
+    let port = original_uri.port_u16().unwrap_or(80);
+
+    let (connect_uri, is_localtest) = if host.ends_with(".localtest.com") {
+        let scheme = original_uri.scheme_str().unwrap_or("http");
+        (format!("{scheme}://127.0.0.1:{port}"), true)
     } else {
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            tonic::transport::Channel::from_shared(endpoint_uri)
-                .map_err(|e| format!("invalid endpoint: {e}"))?
-                .connect(),
-        )
+        (endpoint_uri.clone(), false)
+    };
+
+    let mut endpoint = tonic::transport::Channel::from_shared(connect_uri)
+        .map_err(|e| format!("invalid endpoint: {e}"))?;
+
+    if is_localtest {
+        endpoint = endpoint.origin(original_uri);
+    }
+
+    if use_tls {
+        let mut tls_config = tonic::transport::ClientTlsConfig::new().with_native_roots();
+        if is_localtest {
+            tls_config = tls_config.domain_name(host);
+        }
+        endpoint = endpoint.tls_config(tls_config).map_err(|e| format!("TLS config error: {e}"))?;
+    }
+
+    tokio::time::timeout(Duration::from_secs(15), endpoint.connect())
         .await
         .map_err(|_| format!("gRPC connect timeout to {addr}"))?
         .map_err(|e| format!("gRPC connect error: {e}"))
-    }
 }
