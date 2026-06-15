@@ -10,6 +10,11 @@ TOKIO_ENV=${5:-""}
 SUFFIX="${CASE_NAME}"
 echo "==> Running Case: ${CASE_NAME} (QUIC: ${QUIC_CONNS}, Profile: ${BUILD_PROFILE})"
 
+CPU_QUOTA_ARG=()
+if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
+  CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
+fi
+
 # 1. Cleanup server/client scopes from previous case
 rm -f /tmp/bench-results.json
 sudo rm -f /tmp/server-trace.*.bin /tmp/client-trace.*.bin /tmp/server-trace.*.bin.active /tmp/client-trace.*.bin.active /tmp/server-trace.*.bin.gz /tmp/client-trace.*.bin.gz
@@ -66,7 +71,7 @@ fi
 
 # 3. Start Server
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
   ${TOKIO_ENV:+-E $TOKIO_ENV} \
   -- ./target/release/server --config ci-helpers/configs/server.yaml \
@@ -89,7 +94,7 @@ fi
 sleep 3
 
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
   ${TOKIO_ENV:+-E $TOKIO_ENV} \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &

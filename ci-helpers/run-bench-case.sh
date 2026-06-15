@@ -11,6 +11,11 @@ FRP_TMP_DIR=""
 FRPS_CONFIG="ci-helpers/configs/frps.toml"
 FRPC_CONFIG="ci-helpers/configs/frpc.toml"
 
+CPU_QUOTA_ARG=()
+if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
+  CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
+fi
+
 pick_frp_ports() {
   if [ -n "${FRP_SERVER_PORT}" ] && [ -n "${FRP_HTTP_PORT}" ]; then
     return 0
@@ -88,7 +93,7 @@ start_frp_stack() {
   : > /tmp/frpc.log
 
   sudo systemd-run --scope --unit=frp-server --collect \
-    -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frps -c "${FRPS_CONFIG}" >> /tmp/frps.log 2>&1 &
 
   for i in $(seq 1 20); do
@@ -105,7 +110,7 @@ start_frp_stack() {
   fi
 
   sudo systemd-run --scope --unit=frp-client --collect \
-    -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frpc -c "${FRPC_CONFIG}" >> /tmp/frpc.log 2>&1 &
 
   for i in $(seq 1 20); do
