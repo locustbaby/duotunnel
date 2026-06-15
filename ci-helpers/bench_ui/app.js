@@ -88,10 +88,10 @@ const UI = {
 
   NavArrows: (prev, next) => {
     const prevHtml = prev
-      ? `<a class="nav-arrow nav-prev" href="#${Utils.sha7(prev)}" title="${Utils.esc(Utils.commitMsg(prev))}">← ${Utils.sha7(prev)}</a>`
+      ? `<a class="nav-arrow nav-prev" href="#${prev.id || Utils.sha7(prev)}" title="${Utils.esc(Utils.commitMsg(prev))}">← ${Utils.sha7(prev)}</a>`
       : `<span class="nav-arrow nav-prev nav-disabled">← older</span>`;
     const nextHtml = next
-      ? `<a class="nav-arrow nav-next" href="#${Utils.sha7(next)}" title="${Utils.esc(Utils.commitMsg(next))}">${Utils.sha7(next)} →</a>`
+      ? `<a class="nav-arrow nav-next" href="#${next.id || Utils.sha7(next)}" title="${Utils.esc(Utils.commitMsg(next))}">${Utils.sha7(next)} →</a>`
       : `<span class="nav-arrow nav-next nav-disabled">newer →</span>`;
     return `<div class="nav-arrows">${prevHtml}${nextHtml}</div>`;
   }
@@ -150,19 +150,19 @@ const Charts = {
 
 // --- Domain Logic ---
 const Data = {
-  findEntry: (sha) => entries.find(e => Utils.shaFull(e) === sha || Utils.sha7(e) === sha),
+  findEntry: (sha) => entries.find(e => e.id === sha || Utils.shaFull(e) === sha || Utils.sha7(e) === sha),
   prevOf: (entry) => {
-    const s = Utils.sha7(entry);
-    const idx = entries.findIndex(e => Utils.sha7(e) === s);
+    const s = entry.id || Utils.sha7(entry);
+    const idx = entries.findIndex(e => (e.id || Utils.sha7(e)) === s);
     return idx > 0 ? entries[idx - 1] : null;
   },
   nextOf: (entry) => {
-    const s = Utils.sha7(entry);
-    const idx = entries.findIndex(e => Utils.sha7(e) === s);
+    const s = entry.id || Utils.sha7(entry);
+    const idx = entries.findIndex(e => (e.id || Utils.sha7(e)) === s);
     return idx >= 0 && idx < entries.length - 1 ? entries[idx + 1] : null;
   },
   loadDetail: async (entry) => {
-    const s7 = Utils.sha7(entry);
+    const s7 = entry.id || Utils.sha7(entry);
     try {
       const res = await fetch(`data/${s7}.json`);
       return res.ok ? await res.json() : entry;
@@ -184,7 +184,7 @@ function renderOverview() {
   const sum = latest.summary || {};
   const prevSum = prev ? (prev.summary || {}) : {};
   
-  metaEl.innerHTML = `Latest: <a href="#${Utils.sha7(latest)}">${Utils.sha7(latest)}</a> ${Utils.esc(Utils.commitMsg(latest))} · ${new Date(latest.timestamp).toLocaleString()}`;
+  metaEl.innerHTML = `Latest: <a href="#${latest.id || Utils.sha7(latest)}">${Utils.sha7(latest)}</a> ${Utils.esc(Utils.commitMsg(latest))} · ${new Date(latest.timestamp).toLocaleString()}`;
 
   let html = `<div class="cards">
     ${UI.Card('Total RPS', Utils.fmt(sum.totalRPS), Utils.delta(sum.totalRPS||0, prevSum.totalRPS, false), 'req/s')}
@@ -219,7 +219,12 @@ function renderOverview() {
     }));
     Charts.create(trendCanvasId(cat.id), {type:'line', data:{labels:lbl, datasets:ds}, options:{
       ...Charts.DEFAULT_OPTS,
-      onClick(evt, elems) { if (elems.length) location.hash = lbl[elems[0].index]; },
+      onClick(evt, elems) {
+        if (elems.length) {
+          const entry = entries[elems[0].index];
+          location.hash = entry.id || Utils.sha7(entry);
+        }
+      },
       scales:{...Charts.DEFAULT_OPTS.scales, y:{...Charts.DEFAULT_OPTS.scales.y, title:{display:true,text:'ms',color:'#6b7d93'}}},
     }});
   });
@@ -237,7 +242,7 @@ function renderOverview() {
     }
     return {
       className: 'clickable' + (i === 0 ? ' row-active' : ''),
-      attribs: `data-sha="${s7}"`,
+      attribs: `data-sha="${e.id || s7}"`,
       cells: [s7, new Date(e.timestamp).toLocaleString(undefined, {year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}), Utils.fmt(e.summary?.totalRPS??0), dR, (e.summary?.totalErr??0)+'%', dE, Utils.fmt(e.summary?.totalRequests??0), (e.scenarios||[]).length]
     };
   });

@@ -27,24 +27,16 @@ cp "$GITHUB_WORKSPACE/ci-helpers/bench_ui/style.css" bench/style.css
 cp "$GITHUB_WORKSPACE/ci-helpers/bench_ui/app.js" bench/app.js
 rm -rf bench/viewer && cp -r "$GITHUB_WORKSPACE/ci-helpers/bench_ui/viewer" bench/viewer
 
-echo "==> Pruning old traces"
-if [ -d bench/traces ]; then
-  find bench/traces -name "*.html" -delete 2>/dev/null || true
-  SHAS=$(ls bench/traces/ 2>/dev/null | grep -oE '^[0-9a-f]{7}' | sort -u)
-  SHA_COUNT=$(echo "$SHAS" | grep -c . || true)
-  if [ "$SHA_COUNT" -gt 3 ]; then
-    OLD_SHAS=$(echo "$SHAS" | head -n $(( SHA_COUNT - 3 )))
-    for OLD in $OLD_SHAS; do
-      find bench/traces -maxdepth 1 -name "${OLD}-*" -exec rm -rf {} +
-    done
-  fi
-fi
-
 echo "==> Processing per-case traces"
 SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
 REPO_NAME="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f2)"
 BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}/bench/traces"
 mkdir -p bench/traces
+
+RUN_SUFFIX=""
+if [ -n "${GITHUB_RUN_ID:-}" ]; then
+  RUN_SUFFIX="-${GITHUB_RUN_ID}"
+fi
 
 TRACE_CASES_JSON='['
 FIRST=1
@@ -63,13 +55,13 @@ for CASE_NAME in ingress_8000qps egress_8000qps ingress_multihost_8000qps egress
 
   if [ -s "$SRV" ]; then
     node "$GITHUB_WORKSPACE/ci-helpers/bench_ui/viewer/bin2json.js" \
-      "$SRV" "bench/traces/${SHORT_SHA}-${CASE_NAME}-server"
-    SRV_URL="${BASE_URL}/${SHORT_SHA}-${CASE_NAME}-server"
+      "$SRV" "bench/traces/${SHORT_SHA}${RUN_SUFFIX}-${CASE_NAME}-server"
+    SRV_URL="${BASE_URL}/${SHORT_SHA}${RUN_SUFFIX}-${CASE_NAME}-server"
   fi
   if [ -s "$CLI" ]; then
     node "$GITHUB_WORKSPACE/ci-helpers/bench_ui/viewer/bin2json.js" \
-      "$CLI" "bench/traces/${SHORT_SHA}-${CASE_NAME}-client"
-    CLI_URL="${BASE_URL}/${SHORT_SHA}-${CASE_NAME}-client"
+      "$CLI" "bench/traces/${SHORT_SHA}${RUN_SUFFIX}-${CASE_NAME}-client"
+    CLI_URL="${BASE_URL}/${SHORT_SHA}${RUN_SUFFIX}-${CASE_NAME}-client"
   fi
   if [ -n "$SRV_URL" ] || [ -n "$CLI_URL" ] || [ -n "$SRV_ARTIFACT_URL" ] || [ -n "$CLI_ARTIFACT_URL" ]; then
     [ "$FIRST" = "1" ] && FIRST=0 || TRACE_CASES_JSON="${TRACE_CASES_JSON},"
@@ -92,6 +84,7 @@ python3 "$GITHUB_WORKSPACE/ci-helpers/bench-tool.py" publish \
   --msg     "$(git -C "$GITHUB_WORKSPACE" log -1 --pretty=%s)" \
   --url     "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" \
   --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+  --run-id  "${GITHUB_RUN_ID:-}" \
   $TRACE_CASES_ARG
 
 echo "==> Committing and pushing to gh-pages"

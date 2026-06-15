@@ -362,12 +362,21 @@ def run_publish(args):
                 except Exception: pass
 
     sha7 = args.sha[:7]
+    run_id = args.run_id if getattr(args, "run_id", None) else ""
+    if not run_id and args.run_url:
+        m = re.search(r"/runs/(\d+)", args.run_url)
+        if m:
+            run_id = m.group(1)
+
+    run_key = f"{sha7}-{run_id}" if run_id else sha7
+    entry["id"] = run_key
+
     detail_dir = os.path.join(os.path.dirname(os.path.abspath(args.data)), "data")
     os.makedirs(detail_dir, exist_ok=True)
-    with open(os.path.join(detail_dir, f"{sha7}.json"), "w") as f:
+    with open(os.path.join(detail_dir, f"{run_key}.json"), "w") as f:
         json.dump(entry, f, separators=(",", ":"))
 
-    index_entry = {k: entry.get(k) for k in ["commit", "timestamp", "summary", "catalog", "run_url", "artifacts"]}
+    index_entry = {k: entry.get(k) for k in ["id", "commit", "timestamp", "summary", "catalog", "run_url", "artifacts"]}
     index_entry["scenarios"] = [
         {"name": name, **{k: c.get(k) for k in ["label", "protocol", "direction", "category", "tunnel"]},
          **{k: (c.get("perf") or {}).get(k) for k in ["p50", "p95", "rps", "err", "requests"]}}
@@ -378,7 +387,51 @@ def run_publish(args):
 
     with open(args.data, "w") as f:
         f.write(PREFIX + json.dumps({"entries": entries}, separators=(",", ":")) + SUFFIX + "\n")
-    print(f"Published {sha7}, total: {len(entries)}")
+    print(f"Published {run_key}, total: {len(entries)}")
+
+    # Prune old detail files & traces chronologically
+    valid_ids = set()
+    for e in entries:
+        v_id = e.get("id") or (e.get("commit", {}).get("id", "")[:7])
+        if v_id:
+            valid_ids.add(v_id)
+
+    # Prune data/
+    if os.path.exists(detail_dir):
+        for filename in os.listdir(detail_dir):
+            if filename.endswith(".json"):
+                name = filename[:-5]
+                if name not in valid_ids:
+                    try:
+                        os.remove(os.path.join(detail_dir, filename))
+                        print(f"Pruned old detail file: {filename}")
+                    except Exception as ex:
+                        print(f"Failed to prune detail file {filename}: {ex}", file=sys.stderr)
+
+    # Prune traces/
+    latest_ids_for_traces = []
+    for e in reversed(entries):
+        v_id = e.get("id") or (e.get("commit", {}).get("id", "")[:7])
+        if v_id and v_id not in latest_ids_for_traces:
+            latest_ids_for_traces.append(v_id)
+            if len(latest_ids_for_traces) >= args.max_traces:
+                break
+    latest_ids_for_traces = set(latest_ids_for_traces)
+
+    traces_dir = os.path.join(os.path.dirname(os.path.abspath(args.data)), "traces")
+    if os.path.exists(traces_dir):
+        for filename in os.listdir(traces_dir):
+            matched = False
+            for v_id in latest_ids_for_traces:
+                if filename.startswith(f"{v_id}-"):
+                    matched = True
+                    break
+            if not matched:
+                try:
+                    os.remove(os.path.join(traces_dir, filename))
+                    print(f"Pruned old trace file: {filename}")
+                except Exception as ex:
+                    print(f"Failed to prune trace file {filename}: {ex}", file=sys.stderr)
 
 # --- CLI Entry Point ---
 
@@ -406,6 +459,8 @@ def main():
     b.add_argument("--run-url", default="")
     b.add_argument("--trace-cases-file", default="")
     b.add_argument("--max-entries", type=int, default=50)
+    b.add_argument("--run-id", default="")
+    b.add_argument("--max-traces", type=int, default=10)
 
     i = sub.add_parser("inject")
     i.add_argument("--result", required=True)
