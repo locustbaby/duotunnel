@@ -1,6 +1,6 @@
 use crate::rules::{
-    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
-    IngressListenerMode, IngressVhostRule, RoutingData, UpstreamServer, GroupId, ProxyName,
+    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, GroupId, IngressListener,
+    IngressListenerMode, IngressVhostRule, ProxyName, RoutingData, UpstreamServer,
 };
 use anyhow::Result;
 use figment::{
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(up.lb_policy, "round_robin");
         assert_eq!(up.servers.len(), 1);
         assert_eq!(up.servers[0].address, "10.0.0.1:80");
-        assert_eq!(up.servers[0].resolve, true);
+        assert!(up.servers[0].resolve);
 
         // Assert Egress Upstreams
         assert_eq!(routing_data.egress_upstreams.len(), 1);
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(eup.lb_policy, "least_conn");
         assert_eq!(eup.servers.len(), 1);
         assert_eq!(eup.servers[0].address, "20.0.0.1:443");
-        assert_eq!(eup.servers[0].resolve, false);
+        assert!(!eup.servers[0].resolve);
 
         // Assert Egress Vhost Rules
         assert_eq!(routing_data.egress_vhost_rules.len(), 1);

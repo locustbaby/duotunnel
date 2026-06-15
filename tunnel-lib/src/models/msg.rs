@@ -1,5 +1,5 @@
-use crate::proxy::core::Protocol;
 use crate::models::id::{GroupId, ProxyName};
+use crate::proxy::core::Protocol;
 use anyhow::{anyhow, Result};
 use rkyv::{
     api::high::{HighDeserializer, HighSerializer, HighValidator},

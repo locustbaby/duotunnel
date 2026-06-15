@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tunnel_lib::{ClientStatus, TokenStatus, GroupId};
+use tunnel_lib::{ClientStatus, GroupId, TokenStatus};
 pub struct AuthResult {
     pub client_group: GroupId,
 }

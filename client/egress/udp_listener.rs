@@ -10,8 +10,8 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    decode_udp_datagram_envelope, encode_udp_datagram_envelope, UdpDatagramEnvelope, UdpSessionKey,
-    MAX_DATAGRAM_BYTES, ProxyName,
+    decode_udp_datagram_envelope, encode_udp_datagram_envelope, ProxyName, UdpDatagramEnvelope,
+    UdpSessionKey, MAX_DATAGRAM_BYTES,
 };
 
 #[derive(Default)]

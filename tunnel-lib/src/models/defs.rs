@@ -1,7 +1,7 @@
+use crate::models::id::{GroupId, ProxyName};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::models::id::{GroupId, ProxyName};
 
 #[derive(
     Debug,

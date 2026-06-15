@@ -81,7 +81,9 @@ impl UdpSessionManager {
     pub async fn forward_client_datagram(&self, payload: Bytes) -> Result<()> {
         let envelope = decode_udp_datagram_envelope(payload.as_ref())?;
         let session = self.get_or_create_session(&envelope.session).await?;
-        session.last_activity.store(current_time_secs(), Ordering::Relaxed);
+        session
+            .last_activity
+            .store(current_time_secs(), Ordering::Relaxed);
         session.socket.send(&envelope.payload).await?;
         Ok(())
     }

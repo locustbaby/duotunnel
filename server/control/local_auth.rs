@@ -10,8 +10,8 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tunnel_store::{AuthError, AuthResult, AuthStore, ClientStatus, TokenListEntry, TokenStatus};
 use tunnel_lib::GroupId;
+use tunnel_store::{AuthError, AuthResult, AuthStore, ClientStatus, TokenListEntry, TokenStatus};
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {

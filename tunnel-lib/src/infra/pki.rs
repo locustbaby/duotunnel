@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, KeyPair,
-    KeyUsagePurpose, Issuer,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, Issuer,
+    KeyPair, KeyUsagePurpose,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
-use std::ops::Deref;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
@@ -80,7 +80,10 @@ impl CertState {
             inflight: HashMap::new(),
             ttl,
             permits: Arc::new(Semaphore::new(max_parallel_generations.max(1))),
-            root_ca: Arc::new(RootCa::load_or_generate(ca_cert_path, ca_key_path).expect("failed to initialize root CA")),
+            root_ca: Arc::new(
+                RootCa::load_or_generate(ca_cert_path, ca_key_path)
+                    .expect("failed to initialize root CA"),
+            ),
         }
     }
 
@@ -157,29 +160,28 @@ impl RootCa {
             let c_path = std::path::Path::new(c_path);
             let k_path = std::path::Path::new(k_path);
             if c_path.exists() && k_path.exists() {
-                if let (Ok(cert_pem), Ok(key_pem)) = (std::fs::read_to_string(c_path), std::fs::read_to_string(k_path)) {
+                if let (Ok(cert_pem), Ok(key_pem)) = (
+                    std::fs::read_to_string(c_path),
+                    std::fs::read_to_string(k_path),
+                ) {
                     match KeyPair::from_pem(&key_pem) {
-                        Ok(key_pair) => {
-                            match Issuer::from_ca_cert_pem(&cert_pem, key_pair) {
-                                Ok(issuer) => {
-                                    match pem_to_der(&cert_pem) {
-                                        Ok(der_bytes) => {
-                                            tracing::info!(cert_path = %c_path.display(), key_path = %k_path.display(), "loaded persistent Root CA");
-                                            return Ok(Self {
-                                                issuer: RootCaIssuer::Loaded(issuer),
-                                                cert_der: CertificateDer::from(der_bytes).into_owned(),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "failed to decode loaded CA PEM to DER; regenerating CA");
-                                        }
-                                    }
+                        Ok(key_pair) => match Issuer::from_ca_cert_pem(&cert_pem, key_pair) {
+                            Ok(issuer) => match pem_to_der(&cert_pem) {
+                                Ok(der_bytes) => {
+                                    tracing::info!(cert_path = %c_path.display(), key_path = %k_path.display(), "loaded persistent Root CA");
+                                    return Ok(Self {
+                                        issuer: RootCaIssuer::Loaded(issuer),
+                                        cert_der: CertificateDer::from(der_bytes).into_owned(),
+                                    });
                                 }
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "failed to parse CA certificate from PEM; regenerating CA");
+                                    tracing::warn!(error = %e, "failed to decode loaded CA PEM to DER; regenerating CA");
                                 }
+                            },
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to parse CA certificate from PEM; regenerating CA");
                             }
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to parse CA private key; regenerating CA");
                         }

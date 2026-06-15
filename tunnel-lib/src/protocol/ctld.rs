@@ -49,7 +49,17 @@ pub enum ResourceOp<T> {
     Delete { key: String },
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ConfigSnapshot {
     pub resource_version: u64,
     pub ingress_listeners: Vec<ProtoIngressListener>,

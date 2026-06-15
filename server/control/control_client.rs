@@ -49,7 +49,15 @@ impl BackgroundService for ControlClientService {
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async move {
-            watch_loop(self.ctld_addr, self.auth_token, self.config_path, state, ready, shutdown).await;
+            watch_loop(
+                self.ctld_addr,
+                self.auth_token,
+                self.config_path,
+                state,
+                ready,
+                shutdown,
+            )
+            .await;
             Ok(())
         })
     }
@@ -91,24 +99,22 @@ async fn watch_loop(
     // Load fallback snapshot on boot if it exists on disk
     if snapshot_path.exists() {
         match tokio::fs::read_to_string(&snapshot_path).await {
-            Ok(content) => {
-                match serde_json::from_str::<ConfigSnapshot>(&content) {
-                    Ok(snap) => {
-                        info!(
-                            path = ?snapshot_path,
-                            resource_version = snap.resource_version,
-                            "loaded local snapshot fallback"
-                        );
-                        apply_snapshot(&snap, &state).await;
-                        ready.store(true, Ordering::Release);
-                        last_version = snap.resource_version;
-                        current_snapshot = Some(snap);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to parse local snapshot fallback");
-                    }
+            Ok(content) => match serde_json::from_str::<ConfigSnapshot>(&content) {
+                Ok(snap) => {
+                    info!(
+                        path = ?snapshot_path,
+                        resource_version = snap.resource_version,
+                        "loaded local snapshot fallback"
+                    );
+                    apply_snapshot(&snap, &state).await;
+                    ready.store(true, Ordering::Release);
+                    last_version = snap.resource_version;
+                    current_snapshot = Some(snap);
                 }
-            }
+                Err(e) => {
+                    warn!(error = %e, "failed to parse local snapshot fallback");
+                }
+            },
             Err(e) => {
                 warn!(error = %e, "failed to read local snapshot fallback file");
             }

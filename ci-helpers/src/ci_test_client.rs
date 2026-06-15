@@ -433,7 +433,10 @@ async fn run_ws(url: &str, args: &[String]) -> Result<String, String> {
         (url.to_string(), None)
     };
 
-    let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(connect_uri.as_str())
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+            connect_uri.as_str(),
+        )
         .map_err(|e| format!("invalid ws url: {e}"))?;
 
     if let Some(hh) = host_header {
@@ -769,7 +772,9 @@ async fn connect_grpc_channel(
         format!("http://{addr}")
     };
 
-    let original_uri: tonic::transport::Uri = endpoint_uri.parse().map_err(|e| format!("invalid URI: {e}"))?;
+    let original_uri: tonic::transport::Uri = endpoint_uri
+        .parse()
+        .map_err(|e| format!("invalid URI: {e}"))?;
     let host = original_uri.host().unwrap_or("localhost").to_string();
     let port = original_uri.port_u16().unwrap_or(80);
 
@@ -792,7 +797,9 @@ async fn connect_grpc_channel(
         if is_localtest {
             tls_config = tls_config.domain_name(host);
         }
-        endpoint = endpoint.tls_config(tls_config).map_err(|e| format!("TLS config error: {e}"))?;
+        endpoint = endpoint
+            .tls_config(tls_config)
+            .map_err(|e| format!("TLS config error: {e}"))?;
     }
 
     tokio::time::timeout(Duration::from_secs(15), endpoint.connect())

@@ -431,9 +431,9 @@ mod tests {
         assert_eq!(upstream.servers.len(), 2);
 
         assert_eq!(upstream.servers[0].address, "127.0.0.1:8080");
-        assert_eq!(upstream.servers[0].resolve, false);
+        assert!(!upstream.servers[0].resolve);
 
         assert_eq!(upstream.servers[1].address, "example.com:80");
-        assert_eq!(upstream.servers[1].resolve, true);
+        assert!(upstream.servers[1].resolve);
     }
 }

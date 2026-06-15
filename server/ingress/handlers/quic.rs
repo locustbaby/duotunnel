@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tunnel_lib::{recv_message, recv_message_type, send_message, ClientId, Login, LoginResp, MessageType};
+use tunnel_lib::{
+    recv_message, recv_message_type, send_message, ClientId, Login, LoginResp, MessageType,
+};
 pub async fn run_quic_server(
     state: Arc<ServerState>,
     ready: Arc<AtomicBool>,
