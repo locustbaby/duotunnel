@@ -31,7 +31,7 @@ pub fn build_patch(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> ConfigPa
             |item| item.port.to_string(),
         ),
         client_groups: diff_by_key(&previous.client_groups, &next.client_groups, |item| {
-            item.group_id.clone()
+            item.group_id.to_string()
         }),
         egress_upstreams: diff_by_key(&previous.egress_upstreams, &next.egress_upstreams, |item| {
             item.name.clone()

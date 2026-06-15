@@ -2,7 +2,7 @@ log_level: "debug"
 tls_skip_verify: true
 server_addr: "127.0.0.1"
 server_port: 10086
-auth_token: "dt_E64u66yqS9pPYAAWgStdfTWCJyT8fg9rAWaYh3l82Vg"
+auth_token: "dt_mEor482W5V48iATCVk9HfOdiDNSYWtEdUl0CROKVGls"
 entry:
   port: 8082
 metrics_port: 9092

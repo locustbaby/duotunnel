@@ -32,6 +32,11 @@ impl TunnelService for DefaultTunnelService {
                     || err_lower.contains("open_bi timed out")
                 {
                     kind = "quic_open_timed_out";
+                } else if err_lower.contains("quic open rejected overloaded")
+                    || err_lower.contains("queue full")
+                    || err_lower.contains("pending queue full")
+                {
+                    kind = "quic_open_rejected_overloaded";
                 } else if err_lower.contains("quic connection lost")
                     || err_lower.contains("connection lost")
                 {

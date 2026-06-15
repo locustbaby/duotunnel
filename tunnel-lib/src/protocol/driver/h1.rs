@@ -292,17 +292,21 @@ impl ProtocolDriver for Http1Driver {
         self.send.write_all(&header_buf).await?;
         let mut body = response.into_body();
         let mut accumulated_trailers = HeaderMap::new();
-        let mut chunk_buf = BytesMut::with_capacity(8192 + 24);
         loop {
             match body.frame().await {
                 Some(Ok(frame)) => {
                     if let Some(chunk) = frame.data_ref() {
                         if !chunk.is_empty() {
-                            chunk_buf.clear();
-                            write!(chunk_buf, "{:x}\r\n", chunk.len()).unwrap();
-                            chunk_buf.put_slice(chunk);
-                            chunk_buf.put_slice(b"\r\n");
-                            self.send.write_all(&chunk_buf).await?;
+                            let mut prefix = [0u8; 32];
+                            let prefix_len = {
+                                use std::io::Write as IoWrite;
+                                let mut cursor = std::io::Cursor::new(&mut prefix[..]);
+                                write!(&mut cursor, "{:x}\r\n", chunk.len()).unwrap();
+                                cursor.position() as usize
+                            };
+                            self.send.write_all(&prefix[..prefix_len]).await?;
+                            self.send.write_all(chunk).await?;
+                            self.send.write_all(b"\r\n").await?;
                         }
                     }
                     if let Ok(trailers) = frame.into_trailers() {

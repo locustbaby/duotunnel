@@ -1,4 +1,5 @@
 use crate::proxy::core::Protocol;
+use crate::models::id::{GroupId, ProxyName};
 use anyhow::{anyhow, Result};
 use rkyv::{
     api::high::{HighDeserializer, HighSerializer, HighValidator},
@@ -11,6 +12,7 @@ use rkyv::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(crate) const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_DATAGRAM_BYTES: usize = 1200;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +49,7 @@ impl std::fmt::Debug for Login {
         } else {
             "***".to_string()
         };
-        f.debug_struct("Login")
-            .field("token", &masked)
-            .finish()
+        f.debug_struct("Login").field("token", &masked).finish()
     }
 }
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -57,10 +57,10 @@ pub struct LoginResp {
     pub success: bool,
     pub error: Option<String>,
     pub config: ClientConfig,
-    pub client_group: String,
+    pub client_group: GroupId,
 }
 impl LoginResp {
-    pub fn success(config: ClientConfig, client_group: String) -> Self {
+    pub fn success(config: ClientConfig, client_group: GroupId) -> Self {
         Self {
             success: true,
             error: None,
@@ -73,7 +73,7 @@ impl LoginResp {
             success: false,
             error: Some(error.into()),
             config: ClientConfig::default(),
-            client_group: String::new(),
+            client_group: GroupId::default(),
         }
     }
 }
@@ -81,6 +81,7 @@ impl LoginResp {
 pub struct ClientConfig {
     pub config_version: String,
     pub upstreams: Vec<UpstreamConfig>,
+    pub egress_rules: Vec<crate::EgressVhostRuleDef>,
 }
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct UpstreamConfig {
@@ -95,11 +96,24 @@ pub struct UpstreamServer {
 }
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct RoutingInfo {
-    pub proxy_name: String,
+    pub proxy_name: ProxyName,
     pub src_addr: String,
     pub src_port: u16,
     pub protocol: Protocol,
     pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct UdpSessionKey {
+    pub proxy_name: ProxyName,
+    pub client_addr: String,
+    pub client_port: u16,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UdpDatagramEnvelope {
+    pub session: UdpSessionKey,
+    pub payload: Vec<u8>,
 }
 
 pub async fn send_message<W, M>(writer: &mut W, msg_type: MessageType, msg: &M) -> Result<()>
@@ -174,6 +188,28 @@ where
 {
     recv_typed_message(reader, MessageType::RoutingInfo).await
 }
+
+pub fn encode_udp_datagram_envelope(envelope: &UdpDatagramEnvelope) -> Result<AlignedVec<16>> {
+    let payload = rkyv::to_bytes::<rancor::Error>(envelope)
+        .map_err(|e| anyhow!("rkyv serialize failed: {e}"))?;
+    if payload.len() > MAX_DATAGRAM_BYTES {
+        return Err(anyhow!(
+            "Datagram too large to send: {} bytes",
+            payload.len()
+        ));
+    }
+    Ok(payload)
+}
+
+pub fn decode_udp_datagram_envelope(buf: &[u8]) -> Result<UdpDatagramEnvelope> {
+    if buf.len() > MAX_DATAGRAM_BYTES {
+        return Err(anyhow!("Datagram too large: {} bytes", buf.len()));
+    }
+    let archived = rkyv::access::<ArchivedUdpDatagramEnvelope, rancor::Error>(buf)
+        .map_err(|e| anyhow!("rkyv access failed: {e}"))?;
+    rkyv::deserialize::<UdpDatagramEnvelope, rancor::Error>(archived)
+        .map_err(|e| anyhow!("rkyv deserialize failed: {e}"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +239,7 @@ mod tests {
     #[test]
     fn test_routing_info_serialize() {
         let info = RoutingInfo {
-            proxy_name: "web".to_string(),
+            proxy_name: "web".into(),
             src_addr: "192.168.1.1".to_string(),
             src_port: 12345,
             protocol: Protocol::H1,
@@ -242,7 +278,7 @@ mod tests {
     #[test]
     fn test_routing_info_host_none() {
         let info = RoutingInfo {
-            proxy_name: "tcp-proxy".to_string(),
+            proxy_name: "tcp-proxy".into(),
             src_addr: "10.0.0.1".to_string(),
             src_port: 9000,
             protocol: Protocol::Tcp,
@@ -276,8 +312,9 @@ mod tests {
             config: ClientConfig {
                 config_version: "v1.0.0".to_string(),
                 upstreams: vec![],
+                egress_rules: vec![],
             },
-            client_group: "test-client".to_string(),
+            client_group: "test-client".into(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
@@ -298,7 +335,7 @@ mod tests {
             success: false,
             error: Some("auth failed".to_string()),
             config: ClientConfig::default(),
-            client_group: String::new(),
+            client_group: "".into(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
@@ -313,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_recv_routing_info_full_frame() {
         let info = RoutingInfo {
-            proxy_name: "web".to_string(),
+            proxy_name: "web".into(),
             src_addr: "192.168.0.1".to_string(),
             src_port: 54321,
             protocol: Protocol::H2,
@@ -332,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_recv_routing_info_no_host() {
         let info = RoutingInfo {
-            proxy_name: "tcp-svc".to_string(),
+            proxy_name: "tcp-svc".into(),
             src_addr: "::1".to_string(),
             src_port: 22,
             protocol: Protocol::Tcp,
@@ -386,7 +423,7 @@ mod tests {
             token: "tok1".to_string(),
         };
         let info = RoutingInfo {
-            proxy_name: "p".to_string(),
+            proxy_name: "p".into(),
             src_addr: "1.2.3.4".to_string(),
             src_port: 80,
             protocol: Protocol::H1,
@@ -405,5 +442,21 @@ mod tests {
         let decoded_info = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded_info.proxy_name, "p");
         assert_eq!(decoded_info.host.as_deref(), Some("foo.com"));
+    }
+
+    #[test]
+    fn test_udp_datagram_envelope_round_trip() {
+        let envelope = UdpDatagramEnvelope {
+            session: UdpSessionKey {
+                proxy_name: "dns".into(),
+                client_addr: "127.0.0.1".to_string(),
+                client_port: 5353,
+            },
+            payload: vec![1, 2, 3, 4, 5],
+        };
+
+        let encoded = encode_udp_datagram_envelope(&envelope).unwrap();
+        let decoded = decode_udp_datagram_envelope(&encoded).unwrap();
+        assert_eq!(decoded, envelope);
     }
 }

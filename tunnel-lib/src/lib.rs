@@ -18,7 +18,7 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use infra::dns_cache::EgressDnsCache;
-pub use infra::metrics::METRICS;
+pub use infra::metrics::{wait_for_resource_drain, METRICS};
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
@@ -35,10 +35,12 @@ pub use models::defs::{
     IngressListenerDef, IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef,
     TokenStatus, UpstreamServerDef,
 };
+pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
-    recv_message, recv_message_type, recv_routing_info, recv_typed_message, send_message,
-    send_routing_info, ClientConfig, Login, LoginResp, MessageType, RoutingInfo, UpstreamConfig,
-    UpstreamServer,
+    decode_udp_datagram_envelope, encode_udp_datagram_envelope, recv_message, recv_message_type,
+    recv_routing_info, recv_typed_message, send_message, send_routing_info, ClientConfig, Login,
+    LoginResp, MessageType, RoutingInfo, UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig,
+    UpstreamServer, MAX_DATAGRAM_BYTES,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::sniff::{

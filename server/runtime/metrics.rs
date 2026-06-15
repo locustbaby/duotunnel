@@ -71,7 +71,7 @@ impl Drop for OpenBiInflightGuard {
     }
 }
 
-pub fn open_bi_begin(_conn_id: &std::sync::Arc<str>) -> OpenBiInflightGuard {
+pub fn open_bi_begin(_conn_id: &str) -> OpenBiInflightGuard {
     metrics::counter!("duotunnel_open_bi_total").increment(1);
     metrics::gauge!("duotunnel_open_bi_inflight").increment(1.0);
     OpenBiInflightGuard
@@ -83,4 +83,8 @@ pub fn open_bi_observe_wait_ms(wait_ms: f64) {
 
 pub fn open_bi_timed_out() {
     metrics::counter!("duotunnel_open_bi_timed_out_total").increment(1);
+}
+
+pub fn open_bi_rejected_overloaded() {
+    metrics::counter!("duotunnel_open_bi_rejected_overloaded_total").increment(1);
 }

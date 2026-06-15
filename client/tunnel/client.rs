@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
 
 use crate::bootstrap::config::ClientConfigFile;
+use crate::egress::udp_listener::{forward_incoming_datagram, UdpListenerRegistry};
 use crate::ingress::app::LocalProxyMap;
 use crate::ingress::handler::handle_work_stream;
 use crate::plugins;
@@ -21,6 +22,7 @@ pub(crate) async fn run_client(
     shutdown: CancellationToken,
     ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
+    udp_registry: Arc<UdpListenerRegistry>,
 ) -> std::result::Result<(), ConnectError> {
     let conn = connect_to_server(config, endpoint).await?;
     info!("Connected to server");
@@ -66,6 +68,7 @@ pub(crate) async fn run_client(
         upstreams = resp.config.upstreams.len(),
         "Login successful, config received"
     );
+    entry_pool.set_egress_rules(resp.config.egress_rules.clone());
     let lb = Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
     let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
     let proxy_map = Arc::new(LocalProxyMap::from_config(
@@ -100,6 +103,19 @@ pub(crate) async fn run_client(
                     Err(e) => {
                         warn!(error = %e, "Connection error");
                         break Err(ConnectError::transient(anyhow!("accept_bi failed: {}", e)));
+                    }
+                }
+            }
+            datagram_result = conn.read_datagram() => {
+                match datagram_result {
+                    Ok(payload) => {
+                        if let Err(e) = forward_incoming_datagram(&udp_registry, payload).await {
+                            debug!(error = %e, "udp datagram forward error");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "datagram read error");
+                        break Err(ConnectError::transient(anyhow!("read_datagram failed: {}", e)));
                     }
                 }
             }

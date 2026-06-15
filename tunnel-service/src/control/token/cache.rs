@@ -37,7 +37,7 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
             .into_iter()
             .map(|r: sqlx::sqlite::SqliteRow| TokenCacheEntry {
                 hash_hex: r.get("token_hash"),
-                client_group: r.get("client_group"),
+                client_group: r.get::<String, _>("client_group").into(),
                 client_status: ClientStatus::parse(&r.get::<String, _>("client_status"))
                     .unwrap_or(ClientStatus::Disabled),
                 token_status: TokenStatus::parse(&r.get::<String, _>("token_status"))

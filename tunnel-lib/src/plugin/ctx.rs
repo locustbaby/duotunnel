@@ -1,4 +1,5 @@
 use crate::lb::overload::OverloadLimits;
+use crate::models::id::{GroupId, ProxyName};
 use crate::transport::tcp_params::TcpParams;
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -108,15 +109,15 @@ pub struct PhaseOutcome {
 /// crate directly.
 #[derive(Debug, Clone)]
 pub struct Route {
-    pub group_id: Arc<str>,
-    pub proxy_name: Arc<str>,
+    pub group_id: GroupId,
+    pub proxy_name: ProxyName,
 }
 
 impl Route {
-    pub fn new(group_id: impl Into<Arc<str>>, proxy_name: impl Into<Arc<str>>) -> Self {
+    pub fn new(group_id: GroupId, proxy_name: ProxyName) -> Self {
         Self {
-            group_id: group_id.into(),
-            proxy_name: proxy_name.into(),
+            group_id,
+            proxy_name,
         }
     }
 }

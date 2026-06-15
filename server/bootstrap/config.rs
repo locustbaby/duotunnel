@@ -215,6 +215,9 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
     if cfg.server.open_stream_timeout_ms == 0 {
         errors.push("server.open_stream_timeout_ms must be >= 1".into());
     }
+    if matches!(cfg.server.overload.max_pending_streams, Some(0)) {
+        errors.push("server.overload.max_pending_streams must be >= 1 when set".into());
+    }
     if cfg.server.proxy_buffers.relay_buf_size
         < tunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE
     {
@@ -260,7 +263,7 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
                         ));
                     }
                     if let Some(group) = groups.get(&rule.client_group) {
-                        if !group.upstreams.contains_key(&rule.proxy_name) {
+                        if !group.upstreams.contains_key(rule.proxy_name.as_str()) {
                             errors.push(format!(
                                 "port {}: match_host \"{}\": proxy_name \"{}\" not found in group \"{}\"",
                                 listener.port, rule.match_host, rule.proxy_name, rule.client_group
@@ -276,7 +279,7 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
             }
             IngressMode::Tcp(t) => {
                 if let Some(group) = groups.get(&t.client_group) {
-                    if !group.upstreams.contains_key(&t.proxy_name) {
+                    if !group.upstreams.contains_key(t.proxy_name.as_str()) {
                         errors.push(format!(
                             "port {}: tcp proxy_name \"{}\" not found in group \"{}\"",
                             listener.port, t.proxy_name, t.client_group
@@ -315,6 +318,7 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
 
 pub fn build_client_config_for_group(
     tm: &TunnelManagement,
+    egress_rules: &[tunnel_lib::EgressVhostRuleDef],
     group_id: &str,
 ) -> Option<tunnel_lib::ClientConfig> {
     let group = tm.client_configs.groups.get(group_id)?;
@@ -337,6 +341,7 @@ pub fn build_client_config_for_group(
     Some(tunnel_lib::ClientConfig {
         config_version: group.config_version.clone(),
         upstreams,
+        egress_rules: egress_rules.to_vec(),
     })
 }
 
@@ -353,14 +358,14 @@ mod tests {
                 groups: HashMap::new(),
             },
         };
-        assert!(build_client_config_for_group(&tm, "nonexistent").is_none());
+        assert!(build_client_config_for_group(&tm, &[], "nonexistent").is_none());
     }
 
     #[test]
     fn test_build_client_config_for_group_empty() {
         let mut groups = HashMap::new();
         groups.insert(
-            "group1".to_string(),
+            "group1".to_string().into(),
             GroupConfig {
                 config_version: "v1".to_string(),
                 upstreams: HashMap::new(),
@@ -371,7 +376,8 @@ mod tests {
             client_configs: ClientConfigs { groups },
         };
 
-        let config = build_client_config_for_group(&tm, "group1").expect("group1 should exist");
+        let config =
+            build_client_config_for_group(&tm, &[], "group1").expect("group1 should exist");
         assert_eq!(config.config_version, "v1");
         assert!(config.upstreams.is_empty());
     }
@@ -398,7 +404,7 @@ mod tests {
 
         let mut groups = HashMap::new();
         groups.insert(
-            "group_prod".to_string(),
+            "group_prod".to_string().into(),
             GroupConfig {
                 config_version: "v2".to_string(),
                 upstreams,
@@ -411,7 +417,7 @@ mod tests {
         };
 
         let config =
-            build_client_config_for_group(&tm, "group_prod").expect("group_prod should exist");
+            build_client_config_for_group(&tm, &[], "group_prod").expect("group_prod should exist");
         assert_eq!(config.config_version, "v2");
         assert_eq!(config.upstreams.len(), 1);
 

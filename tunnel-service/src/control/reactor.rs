@@ -41,7 +41,6 @@ pub(crate) async fn debounce_publish_task(
 }
 
 pub(crate) async fn db_poll_task(svc: std::sync::Weak<ControlService>) {
-    let mut last_data_version: Option<i64> = None;
     loop {
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         let Some(svc) = svc.upgrade() else { break };
@@ -49,30 +48,25 @@ pub(crate) async fn db_poll_task(svc: std::sync::Weak<ControlService>) {
             Err(e) => {
                 warn!(error = %e, "db_poll: failed to load token cache");
             }
-            Ok(entries) => {
-                match svc.token_cache.data_version().await {
-                    Err(e) => {
-                        warn!(error = %e, "db_poll: failed to check data version");
-                    }
-                    Ok(version) => {
-                        if last_data_version.is_none() || last_data_version != Some(version) {
-                            last_data_version = Some(version);
-                            let mut parts: Vec<String> = entries
-                                .iter()
-                                .map(|e| {
-                                    format!("{}:{}:{}", e.hash_hex, e.token_status, e.client_status)
-                                })
-                                .collect();
-                            parts.sort_unstable();
-                            tracing::debug!(
-                                version,
-                                "db_poll: token change detected, triggering publish"
-                            );
-                            svc.publish();
-                        }
+            Ok(entries) => match svc.load_routing().await {
+                Err(e) => {
+                    warn!(error = %e, "db_poll: failed to load routing rules");
+                }
+                Ok(routing) => {
+                    let (ingress_listeners, client_groups, egress_upstreams, egress_vhost_rules) =
+                        crate::control::proto::routing_data_to_proto(&routing);
+                    let current = svc.snapshot();
+                    let changed = entries != current.token_cache
+                        || ingress_listeners != current.ingress_listeners
+                        || client_groups != current.client_groups
+                        || egress_upstreams != current.egress_upstreams
+                        || egress_vhost_rules != current.egress_vhost_rules;
+                    if changed {
+                        tracing::info!("db_poll: database change detected, triggering publish");
+                        svc.publish();
                     }
                 }
-            }
+            },
         }
     }
 }

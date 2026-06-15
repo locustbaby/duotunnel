@@ -5,14 +5,16 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use tunnel_lib::{maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, OpenBiOutcome};
+use tunnel_lib::{
+    maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, GroupId, OpenBiOutcome, ProxyName,
+};
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
     state: Arc<ServerState>,
     _port: u16,
-    proxy_name: String,
-    group_id: String,
+    proxy_name: ProxyName,
+    group_id: GroupId,
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
@@ -45,8 +47,8 @@ pub async fn run_tcp_accept_loop(
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
     mut stream: TcpStream,
-    proxy_name: String,
-    group_id: String,
+    proxy_name: ProxyName,
+    group_id: GroupId,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
     let pool = state.peek_buf_pool();
@@ -54,10 +56,15 @@ async fn handle_tcp_connection(
         tunnel_lib::SniffPolicy::default(),
         tunnel_lib::default_ingress_detectors(),
     );
-    let sniffed = match tokio::time::timeout(state.sniff_timeout(), runtime.sniff(&mut stream, pool)).await {
-        Ok(res) => res?,
-        Err(_) => return Err(anyhow::anyhow!("protocol sniffing timed out (Slowloris protection)")),
-    };
+    let sniffed =
+        match tokio::time::timeout(state.sniff_timeout(), runtime.sniff(&mut stream, pool)).await {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "protocol sniffing timed out (Slowloris protection)"
+                ))
+            }
+        };
     let protocol = if sniffed.bytes_read == 0 {
         tunnel_lib::proxy::core::Protocol::Unknown
     } else {
@@ -97,11 +104,14 @@ async fn handle_tcp_connection(
             &selected.conn,
             &selected.inflight_table,
             selected.slot_id,
+            state.overload_limits(),
             open_timeout,
             |elapsed, outcome| {
                 metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
                 if matches!(outcome, OpenBiOutcome::TimedOut) {
                     metrics::open_bi_timed_out();
+                } else if matches!(outcome, OpenBiOutcome::RejectedOverloaded) {
+                    metrics::open_bi_rejected_overloaded();
                 }
             },
         )

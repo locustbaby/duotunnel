@@ -4,7 +4,7 @@ pub use tunnel_lib::{
     ClientGroupDef as ClientGroup, ClientUpstreamDef as ClientUpstream, EgressUpstreamDef,
     EgressVhostRuleDef as EgressVhostRule, IngressListenerDef as IngressListener,
     IngressListenerModeDef as IngressListenerMode, IngressVhostRuleDef as IngressVhostRule,
-    UpstreamServerDef as UpstreamServer,
+    UpstreamServerDef as UpstreamServer, GroupId, ProxyName,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

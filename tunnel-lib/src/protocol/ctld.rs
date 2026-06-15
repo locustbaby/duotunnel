@@ -1,8 +1,8 @@
-use crate::models::msg::{recv_message_type, send_message, MessageType, MAX_MESSAGE_BYTES};
 use crate::models::defs::{
     ClientGroupDef, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef, IngressListenerDef,
     IngressListenerModeDef, IngressVhostRuleDef, TokenCacheEntryDef, UpstreamServerDef,
 };
+use crate::models::msg::{recv_message_type, send_message, MessageType, MAX_MESSAGE_BYTES};
 use anyhow::{anyhow, Result};
 use rkyv::{
     api::high::{HighDeserializer, HighValidator},
@@ -49,7 +49,7 @@ pub enum ResourceOp<T> {
     Delete { key: String },
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConfigSnapshot {
     pub resource_version: u64,
     pub ingress_listeners: Vec<ProtoIngressListener>,

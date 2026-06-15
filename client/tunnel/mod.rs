@@ -1,4 +1,5 @@
 use crate::bootstrap::config::ClientConfigFile;
+use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -16,6 +17,7 @@ pub(crate) struct TunnelPoolService {
     pub(crate) endpoint: quinn::Endpoint,
     pub(crate) entry_pool: Arc<EntryConnPool>,
     pub(crate) ready: Arc<AtomicBool>,
+    pub(crate) udp_registry: Arc<UdpListenerRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -32,6 +34,7 @@ impl ClientService for TunnelPoolService {
                 shutdown,
                 self.ready.clone(),
                 self.entry_pool.clone(),
+                self.udp_registry.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("run_pool failed: {}", e))
@@ -42,6 +45,7 @@ impl ClientService for TunnelPoolService {
                 shutdown,
                 self.ready.clone(),
                 self.entry_pool.clone(),
+                self.udp_registry.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("run_supervisor failed: {}", e))

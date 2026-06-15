@@ -44,4 +44,6 @@ arc-swap = "1.9"
 figment = { version = "0.10", features = ["yaml", "env"] }
 rand = "0.9"
 mimalloc = "0.1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
 dial9-tokio-telemetry = { version = "0.3.11", features = ["cpu-profiling"], optional = true }

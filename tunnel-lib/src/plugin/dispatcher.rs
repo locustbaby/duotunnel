@@ -35,10 +35,13 @@ async fn sniff(
 ) -> Result<(ProtocolHint, crate::PrefixedReadWrite<TcpStream>)> {
     let runtime = SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors());
     let pool = crate::PeekBufPool::new(SNIFF_LIMIT);
-    let sniffed = match tokio::time::timeout(sniff_timeout, runtime.sniff(&mut stream, &pool)).await {
+    let sniffed = match tokio::time::timeout(sniff_timeout, runtime.sniff(&mut stream, &pool)).await
+    {
         Ok(res) => res?,
         Err(_) => {
-            return Err(anyhow!("protocol sniffing timed out (Slowloris protection)"));
+            return Err(anyhow!(
+                "protocol sniffing timed out (Slowloris protection)"
+            ));
         }
     };
     let mut hint = sniffed.hint.clone();
@@ -73,7 +76,11 @@ impl IngressDispatcher {
     ) -> Result<()> {
         let mut timing = PhaseTiming::new();
 
-        let (hint, stream) = sniff(stream, std::time::Duration::from_millis(ctx.timeouts.sniff_ms)).await?;
+        let (hint, stream) = sniff(
+            stream,
+            std::time::Duration::from_millis(ctx.timeouts.sniff_ms),
+        )
+        .await?;
         timing.sniff_done_at = Some(Instant::now());
         ctx.hint = Some(hint.clone());
 

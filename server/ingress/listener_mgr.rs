@@ -21,11 +21,13 @@ enum ListenerState {
     Draining,
 }
 
+use tunnel_lib::{GroupId, ProxyName};
+
 enum ListenerKind {
     Http,
     Tcp {
-        group_id: String,
-        proxy_name: String,
+        group_id: GroupId,
+        proxy_name: ProxyName,
     },
 }
 
@@ -243,4 +245,20 @@ pub(crate) async fn sync_listener_subset(
 
 pub(crate) async fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
     sync_all_listeners(state, desired).await;
+}
+
+pub(crate) async fn shutdown_all_listeners(state: &Arc<ServerState>) {
+    let drained = {
+        let mut map = state.listeners().lock_map();
+        map.drain()
+            .map(|(_, mut entry)| {
+                entry.state = ListenerState::Draining;
+                entry.cancel.cancel();
+                entry.drained
+            })
+            .collect::<Vec<_>>()
+    };
+    for notify in drained {
+        notify.notified().await;
+    }
 }

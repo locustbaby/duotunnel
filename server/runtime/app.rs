@@ -1,18 +1,21 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::bootstrap::cli::{Cli, Commands, TokenAction};
 use crate::bootstrap::config::ServerConfigFile;
 use crate::bootstrap::{build_server_state, ServerBootstrap, ServerState};
-use crate::ingress::{handlers, sync_listeners};
+use crate::ingress::{handlers, shutdown_all_listeners, sync_listeners};
 use crate::runtime;
 use crate::runtime::metrics;
 use crate::runtime::supervisor::{
     BackgroundComponent, ComponentContext, MetricsComponent, ServerSupervisor,
 };
 use tunnel_store::AuthStore;
+
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct ServerApp {
     cli: Cli,
@@ -114,6 +117,12 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
     }
 
     let runtime = ServerRuntime::build(&bootstrap).await?;
+    let signal_shutdown = runtime.shutdown.clone();
+    runtime::spawn_task(async move {
+        wait_for_shutdown_signal().await;
+        info!("Received shutdown signal, draining server...");
+        signal_shutdown.cancel();
+    });
     let bootstrap = Arc::new(bootstrap);
     let supervisor = start_supervisor(bootstrap.clone(), &runtime);
     let result = proxy_main(
@@ -122,6 +131,9 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
         runtime.ready.clone(),
     )
     .await;
+    if runtime.shutdown.is_cancelled() {
+        wait_for_shutdown_drain("server").await;
+    }
     runtime.shutdown.cancel();
     supervisor.shutdown();
     result
@@ -152,14 +164,54 @@ async fn proxy_main(
     sync_listeners(&state, &listeners).await;
 
     let quic_state = state.clone();
-    let quic_handle =
-        runtime::spawn_task(
-            async move { handlers::quic::run_quic_server(quic_state, ready).await },
-        );
+    let quic_shutdown = shutdown.clone();
+    let quic_handle = runtime::spawn_task(async move {
+        handlers::quic::run_quic_server(quic_state, ready, quic_shutdown).await
+    });
 
     tokio::select! {
         r = quic_handle => { r??; }
         _ = shutdown.cancelled() => {}
     }
+    shutdown_all_listeners(&state).await;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn wait_for_shutdown_drain(role: &'static str) {
+    let drained = tunnel_lib::wait_for_resource_drain(SHUTDOWN_DRAIN_TIMEOUT).await;
+    let active = tunnel_lib::METRICS.active_connections();
+    let pending = tunnel_lib::METRICS.pending_streams();
+    if drained {
+        info!(
+            role,
+            active_connections = active,
+            pending_streams = pending,
+            "shutdown drain completed"
+        );
+    } else {
+        info!(
+            role,
+            active_connections = active,
+            pending_streams = pending,
+            drain_timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "shutdown drain timed out; forcing exit"
+        );
+    }
 }

@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -105,10 +106,17 @@ async fn handle_entry_connection(
 
     let peek_pool = ENTRY_PEEK_POOL.get_or_init(|| PeekBufPool::new(peek_buf_size));
     let runtime = SniffRuntime::new(SniffPolicy::default(), default_client_detectors());
-    let sniffed = match tokio::time::timeout(sniff_timeout, runtime.sniff(&mut local_stream, peek_pool)).await {
+    let sniffed = match tokio::time::timeout(
+        sniff_timeout,
+        runtime.sniff(&mut local_stream, peek_pool),
+    )
+    .await
+    {
         Ok(res) => res?,
         Err(_) => {
-            return Err(anyhow::anyhow!("protocol sniffing timed out (Slowloris protection)"));
+            return Err(anyhow::anyhow!(
+                "protocol sniffing timed out (Slowloris protection)"
+            ));
         }
     };
     let (protocol, host, initial_bytes) = if sniffed.bytes_read > 0 {
@@ -122,6 +130,42 @@ async fn handle_entry_connection(
     };
 
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
+
+    if let Some(ref host_raw) = host {
+        let host_clean = host_raw.split(':').next().unwrap_or(host_raw);
+        let rules = pool.egress_rules();
+        for rule in rules {
+            let rule_host_clean = rule
+                .match_host
+                .split(':')
+                .next()
+                .unwrap_or(&rule.match_host);
+            if rule_host_clean == host_clean && rule.action_upstream == "reject" {
+                warn!(target: "client::egress", "Target '{}' rejected locally by rule '{}'", host_raw, rule.match_host);
+                crate::metrics::egress_rejection("rule_match", host_clean);
+
+                if protocol == tunnel_lib::proxy::core::Protocol::H1 {
+                    let body = "502 Bad Gateway - Rejected by Egress Rule\n";
+                    let resp = format!(
+                        "HTTP/1.1 502 Bad Gateway\r\n\
+                         Connection: close\r\n\
+                         Content-Type: text/plain\r\n\
+                         Content-Length: {}\r\n\
+                         X-DuoTunnel-Reject: rule-match\r\n\
+                         \r\n\
+                         {}",
+                        body.len(),
+                        body
+                    );
+                    let _ = local_stream.write_all(resp.as_bytes()).await;
+                    let _ = local_stream.shutdown().await;
+                } else {
+                    let _ = local_stream.shutdown().await;
+                }
+                return Ok(());
+            }
+        }
+    }
 
     let pool_size = pool.pool_size().await;
     let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
@@ -137,6 +181,7 @@ async fn handle_entry_connection(
             &conn.conn,
             &conn.inflight_table,
             conn.slot_id,
+            overload,
             open_stream_timeout,
             |_elapsed, _outcome| {},
         )
@@ -147,7 +192,7 @@ async fn handle_entry_connection(
                 let recv = opened.recv;
                 let _inflight_guard = opened.inflight;
                 let routing_info = RoutingInfo {
-                    proxy_name: "entry".to_string(),
+                    proxy_name: "entry".into(),
                     src_addr: peer_addr.ip().to_string(),
                     src_port: peer_addr.port(),
                     protocol,
@@ -169,6 +214,29 @@ async fn handle_entry_connection(
                 ErrorKind::QuicOpenTimedOut => {
                     warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi timed out, trying next connection");
                     last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                }
+                ErrorKind::QuicOpenRejectedOverloaded => {
+                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi rejected due to overload");
+                    if protocol == tunnel_lib::proxy::core::Protocol::H1 {
+                        let body = "503 Service Unavailable - Open stream queue full\n";
+                        let resp = format!(
+                            "HTTP/1.1 503 Service Unavailable\r\n\
+                             Connection: close\r\n\
+                             Content-Type: text/plain\r\n\
+                             Content-Length: {}\r\n\
+                             Retry-After: 1\r\n\
+                             X-DuoTunnel-Reject: overload\r\n\
+                             \r\n\
+                             {}",
+                            body.len(),
+                            body
+                        );
+                        let _ = local_stream.write_all(resp.as_bytes()).await;
+                        let _ = local_stream.shutdown().await;
+                        return Ok(());
+                    }
+                    let _ = local_stream.shutdown().await;
+                    return Err(with_conn_detail(conn.conn.stable_id(), e).into());
                 }
                 ErrorKind::QuicConnectionLost => {
                     warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit stale connection, evicting pool entry");
@@ -204,5 +272,140 @@ impl ClientService for EgressListenerService {
         start_entry_listener(self.pool.clone(), shutdown, self.entry_cfg.clone())
             .await
             .map_err(|e| anyhow::anyhow!("entry listener failed: {}", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tunnel_lib::EgressVhostRuleDef;
+
+    #[tokio::test]
+    async fn test_handle_entry_connection_http_reject() {
+        let pool = EntryConnPool::new(100, 1);
+        pool.set_egress_rules(vec![EgressVhostRuleDef {
+            match_host: "blocked.com".to_string(),
+            action_upstream: "reject".to_string(),
+        }]);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: blocked.com\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            response
+        });
+
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let tcp_params = Arc::new(TcpParams::default());
+        let overload = OverloadLimits::resolve(
+            tunnel_lib::SharedOverloadMode::Burst,
+            100,
+            0,
+            0,
+            None,
+            Some(0.0),
+            Some(0.0),
+            0,
+            tunnel_lib::BackoffStrategy::Exponential,
+        );
+
+        let res = handle_entry_connection(
+            pool,
+            server_stream,
+            1024,
+            tcp_params,
+            Duration::from_secs(1),
+            &overload,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(res.is_ok());
+
+        let client_response = client_handle.await.unwrap();
+        let resp_str = String::from_utf8_lossy(&client_response);
+        assert!(resp_str.contains("HTTP/1.1 502 Bad Gateway"));
+        assert!(resp_str.contains("X-DuoTunnel-Reject: rule-match"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_entry_connection_tls_reject() {
+        let pool = EntryConnPool::new(100, 1);
+        pool.set_egress_rules(vec![EgressVhostRuleDef {
+            match_host: "blocked.com".to_string(),
+            action_upstream: "reject".to_string(),
+        }]);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            let mut client_hello = vec![
+                0x16, // Handshake
+                0x03, 0x01, // TLS 1.0 (version in record header)
+                0x00, 0x43, // Record Length: 67 bytes
+                0x01, // Client Hello
+                0x00, 0x00, 0x3f, // Handshake length: 63 bytes
+                0x03, 0x03, // Version: TLS 1.2
+                // Random: 32 bytes
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0x00, // Session ID length: 0
+                0x00, 0x02, // Cipher suite length: 2
+                0x00, 0x2f, // Cipher suite: TLS_RSA_WITH_AES_128_CBC_SHA
+                0x01, // Compression method length: 1
+                0x00, // Compression: null
+                0x00, 0x14, // Extensions length: 20
+                0x00, 0x00, // Extension type: server_name (SNI)
+                0x00, 0x10, // SNI extension length: 16
+                0x00, 0x0e, // Server name list length: 14
+                0x00, // Server name type: host_name
+                0x00, 0x0b, // Host name length: 11
+            ];
+            client_hello.extend_from_slice(b"blocked.com");
+            stream.write_all(&client_hello).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            response
+        });
+
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let tcp_params = Arc::new(TcpParams::default());
+        let overload = OverloadLimits::resolve(
+            tunnel_lib::SharedOverloadMode::Burst,
+            100,
+            0,
+            0,
+            None,
+            Some(0.0),
+            Some(0.0),
+            0,
+            tunnel_lib::BackoffStrategy::Exponential,
+        );
+
+        let res = handle_entry_connection(
+            pool,
+            server_stream,
+            1024,
+            tcp_params,
+            Duration::from_secs(1),
+            &overload,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(res.is_ok());
+
+        let client_response = client_handle.await.unwrap();
+        assert!(client_response.is_empty());
     }
 }

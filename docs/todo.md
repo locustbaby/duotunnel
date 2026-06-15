@@ -72,144 +72,115 @@ flowchart TD
 ## 🚨 Phase 0: 关键安全防御、死锁修复与日志脱敏 (Critical Security & Stability)
 
 ### [TODO-CR-AUDIT-17] DashMap Lock Ordering Inversion in Client Registry
-* **Priority**: Critical | **Status**: TODO | **Track**: Control Plane & Config
-* **Problem**: 
-  在 [registry.rs](file:///Users/sexy/Documents/GitHub/duotunnel/server/src/registry.rs) 中，`replace_or_register` 函数通过 `.entry()` 获取了 `groups` DashMap 桶上的写锁，在持有该锁的同时，又尝试获取 `clients` DashMap 条目的写锁。这种嵌套锁的顺序在并发注册和注销时极易造成严重的运行时死锁，导致整个控制面服务挂起。
-* **Fix**:
-  避免嵌套锁住不同的 `DashMap` 或互斥结构。先从 `groups` 提取所需字段并显式释放该桶的写锁 guard，之后再对 `clients` 进行后续的写操作，确保锁级别平铺。
+* **Priority**: Critical | **Status**: ✅ Done (Phase 0) | **Track**: Control Plane & Config
+* **Fix**: Replaced nested `DashMap` mutation with an actor-owned registry index plus `ArcSwap` snapshots, removing the original lock-ordering inversion entirely instead of just tightening shard guard scope.
 
 ### [TODO-CR-AUDIT-18] Sniffer Slowloris Vulnerability in Protocol Detection (5s Timeout)
-* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
-* **Problem**: 
-  在协议探测模块中，`SniffRuntime::sniff` 循环读取入站数据流块来探测应用层协议（HTTP/1.1, H2c, TLS SNI）。然而，该过程缺乏绝对的时间超时限制。恶意客户端可以通过无限慢的速度发送极少字节（Slowloris 慢速攻击），让探测协程无限期 `Pending` 在 `stream.read()`，从而耗尽服务器的所有接收 Worker 资源。
-* **Fix**:
-  在 [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/egress/listener.rs) 与服务端的 Ingress 调度中，使用 `tokio::time::timeout(Duration::from_secs(5), ...)` 对嗅探操作包裹硬超时逻辑，超时未判定则立即断开。
+* **Priority**: High | **Status**: ✅ Done (Phase 0) | **Track**: HA, Overload & Observability
+* **Fix**: Wrapped `SniffRuntime::sniff` in `tokio::time::timeout(sniff_timeout, ...)` on both ingress paths: client entry sniffing and the server-side `IngressDispatcher`. Default remains 5s and is configurable via listener/server sniff timeout settings.
 
 ### [TODO-CR-AUDIT-8] 敏感凭证泄漏风险 (Security/Log Leakage in AuthError)
-* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
-* **Problem**:
-  `AuthError::Internal` 内部直接包裹了 `anyhow::Error` 的原始上下文。当客户端授权失败触发异常日志时，敏感的明文 Auth Token 会伴随调用栈或者错误信息被直接输出到 Trace/Error 日志中，产生凭证泄露风险。
-* **Fix**:
-  在输出日志或向外部传播 Auth 错误之前，对 Token 执行 SHA-256 哈希或前缀截断掩码（如 `Token: abc...xyz`），禁止打印原始敏感明文。
+* **Priority**: High | **Status**: ✅ Done (Phase 0) | **Track**: Control Plane & Config
+* **Fix**: Token-like `dt_...` substrings are now masked before `AuthError` formatting/log emission using a stable hash-derived placeholder (for example `dt_masked_deadbeef`). Related `Debug` output paths also avoid printing raw token values.
 
 ---
 
 ## 🚀 Phase 1: 核心用户态零拷贝、内存池与高并发连接管理 (High Priority: Performance & Zero-Copy)
 
 ### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
-* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
-* **Problem**:
-  在 [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 中，Thread-local 的 `LOCAL_POOL` 在空或容量不匹配时会退退到全局的 `global_pool()`。目前 `global_pool()` 虽然是无锁的 `crossbeam_queue::SegQueue`，但代码中加入了 `global.len() < 256` 限制判断。**在 `SegQueue` 上调用 `len()` 是 $O(N)$ 复杂度的操作（需要遍历链表）**，高并发下这会导致严重的 CPU 缓存行争用和毛刺。
-* **Fix**:
-  彻底废除基于全局 SegQueue 且带有 $O(N)$ `len()` 判定限制的缓冲池，改用有界的、`len()` 为 $O(1)$ 的无锁并发 MPMC 队列 `crossbeam_queue::ArrayQueue<Vec<u8>>`。如果队列满则直接 drop 交给 GC，消除全局临界区争用。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
+* **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
 
 ### [TODO-97] Buffer pool capacity lax matching & uninitialized allocation
-* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
-* **Problem**:
-  [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs) 中的 `take_buffer` 使用了 `buf.capacity() == buffer_size` 强对齐匹配，造成不同 buffer_size 容器在池中大量失效并重新分配。另外，`resize` 操作无意义地对缓存 Vec 进行了 memset 置零，增加了总线吞吐负担。
-* **Fix**:
-  1. 将匹配条件放宽到 `buf.capacity() >= buffer_size`。
-  2. 取出后使用 `unsafe { buf.set_len(buffer_size) }` 替代 `resize(..., 0)`（后续读系统调用会立即覆盖这片内存，无安全泄露风险）。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
+* **Fix**: Reuse paths now accept `capacity >= buffer_size` and use `unsafe { buf.set_len(buffer_size) }` instead of `resize(..., 0)`. `PooledBufGuard` (RAII) ensures the buffer is always returned on drop, preventing leaks across cancellation points.
+* **Fix**: Cold-start / pool-empty allocation now also uses the same uninitialized-length strategy, so the zero-fill fallback is removed from the hot relay buffer path.
 
 ### [performance_optimization_proposal.md §1] L7 Zero-Copy Body Streaming
-* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
-* **Problem**:
-  L7 HTTP/1.x 转发中，网关需要将 Quinn 的 QUIC 数据流读取并写入 TCP 接口。目前仍然通过多步带内存拷贝的 Buffer 方式中转。
-* **Fix**:
-  在 `h1.rs` 和 `egress/http.rs` 的 Body 转发中，将 `recv.read()` 改为 `recv.read_chunk()`。Quinn 的 `read_chunk` 直接返回 RC 引用计数的 `bytes::Bytes`，可以绕过用户态缓冲区中转，实现真正的零拷贝网络数据中转。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
+* **Fix**: QUIC→TCP relay uses `copy_quic_to_shutdown` backed by `recv.read_chunk()` throughout [bridge.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/bridge.rs) and [base.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/proxy/base.rs). HTTP body forwarding in [egress/http.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/egress/http.rs) uses `read_chunk` with a streaming `try_unfold` body, avoiding intermediate heap-allocated copies.
 
 ### [performance_optimization_proposal.md §2] L7 Zero-Copy Chunked Response Writer
-* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
 * **Problem**:
   在序列化 HTTP 分段响应（Chunked Response）时，由于需要计算并拼接十六进制的 Chunk 长度以及 `\r\n`，系统常会创建额外的中间缓冲区进行拷贝拼接。
 * **Fix**:
-  消除中间缓冲区拷贝。直接使用 stack-allocated 的前缀数组（约 32 字节）写入 hex 长度与 `\r\n`，随后直接 `write_all(chunk)` 写入主体负载，由 Quinn 在更底层自动拼包发送，实现 Payload 部分的零拷贝。
+  已直接在 `Http1Driver::write_response` 中使用 stack-allocated 前缀数组（32 字节）格式化十六进制长度与 `\r\n`，随后通过 `write_all` 连续写入前缀和数据块，避免了中间拷贝，由 Quinn 底层自动拼包发送。
 
 ### [TODO-81] Optimize Peek Buffer Copy in ProxyEngine (Zero-Copy)
-* **Priority**: High | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
-* **Problem**: 
-  `ProxyEngine::run_stream` 在判断应用层协议时，如果协议不是预定义的，会在每一条入站 Stream 上执行一次堆分配的 `Bytes::copy_from_slice` 拷贝，增加了 GC 压力。
-* **Fix**: 
-  改为直接从 [peek_buf.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/peek_buf.rs) 的 `PeekBufPool` 借出 raw slice 进行探测，避免在 TCP/Passthrough 路径上为了打包而创建和分配中间 `Bytes` 包装。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
+* **Fix**: `SniffRuntime::sniff` in [sniff.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/protocol/sniff.rs) now takes a `&PeekBufPool`, reads directly into a pooled `Vec<u8>`, and returns a `SniffPrefix::Pooled` — an `Arc<PooledBufInner>` that returns the buffer to `PeekBufPool` on the last drop. No intermediate `Bytes::copy_from_slice` on the fast (Matched) path.
+* **Residual**: `PeekBufPool::take()` still zero-fills when a reused buffer is shorter than `buf_size`. Since the bytes are immediately overwritten by `stream.read()`, this is safe but costs ~4 KiB memset per connection. Deferred to TODO-98.
 
 ### [TODO-104] EgressDnsCache global Mutex lock removal via DashMap & Single-Flight
-* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
-* **Problem**:
-  在 [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/dns_cache.rs) 中，`EgressDnsCache` 使用了单一全局异步锁 `write_lock: tokio::sync::Mutex<()>` 来协调所有 DNS 未命中的解析，导致不同域名的并发查询全部串行化。此外，每次缓存更新都需要 clone 整个 `HashMap` 以便用 `ArcSwap` 替换，在大量域名解析时造成高内存分配开销。
-* **Fix**:
-  1. 移去全局 `write_lock`，将内部的 `ArcSwap<HashMap<...>>` 替换为并发安全的 `DashMap`。
-  2. 实现 Single-Flight 机制（基于 `broadcast::channel`），使对于同一个域名的 concurrent 查询仅发起一次真实外发 DNS 查询，其余并发请求共同等待该结果，但不同域名解析互不干扰地并行运行。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
+* **Fix**: [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/dns_cache.rs) now uses `DashMap<(String,u16), DnsEntry>` for cache and `DashMap<(String,u16), broadcast::Sender<...>>` for inflight dedup. Each unique `(host, port)` races an `Entry::Vacant` insertion to become the single resolver; all concurrent waiters subscribe and receive the result via broadcast. Resolution is wrapped in `tokio::time::timeout(5s)`. Stale cache served on failure.
 
 ### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
-* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
-* **Problem**:
-  Egress（客户端到服务器）路径在同一 QPS 下时延迟明显偏高，主要是因为 TCP/WebSocket 的热路径上缺乏 upstream TCP 连接复用池，导致每次都进行完整的物理连接握手。
-* **Fix**:
-  1. 引入轻量级、无锁的 TCP 连接池，供 L4 Egress 复用。
-  2. 设置最大空闲连接数与 `idle_timeout`。通过后台协程定期发送空包探测或 Keepalive，及时从连接池中剔除已死物理连接。
+* **Priority**: High | **Status**: 🚧 Partial / Re-scoped (Phase 1) | **Track**: Transport & Performance
+* **Fix**: The DNS cache portion is complete and remains on the production path. The original `raw TCP` idle pool direction was evaluated, removed from the production egress path, and no longer remains part of the public egress API surface.
+* **Rationale**: HTTP/H2 reuse remains delegated to Hyper’s protocol-aware pool. For raw TCP / WebSocket / TLS upstream sockets, the coarse `SocketAddr`-only pool shape did not justify the complexity and correctness risk for this phase.
 
 ### [TODO-76] Client-side local egress rule evaluation and early truncation
-* **Priority**: High | **Status**: TODO | **Track**: Core Proxy & Protocol
-* **Problem**:
-  目前 Egress 出站路由规则是在服务端（`ServerEgressMap`）进行最终判定的。如果某个 Host 不匹配出站规则，客户端仍然会建立 QUIC 连接/流发送数据，然后被服务端以 `route_not_found` 拒绝，这浪费了 WAN 带宽与 QUIC 连接流资源。
-* **Fix**:
-  1. 将 Egress 规则下发到客户端的配置中。
-  2. 在 [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/src/egress/listener.rs) 中，于嗅探出 Host 后，立即在客户端本地匹配出站规则。
-  3. 若不匹配，则本地直接截断并断开 TCP 连接（返回 502/404 等），拒绝发起 QUIC Stream；同时服务器端保留最终防御判定（防篡改）。
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Core Proxy & Protocol
+* **Fix**: Egress vhost rules pushed to client config via `EntryConnPool::set_egress_rules`. In [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/egress/listener.rs), after SNI/host sniff, rules are evaluated locally: HTTP plain → `502 Bad Gateway` with `X-DuoTunnel-Reject: rule-match`; TLS/Other → clean EOF. Warning log + `egress_rejections_total` Prometheus counter incremented. Server-side rule check still active as final defense. Current matching is exact host comparison only (no wildcard).
 
 ### [TODO-82] Decouple SQLite from Edge Server (Stateless Edge)
-* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Control Plane & Config
 * **Problem**:
   边缘节点 `server` 仍然需要直接编译 SQLite 驱动并查询 local `tunnel-store` 数据库，阻碍了边缘节点的去状态化横向伸缩。
 * **Fix**:
-  彻底解耦边缘节点的 SQLite 依赖，使其变成无状态节点。通过轻量级的 gRPC/HTTP 客户端，向中心控制面动态获取路由策略与鉴权凭证。
+  ctld-managed 模式下，server 启动已不再构建本地 SQLite `AuthStore`/`RuleStore`，改为使用 `ControlClientService` 从中心控制面持续接收 `Snapshot/Patch`，并将 token cache 与 routing snapshot 保存在内存里；首个 Snapshot 到达前 `/healthz` 保持 not ready，QUIC login 也会直接返回 `server not ready`，避免空配置窗口对外服务。
+  本地快照持久化已完全实现：在成功从控制面拉取快照时写入本地文件，并在启动时如果控制面不可达，能自动加载本地备份快照作为只读 fallback。
 
 ### [TODO-26] Native UDP proxy over QUIC Datagram
-* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
 * **Problem**:
   目前缺乏 UDP 代理的支持。虽然 Quinn 支持底层的不可靠 Datagram (RFC 9221)，但 DuoTunnel 尚未实现客户端 UDP 监听解包与服务端 UDP 会话保持与老化淘汰。
 * **Fix**:
-  1. **客户端 UDP 监听**：实现 `UdpListener`，将接收到的 UDP 数据包映射为会话键并打包送入 `quinn::Connection::send_datagram()`。
-  2. **服务端会话管理器**：绑定临时 `tokio::net::UdpSocket` 投递给 Upstream，并起后台 Task 监听回包转发给客户端。
-  3. **老化淘汰机制**：对 >30 秒无流量的 UDP socket 执行超时清理。
+  现在已经补上最小可用运行时：客户端可按 `udp_entries` 绑定本地 UDP listener，把数据包封装成 `UdpDatagramEnvelope` 通过 QUIC datagram 发送；服务端收到后按 `proxy_name` 解析 upstream、建立按 `UdpSessionKey` 分组的 UDP socket，并把回包继续通过 QUIC datagram 送回客户端 listener。基础协议模型 `UdpSessionKey`/`UdpDatagramEnvelope` 与独立的 `encode/decode` helper 也已接入这条路径。
+  UDP 代理生产级收尾工作已完成：实现了基于最后活动时间戳的 UDP 会话定时清理与老化淘汰，避免连接内存无限增长。
 
 ### [TODO-32] Root CA signing mode for generated certs
-* **Priority**: High | **Status**: TODO | **Track**: Transport & Performance
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
 * **Problem**:
   当前自签证书逻辑在每次请求时消耗大量 CPU，且对持久化不友好。
 * **Fix**:
-  将生成逻辑改造为：一次性建立持久化的 Root CA，后续根据不同 Host 异步动态生成、签署并缓存二级证书。
+  证书生成路径已改成“进程级 Root CA 一次生成，后续按 Host 签发 leaf cert”，并继续复用现有 host 级 `ServerConfig` cache 与并发生成限流；这已经消除了“每个 Host 都重新自签一套根”的高 CPU 路径。
+  根证书（Root CA）的磁盘持久化加载与存储已完成：首次启动生成根证书和私钥并写入磁盘；后续重启时会自动从磁盘加载，保证自签证书链稳定性。
 
 ### [TODO-53D] Remove legacy static token map
-* **Priority**: High | **Status**: TODO | **Track**: Control Plane & Config
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Control Plane & Config
 * **Problem**:
   阶段 A-C 已经完成。剩余阶段 D 需要清理并彻底移除 server 配置中遗留的静态 token map。
+* **Fix**:
+  当前 server 运行时鉴权路径已只剩两种：Standalone 模式走 `SqliteAuthStore`，ctld-managed 模式走 `LocalTokenCache` 的只读快照缓存；配置 schema 与 bootstrap 路径中也不再存在 `auth_tokens`/静态 token map 的生产入口。该条目已由现有实现收口，文档此前状态滞后。
 
 ### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
-* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: HA, Overload & Observability
 * **Problem**:
   在并发高峰期，请求可能会在 open_bi 队列上无限期排队等待，引起 upstream 协程淤积和内存爆满。
 * **Fix**:
-  限制配置的最大排队深度。超过该队列阈值时，直接快速失败（Fast-Fail）丢弃或响应 503。
+  `OverloadConfig` 新增 `max_pending_streams`，对 QUIC `open_bi` 待队列做显式上限控制。超过阈值时直接以 `quic_open_rejected_overloaded` 快速失败；Client H1 入口返回 `503 Service Unavailable` + `Retry-After: 1`，TCP/TLS 路径则直接关闭本地连接，避免继续堆积等待。
 
 ### [TODO-CR-AUDIT-21] SIGTERM Graceful Connection Draining
-* **Priority**: High | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: HA, Overload & Observability
 * **Problem**:
   Server 和 Client 均缺乏优雅停机机制，SIGTERM 信号会引发粗暴的进程退出，瞬间掐断成千上万个活跃会话。
 * **Fix**:
-  接入 `tokio::signal`，捕获 SIGTERM/SIGINT，停止接受新连接，并给存量会话设定最长可能如 30 秒的优雅漏斗释放时长。
+  已接入 `tokio::signal`，Server/Client 均可捕获 `SIGTERM`/`SIGINT` 并触发统一 shutdown；Server 会停止 QUIC accept 并取消所有 listener，Client healthz server 也会同步退出。随后双方都会对活动 accepted connection / pending stream 执行最长 30 秒的 drain 等待，超时后记录日志并强制退出。
 
 ### [TODO-35] Two-tier upstream connection pool
-* **Priority**: High | **Status**: TODO | **Track**: Performance Ideas
+* **Priority**: High | **Status**: ❌ Discarded (Phase 1) | **Track**: Performance Ideas
 * **Fix**:
-  本地 Egress 侧采用“无锁热队列”加“全局冷池”的两级长连接连接池模型，减少连接竞争。
+  由于去除了 L4 TCP 级别的通用连接池（仅保留 Hyper 协议感知的 HTTP/H2 连接复用，原生 TCP/TLS 放弃长连接池化），此项两级 L4 连接池设计也一并舍弃。
 
 ### [TODO-64] ClientId / GroupId / ProxyName / ReuseHash newtypes
-* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Priority**: Medium | **Status**: ✅ Done (Phase 1) | **Track**: Core Proxy & Protocol
 * **Problem**:
   系统热路径（例如 registry、连接池、h2c）上依然使用裸 `String` / `Arc<str>` 作为 ID 标识，在多核处理器并发哈希和克隆时造成高开销，且缺乏强类型约束。
 * **Fix**:
-  引入专门的强类型 Newtype 封装（如 `ClientId`、`GroupId`、`ProxyName`、`ReuseHash`）。在内存热路径中使用轻量级包装，只在输入/输出的边界层做 String 编解码转换。
+  引入了 `ClientId`、`GroupId`、`ProxyName`、`ReuseHash` 的强类型 Newtype 封装，实现 `Deref<Target = str>`、`Borrow<str>`、`Display` 及高效的反序列化/序列化机制，全面消除了原本内存热路径中的 String 重复拷贝与 Hash 查找开销。
 
 ---
 

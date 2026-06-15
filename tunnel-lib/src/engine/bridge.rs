@@ -1,4 +1,6 @@
-use crate::engine::copy::{copy_buffered_then_finish, copy_buffered_then_shutdown};
+use crate::engine::copy::{
+    copy_buffered_then_finish, copy_buffered_then_shutdown, copy_quic_to_shutdown,
+};
 use crate::proxy::buffer_params::DEFAULT_RELAY_BUF_SIZE;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace};
@@ -53,7 +55,7 @@ pub async fn relay_with_first_data(
         tcp_stream.write_all(data).await?;
     }
     let (tcp_read, tcp_write) = tcp_stream.into_split();
-    let quic_to_tcp = copy_buffered_then_shutdown(quic_recv, tcp_write, DEFAULT_RELAY_BUF_SIZE);
+    let quic_to_tcp = copy_quic_to_shutdown(quic_recv, tcp_write);
     let tcp_to_quic = copy_buffered_then_finish(tcp_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(quic_to_tcp, tcp_to_quic) {
         Ok((sent, recv)) => {
@@ -96,10 +98,15 @@ mod tests {
             src.shutdown().await.expect("test failed");
         });
         let (mut sink_read, sink_write) = tokio::io::duplex(64);
-        let count = relay_unidirectional(dst, sink_write).await.expect("test failed");
+        let count = relay_unidirectional(dst, sink_write)
+            .await
+            .expect("test failed");
         assert_eq!(count, data.len() as u64);
         let mut received = Vec::new();
-        sink_read.read_to_end(&mut received).await.expect("test failed");
+        sink_read
+            .read_to_end(&mut received)
+            .await
+            .expect("test failed");
         assert_eq!(&received, data);
     }
     #[tokio::test]
@@ -107,7 +114,9 @@ mod tests {
         let (mut src, dst) = tokio::io::duplex(64);
         src.shutdown().await.expect("test failed");
         let (_, sink_write) = tokio::io::duplex(64);
-        let count = relay_unidirectional(dst, sink_write).await.expect("test failed");
+        let count = relay_unidirectional(dst, sink_write)
+            .await
+            .expect("test failed");
         assert_eq!(count, 0, "empty stream must transfer 0 bytes");
     }
     #[tokio::test]
@@ -130,10 +139,16 @@ mod tests {
         assert_eq!(sent, a_data.len() as u64, "sent byte count mismatch");
         assert_eq!(recv, b_data.len() as u64, "recv byte count mismatch");
         let mut a_received = Vec::new();
-        side_a_read.read_to_end(&mut a_received).await.expect("test failed");
+        side_a_read
+            .read_to_end(&mut a_received)
+            .await
+            .expect("test failed");
         assert_eq!(&a_received, b_data);
         let mut b_received = Vec::new();
-        side_b_read.read_to_end(&mut b_received).await.expect("test failed");
+        side_b_read
+            .read_to_end(&mut b_received)
+            .await
+            .expect("test failed");
         assert_eq!(&b_received, a_data);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -157,12 +172,18 @@ mod tests {
         });
         let a_reader = tokio::spawn(async move {
             let mut buf = Vec::new();
-            side_a_read.read_to_end(&mut buf).await.expect("test failed");
+            side_a_read
+                .read_to_end(&mut buf)
+                .await
+                .expect("test failed");
             buf
         });
         let b_reader = tokio::spawn(async move {
             let mut buf = Vec::new();
-            side_b_read.read_to_end(&mut buf).await.expect("test failed");
+            side_b_read
+                .read_to_end(&mut buf)
+                .await
+                .expect("test failed");
             buf
         });
         let (sent, recv) = relay(relay_a, relay_b).await.expect("test failed");

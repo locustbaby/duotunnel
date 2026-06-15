@@ -31,8 +31,8 @@ impl RouteResolver for VhostPlugin {
 
         match target {
             Some(t) => Ok(PhaseResult::Continue(Route::new(
-                t.group_id.as_ref(),
-                t.proxy_name.as_ref(),
+                t.group_id.clone(),
+                t.proxy_name.clone(),
             ))),
             None => Ok(PhaseResult::Reject {
                 status: 404,

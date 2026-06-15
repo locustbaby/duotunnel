@@ -1,9 +1,10 @@
-use bytes::Bytes;
+use crate::SniffPrefix;
 use quinn::{RecvStream, SendStream};
 use std::io::Result;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
 pub struct QuinnStream {
     pub send: SendStream,
     pub recv: RecvStream,
@@ -40,18 +41,13 @@ impl AsyncWrite for QuinnStream {
 }
 pub struct PrefixedReadWrite<S> {
     stream: S,
-    prefix: Option<Bytes>,
+    prefix: SniffPrefix,
 }
 impl<S> PrefixedReadWrite<S> {
-    pub fn new(stream: S, prefix: impl Into<Bytes>) -> Self {
-        let prefix = prefix.into();
+    pub fn new(stream: S, prefix: impl Into<SniffPrefix>) -> Self {
         Self {
             stream,
-            prefix: if prefix.is_empty() {
-                None
-            } else {
-                Some(prefix)
-            },
+            prefix: prefix.into(),
         }
     }
 }
@@ -61,15 +57,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for PrefixedReadWrite<S> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        if let Some(prefix) = &mut self.prefix {
-            let len = std::cmp::min(prefix.len(), buf.remaining());
-            buf.put_slice(&prefix[..len]);
-            if len == prefix.len() {
-                self.prefix = None;
-            } else {
-                let remaining = prefix.split_off(len);
-                *prefix = remaining;
-            }
+        if !self.prefix.is_empty() {
+            let len = std::cmp::min(self.prefix.len(), buf.remaining());
+            buf.put_slice(&self.prefix.as_bytes()[..len]);
+            self.prefix.advance(len);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut self.stream).poll_read(cx, buf)
@@ -92,7 +83,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedReadWrite<S> {
 }
 pub struct PrefixedReadHalf<R> {
     reader: R,
-    prefix: Option<Bytes>,
+    prefix: SniffPrefix,
 }
 impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReadHalf<R> {
     fn poll_read(
@@ -100,15 +91,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReadHalf<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        if let Some(prefix) = &mut self.prefix {
-            let len = std::cmp::min(prefix.len(), buf.remaining());
-            buf.put_slice(&prefix[..len]);
-            if len == prefix.len() {
-                self.prefix = None;
-            } else {
-                let remaining = prefix.split_off(len);
-                *prefix = remaining;
-            }
+        if !self.prefix.is_empty() {
+            let len = std::cmp::min(self.prefix.len(), buf.remaining());
+            buf.put_slice(&self.prefix.as_bytes()[..len]);
+            self.prefix.advance(len);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut self.reader).poll_read(cx, buf)
