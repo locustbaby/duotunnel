@@ -95,6 +95,7 @@ pub(crate) struct RoutingSnapshot {
     http_routers: HttpRouterMap,
     tunnel_management: Arc<TunnelManagement>,
     egress_map: Arc<egress::ServerEgressMap>,
+    egress_rules: Vec<tunnel_lib::EgressVhostRuleDef>,
 }
 
 impl RoutingSnapshot {
@@ -106,7 +107,11 @@ impl RoutingSnapshot {
         &self,
         group_id: &str,
     ) -> Option<tunnel_lib::ClientConfig> {
-        self::config::build_client_config_for_group(&self.tunnel_management, group_id)
+        self::config::build_client_config_for_group(
+            &self.tunnel_management,
+            &self.egress_rules,
+            group_id,
+        )
     }
 
     pub(crate) fn route_target(&self, listener_port: u16, host: &str) -> Option<RouteTarget> {
@@ -211,6 +216,10 @@ impl ServerState {
 
     pub(crate) fn relay_buf_size(&self) -> usize {
         self.ingress.proxy_buffer_params.relay_buf_size
+    }
+
+    pub(crate) fn sniff_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ingress.proxy_buffer_params.sniff_timeout_ms)
     }
 
     pub(crate) fn peek_buf_pool(&self) -> &crate::PeekBufPool {
@@ -380,8 +389,8 @@ pub(crate) fn build_routing_snapshot(
                 router.add_route(
                     &rule.match_host,
                     RouteTarget {
-                        group_id: Arc::from(rule.client_group.as_str()),
-                        proxy_name: Arc::from(rule.proxy_name.as_str()),
+                        group_id: rule.client_group.clone(),
+                        proxy_name: rule.proxy_name.clone(),
                     },
                 );
             }
@@ -394,10 +403,20 @@ pub(crate) fn build_routing_snapshot(
         }
     }
     let egress_map = egress::ServerEgressMap::from_config(egress, http_params);
+    let egress_rules = egress
+        .rules
+        .vhost
+        .iter()
+        .map(|r| tunnel_lib::EgressVhostRuleDef {
+            match_host: r.match_host.clone(),
+            action_upstream: r.action_upstream.clone(),
+        })
+        .collect();
     RoutingSnapshot {
         http_routers: Arc::new(http_routers),
         tunnel_management: Arc::new(tm.clone()),
         egress_map: Arc::new(egress_map),
+        egress_rules,
     }
 }
 

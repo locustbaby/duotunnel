@@ -2,9 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 pub use tunnel_lib::{
     ClientGroupDef as ClientGroup, ClientUpstreamDef as ClientUpstream, EgressUpstreamDef,
-    EgressVhostRuleDef as EgressVhostRule, IngressListenerDef as IngressListener,
+    EgressVhostRuleDef as EgressVhostRule, GroupId, IngressListenerDef as IngressListener,
     IngressListenerModeDef as IngressListenerMode, IngressVhostRuleDef as IngressVhostRule,
-    UpstreamServerDef as UpstreamServer,
+    ProxyName, UpstreamServerDef as UpstreamServer,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

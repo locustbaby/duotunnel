@@ -44,6 +44,7 @@ pub async fn run_http_accept_loop(
             let svc = crate::ingress::tunnel_service::DefaultTunnelService;
             let timeouts = Timeouts {
                 open_stream_ms: state.open_stream_timeout().as_millis() as u64,
+                sniff_ms: state.sniff_timeout().as_millis() as u64,
                 ..Timeouts::default()
             };
             let mut ctx = ServerCtx::new(

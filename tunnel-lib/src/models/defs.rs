@@ -1,3 +1,4 @@
+use crate::models::id::{GroupId, ProxyName};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -89,8 +90,8 @@ impl fmt::Display for TokenStatus {
 )]
 pub struct IngressVhostRuleDef {
     pub match_host: String,
-    pub group_id: String,
-    pub proxy_name: String,
+    pub group_id: GroupId,
+    pub proxy_name: ProxyName,
 }
 
 #[derive(
@@ -101,8 +102,8 @@ pub enum IngressListenerModeDef {
         vhost: Vec<IngressVhostRuleDef>,
     },
     Tcp {
-        group_id: String,
-        proxy_name: String,
+        group_id: GroupId,
+        proxy_name: ProxyName,
     },
 }
 
@@ -136,7 +137,7 @@ pub struct ClientUpstreamDef {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ClientGroupDef {
-    pub group_id: String,
+    pub group_id: GroupId,
     pub config_version: String,
     pub upstreams: Vec<ClientUpstreamDef>,
 }
@@ -163,7 +164,7 @@ pub struct EgressUpstreamDef {
 )]
 pub struct TokenCacheEntryDef {
     pub hash_hex: String,
-    pub client_group: String,
+    pub client_group: GroupId,
     pub client_status: ClientStatus,
     pub token_status: TokenStatus,
 }

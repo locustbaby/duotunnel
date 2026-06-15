@@ -1,6 +1,6 @@
 use crate::rules::{
-    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
-    IngressListenerMode, IngressVhostRule, RoutingData, UpstreamServer,
+    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, GroupId, IngressListener,
+    IngressListenerMode, IngressVhostRule, ProxyName, RoutingData, UpstreamServer,
 };
 use anyhow::Result;
 use figment::{
@@ -75,6 +75,7 @@ pub struct OverloadConfig {
     pub emfile_backoff_ms: u64,
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
+    pub max_pending_streams: Option<usize>,
     /// Total time budget for the slow-path wait, in milliseconds.
     /// For `exponential` strategy the loop backs off within this budget;
     /// for `fixed` it sleeps the full budget once.
@@ -96,6 +97,7 @@ impl Default for OverloadConfig {
             emfile_backoff_ms: 100,
             inflight_yield_threshold: 800,
             inflight_sleep_threshold: 950,
+            max_pending_streams: None,
             inflight_sleep_ms: 2,
             inflight_yield_pct: Some(0.80),
             inflight_sleep_pct: Some(0.95),
@@ -111,6 +113,7 @@ impl OverloadConfig {
             max_concurrent_streams,
             self.inflight_yield_threshold,
             self.inflight_sleep_threshold,
+            self.max_pending_streams,
             self.inflight_yield_pct,
             self.inflight_sleep_pct,
             self.inflight_sleep_ms,
@@ -224,21 +227,21 @@ pub struct HttpListenerDef {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TcpListenerDef {
-    pub client_group: String,
-    pub proxy_name: String,
+    pub client_group: GroupId,
+    pub proxy_name: ProxyName,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VhostRuleDef {
     pub match_host: String,
-    pub client_group: String,
-    pub proxy_name: String,
+    pub client_group: GroupId,
+    pub proxy_name: ProxyName,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ClientConfigs {
     #[serde(default)]
-    pub groups: HashMap<String, GroupConfig>,
+    pub groups: HashMap<GroupId, GroupConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -474,7 +477,7 @@ mod tests {
 
         let mut groups = HashMap::new();
         groups.insert(
-            "group_a".to_string(),
+            "group_a".to_string().into(),
             GroupConfig {
                 config_version: "v1".to_string(),
                 upstreams: client_upstreams,
@@ -528,16 +531,16 @@ mod tests {
                             mode: IngressModeDef::Http(HttpListenerDef {
                                 vhost: vec![VhostRuleDef {
                                     match_host: "test.local".to_string(),
-                                    client_group: "group_a".to_string(),
-                                    proxy_name: "proxy_1".to_string(),
+                                    client_group: "group_a".into(),
+                                    proxy_name: "proxy_1".into(),
                                 }],
                             }),
                         },
                         IngressListenerDef {
                             port: 443,
                             mode: IngressModeDef::Tcp(TcpListenerDef {
-                                client_group: "group_b".to_string(),
-                                proxy_name: "proxy_2".to_string(),
+                                client_group: "group_b".into(),
+                                proxy_name: "proxy_2".into(),
                             }),
                         },
                     ],
@@ -600,7 +603,7 @@ mod tests {
         assert_eq!(up.lb_policy, "round_robin");
         assert_eq!(up.servers.len(), 1);
         assert_eq!(up.servers[0].address, "10.0.0.1:80");
-        assert_eq!(up.servers[0].resolve, true);
+        assert!(up.servers[0].resolve);
 
         // Assert Egress Upstreams
         assert_eq!(routing_data.egress_upstreams.len(), 1);
@@ -609,7 +612,7 @@ mod tests {
         assert_eq!(eup.lb_policy, "least_conn");
         assert_eq!(eup.servers.len(), 1);
         assert_eq!(eup.servers[0].address, "20.0.0.1:443");
-        assert_eq!(eup.servers[0].resolve, false);
+        assert!(!eup.servers[0].resolve);
 
         // Assert Egress Vhost Rules
         assert_eq!(routing_data.egress_vhost_rules.len(), 1);
@@ -621,25 +624,44 @@ mod tests {
     #[test]
     fn test_tunnel_management_is_empty() {
         let mut tm = TunnelManagement::default();
-        assert!(tm.is_empty(), "Expected empty TunnelManagement to return true for is_empty");
+        assert!(
+            tm.is_empty(),
+            "Expected empty TunnelManagement to return true for is_empty"
+        );
 
-        tm.server_ingress_routing.listeners.push(IngressListenerDef {
-            port: 8080,
-            mode: IngressModeDef::Http(HttpListenerDef::default()),
-        });
-        assert!(!tm.is_empty(), "Expected non-empty listeners to return false for is_empty");
+        tm.server_ingress_routing
+            .listeners
+            .push(IngressListenerDef {
+                port: 8080,
+                mode: IngressModeDef::Http(HttpListenerDef::default()),
+            });
+        assert!(
+            !tm.is_empty(),
+            "Expected non-empty listeners to return false for is_empty"
+        );
 
         let mut tm = TunnelManagement::default();
-        tm.client_configs.groups.insert("group1".to_string(), GroupConfig {
-            config_version: "v1".to_string(),
-            upstreams: HashMap::new(),
-        });
-        assert!(!tm.is_empty(), "Expected non-empty groups to return false for is_empty");
+        tm.client_configs.groups.insert(
+            "group1".to_string().into(),
+            GroupConfig {
+                config_version: "v1".to_string(),
+                upstreams: HashMap::new(),
+            },
+        );
+        assert!(
+            !tm.is_empty(),
+            "Expected non-empty groups to return false for is_empty"
+        );
 
-        tm.server_ingress_routing.listeners.push(IngressListenerDef {
-            port: 8080,
-            mode: IngressModeDef::Http(HttpListenerDef::default()),
-        });
-        assert!(!tm.is_empty(), "Expected both non-empty listeners and groups to return false for is_empty");
+        tm.server_ingress_routing
+            .listeners
+            .push(IngressListenerDef {
+                port: 8080,
+                mode: IngressModeDef::Http(HttpListenerDef::default()),
+            });
+        assert!(
+            !tm.is_empty(),
+            "Expected both non-empty listeners and groups to return false for is_empty"
+        );
     }
 }

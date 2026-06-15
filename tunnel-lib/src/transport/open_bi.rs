@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub enum OpenBiOutcome {
     Ready,
     TimedOut,
+    RejectedOverloaded,
     ConnectionLost,
     ConnectionClosing,
     TransportFatal,
@@ -25,6 +26,7 @@ pub async fn open_bi_guarded<F>(
     conn: &Connection,
     inflight_table: &Arc<InflightTable>,
     slot_id: InflightSlotId,
+    overload_limits: &crate::lb::overload::OverloadLimits,
     stream_timeout: Duration,
     on_wait_done: F,
 ) -> Result<OpenedStream, ProxyError>
@@ -49,6 +51,14 @@ where
     }
 
     let started = Instant::now();
+    let pending = crate::infra::metrics::METRICS.pending_streams() as usize;
+    if pending >= overload_limits.max_pending_streams {
+        on_wait_done(Duration::ZERO, OpenBiOutcome::RejectedOverloaded);
+        return Err(ProxyError::quic_open_rejected_overloaded(format!(
+            "pending queue full: pending={} limit={}",
+            pending, overload_limits.max_pending_streams
+        )));
+    }
     crate::infra::metrics::METRICS
         .stream_pending_queue_depth
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

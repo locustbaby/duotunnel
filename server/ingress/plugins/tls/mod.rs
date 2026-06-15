@@ -87,7 +87,7 @@ impl IngressProtocolHandler for TlsHandler {
                 }
 
                 let routing_info = tunnel_lib::RoutingInfo {
-                    proxy_name: proxy_name.to_string(),
+                    proxy_name: proxy_name.clone(),
                     src_addr,
                     src_port,
                     protocol: tunnel_lib::proxy::core::Protocol::H2,

@@ -67,6 +67,7 @@ impl IngressProtocolHandler for H1Handler {
                 &selected.conn,
                 &selected.inflight_table,
                 selected.slot_id,
+                &ctx.overload,
                 open_timeout,
                 |_elapsed, _outcome| {},
             )
@@ -93,7 +94,7 @@ impl IngressProtocolHandler for H1Handler {
         let recv = opened.recv;
         let _inflight_guard = opened.inflight;
         let routing_info = tunnel_lib::RoutingInfo {
-            proxy_name: proxy_name.to_string(),
+            proxy_name: proxy_name.clone(),
             src_addr: ctx.peer_addr.ip().to_string(),
             src_port: ctx.peer_addr.port(),
             protocol,

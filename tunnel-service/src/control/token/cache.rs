@@ -7,6 +7,7 @@ use tunnel_store::{ClientStatus, TokenStatus};
 #[async_trait]
 pub trait TokenCacheProvider: Send + Sync {
     async fn load_token_cache(&self) -> Result<Vec<TokenCacheEntry>>;
+    #[allow(dead_code)]
     async fn data_version(&self) -> Result<i64>;
 }
 
@@ -37,7 +38,7 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
             .into_iter()
             .map(|r: sqlx::sqlite::SqliteRow| TokenCacheEntry {
                 hash_hex: r.get("token_hash"),
-                client_group: r.get("client_group"),
+                client_group: r.get::<String, _>("client_group").into(),
                 client_status: ClientStatus::parse(&r.get::<String, _>("client_status"))
                     .unwrap_or(ClientStatus::Disabled),
                 token_status: TokenStatus::parse(&r.get::<String, _>("token_status"))
@@ -46,6 +47,7 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
             .collect())
     }
 
+    #[allow(dead_code)]
     async fn data_version(&self) -> Result<i64> {
         let version: i64 = sqlx::query_scalar("PRAGMA data_version")
             .fetch_one(&self.pool)

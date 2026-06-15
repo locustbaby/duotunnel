@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use super::ctx::{Route, ServerCtx};
 use crate::proxy::core::Protocol;
@@ -50,11 +49,11 @@ pub struct ProtocolHint {
     pub authority: Option<String>,
     /// The raw bytes that were peeked.  Passed to `IngressProtocolHandler::handle`
     /// so the handler can replay them into the upstream without re-reading.
-    pub raw_preface: Bytes,
+    pub raw_preface: crate::SniffPrefix,
 }
 
 impl ProtocolHint {
-    pub fn new(kind: ProtocolKind, raw_preface: impl Into<Bytes>) -> Self {
+    pub fn new(kind: ProtocolKind, raw_preface: impl Into<crate::SniffPrefix>) -> Self {
         let protocol = match kind {
             ProtocolKind::Tls | ProtocolKind::Tcp => Protocol::Tcp,
             ProtocolKind::H2c => Protocol::H2,

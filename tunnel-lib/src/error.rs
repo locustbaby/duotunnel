@@ -30,6 +30,7 @@ impl RetryType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     QuicOpenTimedOut,
+    QuicOpenRejectedOverloaded,
     QuicConnectionLost,
     QuicConnectionFatal,
     RoutingMissingInfo,
@@ -55,6 +56,7 @@ impl ErrorKind {
     pub fn as_label(self) -> &'static str {
         match self {
             ErrorKind::QuicOpenTimedOut => "quic_open_timed_out",
+            ErrorKind::QuicOpenRejectedOverloaded => "quic_open_rejected_overloaded",
             ErrorKind::QuicConnectionLost => "quic_connection_lost",
             ErrorKind::QuicConnectionFatal => "quic_connection_fatal",
             ErrorKind::RoutingMissingInfo => "routing_missing_info",
@@ -80,6 +82,7 @@ impl ErrorKind {
     pub fn source(self) -> ErrorSource {
         match self {
             ErrorKind::QuicOpenTimedOut
+            | ErrorKind::QuicOpenRejectedOverloaded
             | ErrorKind::RoutingMissingInfo
             | ErrorKind::QuicConnectionFatal
             | ErrorKind::H2cRouteResolve => ErrorSource::Internal,
@@ -105,6 +108,7 @@ impl ErrorKind {
     pub fn retry(self) -> RetryType {
         match self {
             ErrorKind::QuicOpenTimedOut
+            | ErrorKind::QuicOpenRejectedOverloaded
             | ErrorKind::QuicConnectionLost
             | ErrorKind::NoClientAvailable
             | ErrorKind::ResolveUpstream
@@ -149,6 +153,13 @@ impl ProxyError {
         Self {
             kind: ErrorKind::QuicOpenTimedOut,
             detail: Some(format!("open_bi timed out after {:?}", timeout)),
+        }
+    }
+
+    pub fn quic_open_rejected_overloaded(detail: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::QuicOpenRejectedOverloaded,
+            detail: Some(detail.into()),
         }
     }
 
@@ -326,6 +337,7 @@ impl ProxyError {
             }
             ErrorKind::DownstreamConnection => return None,
             ErrorKind::QuicOpenTimedOut
+            | ErrorKind::QuicOpenRejectedOverloaded
             | ErrorKind::QuicConnectionLost
             | ErrorKind::QuicConnectionFatal => return None,
         })
@@ -334,6 +346,7 @@ impl ProxyError {
     pub fn error_code(&self) -> &'static str {
         match self.kind {
             ErrorKind::QuicOpenTimedOut => "ERR_QUIC_OPEN_TIMED_OUT",
+            ErrorKind::QuicOpenRejectedOverloaded => "ERR_QUIC_OPEN_REJECTED_OVERLOADED",
             ErrorKind::QuicConnectionLost => "ERR_QUIC_CONNECTION_LOST",
             ErrorKind::QuicConnectionFatal => "ERR_QUIC_CONNECTION_FATAL",
             ErrorKind::HttpUpstreamRequest => "ERR_HTTP_UPSTREAM_REQUEST",
@@ -361,6 +374,7 @@ impl fmt::Display for ProxyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self.kind {
             ErrorKind::QuicOpenTimedOut => "quic open timed out",
+            ErrorKind::QuicOpenRejectedOverloaded => "quic open rejected overloaded",
             ErrorKind::QuicConnectionLost => "quic connection lost",
             ErrorKind::QuicConnectionFatal => "quic connection fatal",
             ErrorKind::RoutingMissingInfo => "routing info missing",

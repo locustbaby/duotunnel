@@ -7,6 +7,11 @@ SERVER_LOG=${3:-/tmp/ci-server.log}
 CLIENT_LOG=${4:-/tmp/ci-client.log}
 RETRIES=10
 
+CPU_QUOTA_ARG=()
+if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
+  CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
+fi
+
 wait_unit_gone() {
   for i in $(seq 1 30); do
     S=$(systemctl is-active duotunnel-server.scope 2>/dev/null || echo "gone")
@@ -59,7 +64,7 @@ wait_unit_gone
 
 echo "Restarting server..."
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -- ./target/release/server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "$SERVER_LOG" 2>&1 &
 
@@ -76,7 +81,7 @@ fi
 
 echo "Restarting client..."
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  -p CPUQuota="${STRESS_CPU_QUOTA:-100%}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "$CLIENT_LOG" 2>&1 &
 
 CLIENT_UP=0

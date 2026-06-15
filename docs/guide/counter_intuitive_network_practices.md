@@ -116,3 +116,32 @@ Based on a deep review of `duotunnel`'s protocol logic, here are the core advanc
 - **The Solution:**
   For critical upstreams, implement protocol probing (sniffing / ALPN validation) on connection setup *before* the first request body is sent, preventing first-attempt body exhaustion.
 
+---
+
+## 4. Implemented Systems Engineering Patterns in Duotunnel
+
+Below are the key systems engineering design patterns that have been implemented in `duotunnel` to guarantee high availability, resilience, and cryptographic security under load.
+
+### 4.1 EMFILE / ENFILE Acceptance Safety Backoff
+* **The Issue:** Under extreme connection loads, a server can exhaust its file descriptor (FD) allocation limits, causing `TcpListener::accept` to immediately fail with `EMFILE` (Too many open files) or `ENFILE` (File table overflow). If unhandled, the loop continues to poll `accept` in a tight infinite loop, pinning the CPU core to 100% usage and starving other tasks.
+* **The Solution:** DuoTunnel implements an acceptance safety backoff ([duotunnel_review.md §2.3](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/duotunnel_review.md#L67)). When encountering `EMFILE` or `ENFILE` errors, the worker thread yields and sleeps for 100 milliseconds. This temporary pause gives the operating system and asynchronous tasks time to close inactive connections and release descriptors, preventing CPU thrashing. Additionally, the sleep loop utilizes `tokio::select!` to remain immediately responsive to cancellation signals.
+
+### 4.2 Constant-Time Token Comparison (Anti-Timing Attacks)
+* **The Issue:** Standard string comparison operators (like `==` or `strcmp`) return early as soon as the first mismatched byte is encountered. An attacker can carefully measure the microsecond response differences of authentication calls to guess the token character-by-character (Timing Side-Channel Attack).
+* **The Solution:** In the SQLite database authentication backend ([sqlite.rs:L137](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-store/src/db/sqlite.rs#L137)), DuoTunnel leverages `subtle::ConstantTimeEq` to compare token hashes. This guarantees that the comparison time is identical regardless of how many bytes match, completely neutralizing timing side-channel attacks.
+
+### 4.3 Herding Effect Mitigation via Rotating Index Offset (Tie-Breaker)
+* **The Issue:** When choosing a connection from a pool (like round-robin or least-inflight load balancers), if multiple worker threads start their scans from index 0, they will all pick the exact same target connection, creating localized load spikes and leaving other connections idle (Herding / Thundering Herd Effect).
+* **The Solution:** DuoTunnel implements a thread-local `ROTATING_INDEX` offset ([inflight.rs:L146](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/lb/inflight.rs#L146)). Every scan query reads and increments this thread-local rotating index, ensuring that different worker threads start scanning the target list at different points, naturally distributing incoming streams across all healthy pooled connections even when they have identical loads.
+
+### 4.4 SQLite Concurrency via WAL Mode & Busy Timeout
+* **The Issue:** SQLite's default rollback journal locks the entire database file during write transactions, blocking concurrent read operations. In high-concurrency authentication environments, this immediately throws `database is locked` errors and causes gateway timeouts.
+* **The Solution:** DuoTunnel optimizes database connection parameters during initialization ([sqlite.rs:L28](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-store/src/db/sqlite.rs#L28)) by enabling Write-Ahead Logging (WAL) mode (`PRAGMA journal_mode=WAL`) and setting a busy timeout of 5 seconds (`PRAGMA busy_timeout=5000`). WAL allows concurrent readers to proceed without blocking while a write transaction is active, while the busy timeout makes concurrent writers queue and wait instead of failing instantly.
+
+### 4.5 Uninitialized Memory Allocation (Zero-filling Prevention)
+* **The Issue:** Standard vector allocations (like `vec![0u8; len]` or `resize(len, 0)`) zero-fill the allocated memory space. In high-throughput network relays where the buffer is immediately overwritten by an I/O read syscall, zero-filling wastes CPU cycles and pollutes the CPU L1 data cache.
+* **The Solution:** DuoTunnel uses uninitialized allocations and metadata length tracking (such as `AlignedVec` or `unsafe { buf.set_len(len); }` in configuration watch pathways) to skip the safe but redundant zero-filling step when the buffer is guaranteed to be overwritten by immediate read system calls.
+
+### 4.6 Secure Masking of Critical Tokens in Trace Logs
+* **The Issue:** Printing raw context errors (like `anyhow::Error`) in stdout or centralized telemetry logs can easily leak plaintext authentication tokens during authentication or configuration reload failures.
+* **The Solution:** DuoTunnel implements custom `Display` / `Debug` logic that scans error streams for sensitive tokens and dynamically masks their suffixes using SHA-256 hashes ([duotunnel_review.md §2.4](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/duotunnel_review.md#L74)). This guarantees that tokens are never exposed in logs, keeping system auditing compliant and secure.

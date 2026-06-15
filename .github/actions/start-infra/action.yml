@@ -63,8 +63,13 @@ runs:
           sleep 0.5
         done
 
+        SERVER_QUOTA_ARG=()
+        if [ -n "${{ inputs.server_cpu_quota }}" ] && [ "${{ inputs.server_cpu_quota }}" != "none" ] && [ "${{ inputs.server_cpu_quota }}" != "unlimited" ] && [ "${{ inputs.server_cpu_quota }}" != "0" ] && [ "${{ inputs.server_cpu_quota }}" != "0%" ]; then
+          SERVER_QUOTA_ARG=(-p CPUQuota="${{ inputs.server_cpu_quota }}")
+        fi
+
         sudo systemd-run --scope --unit=duotunnel-server --collect \
-          -p CPUQuota=${{ inputs.server_cpu_quota }} -p CPUWeight=1024 -p MemoryMax=2G \
+          "${SERVER_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           -- ./target/release/server --config ${{ inputs.tun_config_dir }}/server.yaml \
           --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
         for i in $(seq 1 60); do
@@ -81,8 +86,13 @@ runs:
         python3 -c "import re,sys; f='${{ inputs.tun_config_dir }}/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; w=sys.argv[3]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); c=re.sub(r'^(\\s*worker_threads:)\\s*\\d+', r'\\1 '+w, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "${{ inputs.quic_connections }}" "${{ inputs.worker_threads }}"
         sleep 3
 
+        CLIENT_QUOTA_ARG=()
+        if [ -n "${{ inputs.client_cpu_quota }}" ] && [ "${{ inputs.client_cpu_quota }}" != "none" ] && [ "${{ inputs.client_cpu_quota }}" != "unlimited" ] && [ "${{ inputs.client_cpu_quota }}" != "0" ] && [ "${{ inputs.client_cpu_quota }}" != "0%" ]; then
+          CLIENT_QUOTA_ARG=(-p CPUQuota="${{ inputs.client_cpu_quota }}")
+        fi
+
         sudo systemd-run --scope --unit=duotunnel-client --collect \
-          -p CPUQuota=${{ inputs.client_cpu_quota }} -p CPUWeight=1024 -p MemoryMax=2G \
+          "${CLIENT_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           -- ./target/release/client --config ${{ inputs.tun_config_dir }}/client.yaml >> /tmp/ci-client.log 2>&1 &
         for i in $(seq 1 60); do
           systemctl is-failed duotunnel-client.scope > /dev/null 2>&1 && break

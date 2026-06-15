@@ -200,6 +200,7 @@ async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
                 Box::new(control_client::ControlClientService {
                     ctld_addr: addr,
                     auth_token: ctld_token.clone(),
+                    config_path: ctx.bootstrap.config_path().to_string(),
                 })
             }
             Err(e) => {
@@ -216,7 +217,10 @@ async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
     let purge_shutdown = ctx.shutdown.clone();
     tokio::spawn(purge_loop(registry, purge_shutdown));
 
-    if let Err(e) = svc.run(ctx.state, ctx.shutdown, ctx.proxy_handle).await {
+    if let Err(e) = svc
+        .run(ctx.state, ctx.ready, ctx.shutdown, ctx.proxy_handle)
+        .await
+    {
         error!(service = name, error = %e, "background service exited with error");
     }
     Ok(())

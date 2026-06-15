@@ -317,3 +317,11 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
 - **极佳的同步非阻塞指标采集实践**: Metrics observation processes are synchronically added to atomic gauges.
 - **负载均衡扫描复杂度优化 ($O(N) \to O(1)$)**: P2C load balancing handles selection complexity for connection pools with more than 32 clients.
 
+## 💎 2026-06-15 归档已完成项 ✅
+
+- [x] **[TODO-94] JitterBackoff 指数退避下限控制**: 已在 `client/tunnel/supervisor.rs` 中通过 `random_delay_range(min_delay, cap)` (其中 `min_delay = cap / 2`) 实现了指数退避的下限控制，消除了重试后期的瞬时高频重试风暴。
+- [x] **[TODO-CR-AUDIT-11] 消除“Peek + Read_exact 丢弃”双重 I/O**: 已通过重构 `SniffRuntime::sniff` 消除该开销。当前直接使用原生 `stream.read()` 读取并缓存前缀，无多余系统调用。并在首段完成 `initial_bytes` 的 QUIC 发送，省去了不必要的 `PrefixedReadWrite` 包装与复杂零拷贝机制。
+- [x] **[TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi**: 已在 `tunnel-lib/src/open_bi.rs` 的 `open_bi_guarded` 中，对 `conn.open_bi()` 的等待期注入了 `waiting_for_stream_credit` 的 tracing debug span，使外部工具如 `tokio-console` 能清晰观测挂起协程。
+- [x] **[TODO-CR-AUDIT-13] Asymmetric Window Coupling in QUIC Configuration**: 已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小。
+- [x] **[TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety**: 已在 `tunnel-store/src/sqlite.rs` 进行了重构，通过 zero-copy 的 `&str` 代替 `String` 堆分配读取 SQLite 状态。
+

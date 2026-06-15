@@ -1,4 +1,5 @@
 use crate::bootstrap::config::ClientConfigFile;
+use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -11,6 +12,7 @@ pub async fn run_pool(
     cancel: CancellationToken,
     ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
+    udp_registry: Arc<UdpListenerRegistry>,
 ) -> Result<()> {
     let n = config.quic.connections.max(1) as usize;
     info!(connections = n, "starting QUIC connection pool");
@@ -21,6 +23,7 @@ pub async fn run_pool(
         let slot_cancel = cancel.clone();
         let slot_ready = ready.clone();
         let slot_pool = entry_pool.clone();
+        let slot_udp_registry = udp_registry.clone();
         slots.spawn(async move {
             crate::tunnel::supervisor::run_supervisor(
                 slot_config,
@@ -28,6 +31,7 @@ pub async fn run_pool(
                 slot_cancel,
                 slot_ready,
                 slot_pool,
+                slot_udp_registry,
             )
             .await
         });

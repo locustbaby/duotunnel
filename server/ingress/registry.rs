@@ -6,16 +6,17 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 use tunnel_lib::{
-    inflight_load, new_inflight_table, pick_p2c_inflight, InflightSlotId, InflightTable,
+    inflight_load, new_inflight_table, pick_p2c_inflight, ClientId, GroupId, InflightSlotId,
+    InflightTable,
 };
 
 struct ClientInfo {
-    group_id: String,
+    group_id: GroupId,
 }
 
 #[derive(Clone)]
 pub struct SelectedConnection {
-    pub conn_id: Arc<str>,
+    pub conn_id: ClientId,
     pub conn: Connection,
     pub inflight_table: Arc<InflightTable>,
     pub slot_id: InflightSlotId,
@@ -57,13 +58,13 @@ impl ClientGroup {
 
 enum RegistryMsg {
     Register {
-        client_id: String,
-        group_id: String,
+        client_id: ClientId,
+        group_id: GroupId,
         conn: Connection,
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
     Unregister {
-        client_id: String,
+        client_id: ClientId,
     },
     PurgeDead {
         reply: oneshot::Sender<usize>,
@@ -71,7 +72,7 @@ enum RegistryMsg {
 }
 
 pub struct ClientRegistry {
-    groups: Arc<DashMap<String, Arc<ClientGroup>>>,
+    groups: Arc<DashMap<GroupId, Arc<ClientGroup>>>,
     tx: mpsc::Sender<RegistryMsg>,
 }
 
@@ -83,29 +84,40 @@ impl ClientRegistry {
         let groups_clone = groups.clone();
 
         tokio::spawn(async move {
-            let mut clients: HashMap<String, ClientInfo> = HashMap::new();
-            let mut group_conns: HashMap<String, HashMap<String, (Connection, InflightSlotId)>> = HashMap::new();
+            let mut clients: HashMap<ClientId, ClientInfo> = HashMap::new();
+            let mut group_conns: HashMap<GroupId, HashMap<ClientId, (Connection, InflightSlotId)>> =
+                HashMap::new();
 
-            let build_snapshot = |table: &Arc<InflightTable>, idx: &HashMap<String, (Connection, InflightSlotId)>| {
-                idx.iter()
-                    .map(|(client_id, (conn, slot_id))| {
-                        Arc::new(SelectedConnection {
-                            conn_id: Arc::<str>::from(client_id.as_str()),
-                            conn: conn.clone(),
-                            inflight_table: table.clone(),
-                            slot_id: *slot_id,
+            let build_snapshot =
+                |table: &Arc<InflightTable>,
+                 idx: &HashMap<ClientId, (Connection, InflightSlotId)>| {
+                    idx.iter()
+                        .map(|(client_id, (conn, slot_id))| {
+                            Arc::new(SelectedConnection {
+                                conn_id: client_id.clone(),
+                                conn: conn.clone(),
+                                inflight_table: table.clone(),
+                                slot_id: *slot_id,
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            };
+                        .collect::<Vec<_>>()
+                };
 
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    RegistryMsg::Register { client_id, group_id, conn, reply } => {
+                    RegistryMsg::Register {
+                        client_id,
+                        group_id,
+                        conn,
+                        reply,
+                    } => {
                         info!(client_id = %client_id, group_id = %group_id, "registering client");
-                        let group = groups_clone
-                            .entry(group_id.clone())
-                            .or_insert_with(|| Arc::new(ClientGroup::new()));
+                        let group = {
+                            let entry = groups_clone
+                                .entry(group_id.clone())
+                                .or_insert_with(|| Arc::new(ClientGroup::new()));
+                            entry.value().clone()
+                        };
 
                         let idx = group_conns.entry(group_id.clone()).or_default();
                         let slot_id = if let Some((_, existing_slot)) = idx.get(&client_id) {
@@ -120,19 +132,30 @@ impl ClientRegistry {
                         };
 
                         idx.insert(client_id.clone(), (conn, slot_id));
-                        group.snapshot.store(Arc::new(build_snapshot(&inflight_table, idx)));
+                        group
+                            .snapshot
+                            .store(Arc::new(build_snapshot(&inflight_table, idx)));
 
-                        if let Some(old_info) = clients.insert(client_id.clone(), ClientInfo { group_id: group_id.clone() }) {
+                        if let Some(old_info) = clients.insert(
+                            client_id.clone(),
+                            ClientInfo {
+                                group_id: group_id.clone(),
+                            },
+                        ) {
                             if old_info.group_id != group_id {
                                 if let Some(old_idx) = group_conns.get_mut(&old_info.group_id) {
                                     if let Some((_, slot)) = old_idx.remove(&client_id) {
                                         inflight_table.free_slot(slot);
                                     }
                                     if let Some(old_grp) = groups_clone.get(&old_info.group_id) {
-                                        old_grp.snapshot.store(Arc::new(build_snapshot(&inflight_table, old_idx)));
+                                        old_grp.snapshot.store(Arc::new(build_snapshot(
+                                            &inflight_table,
+                                            old_idx,
+                                        )));
                                         if old_grp.is_empty() {
                                             drop(old_grp);
-                                            groups_clone.remove_if(&old_info.group_id, |_, g| g.is_empty());
+                                            groups_clone
+                                                .remove_if(&old_info.group_id, |_, g| g.is_empty());
                                         }
                                     }
                                 }
@@ -150,12 +173,17 @@ impl ClientRegistry {
                                 if let Some((_, slot_id)) = idx.remove(&client_id) {
                                     inflight_table.free_slot(slot_id);
                                 }
-                                if let Some(group) = groups_clone.get(&info.group_id) {
-                                    group.snapshot.store(Arc::new(build_snapshot(&inflight_table, idx)));
-                                    if group.is_empty() {
-                                        drop(group);
-                                        groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
-                                    }
+                                let should_remove =
+                                    if let Some(group) = groups_clone.get(&info.group_id) {
+                                        group
+                                            .snapshot
+                                            .store(Arc::new(build_snapshot(&inflight_table, idx)));
+                                        group.is_empty()
+                                    } else {
+                                        false
+                                    };
+                                if should_remove {
+                                    groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
                                 }
                             }
                         }
@@ -180,7 +208,9 @@ impl ClientRegistry {
                                     dead_count += 1;
                                 }
                                 if let Some(group) = groups_clone.get(gid) {
-                                    group.snapshot.store(Arc::new(build_snapshot(&inflight_table, idx)));
+                                    group
+                                        .snapshot
+                                        .store(Arc::new(build_snapshot(&inflight_table, idx)));
                                 }
                             }
                         }
@@ -194,7 +224,7 @@ impl ClientRegistry {
                             }
                         }
 
-                        let empty_gids: Vec<String> = groups_clone
+                        let empty_gids: Vec<GroupId> = groups_clone
                             .iter()
                             .filter(|r| r.value().is_empty())
                             .map(|r| r.key().clone())
@@ -214,20 +244,32 @@ impl ClientRegistry {
 
     pub async fn register(
         &self,
-        client_id: String,
-        group_id: String,
+        client_id: ClientId,
+        group_id: GroupId,
         conn: Connection,
     ) -> Result<(), &'static str> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(RegistryMsg::Register { client_id, group_id, conn, reply: reply_tx }).await.is_err() {
+        if self
+            .tx
+            .send(RegistryMsg::Register {
+                client_id,
+                group_id,
+                conn,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
             return Err("registry actor channel closed");
         }
-        reply_rx.await.unwrap_or(Err("registry actor response dropped"))
+        reply_rx
+            .await
+            .unwrap_or(Err("registry actor response dropped"))
     }
 
-    pub fn unregister(&self, client_id: &str) {
+    pub fn unregister(&self, client_id: &ClientId) {
         let _ = self.tx.try_send(RegistryMsg::Unregister {
-            client_id: client_id.to_string(),
+            client_id: client_id.clone(),
         });
     }
 
@@ -238,7 +280,12 @@ impl ClientRegistry {
 
     pub async fn purge_dead(&self) -> usize {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(RegistryMsg::PurgeDead { reply: reply_tx }).await.is_err() {
+        if self
+            .tx
+            .send(RegistryMsg::PurgeDead { reply: reply_tx })
+            .await
+            .is_err()
+        {
             return 0;
         }
         reply_rx.await.unwrap_or(0)

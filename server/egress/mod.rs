@@ -45,6 +45,46 @@ impl ServerEgressMap {
             dns_cache: tunnel_lib::EgressDnsCache::new(std::time::Duration::from_secs(30)),
         }
     }
+
+    pub async fn resolve_udp_target(
+        &self,
+        upstream_name: &str,
+    ) -> Result<std::net::SocketAddr, ProxyError> {
+        let group = self.upstreams.get(upstream_name).ok_or_else(|| {
+            ProxyError::route_not_found(format!("upstream_group={upstream_name}"))
+        })?;
+        let upstream_addr = group.next_healthy().ok_or_else(|| {
+            ProxyError::route_not_found(format!("no healthy backends for upstream={upstream_name}"))
+        })?;
+        let parsed = tunnel_lib::transport::addr::parse_upstream(upstream_addr);
+        self.resolve_target_addr(&parsed.connect_addr).await
+    }
+
+    async fn resolve_target_addr(
+        &self,
+        connect_addr_str: &str,
+    ) -> Result<std::net::SocketAddr, ProxyError> {
+        if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>() {
+            return Ok(addr);
+        }
+        let mut parts = connect_addr_str.rsplitn(2, ':');
+        let port_str = parts.next().ok_or_else(|| {
+            ProxyError::resolve_upstream(format!("missing port in {}", connect_addr_str))
+        })?;
+        let host_str = parts.next().ok_or_else(|| {
+            ProxyError::resolve_upstream(format!("missing host in {}", connect_addr_str))
+        })?;
+        let port = port_str.parse::<u16>().map_err(|_| {
+            ProxyError::resolve_upstream(format!(
+                "invalid port {} in {}",
+                port_str, connect_addr_str
+            ))
+        })?;
+        self.dns_cache
+            .resolve(host_str, port)
+            .await
+            .map_err(|e| ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}")))
+    }
 }
 impl UpstreamResolver for ServerEgressMap {
     async fn upstream_peer(&self, context: &mut Context) -> Result<PeerSpec, ProxyError> {
@@ -77,33 +117,7 @@ impl UpstreamResolver for ServerEgressMap {
         match context.protocol {
             Protocol::WebSocket => {
                 info!("WebSocket egress, using TCP forwarding");
-                let target_addr = if let Ok(addr) = connect_addr_str.parse::<std::net::SocketAddr>()
-                {
-                    addr
-                } else {
-                    let mut parts = connect_addr_str.rsplitn(2, ':');
-                    let port_str = parts.next().ok_or_else(|| {
-                        ProxyError::resolve_upstream(format!(
-                            "missing port in {}",
-                            connect_addr_str
-                        ))
-                    })?;
-                    let host_str = parts.next().ok_or_else(|| {
-                        ProxyError::resolve_upstream(format!(
-                            "missing host in {}",
-                            connect_addr_str
-                        ))
-                    })?;
-                    let port = port_str.parse::<u16>().map_err(|_| {
-                        ProxyError::resolve_upstream(format!(
-                            "invalid port {} in {}",
-                            port_str, connect_addr_str
-                        ))
-                    })?;
-                    self.dns_cache.resolve(host_str, port).await.map_err(|e| {
-                        ProxyError::resolve_upstream(format!("{connect_addr_str}: {e}"))
-                    })?
-                };
+                let target_addr = self.resolve_target_addr(&connect_addr_str).await?;
                 let spec = BasicPeerSpec {
                     target_addr,
                     tls: is_https.then(|| TlsPeerSpec {
@@ -172,7 +186,9 @@ impl UpstreamResolver for ServerEgressMap {
                             .into_tcp_peer(tunnel_lib::TcpParams::default())
                             .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
 
-                        match tokio::net::TcpStream::connect(tcp_peer.target_addr).await {
+                        let stream_res = tokio::net::TcpStream::connect(tcp_peer.target_addr).await;
+
+                        match stream_res {
                             Ok(stream) => {
                                 group.mark_healthy(&current_failed);
                                 connected = Some((stream, tcp_peer.tls));
@@ -189,36 +205,7 @@ impl UpstreamResolver for ServerEgressMap {
                                         UpstreamScheme::from_address(&current_failed);
                                     let is_https = scheme.requires_tls();
 
-                                    match if let Ok(addr) =
-                                        connect_addr_str.parse::<std::net::SocketAddr>()
-                                    {
-                                        Ok(addr)
-                                    } else {
-                                        let mut parts = connect_addr_str.rsplitn(2, ':');
-                                        let port_str = parts.next().ok_or_else(|| {
-                                            ProxyError::resolve_upstream(format!(
-                                                "missing port in {}",
-                                                connect_addr_str
-                                            ))
-                                        })?;
-                                        let host_str = parts.next().ok_or_else(|| {
-                                            ProxyError::resolve_upstream(format!(
-                                                "missing host in {}",
-                                                connect_addr_str
-                                            ))
-                                        })?;
-                                        let port = port_str.parse::<u16>().map_err(|_| {
-                                            ProxyError::resolve_upstream(format!(
-                                                "invalid port {} in {}",
-                                                port_str, connect_addr_str
-                                            ))
-                                        })?;
-                                        self.dns_cache.resolve(host_str, port).await.map_err(|e| {
-                                            ProxyError::resolve_upstream(format!(
-                                                "{connect_addr_str}: {e}"
-                                            ))
-                                        })
-                                    } {
+                                    match self.resolve_target_addr(&connect_addr_str).await {
                                         Ok(addr) => {
                                             current_spec.target_addr = addr;
                                             current_spec.tls = is_https.then(|| TlsPeerSpec {

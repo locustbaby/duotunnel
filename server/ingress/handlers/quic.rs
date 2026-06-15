@@ -1,13 +1,21 @@
 use crate::egress::EgressProxy;
+use crate::ingress::handlers::udp_datagram::UdpSessionManager;
 use crate::ingress::tunnel_handler;
 use crate::runtime::metrics;
 use crate::ServerState;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
-pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) -> Result<()> {
+use tunnel_lib::{
+    recv_message, recv_message_type, send_message, ClientId, Login, LoginResp, MessageType,
+};
+pub async fn run_quic_server(
+    state: Arc<ServerState>,
+    ready: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let addr = state.tunnel_addr();
     let quic_params = state.quic_transport_params();
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
@@ -18,27 +26,42 @@ pub async fn run_quic_server(state: Arc<ServerState>, ready: Arc<AtomicBool>) ->
         udp_socket,
         Arc::new(quinn::TokioRuntime),
     )?;
-    ready.store(true, Ordering::Release);
     info!(
         addr = %addr,
         udp_recv_buf_mb = quic_params.udp_recv_buf_bytes / (1024 * 1024),
         udp_send_buf_mb = quic_params.udp_send_buf_bytes / (1024 * 1024),
         "QUIC server listening"
     );
-    while let Some(incoming) = endpoint.accept().await {
-        let state = state.clone();
-        tokio::task::spawn(async move {
-            metrics::quic_connection_opened();
-            if let Err(e) = handle_quic_connection(state, incoming).await {
-                error!(error = % e, "QUIC connection error");
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("QUIC server stopping due to shutdown signal");
+                break;
             }
-            metrics::quic_connection_closed();
-        });
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else {
+                    break;
+                };
+                let state = state.clone();
+                let ready = ready.clone();
+                tokio::task::spawn(async move {
+                    metrics::quic_connection_opened();
+                    if let Err(e) = handle_quic_connection(state, ready, incoming).await {
+                        error!(error = % e, "QUIC connection error");
+                    }
+                    metrics::quic_connection_closed();
+                });
+            }
+        }
     }
     endpoint.close(0u32.into(), b"server shutting down");
     Ok(())
 }
-async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incoming) -> Result<()> {
+async fn handle_quic_connection(
+    state: Arc<ServerState>,
+    ready: Arc<AtomicBool>,
+    incoming: quinn::Incoming,
+) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
@@ -107,6 +130,20 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
             return Ok(());
         }
     };
+    if !ready.load(Ordering::Acquire) {
+        warn!(addr = %remote_addr, "server not ready for login yet");
+        if let Err(e) = send_message(
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure("server not ready"),
+        )
+        .await
+        {
+            debug!(addr = %remote_addr, error = %e, "send not-ready response failed");
+        }
+        conn.close(0u32.into(), b"server not ready");
+        return Ok(());
+    }
     let auth_result = match state.auth_store().authenticate(&login.token).await {
         Ok(result) => result,
         Err(e) => {
@@ -125,7 +162,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     info!(addr = % remote_addr, client_group = % client_group, "authenticated");
     metrics::auth_success(&client_group);
     let client_config = state.client_config_for_group(&client_group);
-    let conn_id = uuid::Uuid::new_v4().to_string();
+    let conn_id = ClientId::from(uuid::Uuid::new_v4().to_string());
     if let Err(e) = state
         .registry()
         .register(conn_id.clone(), client_group.clone(), conn.clone())
@@ -153,6 +190,7 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
     }
     metrics::client_registered(&client_group);
     let mut revocation_rx = state.revocation_tx().subscribe();
+    let udp_sessions = UdpSessionManager::new(conn.clone(), state.egress_map());
     loop {
         tokio::select! {
             _ = conn.closed() => {
@@ -173,6 +211,19 @@ async fn handle_quic_connection(state: Arc<ServerState>, incoming: quinn::Incomi
                     }
                     Err(e) => {
                         debug!(error = %e, "accept_bi error");
+                        break;
+                    }
+                }
+            }
+            datagram_result = conn.read_datagram() => {
+                match datagram_result {
+                    Ok(payload) => {
+                        if let Err(e) = udp_sessions.forward_client_datagram(payload).await {
+                            debug!(conn_id = %conn_id, error = %e, "udp datagram forwarding error");
+                        }
+                    }
+                    Err(e) => {
+                        debug!(conn_id = %conn_id, error = %e, "read_datagram error");
                         break;
                     }
                 }

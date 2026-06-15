@@ -154,7 +154,9 @@ impl AuthStore for SqliteAuthStore {
             warn!(client_group = %client_group, "login attempt for disabled client");
             return Err(AuthError::ClientDisabled);
         }
-        Ok(AuthResult { client_group })
+        Ok(AuthResult {
+            client_group: client_group.into(),
+        })
     }
     async fn create_client(&self, name: &str) -> Result<String> {
         let raw_token = generate_token();

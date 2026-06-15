@@ -10,6 +10,7 @@ pub struct ProxyBufferConfig {
     /// Larger values reduce syscall density at the cost of memory per stream.
     /// Default 65536 (64 KiB) matches nginx/envoy and halves syscalls vs 8 KiB.
     pub relay_buf_size: usize,
+    pub sniff_timeout_ms: u64,
 }
 impl Default for ProxyBufferConfig {
     fn default() -> Self {
@@ -18,6 +19,7 @@ impl Default for ProxyBufferConfig {
             http_header_buf_size: 8192,
             http_body_chunk_size: 8192,
             relay_buf_size: 65536,
+            sniff_timeout_ms: 5000,
         }
     }
 }
@@ -28,6 +30,7 @@ impl From<&ProxyBufferConfig> for ProxyBufferParams {
             http_header_buf_size: c.http_header_buf_size,
             http_body_chunk_size: c.http_body_chunk_size,
             relay_buf_size: normalize_relay_buf_size(c.relay_buf_size),
+            sniff_timeout_ms: c.sniff_timeout_ms,
         }
     }
 }

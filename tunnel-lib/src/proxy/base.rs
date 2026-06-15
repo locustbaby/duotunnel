@@ -1,4 +1,4 @@
-use crate::engine::copy::{copy_buffered_then_finish, copy_buffered_then_shutdown};
+use crate::engine::copy::{copy_buffered_then_finish, copy_quic_to_shutdown};
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use tokio::net::TcpStream;
@@ -16,7 +16,7 @@ async fn forward_inner(
         send.write_all(data).await?;
     }
     let (tcp_read, tcp_write) = external_stream.into_split();
-    let quic_to_tcp = copy_buffered_then_shutdown(recv, tcp_write, relay_buf_size);
+    let quic_to_tcp = copy_quic_to_shutdown(recv, tcp_write);
     let tcp_to_quic = copy_buffered_then_finish(tcp_read, send, relay_buf_size);
     tokio::try_join!(quic_to_tcp, tcp_to_quic)?;
     Ok(())
@@ -55,7 +55,7 @@ pub async fn forward_prefixed_to_client(
     relay_buf_size: usize,
 ) -> Result<()> {
     let (tcp_read, tcp_write) = external_stream.into_split();
-    let quic_to_tcp = copy_buffered_then_shutdown(recv, tcp_write, relay_buf_size);
+    let quic_to_tcp = copy_quic_to_shutdown(recv, tcp_write);
     let tcp_to_quic = copy_buffered_then_finish(tcp_read, send, relay_buf_size);
     tokio::try_join!(quic_to_tcp, tcp_to_quic)?;
     Ok(())

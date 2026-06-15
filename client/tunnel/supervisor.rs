@@ -1,4 +1,5 @@
 use crate::bootstrap::config::ClientConfigFile;
+use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::tunnel::client::run_client;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::{anyhow, Result};
@@ -52,6 +53,7 @@ pub async fn run_supervisor(
     cancel: CancellationToken,
     ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
+    udp_registry: Arc<UdpListenerRegistry>,
 ) -> Result<()> {
     let initial_delay = Duration::from_millis(config.reconnect.initial_delay_ms);
     let max_delay = Duration::from_millis(config.reconnect.max_delay_ms);
@@ -71,7 +73,7 @@ pub async fn run_supervisor(
         tokio::select! {
             _ = cancel.cancelled() => { info!(server = % config.server_address(),
             "shutdown signal received"); return Ok(()); } result = run_client(&
-            config, &endpoint, cancel.clone(), ready.clone(), entry_pool.clone()) => { match result { Ok(_) => { backoff.reset();
+            config, &endpoint, cancel.clone(), ready.clone(), entry_pool.clone(), udp_registry.clone()) => { match result { Ok(_) => { backoff.reset();
             info!(server = % config.server_address(),
             "connection ended, restarting loop"); } Err(e) => { if e.class() ==
             FailureClass::Fatal { error!(server = % config.server_address(), error = % e,

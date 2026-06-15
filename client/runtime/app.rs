@@ -8,9 +8,12 @@ use tracing::{info, warn};
 use crate::bootstrap::cli::Args;
 use crate::bootstrap::ClientBootstrap;
 use crate::egress::listener::EntryListenerConfig;
+use crate::egress::udp_listener::{UdpEgressListenerService, UdpListenerRegistry};
 use crate::runtime::engine::RuntimeEngine;
 use crate::runtime::spawn_task;
 use crate::tunnel::conn_pool::EntryConnPool;
+
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct ClientApp {
     args: Args,
@@ -36,17 +39,21 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     spawn_task(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("Received Ctrl+C, shutting down...");
-            cancel_clone.cancel();
-        }
+        wait_for_shutdown_signal().await;
+        info!("Received shutdown signal, shutting down...");
+        cancel_clone.cancel();
     });
     let ready = Arc::new(AtomicBool::new(false));
     if let Some(port) = config.metrics_port {
-        spawn_task(run_healthz_server(port, ready.clone()));
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("failed to install prometheus recorder");
+        crate::metrics::set_handle(handle);
+        spawn_task(run_healthz_server(port, ready.clone(), cancel.clone()));
     }
     let entry_pool =
         EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
+    let udp_registry = Arc::new(UdpListenerRegistry::default());
     let mut engine = RuntimeEngine::new(cancel.clone());
 
     if let Some(entry_port) = config.entry.port {
@@ -70,6 +77,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
             open_stream_timeout,
             accept_workers: config.entry.accept_workers.max(1),
             overload: Arc::new(overload_limits),
+            sniff_timeout: Duration::from_millis(config.proxy_buffers.sniff_timeout_ms),
         };
 
         engine.add_service(Arc::new(crate::egress::listener::EgressListenerService {
@@ -78,17 +86,30 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         }));
     }
 
+    for udp_entry in &config.udp_entries {
+        engine.add_service(Arc::new(UdpEgressListenerService {
+            entry: udp_entry.clone(),
+            pool: entry_pool.clone(),
+            registry: udp_registry.clone(),
+        }));
+    }
+
     engine.add_service(Arc::new(crate::tunnel::TunnelPoolService {
         config,
         endpoint,
         entry_pool,
         ready,
+        udp_registry,
     }));
 
-    engine.run_until_shutdown().await
+    let result = engine.run_until_shutdown().await;
+    if cancel.is_cancelled() {
+        wait_for_shutdown_drain("client").await;
+    }
+    result
 }
 
-async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
+async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, shutdown: CancellationToken) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     let addr = format!("0.0.0.0:{}", port);
@@ -101,30 +122,80 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>) {
     };
     info!(addr = %addr, "healthz server started");
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let ready = ready.clone();
-        spawn_task(async move {
-            let mut buf = [0u8; 256];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-            let (status, body) = if req.starts_with("GET /healthz") {
-                if ready.load(Ordering::Acquire) {
-                    ("200 OK", "ok\n")
-                } else {
-                    ("503 Service Unavailable", "not ready\n")
-                }
-            } else {
-                ("400 Bad Request", "bad request\n")
-            };
-            let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                status,
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-        });
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!(addr = %addr, "healthz server stopping");
+                return;
+            }
+            accept = listener.accept() => {
+                let Ok((mut stream, _)) = accept else {
+                    continue;
+                };
+                let ready = ready.clone();
+                spawn_task(async move {
+                    let mut buf = [0u8; 256];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
+                    let (status, content_type, body) = if req.starts_with("GET /healthz") {
+                        if ready.load(Ordering::Acquire) {
+                            ("200 OK", "text/plain", "ok\n".to_string())
+                        } else {
+                            ("503 Service Unavailable", "text/plain", "not ready\n".to_string())
+                        }
+                    } else if req.starts_with("GET /metrics") {
+                        ("200 OK", "text/plain; charset=utf-8", crate::metrics::encode())
+                    } else {
+                        ("400 Bad Request", "text/plain", "bad request\n".to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+                        status,
+                        content_type,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn wait_for_shutdown_drain(role: &'static str) {
+    let drained = tunnel_lib::wait_for_resource_drain(SHUTDOWN_DRAIN_TIMEOUT).await;
+    let active = tunnel_lib::METRICS.active_connections();
+    let pending = tunnel_lib::METRICS.pending_streams();
+    if drained {
+        info!(
+            role,
+            active_connections = active,
+            pending_streams = pending,
+            "shutdown drain completed"
+        );
+    } else {
+        warn!(
+            role,
+            active_connections = active,
+            pending_streams = pending,
+            drain_timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "shutdown drain timed out; forcing exit"
+        );
     }
 }

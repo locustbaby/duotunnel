@@ -1,5 +1,5 @@
 use crate::rules::{
-    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
+    ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, GroupId, IngressListener,
     IngressListenerMode, IngressVhostRule, RoutingData, RuleStore, UpstreamServer,
 };
 use anyhow::{Context, Result};
@@ -33,7 +33,7 @@ struct ClientGroupPlan {
 }
 
 struct ClientGroupMutationPlan {
-    delete_groups: Vec<String>,
+    delete_groups: Vec<GroupId>,
     groups: Vec<ClientGroupPlan>,
 }
 
@@ -389,8 +389,8 @@ impl RuleStore for SqliteRuleStore {
                             if let IngressListenerMode::Http { vhost } = &mut last.mode {
                                 vhost.push(IngressVhostRule {
                                     match_host: host,
-                                    group_id: row.get("group_id"),
-                                    proxy_name: row.get("proxy_name"),
+                                    group_id: row.get::<String, _>("group_id").into(),
+                                    proxy_name: row.get::<String, _>("proxy_name").into(),
                                 });
                             }
                         }
@@ -400,8 +400,8 @@ impl RuleStore for SqliteRuleStore {
             }
             let listener_mode = if mode == "tcp" {
                 IngressListenerMode::Tcp {
-                    group_id: row.get("tcp_group"),
-                    proxy_name: row.get("tcp_proxy"),
+                    group_id: row.get::<String, _>("tcp_group").into(),
+                    proxy_name: row.get::<String, _>("tcp_proxy").into(),
                 }
             } else {
                 let mut vhost = Vec::new();
@@ -409,8 +409,8 @@ impl RuleStore for SqliteRuleStore {
                 if let Some(host) = match_host {
                     vhost.push(IngressVhostRule {
                         match_host: host,
-                        group_id: row.get("group_id"),
-                        proxy_name: row.get("proxy_name"),
+                        group_id: row.get::<String, _>("group_id").into(),
+                        proxy_name: row.get::<String, _>("proxy_name").into(),
                     });
                 }
                 IngressListenerMode::Http { vhost }
@@ -435,7 +435,7 @@ impl RuleStore for SqliteRuleStore {
         .context("load client groups")?;
         let mut groups: Vec<ClientGroup> = Vec::new();
         for row in &group_rows {
-            let group_id: String = row.get("group_id");
+            let group_id: GroupId = row.get::<String, _>("group_id").into();
             let upstream_id: Option<i64> = row.try_get("upstream_id").ok();
             if let Some(last_group) = groups.last_mut() {
                 if last_group.group_id == group_id {
@@ -608,8 +608,8 @@ impl RuleStore for SqliteRuleStore {
                     )
                     .bind(lid)
                     .bind(&r.match_host)
-                    .bind(&r.group_id)
-                    .bind(&r.proxy_name)
+                    .bind(r.group_id.as_str())
+                    .bind(r.proxy_name.as_str())
                     .execute(&mut *tx)
                     .await
                     .context("insert ingress vhost rule")?;
@@ -618,7 +618,7 @@ impl RuleStore for SqliteRuleStore {
         }
         for group_id in plan.client_groups.delete_groups {
             sqlx::query("DELETE FROM client_groups WHERE group_id = ?")
-                .bind(group_id)
+                .bind(group_id.as_str())
                 .execute(&mut *tx)
                 .await
                 .context("delete stale client group")?;
@@ -631,14 +631,14 @@ impl RuleStore for SqliteRuleStore {
                  ON CONFLICT(group_id) DO UPDATE SET
                      config_version = excluded.config_version",
             )
-            .bind(&g.group_id)
+            .bind(g.group_id.as_str())
             .bind(&g.config_version)
             .execute(&mut *tx)
             .await
             .context("upsert client group")?;
             for upstream_name in &group_plan.delete_upstreams {
                 sqlx::query("DELETE FROM client_upstreams WHERE group_id = ? AND name = ?")
-                    .bind(&g.group_id)
+                    .bind(g.group_id.as_str())
                     .bind(upstream_name)
                     .execute(&mut *tx)
                     .await
@@ -653,7 +653,7 @@ impl RuleStore for SqliteRuleStore {
                          lb_policy = excluded.lb_policy
                      RETURNING id",
                 )
-                .bind(&g.group_id)
+                .bind(g.group_id.as_str())
                 .bind(&u.name)
                 .bind(&u.lb_policy)
                 .fetch_one(&mut *tx)

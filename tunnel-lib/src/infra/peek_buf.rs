@@ -15,6 +15,7 @@ thread_local! {
 /// overwrite every byte before reading (e.g. pass the slice to `recv.read()` or
 /// `stream.peek()`). `put()` resets the length before returning to the pool so the
 /// next `take()` can safely `set_len` again without re-zeroing.
+#[derive(Clone, Copy)]
 pub struct PeekBufPool {
     buf_size: usize,
 }

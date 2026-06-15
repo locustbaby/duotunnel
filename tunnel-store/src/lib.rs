@@ -1,16 +1,16 @@
+#[cfg(feature = "server-config")]
+pub mod config;
+pub mod db;
 pub mod rules;
 mod token;
 mod traits;
-pub mod db;
-#[cfg(feature = "server-config")]
-pub mod config;
 
+#[cfg(feature = "sqlite")]
+pub use db::sqlite::open_sqlite_pool;
 pub use rules::{
     ClientGroup, ClientUpstream, EgressUpstreamDef, EgressVhostRule, IngressListener,
     IngressListenerMode, IngressVhostRule, RoutingData, RuleStore, UpstreamServer,
 };
-#[cfg(feature = "sqlite")]
-pub use db::sqlite::open_sqlite_pool;
 pub use token::{generate_token, hash_token, hash_token_bytes};
 pub use traits::{AuthError, AuthResult, AuthStore, TokenListEntry};
 pub use tunnel_lib::{ClientStatus, TokenStatus};

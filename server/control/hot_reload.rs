@@ -3,6 +3,7 @@ use crate::control::service::BackgroundService;
 use crate::ingress::sync_listeners;
 use crate::{build_routing_snapshot, ServerState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,10 +22,12 @@ impl BackgroundService for HotReloadService {
     fn run(
         self: Box<Self>,
         state: Arc<ServerState>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
         shutdown: CancellationToken,
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async move {
+            ready.store(true, Ordering::Release);
             if let Err(e) = watch_loop(self.config_path, state, shutdown).await {
                 error!(error = %e, "hot-reload watcher exited unexpectedly");
             }

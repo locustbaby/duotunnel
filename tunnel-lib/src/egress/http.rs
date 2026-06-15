@@ -174,21 +174,15 @@ pub async fn forward_http(
         >,
     > = if content_length > 0 {
         let stream = futures_util::stream::try_unfold(
-            (
-                recv,
-                Some(remaining_first),
-                0usize,
-                content_length,
-                vec![0u8; 8192],
-            ),
-            |(mut recv, first_chunk, mut read, total, mut buf)| async move {
+            (recv, Some(remaining_first), 0usize, content_length),
+            |(mut recv, first_chunk, mut read, total)| async move {
                 if let Some(chunk) = first_chunk {
                     let len = chunk.len();
                     if len > 0 {
                         read += len;
                         return Ok(Some((
                             hyper::body::Frame::data(chunk),
-                            (recv, None, read, total, buf),
+                            (recv, None, read, total),
                         )));
                     }
                 }
@@ -196,17 +190,17 @@ pub async fn forward_http(
                     return Ok(None);
                 }
                 let remaining = total - read;
-                let to_read = buf.len().min(remaining);
-                match recv.read(&mut buf[..to_read]).await {
-                    Ok(Some(n)) if n > 0 => {
-                        read += n;
-                        let chunk = Bytes::copy_from_slice(&buf[..n]);
+                let to_read = 8192.min(remaining);
+                match recv.read_chunk(to_read, true).await {
+                    Ok(Some(chunk)) => {
+                        let len = chunk.bytes.len();
+                        read += len;
                         Ok(Some((
-                            hyper::body::Frame::data(chunk),
-                            (recv, None, read, total, buf),
+                            hyper::body::Frame::data(chunk.bytes),
+                            (recv, None, read, total),
                         )))
                     }
-                    Ok(_) => Ok(None),
+                    Ok(None) => Ok(None),
                     Err(e) => Err(std::io::Error::other(e)),
                 }
             },

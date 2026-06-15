@@ -22,6 +22,7 @@ pub struct OverloadLimits {
     pub mode: OverloadMode,
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
+    pub max_pending_streams: usize,
     pub backoff: BackoffStrategy,
     pub inflight_sleep_budget: Duration,
 }
@@ -33,6 +34,7 @@ impl OverloadLimits {
         max_concurrent_streams: u32,
         yield_abs: usize,
         sleep_abs: usize,
+        max_pending_streams: Option<usize>,
         yield_pct: Option<f32>,
         sleep_pct: Option<f32>,
         sleep_budget_ms: u64,
@@ -48,10 +50,12 @@ impl OverloadLimits {
         if yield_t > sleep_t {
             yield_t = sleep_t;
         }
+        let pending_t = max_pending_streams.unwrap_or_else(|| (max / 4).max(1));
         Self {
             mode,
             inflight_yield_threshold: yield_t,
             inflight_sleep_threshold: sleep_t,
+            max_pending_streams: pending_t,
             backoff,
             inflight_sleep_budget: Duration::from_millis(sleep_budget_ms),
         }

@@ -1,4 +1,4 @@
-use crate::engine::copy::{copy_buffered_then_finish, copy_buffered_then_shutdown};
+use crate::engine::copy::{copy_buffered_then_finish, copy_quic_to_shutdown};
 use crate::proxy::buffer_params::DEFAULT_RELAY_BUF_SIZE;
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
@@ -22,8 +22,7 @@ where
     if !initial_data.is_empty() {
         stream_write.write_all(initial_data).await?;
     }
-    let quic_to_stream =
-        copy_buffered_then_shutdown(quic_recv, stream_write, DEFAULT_RELAY_BUF_SIZE);
+    let quic_to_stream = copy_quic_to_shutdown(quic_recv, stream_write);
     let stream_to_quic = copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     match tokio::try_join!(quic_to_stream, stream_to_quic) {
         Ok((a, b)) => {
@@ -51,8 +50,7 @@ pub async fn relay_tcp_bidirectional(
     stream: TcpStream,
 ) -> Result<(u64, u64)> {
     let (stream_read, stream_write) = tokio::io::split(stream);
-    let quic_to_stream =
-        copy_buffered_then_shutdown(quic_recv, stream_write, DEFAULT_RELAY_BUF_SIZE);
+    let quic_to_stream = copy_quic_to_shutdown(quic_recv, stream_write);
     let stream_to_quic = copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     let (a, b) = tokio::try_join!(quic_to_stream, stream_to_quic)?;
     debug!(quic_to_stream = a, stream_to_quic = b, "relay completed");

@@ -1,3 +1,4 @@
+use crate::models::id::{GroupId, ProxyName};
 use anyhow::Result;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -56,8 +57,8 @@ pub async fn peek_bytes(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<u
 /// to give callers named fields instead of positional `.0` / `.1` access.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RouteTarget {
-    pub group_id: Arc<str>,
-    pub proxy_name: Arc<str>,
+    pub group_id: GroupId,
+    pub proxy_name: ProxyName,
 }
 
 pub struct VhostRouter<T: Clone + Send + Sync> {

@@ -4,6 +4,7 @@ use figment::{
     Figment,
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use tunnel_lib::transport::quic::QuicTransportParams;
 
@@ -21,6 +22,12 @@ impl Default for EntryConfig {
             accept_workers: tunnel_lib::DEFAULT_ACCEPT_WORKERS,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UdpEntryConfig {
+    pub port: u16,
+    pub proxy_name: String,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -125,6 +132,7 @@ pub struct OverloadConfig {
     pub mode: OverloadMode,
     pub inflight_yield_threshold: usize,
     pub inflight_sleep_threshold: usize,
+    pub max_pending_streams: Option<usize>,
     /// Total time budget for the slow-path wait, in milliseconds.
     /// For `exponential` strategy the loop backs off within this budget;
     /// for `fixed` it sleeps the full budget once.
@@ -147,6 +155,7 @@ impl Default for OverloadConfig {
             mode: OverloadMode::InflightSlowpath,
             inflight_yield_threshold: 800,
             inflight_sleep_threshold: 950,
+            max_pending_streams: None,
             inflight_sleep_ms: 2,
             inflight_yield_pct: Some(0.80),
             inflight_sleep_pct: Some(0.95),
@@ -162,6 +171,7 @@ impl OverloadConfig {
             max_concurrent_streams,
             self.inflight_yield_threshold,
             self.inflight_sleep_threshold,
+            self.max_pending_streams,
             self.inflight_yield_pct,
             self.inflight_sleep_pct,
             self.inflight_sleep_ms,
@@ -199,7 +209,7 @@ impl Default for ReconnectConfig {
         }
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ClientConfigFile {
     pub server_addr: String,
     pub server_port: u16,
@@ -211,6 +221,8 @@ pub struct ClientConfigFile {
     pub trace_enabled: bool,
     #[serde(default)]
     pub entry: EntryConfig,
+    #[serde(default)]
+    pub udp_entries: Vec<UdpEntryConfig>,
     #[serde(default)]
     pub metrics_port: Option<u16>,
     #[serde(default)]
@@ -233,6 +245,36 @@ pub struct ClientConfigFile {
     pub reconnect: ReconnectConfig,
     #[serde(default)]
     pub overload: OverloadConfig,
+}
+
+impl std::fmt::Debug for ClientConfigFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked_token = if self.auth_token.starts_with("dt_") && self.auth_token.len() >= 10 {
+            "dt_masked_...".to_string()
+        } else {
+            "***".to_string()
+        };
+        f.debug_struct("ClientConfigFile")
+            .field("server_addr", &self.server_addr)
+            .field("server_port", &self.server_port)
+            .field("auth_token", &masked_token)
+            .field("log_level", &self.log_level)
+            .field("trace_enabled", &self.trace_enabled)
+            .field("entry", &self.entry)
+            .field("udp_entries", &self.udp_entries)
+            .field("metrics_port", &self.metrics_port)
+            .field("tls_skip_verify", &self.tls_skip_verify)
+            .field("tls_ca_cert", &self.tls_ca_cert)
+            .field("tls_server_name", &self.tls_server_name)
+            .field("allow_insecure_fallback", &self.allow_insecure_fallback)
+            .field("quic", &self.quic)
+            .field("tcp", &self.tcp)
+            .field("http_pool", &self.http_pool)
+            .field("proxy_buffers", &self.proxy_buffers)
+            .field("reconnect", &self.reconnect)
+            .field("overload", &self.overload)
+            .finish()
+    }
 }
 impl ClientConfigFile {
     pub fn load(path: &str) -> Result<Self> {
@@ -264,6 +306,25 @@ impl ClientConfigFile {
         }
         if self.auth_token.trim().is_empty() {
             errors.push("auth_token is required".into());
+        }
+        let mut udp_ports = HashSet::new();
+        let mut udp_proxy_names = HashSet::new();
+        for entry in &self.udp_entries {
+            if entry.port == 0 {
+                errors.push("udp_entries[].port must be >= 1".into());
+            }
+            if entry.proxy_name.trim().is_empty() {
+                errors.push("udp_entries[].proxy_name is required".into());
+            }
+            if !udp_ports.insert(entry.port) {
+                errors.push(format!("udp_entries has duplicate port {}", entry.port));
+            }
+            if !udp_proxy_names.insert(entry.proxy_name.trim().to_string()) {
+                errors.push(format!(
+                    "udp_entries has duplicate proxy_name {}",
+                    entry.proxy_name.trim()
+                ));
+            }
         }
         if self.quic.connections == 0 {
             errors.push("quic.connections must be >= 1".into());
@@ -307,6 +368,9 @@ impl ClientConfigFile {
                 "overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
                 self.overload.inflight_yield_threshold, self.overload.inflight_sleep_threshold
             ));
+        }
+        if matches!(self.overload.max_pending_streams, Some(0)) {
+            errors.push("overload.max_pending_streams must be >= 1 when set".into());
         }
         if let (Some(ypct), Some(spct)) = (
             self.overload.inflight_yield_pct,
@@ -355,6 +419,7 @@ mod tests {
             log_level: None,
             trace_enabled: false,
             entry: Default::default(),
+            udp_entries: Vec::new(),
             metrics_port: None,
             tls_skip_verify: false,
             tls_ca_cert: None,
@@ -409,6 +474,7 @@ mod tests {
             inflight_yield_threshold: 100,
             inflight_sleep_threshold: 200,
             inflight_sleep_ms: 10,
+            max_pending_streams: None,
             inflight_yield_pct: None,
             inflight_sleep_pct: None,
             backoff_strategy: BackoffStrategy::Fixed,
@@ -433,6 +499,7 @@ mod tests {
             inflight_yield_threshold: 10, // These should be overridden
             inflight_sleep_threshold: 20, // These should be overridden
             inflight_sleep_ms: 5,
+            max_pending_streams: None,
             inflight_yield_pct: Some(0.5),
             inflight_sleep_pct: Some(0.8),
             backoff_strategy: BackoffStrategy::Exponential,
@@ -460,6 +527,7 @@ mod tests {
             inflight_yield_threshold: 500,
             inflight_sleep_threshold: 100,
             inflight_sleep_ms: 5,
+            max_pending_streams: None,
             inflight_yield_pct: None,
             inflight_sleep_pct: None,
             backoff_strategy: BackoffStrategy::None,
@@ -479,6 +547,7 @@ mod tests {
             inflight_yield_threshold: 0,
             inflight_sleep_threshold: 0,
             inflight_sleep_ms: 5,
+            max_pending_streams: None,
             inflight_yield_pct: Some(0.9),
             inflight_sleep_pct: Some(0.5),
             backoff_strategy: BackoffStrategy::None,
@@ -517,5 +586,22 @@ mod tests {
     fn test_tls_server_name_trims_fallback_server_addr() {
         let config = create_mock_config("  example.com  ", 443, None);
         assert_eq!(config.tls_server_name(), "example.com");
+    }
+
+    #[test]
+    fn test_udp_entries_validate_unique_proxy_name() {
+        let mut config = create_mock_config("example.com", 443, None);
+        config.udp_entries = vec![
+            UdpEntryConfig {
+                port: 5353,
+                proxy_name: "dns".to_string(),
+            },
+            UdpEntryConfig {
+                port: 5354,
+                proxy_name: "dns".to_string(),
+            },
+        ];
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate proxy_name"));
     }
 }

@@ -1,4 +1,5 @@
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::plugin::{ProtocolHint, ProtocolKind};
@@ -8,32 +9,118 @@ use crate::PeekBufPool;
 
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
+pub struct PooledBufInner {
+    buf: Vec<u8>,
+    pool: PeekBufPool,
+}
+
+impl Drop for PooledBufInner {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        if !buf.is_empty() {
+            self.pool.put(buf);
+        }
+    }
+}
+
+impl std::fmt::Debug for PooledBufInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledBufInner")
+            .field("buf_len", &self.buf.len())
+            .field("buf_cap", &self.buf.capacity())
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
-pub struct SniffPrefix(Bytes);
+pub enum SniffPrefix {
+    Empty,
+    Bytes(Bytes),
+    Pooled {
+        inner: Arc<PooledBufInner>,
+        offset: usize,
+        len: usize,
+    },
+}
 
 impl SniffPrefix {
-    pub fn new(prefix: Bytes) -> Self {
-        Self(prefix)
+    pub fn new(bytes: Bytes) -> Self {
+        if bytes.is_empty() {
+            Self::Empty
+        } else {
+            Self::Bytes(bytes)
+        }
+    }
+
+    pub fn new_pooled(buf: Vec<u8>, len: usize, pool: PeekBufPool) -> Self {
+        if len == 0 {
+            if !buf.is_empty() {
+                pool.put(buf);
+            }
+            Self::Empty
+        } else {
+            Self::Pooled {
+                inner: Arc::new(PooledBufInner { buf, pool }),
+                offset: 0,
+                len,
+            }
+        }
     }
 
     pub fn empty() -> Self {
-        Self(Bytes::new())
+        Self::Empty
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        match self {
+            Self::Empty => 0,
+            Self::Bytes(b) => b.len(),
+            Self::Pooled { len, .. } => *len,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        match self {
+            Self::Empty => &[],
+            Self::Bytes(b) => b,
+            Self::Pooled { inner, offset, len } => &inner.buf[*offset..*offset + *len],
+        }
+    }
+
+    pub fn advance(&mut self, amount: usize) {
+        match self {
+            Self::Empty => {
+                assert_eq!(amount, 0);
+            }
+            Self::Bytes(b) => {
+                b.advance(amount);
+                if b.is_empty() {
+                    *self = Self::Empty;
+                }
+            }
+            Self::Pooled { offset, len, .. } => {
+                assert!(amount <= *len);
+                *offset += amount;
+                *len -= amount;
+                if *len == 0 {
+                    *self = Self::Empty;
+                }
+            }
+        }
     }
 
     pub fn into_bytes(self) -> Bytes {
-        self.0
+        match self {
+            Self::Empty => Bytes::new(),
+            Self::Bytes(b) => b,
+            Self::Pooled { inner, offset, len } => {
+                Bytes::copy_from_slice(&inner.buf[offset..offset + len])
+            }
+        }
     }
 }
 
@@ -45,19 +132,19 @@ impl AsRef<[u8]> for SniffPrefix {
 
 impl From<Bytes> for SniffPrefix {
     fn from(value: Bytes) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
 impl From<SniffPrefix> for Bytes {
     fn from(value: SniffPrefix) -> Self {
-        value.0
+        value.into_bytes()
     }
 }
 
 impl From<Vec<u8>> for SniffPrefix {
     fn from(value: Vec<u8>) -> Self {
-        Self(Bytes::from(value))
+        Self::new(Bytes::from(value))
     }
 }
 
@@ -275,12 +362,11 @@ impl<'a> SniffRuntime<'a> {
             for detector in self.detectors {
                 match detector.detect(data) {
                     SniffOutcome::Matched(mut hint) => {
-                        let prefix = Bytes::copy_from_slice(data);
+                        let prefix = SniffPrefix::new_pooled(buf, total, *pool);
                         hint.raw_preface = prefix.clone();
-                        pool.put(buf);
                         return Ok(SniffResult {
                             hint,
-                            prefix: SniffPrefix::new(prefix),
+                            prefix,
                             bytes_read: total,
                             complete: true,
                         });
@@ -296,15 +382,10 @@ impl<'a> SniffRuntime<'a> {
             target = self.policy.max_sniff_bytes;
         }
 
-        let prefix = if total == 0 {
-            Bytes::new()
-        } else {
-            Bytes::copy_from_slice(&buf[..total])
-        };
-        pool.put(buf);
+        let prefix = SniffPrefix::new_pooled(buf, total, *pool);
         Ok(SniffResult {
             hint: ProtocolHint::new(ProtocolKind::Tcp, prefix.clone()),
-            prefix: SniffPrefix::new(prefix),
+            prefix,
             bytes_read: total,
             complete: false,
         })

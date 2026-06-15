@@ -11,6 +11,7 @@ pub struct ProxyBufferParams {
     pub http_header_buf_size: usize,
     pub http_body_chunk_size: usize,
     pub relay_buf_size: usize,
+    pub sniff_timeout_ms: u64,
 }
 impl Default for ProxyBufferParams {
     fn default() -> Self {
@@ -19,6 +20,7 @@ impl Default for ProxyBufferParams {
             http_header_buf_size: 8192,
             http_body_chunk_size: 8192,
             relay_buf_size: 65536,
+            sniff_timeout_ms: 5000,
         }
     }
 }

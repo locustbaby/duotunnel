@@ -24,6 +24,7 @@ enum PoolMsg {
 
 pub struct EntryConnPool {
     tx: mpsc::Sender<PoolMsg>,
+    egress_rules: std::sync::RwLock<Vec<tunnel_lib::EgressVhostRuleDef>>,
 }
 
 impl EntryConnPool {
@@ -70,7 +71,10 @@ impl EntryConnPool {
                             conns.as_slice(),
                             32,
                             3,
-                            |c| c.conn.close_reason().is_none() && !excluded.contains(&c.conn.stable_id()),
+                            |c| {
+                                c.conn.close_reason().is_none()
+                                    && !excluded.contains(&c.conn.stable_id())
+                            },
                             |c| {
                                 inflight_load(
                                     &c.inflight_table,
@@ -78,7 +82,8 @@ impl EntryConnPool {
                                     std::sync::atomic::Ordering::Relaxed,
                                 )
                             },
-                        ).cloned();
+                        )
+                        .cloned();
                         let _ = reply.send(chosen);
                     }
                     PoolMsg::PoolSize(reply) => {
@@ -88,7 +93,24 @@ impl EntryConnPool {
             }
         });
 
-        Arc::new(Self { tx })
+        Arc::new(Self {
+            tx,
+            egress_rules: std::sync::RwLock::new(Vec::new()),
+        })
+    }
+
+    pub fn set_egress_rules(&self, rules: Vec<tunnel_lib::EgressVhostRuleDef>) {
+        if let Ok(mut guard) = self.egress_rules.write() {
+            *guard = rules;
+        }
+    }
+
+    pub fn egress_rules(&self) -> Vec<tunnel_lib::EgressVhostRuleDef> {
+        if let Ok(guard) = self.egress_rules.read() {
+            guard.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     pub async fn push(&self, conn: Connection) {
@@ -101,7 +123,15 @@ impl EntryConnPool {
 
     pub async fn next_conn_excluding(&self, excluded: Vec<usize>) -> Option<Arc<PooledConnection>> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(PoolMsg::NextConn { excluded, reply: reply_tx }).await.is_err() {
+        if self
+            .tx
+            .send(PoolMsg::NextConn {
+                excluded,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
             return None;
         }
         reply_rx.await.ok().flatten()

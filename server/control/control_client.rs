@@ -7,6 +7,7 @@ use std::collections::HashSet;
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
@@ -32,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 pub struct ControlClientService {
     pub ctld_addr: SocketAddr,
     pub auth_token: Option<String>,
+    pub config_path: String,
 }
 
 impl BackgroundService for ControlClientService {
@@ -42,28 +44,96 @@ impl BackgroundService for ControlClientService {
     fn run(
         self: Box<Self>,
         state: Arc<ServerState>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
         shutdown: CancellationToken,
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async move {
-            watch_loop(self.ctld_addr, self.auth_token, state, shutdown).await;
+            watch_loop(
+                self.ctld_addr,
+                self.auth_token,
+                self.config_path,
+                state,
+                ready,
+                shutdown,
+            )
+            .await;
             Ok(())
         })
+    }
+}
+
+fn get_snapshot_path(config_path: &str) -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(config_path);
+    p.set_file_name("local_snapshot.json");
+    p
+}
+
+async fn save_snapshot_to_disk(path: &std::path::Path, snap: &ConfigSnapshot) {
+    match serde_json::to_string(snap) {
+        Ok(json) => {
+            if let Err(e) = tokio::fs::write(path, json).await {
+                error!(error = %e, path = ?path, "failed to save snapshot to disk");
+            } else {
+                tracing::debug!(path = ?path, version = snap.resource_version, "saved snapshot to disk");
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "failed to serialize snapshot");
+        }
     }
 }
 
 async fn watch_loop(
     ctld_addr: SocketAddr,
     auth_token: Option<String>,
+    config_path: String,
     state: Arc<ServerState>,
+    ready: Arc<std::sync::atomic::AtomicBool>,
     shutdown: CancellationToken,
 ) {
-    let mut backoff = Duration::from_secs(1);
+    let snapshot_path = get_snapshot_path(&config_path);
+    let mut current_snapshot: Option<ConfigSnapshot> = None;
     let mut last_version: u64 = 0;
+
+    // Load fallback snapshot on boot if it exists on disk
+    if snapshot_path.exists() {
+        match tokio::fs::read_to_string(&snapshot_path).await {
+            Ok(content) => match serde_json::from_str::<ConfigSnapshot>(&content) {
+                Ok(snap) => {
+                    info!(
+                        path = ?snapshot_path,
+                        resource_version = snap.resource_version,
+                        "loaded local snapshot fallback"
+                    );
+                    apply_snapshot(&snap, &state).await;
+                    ready.store(true, Ordering::Release);
+                    last_version = snap.resource_version;
+                    current_snapshot = Some(snap);
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to parse local snapshot fallback");
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "failed to read local snapshot fallback file");
+            }
+        }
+    }
+
+    let mut backoff = Duration::from_secs(1);
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            result = connect_and_watch(ctld_addr, auth_token.as_deref(), &state, &mut last_version) => {
+            result = connect_and_watch(
+                ctld_addr,
+                auth_token.as_deref(),
+                &state,
+                &ready,
+                &mut last_version,
+                &mut current_snapshot,
+                &snapshot_path,
+            ) => {
                 match result {
                     Ok(()) => {
                         backoff = Duration::from_secs(1);
@@ -96,13 +166,15 @@ async fn connect_and_watch(
     addr: SocketAddr,
     auth_token: Option<&str>,
     state: &Arc<ServerState>,
+    ready: &Arc<std::sync::atomic::AtomicBool>,
     last_version: &mut u64,
+    current_snapshot: &mut Option<ConfigSnapshot>,
+    snapshot_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     info!(addr = %addr, "connecting to tunnel-ctld");
     let stream = TcpStream::connect(addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut current_snapshot: Option<ConfigSnapshot> = None;
 
     // Step 1: send WatchRequest
     let req = WatchRequest {
@@ -125,8 +197,10 @@ async fn connect_and_watch(
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
                 apply_snapshot(&snap, state).await;
-                current_snapshot = Some(snap);
+                ready.store(true, Ordering::Release);
                 *last_version = v;
+                *current_snapshot = Some(snap);
+                save_snapshot_to_disk(snapshot_path, current_snapshot.as_ref().unwrap()).await;
             }
             WatchEvent::Patch(patch) => {
                 let v = patch.resource_version;
@@ -134,6 +208,8 @@ async fn connect_and_watch(
                 if let Some(snapshot) = current_snapshot.as_mut() {
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
                     apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await;
+                    *last_version = v;
+                    save_snapshot_to_disk(snapshot_path, snapshot).await;
                 } else {
                     warn!(
                         resource_version = v,
@@ -237,7 +313,7 @@ fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -
         |item| item.port.to_string(),
     );
     apply_ops(&mut snapshot.client_groups, &patch.client_groups, |item| {
-        item.group_id.clone()
+        item.group_id.to_string()
     });
     apply_ops(
         &mut snapshot.egress_upstreams,
