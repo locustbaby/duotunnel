@@ -322,7 +322,13 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         max_concurrent_streams = max_streams,
         "overload protection resolved"
     );
-    let shared_registry = new_shared_registry();
+    let shard_count = tunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
+    info!(
+        shards = shard_count,
+        cpu_parallelism = tunnel_lib::available_parallelism(),
+        "server QUIC ownership topology resolved"
+    );
+    let shared_registry = new_shared_registry(shard_count);
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;

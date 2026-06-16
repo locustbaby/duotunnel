@@ -7,10 +7,11 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::ProxyError;
+use tunnel_lib::{OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::SharedRegistry;
 
@@ -53,6 +54,8 @@ impl IngressProtocolHandler for TlsHandler {
         let src_addr = peer_addr.ip().to_string();
         let src_port = peer_addr.port();
         let target_host = host.clone();
+        let overload = ctx.overload.clone();
+        let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
         let registry = self.registry.clone();
         let sender_cache: Arc<
@@ -68,6 +71,7 @@ impl IngressProtocolHandler for TlsHandler {
             let target_host = target_host.clone();
             let src_addr = src_addr.clone();
             let group_id = group_id.clone();
+            let overload = overload.clone();
             async move {
                 let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
                     method: req.method().clone(),
@@ -143,9 +147,15 @@ impl IngressProtocolHandler for TlsHandler {
                     );
 
                     match tunnel_lib::forward_h2_request(
-                        &selected.conn,
+                        selected.handle.as_ref(),
                         &sender,
-                        routing_info.clone(),
+                        OpenStreamRequest {
+                            routing_info: routing_info.clone(),
+                            initial_bytes: None,
+                            overload_limits: overload.clone(),
+                            stream_timeout: open_stream_timeout,
+                            on_wait_done: None,
+                        },
                         req_to_send,
                     )
                     .await

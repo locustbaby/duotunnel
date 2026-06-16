@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod addr;
+pub mod connection_handle;
 pub mod listener;
 pub mod open_bi;
 pub mod quic;

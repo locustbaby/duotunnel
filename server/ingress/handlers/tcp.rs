@@ -6,7 +6,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    maybe_slow_path, open_bi_guarded, proxy, run_accept_worker, GroupId, OpenBiOutcome, ProxyName,
+    maybe_slow_path, proxy, run_accept_worker, GroupId, OpenBiOutcome, OpenStreamRequest,
+    ProxyName,
 };
 
 pub async fn run_tcp_accept_loop(
@@ -91,31 +92,28 @@ async fn handle_tcp_connection(
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
-        maybe_slow_path(
-            &selected.inflight_table,
-            selected.slot_id,
-            state.overload_limits(),
-        )
-        .await;
+        maybe_slow_path(selected.handle.inflight_table(), selected.handle.slot_id(), state.overload_limits())
+            .await;
 
         let open_timeout = state.open_stream_timeout();
         let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
-        match open_bi_guarded(
-            &selected.conn,
-            &selected.inflight_table,
-            selected.slot_id,
-            state.overload_limits(),
-            open_timeout,
-            |elapsed, outcome| {
-                metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
-                if matches!(outcome, OpenBiOutcome::TimedOut) {
-                    metrics::open_bi_timed_out();
-                } else if matches!(outcome, OpenBiOutcome::RejectedOverloaded) {
-                    metrics::open_bi_rejected_overloaded();
-                }
-            },
-        )
-        .await
+        match selected
+            .handle
+            .open_stream(OpenStreamRequest {
+                routing_info: routing_info.clone(),
+                initial_bytes: None,
+                overload_limits: state.overload_limits().clone(),
+                stream_timeout: open_timeout,
+                on_wait_done: Some(Box::new(|elapsed, outcome| {
+                    metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
+                    if matches!(outcome, OpenBiOutcome::TimedOut) {
+                        metrics::open_bi_timed_out();
+                    } else if matches!(outcome, OpenBiOutcome::RejectedOverloaded) {
+                        metrics::open_bi_rejected_overloaded();
+                    }
+                })),
+            })
+            .await
         {
             Ok(opened) => break opened,
             Err(e) => {
@@ -134,9 +132,8 @@ async fn handle_tcp_connection(
         }
     };
 
-    let mut send = opened.send;
+    let send = opened.send;
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
-    tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
     proxy::forward_prefixed_to_client(send, recv, prefixed_stream, state.relay_buf_size()).await
 }

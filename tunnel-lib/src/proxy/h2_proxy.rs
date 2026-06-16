@@ -1,4 +1,4 @@
-use crate::{send_routing_info, QuinnStream, RoutingInfo};
+use crate::{ConnectionHandle, OpenStreamRequest, QuinnStream};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -6,7 +6,6 @@ use http_body_util::BodyExt;
 use hyper::client::conn::http2::{Builder as H2ClientBuilder, SendRequest};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use quinn::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
@@ -35,9 +34,9 @@ fn try_get_sender(cache: &H2SenderCache) -> Option<SendRequest<BoxBody>> {
 }
 
 pub async fn forward_h2_request<B>(
-    client_conn: &Connection,
+    client_conn: &ConnectionHandle,
     sender_cache: &H2Sender,
-    routing_info: RoutingInfo,
+    stream_request: OpenStreamRequest,
     request: Request<B>,
 ) -> Result<Response<BoxBody>>
 where
@@ -57,12 +56,10 @@ where
                 None => {
                     debug!("H2 sender miss, establishing new connection");
 
-                    let (send, recv) = client_conn.open_bi().await?;
-                    let mut routing_send = send;
-                    send_routing_info(&mut routing_send, &routing_info).await?;
-
+                    let opened = client_conn.open_stream(stream_request).await?;
+                    let crate::OpenedStream { send, recv, inflight } = opened;
                     let quic_stream = QuinnStream {
-                        send: routing_send,
+                        send,
                         recv,
                     };
                     let io = TokioIo::new(quic_stream);
@@ -77,6 +74,7 @@ where
 
                     let cache = sender_cache.clone();
                     tokio::spawn(async move {
+                        let _inflight_guard = inflight;
                         if let Err(e) = conn_driver.await {
                             debug!(error = %e, "H2 connection driver exited");
                         }

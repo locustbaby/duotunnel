@@ -51,8 +51,19 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         crate::metrics::set_handle(handle);
         spawn_task(run_healthz_server(port, ready.clone(), cancel.clone()));
     }
-    let entry_pool =
-        EntryConnPool::new(config.quic.max_concurrent_streams, config.quic.connections);
+    let shard_count =
+        tunnel_lib::resolve_shard_count(config.quic.shards, Some(config.quic.connections as usize));
+    info!(
+        connections = config.quic.connections,
+        shards = shard_count,
+        cpu_parallelism = tunnel_lib::available_parallelism(),
+        "client QUIC ownership topology resolved"
+    );
+    let entry_pool = EntryConnPool::new(
+        config.quic.max_concurrent_streams,
+        config.quic.connections,
+        shard_count,
+    );
     let udp_registry = Arc::new(UdpListenerRegistry::default());
     let mut engine = RuntimeEngine::new(cancel.clone());
 

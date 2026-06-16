@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-helpers/local-test/test.sh
-# Mirrors CI integration-test job using *.localtest.com domains
-# (localtest.com resolves to 127.0.0.1 — no /etc/hosts sudo needed)
+# Local integration test for the tunnel stack.
+# It intentionally uses *.localtest.com domains, while CI uses ws.local / grpc.local.
 #
 # Usage (run from repo root):
 #   bash ci-helpers/local-test/test.sh
@@ -28,6 +28,9 @@ export SERVER_CONFIG="$CFGDIR/server.yaml"
 export CLIENT_CONFIG="$CFGDIR/client.yaml"
 export CLIENT_GROUP="local-group"
 export CLIENT_HEALTHZ_PORT="9092"
+export LOCAL_HTTP_HOST="wss.localtest.com"
+export LOCAL_WS_HOST="ws.localtest.com"
+export LOCAL_GRPC_HOST="grpc.localtest.com"
 
 KEEP=0
 ONLY_SECTION="all"
@@ -77,6 +80,58 @@ run() {
   else _fail "$out"; fi
 }
 
+resolve_ipv4() {
+  local host="$1" ip=""
+
+  if command -v dig &>/dev/null; then
+    ip=$(dig +short "$host" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }') || true
+  fi
+
+  if [[ -z "$ip" ]] && command -v getent &>/dev/null; then
+    ip=$(getent hosts "$host" 2>/dev/null | awk 'NR == 1 { print $1 }') || true
+  fi
+
+  if [[ -z "$ip" ]] && command -v python3 &>/dev/null; then
+    ip=$(python3 - "$host" <<'PY'
+import socket
+import sys
+
+try:
+    infos = socket.getaddrinfo(sys.argv[1], None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+except socket.gaierror:
+    raise SystemExit(0)
+
+for info in infos:
+    print(info[4][0])
+    break
+PY
+) || true
+  fi
+
+  printf '%s' "$ip"
+}
+
+warn_if_domain_not_loopback() {
+  local domain="$1"
+  local ip
+  ip="$(resolve_ipv4 "$domain")"
+
+  if [[ -z "$ip" ]]; then
+    echo ""
+    echo "WARNING: unable to resolve $domain in preflight"
+    echo "  Continuing; protocol sections will verify connectivity directly."
+    echo ""
+    return
+  fi
+
+  if [[ "$ip" != "127.0.0.1" ]]; then
+    echo ""
+    echo "WARNING: $domain resolves to '$ip', not 127.0.0.1"
+    echo "  Sections using $domain may fail if your resolver is not pinned locally."
+    echo ""
+  fi
+}
+
 # ─── Source shared tunnel-stack functions ────────────────────────────────────
 # shellcheck source=ci-helpers/local-test/tunnel-stack.sh
 source "$CFGDIR/tunnel-stack.sh"
@@ -106,17 +161,9 @@ for b in server client tunnel-ctld http-echo-server ws-echo-server grpc-echo-ser
   }
 done
 
-# ─── Preflight: domain resolution ────────────────────────────────────────────
-for domain in ws.localtest.com grpc.localtest.com; do
-  ip=$(dig +short "$domain" 2>/dev/null | grep -m1 '^[0-9]' \
-       || getent hosts "$domain" 2>/dev/null | awk '{print $1}')
-  if [[ "$ip" != "127.0.0.1" ]]; then
-    echo ""
-    echo "WARNING: $domain resolves to '${ip:-<nothing>}', not 127.0.0.1"
-    echo "  Sections 4 (WS) and 5 (gRPC) will fail."
-    echo "  Fix: sudo tee -a /etc/hosts <<< '127.0.0.1  $domain'"
-    echo ""
-  fi
+# ─── Preflight: local-only domain resolution ─────────────────────────────────
+for domain in "$LOCAL_WS_HOST" "$LOCAL_GRPC_HOST"; do
+  warn_if_domain_not_loopback "$domain"
 done
 
 # Kill any leftover processes from a previous run
@@ -138,7 +185,7 @@ stack_start_server
 stack_create_token
 stack_start_client
 
-log "Tunnel ready  (ingress: *.localtest.com:8081  egress: *.localtest.com:8082)"
+log "Tunnel ready  (ingress: $LOCAL_HTTP_HOST/$LOCAL_WS_HOST/$LOCAL_GRPC_HOST on :8081, egress: $LOCAL_HTTP_HOST:8082)"
 
 CLIENT="$BIN/ci-test-client"
 
@@ -157,8 +204,8 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 2; then
 hdr "SECTION 2 — HTTP/1.1"
-H="http://wss.localtest.com:8081"
-E="http://wss.localtest.com:8082"
+H="http://$LOCAL_HTTP_HOST:8081"
+E="http://$LOCAL_HTTP_HOST:8082"
 
 run "[HTTP] GET ingress"                  "$CLIENT" http "$H/"
 run "[HTTP] POST + body verify ingress"   "$CLIENT" http "$H/" --method POST \
@@ -189,8 +236,8 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 3; then
 hdr "SECTION 3 — HTTP/2 h2c"
-H="http://wss.localtest.com:8081"
-E="http://wss.localtest.com:8082"
+H="http://$LOCAL_HTTP_HOST:8081"
+E="http://$LOCAL_HTTP_HOST:8082"
 
 run "[HTTP2] GET h2c ingress"             "$CLIENT" http2 "$H/"
 run "[HTTP2] POST h2c + body ingress"     "$CLIENT" http2 "$H/" --method POST \
@@ -204,25 +251,25 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 4 — WebSocket ingress
-# Requires ws.localtest.com → 127.0.0.1
+# Uses the local-test WebSocket hostname, separate from CI's ws.local.
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 4; then
 hdr "SECTION 4 — WebSocket"
-run "[WS] Echo ingress"                   "$CLIENT" ws "ws://ws.localtest.com:8081" \
+run "[WS] Echo ingress"                   "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
   --message "hello-ws-tunnel"
-run "[WS] Custom message echo"            "$CLIENT" ws "ws://ws.localtest.com:8081" \
+run "[WS] Custom message echo"            "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
   --message "ci-msg-two"
-run "[WS] Large message (4096 bytes)"     "$CLIENT" ws "ws://ws.localtest.com:8081" \
+run "[WS] Large message (4096 bytes)"     "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
   --message "$(python3 -c "print('x'*4096)")"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — gRPC
-# Requires grpc.localtest.com → 127.0.0.1
+# Uses the local-test gRPC hostname, separate from CI's grpc.local.
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 5; then
 hdr "SECTION 5 — gRPC"
-G5="grpc.localtest.com:8081"
+G5="$LOCAL_GRPC_HOST:8081"
 
 run "[gRPC] Health/Check SERVING"         "$CLIENT" grpc              "$G5" --service ""
 run "[gRPC] EchoService/Echo body"        "$CLIENT" grpc-echo         "$G5" --ping "ci-local-echo-test"
@@ -239,12 +286,12 @@ fi
 if should_run 6; then
 hdr "SECTION 6 — Mixed-protocol smoke tests"
 
-run "[Mix] H1 GET ingress"            "$CLIENT" http      "http://wss.localtest.com:8081/"
-run "[Mix] H2 GET ingress"            "$CLIENT" http2     "http://wss.localtest.com:8081/"
-run "[Mix] H2c prior GET ingress"     "$CLIENT" h2c-prior "http://wss.localtest.com:8081/"
-run "[Mix] WS echo ingress"           "$CLIENT" ws        "ws://ws.localtest.com:8081" --message "mix-ws"
-run "[Mix] gRPC Health ingress"       "$CLIENT" grpc      "grpc.localtest.com:8081" --service ""
-run "[Mix] gRPC Echo ingress"         "$CLIENT" grpc-echo "grpc.localtest.com:8081" --ping "mix-grpc"
-run "[Mix] H1 GET egress"             "$CLIENT" http      "http://wss.localtest.com:8082/"
-run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://wss.localtest.com:8082/"
+run "[Mix] H1 GET ingress"            "$CLIENT" http      "http://$LOCAL_HTTP_HOST:8081/"
+run "[Mix] H2 GET ingress"            "$CLIENT" http2     "http://$LOCAL_HTTP_HOST:8081/"
+run "[Mix] H2c prior GET ingress"     "$CLIENT" h2c-prior "http://$LOCAL_HTTP_HOST:8081/"
+run "[Mix] WS echo ingress"           "$CLIENT" ws        "ws://$LOCAL_WS_HOST:8081" --message "mix-ws"
+run "[Mix] gRPC Health ingress"       "$CLIENT" grpc      "$LOCAL_GRPC_HOST:8081" --service ""
+run "[Mix] gRPC Echo ingress"         "$CLIENT" grpc-echo "$LOCAL_GRPC_HOST:8081" --ping "mix-grpc"
+run "[Mix] H1 GET egress"             "$CLIENT" http      "http://$LOCAL_HTTP_HOST:8082/"
+run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://$LOCAL_HTTP_HOST:8082/"
 fi

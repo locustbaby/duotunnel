@@ -4,7 +4,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::ProxyError;
+use tunnel_lib::{OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::SharedRegistry;
 
@@ -59,19 +59,27 @@ impl IngressProtocolHandler for H1Handler {
                 .select_client_for_group(&group_id)
                 .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
-            tunnel_lib::maybe_slow_path(&selected.inflight_table, selected.slot_id, &ctx.overload)
+            tunnel_lib::maybe_slow_path(selected.handle.inflight_table(), selected.handle.slot_id(), &ctx.overload)
                 .await;
 
             let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
-            match tunnel_lib::open_bi_guarded(
-                &selected.conn,
-                &selected.inflight_table,
-                selected.slot_id,
-                &ctx.overload,
-                open_timeout,
-                |_elapsed, _outcome| {},
-            )
-            .await
+            let routing_info = tunnel_lib::RoutingInfo {
+                proxy_name: proxy_name.clone(),
+                src_addr: ctx.peer_addr.ip().to_string(),
+                src_port: ctx.peer_addr.port(),
+                protocol,
+                host: Some(host.clone()),
+            };
+            match selected
+                .handle
+                .open_stream(OpenStreamRequest {
+                    routing_info,
+                    initial_bytes: None,
+                    overload_limits: ctx.overload.clone(),
+                    stream_timeout: open_timeout,
+                    on_wait_done: None,
+                })
+                .await
             {
                 Ok(opened) => break opened,
                 Err(e) => {
@@ -90,17 +98,9 @@ impl IngressProtocolHandler for H1Handler {
             }
         };
 
-        let mut send = opened.send;
+        let send = opened.send;
         let recv = opened.recv;
         let _inflight_guard = opened.inflight;
-        let routing_info = tunnel_lib::RoutingInfo {
-            proxy_name: proxy_name.clone(),
-            src_addr: ctx.peer_addr.ip().to_string(),
-            src_port: ctx.peer_addr.port(),
-            protocol,
-            host: Some(host),
-        };
-        tunnel_lib::send_routing_info(&mut send, &routing_info).await?;
         tunnel_lib::proxy::forward_prefixed_to_client(send, recv, stream, ctx.relay_buf_size).await
     }
 }

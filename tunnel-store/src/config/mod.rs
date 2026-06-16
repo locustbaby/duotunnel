@@ -297,6 +297,9 @@ impl ServerConfigFile {
         if self.server.open_stream_timeout_ms == 0 {
             errors.push("server.open_stream_timeout_ms must be >= 1".into());
         }
+        if matches!(self.server.quic.shards, Some(0)) {
+            errors.push("server.quic.shards must be >= 1 when set".into());
+        }
         if self.server.overload.inflight_yield_threshold
             > self.server.overload.inflight_sleep_threshold
         {

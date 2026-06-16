@@ -22,6 +22,7 @@ pub use infra::metrics::{wait_for_resource_drain, METRICS};
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
+pub use infra::runtime::{available_parallelism, resolve_shard_count};
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
 pub use lb::inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
@@ -29,6 +30,10 @@ pub use lb::inflight::{
 };
 pub use lb::overload::{
     maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
+};
+pub use lb::shard::{
+    pick_from_preferred_shards, pick_p2c_inflight_owned, stable_shard_index,
+    DEFAULT_P2C_MAX_RETRIES, DEFAULT_P2C_THRESHOLD,
 };
 pub use models::defs::{
     ClientGroupDef, ClientStatus, ClientUpstreamDef, EgressUpstreamDef, EgressVhostRuleDef,
@@ -52,6 +57,7 @@ pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::accept::{run_accept_worker, AcceptedConn};
+pub use transport::connection_handle::{ConnectionHandle, OpenStreamRequest, OpenWaitObserver};
 pub use transport::listener::{
     build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
     DEFAULT_ACCEPT_WORKERS,

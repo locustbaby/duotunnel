@@ -2,7 +2,6 @@ use crate::bootstrap::config::UdpEntryConfig;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -86,22 +85,31 @@ async fn start_udp_listener(
                     }
                 };
                 let pool_size = pool.pool_size().await;
+                let preferred_shard =
+                    pool.shard_for_hash(&(entry.proxy_name.as_str(), client_addr.ip(), client_addr.port()));
                 let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
                 let mut delivered = false;
                 for _ in 0..pool_size.max(1) {
-                    let Some(conn) = pool.next_conn_excluding(tried_conn_ids.clone()).await else {
+                    let Some(conn) = pool
+                        .next_conn_for_shard_excluding(preferred_shard, tried_conn_ids.clone())
+                        .await
+                    else {
                         break;
                     };
-                    tried_conn_ids.push(conn.conn.stable_id());
-                    match conn.conn.send_datagram(Bytes::copy_from_slice(encoded.as_slice())) {
+                    tried_conn_ids.push(conn.handle.stable_id());
+                    match conn
+                        .handle
+                        .send_datagram(bytes::Bytes::copy_from_slice(encoded.as_slice()))
+                        .await
+                    {
                         Ok(()) => {
                             delivered = true;
                             break;
                         }
                         Err(e) => {
-                            warn!(conn_id = conn.conn.stable_id(), error = %e, "udp datagram send failed");
-                            if conn.conn.close_reason().is_some() {
-                                pool.remove(&conn.conn).await;
+                            warn!(conn_id = conn.handle.stable_id(), error = %e, "udp datagram send failed");
+                            if conn.handle.close_reason().is_some() {
+                                pool.remove_stable_id(conn.handle.stable_id()).await;
                             }
                         }
                     }

@@ -13,3 +13,7 @@ CLAUDE.md
 remove_rust_comments_smart.sh
 data/
 docs/tmp-tune/
+.codegraph/daemon.pid
+ca.crt
+ca.key
+ci-helpers/local-test/local_snapshot.json

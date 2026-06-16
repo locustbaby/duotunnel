@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct QuicConfig {
+    pub shards: Option<usize>,
     pub max_concurrent_streams: Option<u32>,
     pub stream_window_mb: Option<u64>,
     pub connection_window_mb: Option<u64>,

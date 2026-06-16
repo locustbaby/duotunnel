@@ -10,9 +10,9 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    default_client_detectors, maybe_slow_path, open_bi_guarded, relay_quic_to_tcp,
-    run_accept_worker, send_routing_info, AcceptedConn, ErrorKind, OverloadLimits, PeekBufPool,
-    ProxyError, RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
+    default_client_detectors, maybe_slow_path, relay_quic_to_tcp, run_accept_worker,
+    AcceptedConn, ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool, ProxyError,
+    RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -168,40 +168,41 @@ async fn handle_entry_connection(
     }
 
     let pool_size = pool.pool_size().await;
+    let preferred_shard = pool.shard_for_hash(&(host.clone(), "entry"));
     let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
-        let conn = match pool.next_conn_excluding(tried_conn_ids.clone()).await {
+        let conn = match pool
+            .next_conn_for_shard_excluding(preferred_shard, tried_conn_ids.clone())
+            .await
+        {
             Some(c) => c,
             None => break,
         };
-        tried_conn_ids.push(conn.conn.stable_id());
-        maybe_slow_path(&conn.inflight_table, conn.slot_id, overload).await;
-        match open_bi_guarded(
-            &conn.conn,
-            &conn.inflight_table,
-            conn.slot_id,
-            overload,
-            open_stream_timeout,
-            |_elapsed, _outcome| {},
-        )
-        .await
+        tried_conn_ids.push(conn.handle.stable_id());
+        maybe_slow_path(conn.handle.inflight_table(), conn.handle.slot_id(), overload).await;
+        let routing_info = RoutingInfo {
+            proxy_name: "entry".into(),
+            src_addr: peer_addr.ip().to_string(),
+            src_port: peer_addr.port(),
+            protocol,
+            host: host.clone(),
+        };
+        match conn
+            .handle
+            .open_stream(OpenStreamRequest {
+                routing_info,
+                initial_bytes: initial_bytes.clone(),
+                overload_limits: overload.clone(),
+                stream_timeout: open_stream_timeout,
+                on_wait_done: None,
+            })
+            .await
         {
             Ok(opened) => {
-                let mut send = opened.send;
+                let send = opened.send;
                 let recv = opened.recv;
                 let _inflight_guard = opened.inflight;
-                let routing_info = RoutingInfo {
-                    proxy_name: "entry".into(),
-                    src_addr: peer_addr.ip().to_string(),
-                    src_port: peer_addr.port(),
-                    protocol,
-                    host,
-                };
-                send_routing_info(&mut send, &routing_info).await?;
-                if let Some(ref init) = initial_bytes {
-                    send.write_all(init).await?;
-                }
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
                 let extra = initial_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                 debug!(
@@ -212,11 +213,11 @@ async fn handle_entry_connection(
             }
             Err(e) => match e.kind {
                 ErrorKind::QuicOpenTimedOut => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi timed out, trying next connection");
-                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                    warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi timed out, trying next connection");
+                    last_err = with_conn_detail(conn.handle.stable_id(), e).into();
                 }
                 ErrorKind::QuicOpenRejectedOverloaded => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi rejected due to overload");
+                    warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi rejected due to overload");
                     if protocol == tunnel_lib::proxy::core::Protocol::H1 {
                         let body = "503 Service Unavailable - Open stream queue full\n";
                         let resp = format!(
@@ -236,21 +237,21 @@ async fn handle_entry_connection(
                         return Ok(());
                     }
                     let _ = local_stream.shutdown().await;
-                    return Err(with_conn_detail(conn.conn.stable_id(), e).into());
+                    return Err(with_conn_detail(conn.handle.stable_id(), e).into());
                 }
                 ErrorKind::QuicConnectionLost => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit stale connection, evicting pool entry");
-                    pool.remove(&conn.conn).await;
-                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                    warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi hit stale connection, evicting pool entry");
+                    pool.remove_stable_id(conn.handle.stable_id()).await;
+                    last_err = with_conn_detail(conn.handle.stable_id(), e).into();
                 }
                 ErrorKind::QuicConnectionFatal => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi hit fatal connection error");
-                    pool.remove(&conn.conn).await;
-                    return Err(with_conn_detail(conn.conn.stable_id(), e).into());
+                    warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi hit fatal connection error");
+                    pool.remove_stable_id(conn.handle.stable_id()).await;
+                    return Err(with_conn_detail(conn.handle.stable_id(), e).into());
                 }
                 _ => {
-                    warn!(error = %e, conn_id = conn.conn.stable_id(), "open_bi failed, trying next connection");
-                    last_err = with_conn_detail(conn.conn.stable_id(), e).into();
+                    warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi failed, trying next connection");
+                    last_err = with_conn_detail(conn.handle.stable_id(), e).into();
                 }
             },
         }
@@ -284,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_entry_connection_http_reject() {
-        let pool = EntryConnPool::new(100, 1);
+        let pool = EntryConnPool::new(100, 1, 1);
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "blocked.com".to_string(),
             action_upstream: "reject".to_string(),
@@ -339,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_entry_connection_tls_reject() {
-        let pool = EntryConnPool::new(100, 1);
+        let pool = EntryConnPool::new(100, 1, 1);
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "blocked.com".to_string(),
             action_upstream: "reject".to_string(),

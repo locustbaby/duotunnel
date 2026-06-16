@@ -9,6 +9,7 @@ use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 
 use tunnel_lib::plugin::{
@@ -16,7 +17,7 @@ use tunnel_lib::plugin::{
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
-use tunnel_lib::ProxyError;
+use tunnel_lib::{OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::{SelectedConnection, SharedRegistry};
 
@@ -99,7 +100,7 @@ fn get_or_create_sender(
 ) -> Option<CachedSender> {
     let mut guard = sender_cache.lock();
     if let Some(entry) = guard.get(route_target) {
-        if entry.selected.conn.close_reason().is_none() {
+        if entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
         }
         guard.remove(route_target);
@@ -122,7 +123,7 @@ fn invalidate_sender_if_matches(
     let mut guard = sender_cache.lock();
     if guard
         .get(route_target)
-        .is_some_and(|entry| entry.selected.conn.stable_id() == conn_id)
+        .is_some_and(|entry| entry.selected.handle.stable_id() == conn_id)
     {
         guard.remove(route_target);
     }
@@ -163,6 +164,8 @@ impl IngressProtocolHandler for H2cHandler {
         let listener_port = ctx.listener_port;
         let client_addr = ctx.peer_addr;
         let single_authority = self.single_authority;
+        let overload = ctx.overload.clone();
+        let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
         let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
@@ -182,6 +185,7 @@ impl IngressProtocolHandler for H2cHandler {
             let route_resolver = route_resolver.clone();
             let metrics = metrics.clone();
             let src_addr = src_addr.clone();
+            let overload = overload.clone();
             async move {
                 let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
                     req.headers()
@@ -286,9 +290,15 @@ impl IngressProtocolHandler for H2cHandler {
                 let boxed_body = body.map_err(std::io::Error::other).boxed();
                 let upstream_req = Request::from_parts(parts, boxed_body);
                 match tunnel_lib::forward_h2_request(
-                    &sender_entry.selected.conn,
+                    sender_entry.selected.handle.as_ref(),
                     &sender_entry.sender,
-                    routing_info.clone(),
+                    OpenStreamRequest {
+                        routing_info: routing_info.clone(),
+                        initial_bytes: None,
+                        overload_limits: overload.clone(),
+                        stream_timeout: open_stream_timeout,
+                        on_wait_done: None,
+                    },
                     upstream_req,
                 )
                 .await
@@ -298,7 +308,7 @@ impl IngressProtocolHandler for H2cHandler {
                         invalidate_sender_if_matches(
                             &sender_cache,
                             &route_target,
-                            sender_entry.selected.conn.stable_id(),
+                            sender_entry.selected.handle.stable_id(),
                         );
                         registry.unregister(&sender_entry.selected.conn_id);
 
@@ -309,9 +319,15 @@ impl IngressProtocolHandler for H2cHandler {
                                 metrics.incr("duotunnel_h2c_retry_total", &[("result", "attempt")]);
                                 let retry_req = build_retry_request(template);
                                 match tunnel_lib::forward_h2_request(
-                                    &retry_entry.selected.conn,
+                                    retry_entry.selected.handle.as_ref(),
                                     &retry_entry.sender,
-                                    routing_info.clone(),
+                                    OpenStreamRequest {
+                                        routing_info: routing_info.clone(),
+                                        initial_bytes: None,
+                                        overload_limits: overload.clone(),
+                                        stream_timeout: open_stream_timeout,
+                                        on_wait_done: None,
+                                    },
                                     retry_req,
                                 )
                                 .await
@@ -331,7 +347,7 @@ impl IngressProtocolHandler for H2cHandler {
                                         invalidate_sender_if_matches(
                                             &sender_cache,
                                             &route_target,
-                                            retry_entry.selected.conn.stable_id(),
+                                            retry_entry.selected.handle.stable_id(),
                                         );
                                         registry.unregister(&retry_entry.selected.conn_id);
                                         let err = ProxyError::h2c_forward(retry_err.to_string());

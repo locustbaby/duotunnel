@@ -1,3 +1,18 @@
+pub fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
+pub fn resolve_shard_count(configured: Option<usize>, max_shards: Option<usize>) -> usize {
+    let cpu = available_parallelism().max(1);
+    let mut resolved = configured.unwrap_or(cpu).max(1);
+    if let Some(limit) = max_shards.map(|value| value.max(1)) {
+        resolved = resolved.min(limit);
+    }
+    resolved.max(1)
+}
+
 pub fn apply_worker_threads(builder: &mut tokio::runtime::Builder) {
     if let Ok(s) = std::env::var("TOKIO_WORKER_THREADS") {
         match s.parse::<usize>() {

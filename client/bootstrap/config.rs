@@ -33,6 +33,7 @@ pub struct UdpEntryConfig {
 #[serde(default)]
 pub struct ClientQuicConfig {
     pub connections: u32,
+    pub shards: Option<usize>,
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
     pub connection_window_mb: Option<u64>,
@@ -47,6 +48,7 @@ impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
             connections: 1,
+            shards: None,
             max_concurrent_streams: 100,
             stream_window_mb: None,
             connection_window_mb: None,
@@ -289,6 +291,7 @@ impl ClientConfigFile {
                         "server_addr",
                         "server_port",
                         "quic.connections",
+                        "quic.shards",
                     ])
                     .split("__"),
             )
@@ -328,6 +331,9 @@ impl ClientConfigFile {
         }
         if self.quic.connections == 0 {
             errors.push("quic.connections must be >= 1".into());
+        }
+        if matches!(self.quic.shards, Some(0)) {
+            errors.push("quic.shards must be >= 1 when set".into());
         }
         if self.quic.max_concurrent_streams == 0 {
             errors.push("quic.max_concurrent_streams must be >= 1".into());
