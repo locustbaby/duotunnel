@@ -22,7 +22,10 @@ pub use infra::metrics::{wait_for_resource_drain, METRICS};
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
-pub use infra::runtime::{available_parallelism, resolve_shard_count};
+pub use infra::runtime::{
+    available_parallelism, configured_worker_threads, effective_runtime_parallelism,
+    resolve_shard_count,
+};
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
 pub use lb::inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,

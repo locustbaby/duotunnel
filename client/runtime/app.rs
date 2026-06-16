@@ -56,7 +56,9 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     info!(
         connections = config.quic.connections,
         shards = shard_count,
+        configured_worker_threads = tunnel_lib::configured_worker_threads(),
         cpu_parallelism = tunnel_lib::available_parallelism(),
+        effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "client QUIC ownership topology resolved"
     );
     let entry_pool = EntryConnPool::new(

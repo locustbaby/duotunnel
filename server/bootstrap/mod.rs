@@ -325,7 +325,9 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
     let shard_count = tunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
     info!(
         shards = shard_count,
+        configured_worker_threads = tunnel_lib::configured_worker_threads(),
         cpu_parallelism = tunnel_lib::available_parallelism(),
+        effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );
     let shared_registry = new_shared_registry(shard_count);

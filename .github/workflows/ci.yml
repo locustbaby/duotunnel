@@ -70,7 +70,7 @@ on:
         type: boolean
         default: true
       worker_threads:
-        description: 'Tokio worker threads for server/client in stress-trace (0 = CPU count)'
+        description: 'Tokio worker threads for server/client in stress jobs (0 = CPU count)'
         type: number
         default: 0
       stress_quic_connections:
@@ -300,6 +300,7 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           mode: 'ctld'
+          worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 1 — External backends (continue-on-error: real internet services)
@@ -892,6 +893,7 @@ jobs:
         with:
           mode: 'ctld'
           quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — basic
         run: |
@@ -1006,6 +1008,7 @@ jobs:
         with:
           mode: 'ctld'
           quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_3000qps
         run: bash ci-helpers/run-bench-case.sh ingress_3000qps "${{ github.sha }}"
@@ -1222,28 +1225,32 @@ jobs:
         run: |
           bash ci-helpers/run-trace-8k.sh ingress_8000qps "${{ github.sha }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}"
+            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — egress_8000qps
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh egress_8000qps "${{ github.sha }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}"
+            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_multihost_8000qps
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh ingress_multihost_8000qps "${{ github.sha }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}"
+            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — egress_multihost_8000qps
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh egress_multihost_8000qps "${{ github.sha }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}"
+            "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — frp_ingress_multihost_8000qps
         run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_8000qps "${{ github.sha }}"

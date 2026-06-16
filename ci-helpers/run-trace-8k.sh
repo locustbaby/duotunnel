@@ -5,14 +5,19 @@ CASE_NAME=$1
 GITHUB_SHA=$2
 QUIC_CONNS=${3:-4}
 BUILD_PROFILE=${4:-dial9}
-TOKIO_ENV=${5:-""}
+WORKER_THREADS=${5:-0}
 
 SUFFIX="${CASE_NAME}"
-echo "==> Running Case: ${CASE_NAME} (QUIC: ${QUIC_CONNS}, Profile: ${BUILD_PROFILE})"
+echo "==> Running Case: ${CASE_NAME} (QUIC: ${QUIC_CONNS}, Profile: ${BUILD_PROFILE}, WorkerThreads: ${WORKER_THREADS})"
 
 CPU_QUOTA_ARG=()
 if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
   CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
+fi
+
+TOKIO_ENV=()
+if [ "${WORKER_THREADS}" != "0" ]; then
+  TOKIO_ENV=(-E TOKIO_WORKER_THREADS="${WORKER_THREADS}")
 fi
 
 # 1. Cleanup server/client scopes from previous case
@@ -73,7 +78,7 @@ fi
 sudo systemd-run --scope --unit=duotunnel-server --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
-  ${TOKIO_ENV:+-E $TOKIO_ENV} \
+  "${TOKIO_ENV[@]}" \
   -- ./target/release/server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
 
@@ -96,7 +101,7 @@ sleep 3
 sudo systemd-run --scope --unit=duotunnel-client --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
-  ${TOKIO_ENV:+-E $TOKIO_ENV} \
+  "${TOKIO_ENV[@]}" \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
 
 CLIENT_UP=0
