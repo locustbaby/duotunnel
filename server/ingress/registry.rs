@@ -83,7 +83,7 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    pub fn new(shard_count: usize) -> Self {
+    pub fn new(shard_count: usize, max_concurrent_streams: u32) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
@@ -146,6 +146,7 @@ impl ClientRegistry {
                             inflight_table.clone(),
                             slot_id,
                             shard_id % shard_count,
+                            max_concurrent_streams,
                         );
                         idx.insert(client_id.clone(), handle);
                         group.shards[shard_id % shard_count].store(Arc::new(build_snapshot(idx)));
@@ -325,14 +326,14 @@ impl ClientRegistry {
 
 impl Default for ClientRegistry {
     fn default() -> Self {
-        Self::new(1)
+        Self::new(1, 1000)
     }
 }
 
 pub type SharedRegistry = Arc<ClientRegistry>;
 
-pub fn new_shared_registry(shard_count: usize) -> SharedRegistry {
-    Arc::new(ClientRegistry::new(shard_count))
+pub fn new_shared_registry(shard_count: usize, max_concurrent_streams: u32) -> SharedRegistry {
+    Arc::new(ClientRegistry::new(shard_count, max_concurrent_streams))
 }
 
 pub fn unregister_if_connection_lost(

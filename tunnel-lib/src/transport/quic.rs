@@ -25,7 +25,7 @@ impl Default for QuicTransportParams {
             connection_receive_window_bytes: 32 * 1024 * 1024,
             send_window_bytes: 8 * 1024 * 1024,
             keepalive_secs: 20,
-            idle_timeout_secs: 60,
+            idle_timeout_secs: 180,
             congestion: Some("bbr".to_string()),
             udp_recv_buf_bytes: 8 * 1024 * 1024,
             udp_send_buf_bytes: 8 * 1024 * 1024,

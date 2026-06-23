@@ -20,6 +20,7 @@ tunnel-lib = { path = "../tunnel-lib" }
 tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs", "bloom"] }
+parking_lot = "0.12"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 tokio-rustls = "0.26"
 webpki-roots = "1.0"

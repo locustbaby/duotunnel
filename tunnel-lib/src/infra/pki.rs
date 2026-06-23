@@ -7,7 +7,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -42,7 +43,7 @@ impl Default for PkiParams {
 }
 
 pub fn init_cert_cache(params: &PkiParams) {
-    let mut guard = CERT_STATE.write().unwrap();
+    let mut guard = CERT_STATE.write();
     *guard = Some(CertState::new(
         Duration::from_secs(params.cert_cache_ttl_secs),
         params.max_parallel_generations,
@@ -265,7 +266,7 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 }
 
 fn ensure_state() {
-    let mut guard = CERT_STATE.write().unwrap();
+    let mut guard = CERT_STATE.write();
     if guard.is_none() {
         let params = PkiParams::default();
         *guard = Some(CertState::new(
@@ -281,7 +282,7 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
     let _ = PKI_RUNTIME.set(tokio::runtime::Handle::current());
     ensure_state();
     {
-        let guard = CERT_STATE.read().unwrap();
+        let guard = CERT_STATE.read();
         if let Some(state) = guard.as_ref() {
             if let Some(config) = state.get(host) {
                 return Ok(config);
@@ -290,7 +291,7 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
     }
 
     let (entry_lock, permits, root_ca) = {
-        let mut guard = CERT_STATE.write().unwrap();
+        let mut guard = CERT_STATE.write();
         let state = guard.as_mut().unwrap();
         if let Some(config) = state.get(host) {
             return Ok(config);
@@ -310,7 +311,7 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
 
     let _entry_guard = entry_lock.lock().await;
     {
-        let guard = CERT_STATE.read().unwrap();
+        let guard = CERT_STATE.read();
         if let Some(state) = guard.as_ref() {
             if let Some(config) = state.get(host) {
                 return Ok(config);
@@ -330,7 +331,7 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
     .map_err(|e| anyhow!("pki generation join error: {e}"))??;
     let config = Arc::new(config);
 
-    let mut guard = CERT_STATE.write().unwrap();
+    let mut guard = CERT_STATE.write();
     let state = guard.as_mut().unwrap();
     state.insert(host.to_string(), Arc::clone(&config));
     state.inflight.remove(host);

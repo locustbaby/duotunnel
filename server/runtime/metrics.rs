@@ -46,22 +46,22 @@ pub fn tcp_connection_closed() {
 }
 
 pub fn auth_success(group_id: &str) {
-    metrics::counter!("duotunnel_auth_success_total", "group_id" => group_id.to_string())
+    metrics::counter!("duotunnel_auth_success_total", "group_id" => group_id.to_owned())
         .increment(1);
 }
 
 pub fn auth_failure(group_id: &str) {
-    metrics::counter!("duotunnel_auth_failure_total", "group_id" => group_id.to_string())
+    metrics::counter!("duotunnel_auth_failure_total", "group_id" => group_id.to_owned())
         .increment(1);
 }
 
 pub fn client_registered(group_id: &str) {
-    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string())
+    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_owned())
         .increment(1.0);
 }
 
 pub fn client_unregistered(group_id: &str) {
-    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_string())
+    metrics::gauge!("duotunnel_clients_per_group", "group_id" => group_id.to_owned())
         .decrement(1.0);
 }
 

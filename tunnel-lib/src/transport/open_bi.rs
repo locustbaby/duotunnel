@@ -20,6 +20,7 @@ pub struct OpenedStream {
     pub send: SendStream,
     pub recv: RecvStream,
     pub inflight: InflightGuard,
+    pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub async fn open_bi_guarded<F>(
@@ -28,6 +29,7 @@ pub async fn open_bi_guarded<F>(
     slot_id: InflightSlotId,
     overload_limits: &crate::lb::overload::OverloadLimits,
     stream_timeout: Duration,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
     on_wait_done: F,
 ) -> Result<OpenedStream, ProxyError>
 where
@@ -41,6 +43,7 @@ where
                 send,
                 recv,
                 inflight: guard.promote(),
+                _permit: permit,
             });
         }
         Some(Err(error)) => {
@@ -76,6 +79,7 @@ where
                 send,
                 recv,
                 inflight: guard.promote(),
+                _permit: permit,
             })
         }
         Ok(Err(error)) => {

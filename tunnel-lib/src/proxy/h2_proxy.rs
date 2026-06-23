@@ -71,6 +71,7 @@ where
                         send,
                         recv,
                         inflight,
+                        ..
                     } = opened;
                     let quic_stream = QuinnStream { send, recv };
                     let io = TokioIo::new(quic_stream);

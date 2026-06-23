@@ -47,7 +47,7 @@ impl Default for Timeouts {
             login_ms: 10_000,
             connect_ms: 10_000,
             resolve_ms: 5_000,
-            sniff_ms: 5_000,
+            sniff_ms: 2_500,
         }
     }
 }

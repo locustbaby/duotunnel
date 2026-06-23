@@ -6,7 +6,6 @@ use bytes::Bytes;
 use quinn::Connection;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 
 pub type OpenWaitObserver = Box<dyn Fn(Duration, OpenBiOutcome) + Send + 'static>;
 
@@ -18,23 +17,12 @@ pub struct OpenStreamRequest {
     pub on_wait_done: Option<OpenWaitObserver>,
 }
 
-enum ConnectionOp {
-    OpenStream {
-        request: OpenStreamRequest,
-        reply: oneshot::Sender<Result<OpenedStream, ProxyError>>,
-    },
-    SendDatagram {
-        payload: Bytes,
-        reply: oneshot::Sender<anyhow::Result<()>>,
-    },
-}
-
 pub struct ConnectionHandle {
     conn: Connection,
     inflight_table: Arc<InflightTable>,
     slot_id: InflightSlotId,
     shard_id: usize,
-    tx: mpsc::Sender<ConnectionOp>,
+    stream_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ConnectionHandle {
@@ -43,66 +31,16 @@ impl ConnectionHandle {
         inflight_table: Arc<InflightTable>,
         slot_id: InflightSlotId,
         shard_id: usize,
+        max_concurrent_streams: u32,
     ) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::channel(128);
-        let actor_conn = conn.clone();
-        let actor_table = inflight_table.clone();
-
-        tokio::spawn(async move {
-            while let Some(op) = rx.recv().await {
-                match op {
-                    ConnectionOp::OpenStream { request, reply } => {
-                        let mut wait_observer = request.on_wait_done;
-                        let result = match open_bi_guarded(
-                            &actor_conn,
-                            &actor_table,
-                            slot_id,
-                            &request.overload_limits,
-                            request.stream_timeout,
-                            move |elapsed, outcome| {
-                                if let Some(observer) = wait_observer.take() {
-                                    observer(elapsed, outcome);
-                                }
-                            },
-                        )
-                        .await
-                        {
-                            Ok(mut opened) => {
-                                if let Err(error) =
-                                    send_routing_info(&mut opened.send, &request.routing_info).await
-                                {
-                                    Err(ProxyError::quic_connection_lost(error.to_string()))
-                                } else if let Some(initial_bytes) = request.initial_bytes {
-                                    if let Err(error) = opened.send.write_all(&initial_bytes).await
-                                    {
-                                        Err(ProxyError::quic_connection_lost(error.to_string()))
-                                    } else {
-                                        Ok(opened)
-                                    }
-                                } else {
-                                    Ok(opened)
-                                }
-                            }
-                            Err(error) => Err(error),
-                        };
-                        let _ = reply.send(result);
-                    }
-                    ConnectionOp::SendDatagram { payload, reply } => {
-                        let result = actor_conn
-                            .send_datagram(payload)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()));
-                        let _ = reply.send(result);
-                    }
-                }
-            }
-        });
+        let stream_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams as usize));
 
         Arc::new(Self {
             conn,
             inflight_table,
             slot_id,
             shard_id,
-            tx,
+            stream_semaphore,
         })
     }
 
@@ -130,36 +68,46 @@ impl ConnectionHandle {
         &self,
         request: OpenStreamRequest,
     ) -> Result<OpenedStream, ProxyError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .try_send(ConnectionOp::OpenStream {
-                request,
-                reply: reply_tx,
-            })
-            .map_err(|error| match error {
-                TrySendError::Full(_) => {
-                    ProxyError::quic_open_rejected_overloaded("connection actor queue is full")
-                }
-                TrySendError::Closed(_) => {
-                    ProxyError::quic_connection_lost("connection actor channel closed")
-                }
+        let permit = self
+            .stream_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ProxyError::quic_open_rejected_overloaded("stream concurrency limit reached")
             })?;
-        reply_rx
-            .await
-            .unwrap_or_else(|_| Err(ProxyError::quic_connection_lost("connection actor dropped")))
+
+        let mut wait_observer = request.on_wait_done;
+        let mut opened = open_bi_guarded(
+            &self.conn,
+            &self.inflight_table,
+            self.slot_id,
+            &request.overload_limits,
+            request.stream_timeout,
+            Some(permit),
+            move |elapsed, outcome| {
+                if let Some(observer) = wait_observer.take() {
+                    observer(elapsed, outcome);
+                }
+            },
+        )
+        .await?;
+
+        if let Err(error) = send_routing_info(&mut opened.send, &request.routing_info).await {
+            return Err(ProxyError::quic_connection_lost(error.to_string()));
+        }
+
+        if let Some(initial_bytes) = request.initial_bytes {
+            if let Err(error) = opened.send.write_all(&initial_bytes).await {
+                return Err(ProxyError::quic_connection_lost(error.to_string()));
+            }
+        }
+
+        Ok(opened)
     }
 
     pub async fn send_datagram(&self, payload: Bytes) -> anyhow::Result<()> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(ConnectionOp::SendDatagram {
-                payload,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("connection actor channel closed"))?;
-        reply_rx
-            .await
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("connection actor dropped")))
+        self.conn
+            .send_datagram(payload)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }

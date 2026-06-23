@@ -28,8 +28,8 @@ fn append_resource_metrics(body: &mut String) {
 pub fn egress_rejection(reason: &str, host: &str) {
     metrics::counter!(
         "egress_rejections_total",
-        "reason" => reason.to_string(),
-        "host" => host.to_string()
+        "reason" => reason.to_owned(),
+        "host" => host.to_owned()
     )
     .increment(1);
 }

@@ -1,4 +1,5 @@
 use quinn::Connection;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,7 +50,7 @@ pub struct EntryConnPool {
     tx: mpsc::Sender<PoolMsg>,
     shard_count: usize,
     next_push_shard: AtomicUsize,
-    egress_rules: std::sync::RwLock<Vec<tunnel_lib::EgressVhostRuleDef>>,
+    egress_rules: RwLock<Vec<tunnel_lib::EgressVhostRuleDef>>,
 }
 
 impl EntryConnPool {
@@ -82,6 +83,7 @@ impl EntryConnPool {
                             inflight_table.clone(),
                             slot_id,
                             shard_id % shard_count,
+                            max_concurrent_streams,
                         );
                         shard.conns.push(Arc::new(PooledConnection { handle }));
                     }
@@ -137,7 +139,7 @@ impl EntryConnPool {
             tx,
             shard_count,
             next_push_shard: AtomicUsize::new(0),
-            egress_rules: std::sync::RwLock::new(Vec::new()),
+            egress_rules: RwLock::new(Vec::new()),
         })
     }
 
@@ -146,17 +148,11 @@ impl EntryConnPool {
     }
 
     pub fn set_egress_rules(&self, rules: Vec<tunnel_lib::EgressVhostRuleDef>) {
-        if let Ok(mut guard) = self.egress_rules.write() {
-            *guard = rules;
-        }
+        *self.egress_rules.write() = rules;
     }
 
     pub fn egress_rules(&self) -> Vec<tunnel_lib::EgressVhostRuleDef> {
-        if let Ok(guard) = self.egress_rules.read() {
-            guard.clone()
-        } else {
-            Vec::new()
-        }
+        self.egress_rules.read().clone()
     }
 
     pub async fn push(&self, conn: Connection) {

@@ -19,7 +19,7 @@ impl Default for ProxyBufferConfig {
             http_header_buf_size: 8192,
             http_body_chunk_size: 8192,
             relay_buf_size: 65536,
-            sniff_timeout_ms: 5000,
+            sniff_timeout_ms: 2500,
         }
     }
 }

@@ -2,9 +2,10 @@ use crate::bootstrap::config::UdpEntryConfig;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -20,18 +21,12 @@ pub struct UdpListenerRegistry {
 
 impl UdpListenerRegistry {
     pub fn register(&self, proxy_name: ProxyName, socket: Arc<UdpSocket>) {
-        if let Ok(mut guard) = self.sockets.write() {
-            guard.insert(proxy_name, socket);
-        }
+        self.sockets.write().insert(proxy_name, socket);
     }
 
     pub async fn forward_reply(&self, envelope: UdpDatagramEnvelope) -> Result<()> {
-        let socket = if let Ok(guard) = self.sockets.read() {
-            guard.get(&envelope.session.proxy_name).cloned()
-        } else {
-            None
-        }
-        .ok_or_else(|| anyhow::anyhow!("no udp listener for {}", envelope.session.proxy_name))?;
+        let socket = self.sockets.read().get(&envelope.session.proxy_name).cloned()
+            .ok_or_else(|| anyhow::anyhow!("no udp listener for {}", envelope.session.proxy_name))?;
         let addr: std::net::IpAddr = envelope.session.client_addr.parse()?;
         socket
             .send_to(

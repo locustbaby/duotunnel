@@ -330,7 +330,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );
-    let shared_registry = new_shared_registry(shard_count);
+    let shared_registry = new_shared_registry(shard_count, max_streams);
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
