@@ -1,12 +1,42 @@
 use dashmap::DashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-#[derive(Clone)]
 pub struct DnsEntry {
     pub addrs: Vec<SocketAddr>,
     pub expires_at: Instant,
+    next_index: AtomicUsize,
+}
+
+impl Clone for DnsEntry {
+    fn clone(&self) -> Self {
+        Self {
+            addrs: self.addrs.clone(),
+            expires_at: self.expires_at,
+            next_index: AtomicUsize::new(self.next_index.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl DnsEntry {
+    fn new(addrs: Vec<SocketAddr>, expires_at: Instant) -> Self {
+        Self {
+            addrs,
+            expires_at,
+            next_index: AtomicUsize::new(0),
+        }
+    }
+
+    fn next_addr(&self) -> Option<SocketAddr> {
+        let len = self.addrs.len();
+        if len == 0 {
+            return None;
+        }
+        let idx = self.next_index.fetch_add(1, Ordering::Relaxed);
+        self.addrs.get(idx % len).copied()
+    }
 }
 
 type DnsKey = (String, u16);
@@ -28,18 +58,15 @@ impl EgressDnsCache {
     }
 
     fn get_stale(&self, key: &(String, u16)) -> Option<SocketAddr> {
-        self.cache
-            .get(key)
-            .and_then(|entry| entry.addrs.first().cloned())
+        self.cache.get(key).and_then(|entry| entry.next_addr())
     }
 
     pub async fn resolve(&self, host: &str, port: u16) -> anyhow::Result<SocketAddr> {
         let key = (host.to_string(), port);
 
-        // Fast path: check cache
         if let Some(entry) = self.cache.get(&key) {
             if Instant::now() < entry.expires_at {
-                if let Some(&addr) = entry.addrs.first() {
+                if let Some(addr) = entry.next_addr() {
                     return Ok(addr);
                 }
             }
@@ -52,10 +79,10 @@ impl EgressDnsCache {
                 // Wait for the in-flight resolution with a timeout
                 match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
                     Ok(Ok(Ok(resolved_vec))) => {
-                        if let Some(&addr) = resolved_vec.first() {
+                        if let Some(addr) = self.get_stale(&key) {
                             return Ok(addr);
                         }
-                        if let Some(addr) = self.get_stale(&key) {
+                        if let Some(&addr) = resolved_vec.first() {
                             return Ok(addr);
                         }
                         return Err(anyhow::anyhow!("no resolved IP for {}:{}", host, port));
@@ -110,20 +137,22 @@ impl EgressDnsCache {
                 Err(_) => Err("DNS resolution timed out".to_string()),
             };
 
+            if let Ok(resolved_vec) = &result {
+                self.cache.insert(
+                    key_clone.clone(),
+                    DnsEntry::new(resolved_vec.clone(), Instant::now() + self.ttl),
+                );
+            }
+
             let _ = tx.send(result.clone());
             self.inflight.remove(&key);
 
             match result {
                 Ok(resolved_vec) => {
-                    let addr = resolved_vec[0];
-                    self.cache.insert(
-                        key_clone,
-                        DnsEntry {
-                            addrs: resolved_vec,
-                            expires_at: Instant::now() + self.ttl,
-                        },
-                    );
-                    return Ok(addr);
+                    if let Some(addr) = self.get_stale(&key_clone) {
+                        return Ok(addr);
+                    }
+                    return Ok(resolved_vec[0]);
                 }
                 Err(err_msg) => {
                     if let Some(addr) = self.get_stale(&key_clone) {
@@ -180,5 +209,20 @@ mod tests {
             assert!(res.is_ok());
             assert!(res.unwrap().ip().is_loopback());
         }
+    }
+
+    #[test]
+    fn test_dns_entry_round_robin() {
+        let entry = DnsEntry::new(
+            vec![
+                "127.0.0.1:80".parse().unwrap(),
+                "127.0.0.2:80".parse().unwrap(),
+            ],
+            Instant::now() + Duration::from_secs(10),
+        );
+
+        assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.1");
+        assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.2");
+        assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.1");
     }
 }

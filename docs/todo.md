@@ -1,6 +1,6 @@
 # Tunnel TODO
 
-> Last synced against code: 2026-06-15.
+> Last synced against code: 2026-06-23.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
@@ -87,6 +87,8 @@ flowchart TD
 
 ## 🚀 Phase 1: 核心用户态零拷贝、内存池与高并发连接管理 (High Priority: Performance & Zero-Copy)
 
+> Phase 1 is effectively closed. Remaining work in this area should be treated as scoped follow-up, not as an open mandate to keep adding speculative performance features. The confirmed low-risk tail items are DNS address rotation and overload metrics exposure; raw L4 pooling remains discarded in favor of Hyper's protocol-aware pooling.
+
 ### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
 * **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
@@ -115,6 +117,10 @@ flowchart TD
 ### [TODO-104] EgressDnsCache global Mutex lock removal via DashMap & Single-Flight
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
 * **Fix**: [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/dns_cache.rs) now uses `DashMap<(String,u16), DnsEntry>` for cache and `DashMap<(String,u16), broadcast::Sender<...>>` for inflight dedup. Each unique `(host, port)` races an `Entry::Vacant` insertion to become the single resolver; all concurrent waiters subscribe and receive the result via broadcast. Resolution is wrapped in `tokio::time::timeout(5s)`. Stale cache served on failure.
+
+### [TODO-89] Support DNS Round-Robin and Fallback in Egress Dns Resolution
+* **Priority**: Medium | **Status**: ✅ Done (Phase 1 tail) | **Track**: Transport & Performance
+* **Fix**: `EgressDnsCache` now keeps the full resolved address set and rotates cached selections with a per-entry atomic cursor, including stale-cache fallback. `resolve(host, port)` remains source compatible and still returns one `SocketAddr`; deeper same-request connect retry across every resolved IP belongs with the Phase 2 connector/request lifecycle work, where connection errors can be classified correctly.
 
 ### [TODO-74] Egress Path DNS Cache & L4 Connection Pool
 * **Priority**: High | **Status**: 🚧 Partial / Re-scoped (Phase 1) | **Track**: Transport & Performance
@@ -304,13 +310,6 @@ flowchart TD
 * **Fix**:
   实现插拔式的 `Ipv6FirstResolver` 插件，以及可在 admission 阶段重定向 DNS 端口流量的劫持模块。
 
-### [TODO-89] Support DNS Round-Robin and Fallback in Egress Dns Resolution
-* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
-* **Problem**:
-  目前的 `resolve_addr` 仅仅使用了解析地址列表的第一个 IP (`addrs.into_iter().next()`)。如果第一个 IP 失联，整个请求将挂掉。
-* **Fix**:
-  返回所有 IP 记录，并在连接首选 IP 失败时支持 Failover 回退尝试后备 IP；支持随机轮询负载均衡。
-
 ### [TODO-CR-AUDIT-20] Fuzz Testing for Sniffing and Lock-Free Structures
 * **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
 * **Problem**:
@@ -379,14 +378,16 @@ flowchart TD
   设计 `AsyncListenerReconciler` 以异步队列处理重绑定；并修复端口解绑时的 race 竞争，防止原 socket 没来得及释放导致的新连接 bind `EADDRINUSE` 故障。
 
 ### [TODO-103] Expose active slowpath waiting tasks metric on /metrics
-* **Priority**: Low | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Priority**: Low | **Status**: ✅ Done (Phase 1 tail) | **Track**: HA, Overload & Observability
 * **Fix**:
-  将内存中用于主动降级防御的慢速排队任务计数 `slowpath_waiting_tasks` 暴露给 Prometheus 端点。
+  Server and client `/metrics` now append `duotunnel_slowpath_waiting_tasks` from `tunnel_lib::METRICS.waiting_tasks()`, exposing the in-memory overload backoff queue depth to Prometheus.
 
 ### [TODO-CR-AUDIT-1] 共享 Arc<TcpListener> 与 SO_REUSEPORT 概念背离
-* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Priority**: Low | **Status**: 🚧 Partial / Resolved by ListenerManager | **Track**: Transport & Performance
 * **Problem**:
   克隆 `Arc<TcpListener>` 在工作 Worker 之间只是共享同一个底层 Socket FD。真实的 `SO_REUSEPORT` 需要每个 Worker 独立绑定属于自己的独立文件描述符以做真正的内核负载分发。
+* **Current state**:
+  Server `ListenerManager` now binds a separate `SO_REUSEPORT` listener per accept worker for managed HTTP/TCP ingress listeners. The generic `run_accept_worker` API still accepts `Arc<TcpListener>` because some non-managed or fallback loops pass a single listener, so this is no longer a standalone Phase 1 performance project.
 
 ### [TODO-CR-AUDIT-2] 缓存行填充与堆内存分离的开销权衡 (False Sharing vs Heap Allocation)
 * **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance

@@ -10,7 +10,21 @@ pub fn set_handle(handle: PrometheusHandle) {
 }
 
 pub fn encode() -> String {
-    HANDLE.get().map(|h| h.render()).unwrap_or_default()
+    let mut body = HANDLE.get().map(|h| h.render()).unwrap_or_default();
+    append_resource_metrics(&mut body);
+    body
+}
+
+fn append_resource_metrics(body: &mut String) {
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("# HELP duotunnel_slowpath_waiting_tasks Active tasks waiting in slowpath overload backoff.\n");
+    body.push_str("# TYPE duotunnel_slowpath_waiting_tasks gauge\n");
+    body.push_str(&format!(
+        "duotunnel_slowpath_waiting_tasks {}\n",
+        tunnel_lib::METRICS.waiting_tasks()
+    ));
 }
 
 pub fn quic_connection_opened() {
