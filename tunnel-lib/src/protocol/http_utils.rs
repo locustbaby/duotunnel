@@ -1,27 +1,76 @@
 use hyper::header::{self, HeaderMap, HeaderName};
 
 /// Extract the value of the `Host` header from a raw HTTP/1.x request buffer.
-/// Returns `None` if the buffer is not valid UTF-8 or has no Host header.
+/// Returns `None` if the request cannot be parsed or has no valid Host header.
 pub fn extract_host_from_http(data: &[u8]) -> Option<String> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let mut lines = data_str.lines();
-    lines.next(); // skip request line
+    let mut lines = data.split(|byte| *byte == b'\n');
+    lines.next()?;
+
     for line in lines {
-        if line.len() > 5 && line[..5].eq_ignore_ascii_case("host:") {
-            return Some(line[5..].trim().to_string());
+        let line = trim_line_end(line);
+        if line.is_empty() {
+            return None;
+        }
+        if let Some((name, value)) = split_once_byte(line, b':') {
+            if name.eq_ignore_ascii_case(b"host") {
+                let value = trim_ascii(value);
+                return std::str::from_utf8(value).ok().map(ToOwned::to_owned);
+            }
+        } else if !starts_with_ascii_whitespace(line) {
+            return None;
         }
     }
+
+    if let Some(line) = data.rsplit(|byte| *byte == b'\n').next() {
+        let line = trim_line_end(line);
+        if let Some((name, value)) = split_once_byte(line, b':') {
+            if name.eq_ignore_ascii_case(b"host") {
+                let value = trim_ascii(value);
+                return std::str::from_utf8(value).ok().map(ToOwned::to_owned);
+            }
+        }
+    }
+
     None
 }
 
 /// Extract the HTTP method and path from the first line of a raw HTTP/1.x request buffer.
 pub fn extract_method_path_from_http(data: &[u8]) -> Option<(String, String)> {
-    let data_str = std::str::from_utf8(data).ok()?;
-    let first_line = data_str.lines().next()?;
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
-    Some((method, path))
+    let first_line = trim_line_end(data.split(|byte| *byte == b'\n').next()?);
+    let mut parts = first_line.split(|byte| byte.is_ascii_whitespace());
+    let method = parts.find(|part| !part.is_empty())?;
+    let path = parts.find(|part| !part.is_empty())?;
+
+    Some((
+        std::str::from_utf8(method).ok()?.to_string(),
+        std::str::from_utf8(path).ok()?.to_string(),
+    ))
+}
+
+fn split_once_byte(value: &[u8], delimiter: u8) -> Option<(&[u8], &[u8])> {
+    let idx = value.iter().position(|byte| *byte == delimiter)?;
+    Some((&value[..idx], &value[idx + 1..]))
+}
+
+fn starts_with_ascii_whitespace(value: &[u8]) -> bool {
+    value.first().is_some_and(|byte| byte.is_ascii_whitespace())
+}
+
+fn trim_line_end(value: &[u8]) -> &[u8] {
+    value.strip_suffix(b"\r").unwrap_or(value)
+}
+
+fn trim_ascii(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &value[start..end]
 }
 pub fn sanitize_request_headers(headers: &mut HeaderMap) {
     let mut headers_to_remove = Vec::new();
@@ -63,4 +112,81 @@ pub fn sanitize_request_headers(headers: &mut HeaderMap) {
 pub fn sanitize_response_headers(headers: &mut HeaderMap) {
     headers.remove(header::TRANSFER_ENCODING);
     headers.remove(header::CONTENT_LENGTH);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_host_case_insensitively_with_port() {
+        let req = b"GET / HTTP/1.1\r\nHOST: example.com:8443\r\n\r\n";
+
+        assert_eq!(
+            extract_host_from_http(req),
+            Some("example.com:8443".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_host_with_surrounding_whitespace() {
+        let req = b"GET / HTTP/1.1\r\nHost: \t example.com  \r\n\r\n";
+
+        assert_eq!(extract_host_from_http(req), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn extracts_host_from_partial_header_buffer() {
+        let req = b"GET / HTTP/1.1\r\nHost: example.com";
+
+        assert_eq!(extract_host_from_http(req), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn missing_host_returns_none() {
+        let req = b"GET / HTTP/1.1\r\nUser-Agent: test\r\n\r\n";
+
+        assert_eq!(extract_host_from_http(req), None);
+    }
+
+    #[test]
+    fn invalid_utf8_host_returns_none() {
+        let req = b"GET / HTTP/1.1\r\nHost: \xff\r\n\r\n";
+
+        assert_eq!(extract_host_from_http(req), None);
+    }
+
+    #[test]
+    fn invalid_utf8_non_host_header_does_not_block_host() {
+        let req = b"GET / HTTP/1.1\r\nX-Raw: \xff\r\nHost: example.com\r\n\r\n";
+
+        assert_eq!(extract_host_from_http(req), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn extracts_method_and_path() {
+        let req = b"POST /submit?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+        assert_eq!(
+            extract_method_path_from_http(req),
+            Some(("POST".to_string(), "/submit?x=1".to_string()))
+        );
+    }
+
+    #[test]
+    fn extracts_method_and_path_without_headers() {
+        let req = b"GET /ready";
+
+        assert_eq!(
+            extract_method_path_from_http(req),
+            Some(("GET".to_string(), "/ready".to_string()))
+        );
+    }
+
+    #[test]
+    fn missing_path_returns_none() {
+        let req = b"GET\r\nHost: example.com\r\n\r\n";
+
+        assert_eq!(extract_method_path_from_http(req), None);
+    }
 }

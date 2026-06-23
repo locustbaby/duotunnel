@@ -6,7 +6,7 @@ use bytes::Bytes;
 use quinn::Connection;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 
 pub type OpenWaitObserver = Box<dyn Fn(Duration, OpenBiOutcome) + Send + 'static>;
 
@@ -132,12 +132,18 @@ impl ConnectionHandle {
     ) -> Result<OpenedStream, ProxyError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(ConnectionOp::OpenStream {
+            .try_send(ConnectionOp::OpenStream {
                 request,
                 reply: reply_tx,
             })
-            .await
-            .map_err(|_| ProxyError::quic_connection_lost("connection actor channel closed"))?;
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    ProxyError::quic_open_rejected_overloaded("connection actor queue is full")
+                }
+                TrySendError::Closed(_) => {
+                    ProxyError::quic_connection_lost("connection actor channel closed")
+                }
+            })?;
         reply_rx
             .await
             .unwrap_or_else(|_| Err(ProxyError::quic_connection_lost("connection actor dropped")))

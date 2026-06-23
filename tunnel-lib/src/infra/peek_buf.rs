@@ -9,12 +9,6 @@ thread_local! {
 /// Each tokio worker thread keeps its own pool — no lock, no cross-thread contention.
 /// Callers `take()` a buffer sized to `buf_size`, use it for a single peek/read,
 /// then `put()` it back so the allocation is reused on the next call.
-///
-/// # Safety invariant
-/// `take()` sets the buffer length to `buf_size` via `set_len`. The caller **must**
-/// overwrite every byte before reading (e.g. pass the slice to `recv.read()` or
-/// `stream.peek()`). `put()` resets the length before returning to the pool so the
-/// next `take()` can safely `set_len` again without re-zeroing.
 #[derive(Clone, Copy)]
 pub struct PeekBufPool {
     buf_size: usize,

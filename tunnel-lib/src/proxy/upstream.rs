@@ -1,7 +1,8 @@
 use crate::proxy::tcp::UpstreamScheme;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub struct UpstreamGroup {
@@ -20,7 +21,7 @@ impl UpstreamGroup {
     }
 
     pub fn mark_unhealthy(&self, server: &str) {
-        let mut map = self.unhealthy.write().unwrap();
+        let mut map = self.unhealthy.write();
         if map.contains_key(server) {
             return;
         }
@@ -38,7 +39,7 @@ impl UpstreamGroup {
                         .await
                         .is_ok_and(|r| r.is_ok())
                     {
-                        let mut map = unhealthy_clone.write().unwrap();
+                        let mut map = unhealthy_clone.write();
                         map.remove(&server_clone);
                         tracing::info!(server = %server_clone, "active health probe succeeded, backend restored to pool early");
                         return;
@@ -58,7 +59,7 @@ impl UpstreamGroup {
                                     .await
                                     .is_ok_and(|r| r.is_ok())
                                     {
-                                        let mut map = unhealthy_clone.write().unwrap();
+                                        let mut map = unhealthy_clone.write();
                                         map.remove(&server_clone);
                                         tracing::info!(server = %server_clone, "active health probe succeeded, backend restored to pool early");
                                         return;
@@ -73,12 +74,12 @@ impl UpstreamGroup {
     }
 
     pub fn mark_healthy(&self, server: &str) {
-        let mut map = self.unhealthy.write().unwrap();
+        let mut map = self.unhealthy.write();
         map.remove(server);
     }
 
     pub fn is_healthy(&self, server: &str) -> bool {
-        let map = self.unhealthy.read().unwrap();
+        let map = self.unhealthy.read();
         if let Some(expires_at) = map.get(server) {
             Instant::now() >= *expires_at
         } else {
@@ -123,5 +124,50 @@ impl UpstreamGroup {
 
     pub fn first(&self) -> Option<&String> {
         self.servers.first()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mark_unhealthy_and_healthy_updates_health_state() {
+        let group = UpstreamGroup::new(vec!["127.0.0.1:1".to_string()]);
+
+        group.mark_unhealthy("127.0.0.1:1");
+        assert!(!group.is_healthy("127.0.0.1:1"));
+
+        group.mark_healthy("127.0.0.1:1");
+        assert!(group.is_healthy("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn next_healthy_skips_unhealthy_server() {
+        let group = UpstreamGroup::new(vec!["127.0.0.1:1".to_string(), "127.0.0.1:2".to_string()]);
+
+        group.mark_unhealthy("127.0.0.1:1");
+
+        for _ in 0..4 {
+            assert_eq!(
+                group.next_healthy().map(String::as_str),
+                Some("127.0.0.1:2")
+            );
+        }
+    }
+
+    #[test]
+    fn expired_unhealthy_entry_is_selectable() {
+        let group = UpstreamGroup::new(vec!["127.0.0.1:1".to_string()]);
+        group.unhealthy.write().insert(
+            "127.0.0.1:1".to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+
+        assert!(group.is_healthy("127.0.0.1:1"));
+        assert_eq!(
+            group.next_healthy().map(String::as_str),
+            Some("127.0.0.1:1")
+        );
     }
 }
