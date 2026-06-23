@@ -11,28 +11,12 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{ErrorKind, OpenStreamRequest, ProxyError};
+use tunnel_lib::{OpenStreamRequest, ProxyError};
 
-use crate::ingress::registry::SharedRegistry;
+use crate::ingress::registry::{unregister_if_connection_lost, SharedRegistry};
 
 pub struct TlsHandler {
     pub registry: SharedRegistry,
-}
-
-fn unregister_if_connection_lost(
-    registry: &SharedRegistry,
-    selected: &crate::ingress::registry::SelectedConnection,
-    err: &anyhow::Error,
-) {
-    let fatal_proxy_error = err.downcast_ref::<ProxyError>().is_some_and(|proxy_err| {
-        matches!(
-            proxy_err.kind,
-            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
-        )
-    });
-    if selected.handle.close_reason().is_some() || fatal_proxy_error {
-        registry.unregister(&selected.conn_id);
-    }
 }
 
 #[async_trait]

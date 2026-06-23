@@ -127,6 +127,8 @@ async fn handle_tcp_connection(
                     error = %e,
                     "failed to open QUIC stream on selected TCP proxy connection, unregistering and retrying"
                 );
+                // Raw TCP has no per-connection H2 sender cache to invalidate; dropping this
+                // selected client lets the next attempt pick a different connection immediately.
                 state.registry().unregister(&selected.conn_id);
                 if attempts >= max_attempts {
                     return Err(e.into());

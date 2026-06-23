@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
-    stable_shard_index, ClientId, ConnectionHandle, GroupId,
+    stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, ProxyError,
 };
 
 struct ClientInfo {
@@ -333,4 +333,20 @@ pub type SharedRegistry = Arc<ClientRegistry>;
 
 pub fn new_shared_registry(shard_count: usize) -> SharedRegistry {
     Arc::new(ClientRegistry::new(shard_count))
+}
+
+pub fn unregister_if_connection_lost(
+    registry: &SharedRegistry,
+    selected: &SelectedConnection,
+    err: &anyhow::Error,
+) {
+    let fatal_proxy_error = err.downcast_ref::<ProxyError>().is_some_and(|proxy_err| {
+        matches!(
+            proxy_err.kind,
+            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+        )
+    });
+    if selected.handle.close_reason().is_some() || fatal_proxy_error {
+        registry.unregister(&selected.conn_id);
+    }
 }

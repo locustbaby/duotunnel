@@ -39,6 +39,14 @@ Default policy:
 
 Round-robin should stop being the default registration behavior. It may remain as a future optional policy, but not the baseline implementation.
 
+Shard-count changes:
+
+- first implementation uses stable hash plus modulo shard count
+- changing shard count intentionally remaps some connection identities and request keys
+- this is acceptable for static runtime configuration and restart-based topology changes
+- online scale-up/down needs a later consistent-hash or rendezvous-hash policy before it is safe to treat shard-count changes as low churn
+- the policy trait should expose shard count as an input so the implementation can be replaced without touching callers
+
 ## Endpoint Actor Responsibilities
 
 Endpoint actors are needed on both client and server.
@@ -120,6 +128,23 @@ Existing connection-handle APIs should remain the data-plane boundary:
 
 - `open_stream(...)`
 - `send_datagram(...)`
+
+## Migration Plan
+
+The migration should land in small compatibility-preserving steps.
+
+1. Add `ShardTopologyPolicy`, key types, and deterministic unit tests while keeping current round-robin registration behavior.
+2. Change client pool and server registry registration APIs to accept explicit `shard_id`; keep temporary call sites passing the old round-robin value.
+3. Move client registration shard choice into a client endpoint actor, leaving session tasks and connection actors unchanged.
+4. Move server registration shard choice into a server endpoint actor after login success, leaving auth, token revocation, and datagram handling in existing per-connection tasks.
+5. Remove registry/pool-owned round-robin state once both endpoint actors own shard assignment.
+6. Run the local integration matrix, then delete compatibility shims in a follow-up commit.
+
+Rollback strategy:
+
+- keep endpoint actor handles behind existing runtime constructors until both client and server paths pass integration tests
+- avoid changing wire protocol or connection-handle APIs in this refactor
+- if a phase regresses, revert that phase without touching already-landed policy tests or data-plane connection actors
 
 ## Testing
 
