@@ -81,8 +81,9 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
     let generation = state.listeners().next_generation();
     let cancel = CancellationToken::new();
     let drained = Arc::new(Notify::new());
-    let remaining = Arc::new(AtomicUsize::new(0));
+    let remaining = Arc::new(AtomicUsize::new(accept_workers));
     let mut handles = Vec::with_capacity(accept_workers);
+    let mut spawned = 0usize;
     let kind = match &listener.mode {
         IngressMode::Http(_) => ListenerKind::Http,
         IngressMode::Tcp(cfg) => ListenerKind::Tcp {
@@ -107,7 +108,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let cancel = cancel.clone();
                 let drained = drained.clone();
                 let remaining = remaining.clone();
-                remaining.fetch_add(1, Ordering::Release);
+                spawned += 1;
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = crate::ingress::handlers::http::run_http_accept_loop(
                         listener_socket,
@@ -142,7 +143,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let remaining = remaining.clone();
                 let group_id = cfg.client_group.clone();
                 let proxy_name = cfg.proxy_name.clone();
-                remaining.fetch_add(1, Ordering::Release);
+                spawned += 1;
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = crate::ingress::handlers::tcp::run_tcp_accept_loop(
                         listener_socket,
@@ -168,6 +169,11 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
         cancel.cancel();
         notify_listener_drained(&drained);
         return;
+    }
+
+    let unspawned = accept_workers.saturating_sub(spawned);
+    if unspawned > 0 && remaining.fetch_sub(unspawned, Ordering::AcqRel) == unspawned {
+        notify_listener_drained(&drained);
     }
 
     info!(port = %port, generation, "listener active");

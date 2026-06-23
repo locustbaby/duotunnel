@@ -1,8 +1,13 @@
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_secs(6);
+const DNS_FAILURE_STALE_BACKOFF: Duration = Duration::from_secs(10);
 
 pub struct DnsEntry {
     pub addrs: Vec<SocketAddr>,
@@ -43,17 +48,52 @@ type DnsKey = (String, u16);
 type InflightTx = broadcast::Sender<Result<Vec<SocketAddr>, String>>;
 
 pub struct EgressDnsCache {
-    cache: DashMap<DnsKey, DnsEntry>,
-    inflight: DashMap<DnsKey, InflightTx>,
+    cache: Arc<DashMap<DnsKey, DnsEntry>>,
+    inflight: Arc<DashMap<DnsKey, InflightTx>>,
     ttl: Duration,
 }
 
 impl EgressDnsCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
-            cache: DashMap::new(),
-            inflight: DashMap::new(),
+            cache: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
             ttl,
+        }
+    }
+
+    async fn wait_for_inflight(
+        &self,
+        mut rx: broadcast::Receiver<Result<Vec<SocketAddr>, String>>,
+        key: &DnsKey,
+        host: &str,
+        port: u16,
+    ) -> anyhow::Result<SocketAddr> {
+        match tokio::time::timeout(DNS_INFLIGHT_WAIT_TIMEOUT, rx.recv()).await {
+            Ok(Ok(Ok(resolved_vec))) => {
+                if let Some(addr) = self.get_stale(key) {
+                    return Ok(addr);
+                }
+                if let Some(&addr) = resolved_vec.first() {
+                    return Ok(addr);
+                }
+                Err(anyhow::anyhow!("no resolved IP for {}:{}", host, port))
+            }
+            Ok(Ok(Err(err_msg))) => {
+                if let Some(addr) = self.get_stale(key) {
+                    tracing::warn!(
+                        host = %host, port = port, error = %err_msg,
+                        "DNS lookup failed, using stale cached IP"
+                    );
+                    return Ok(addr);
+                }
+                Err(anyhow::anyhow!("DNS lookup failed: {}", err_msg))
+            }
+            Ok(Err(_)) | Err(_) => Err(anyhow::anyhow!(
+                "DNS lookup did not complete for {}:{}",
+                host,
+                port
+            )),
         }
     }
 
@@ -75,33 +115,8 @@ impl EgressDnsCache {
         loop {
             let rx = self.inflight.get(&key).map(|sender| sender.subscribe());
 
-            if let Some(mut rx) = rx {
-                // Wait for the in-flight resolution with a timeout
-                match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-                    Ok(Ok(Ok(resolved_vec))) => {
-                        if let Some(addr) = self.get_stale(&key) {
-                            return Ok(addr);
-                        }
-                        if let Some(&addr) = resolved_vec.first() {
-                            return Ok(addr);
-                        }
-                        return Err(anyhow::anyhow!("no resolved IP for {}:{}", host, port));
-                    }
-                    Ok(Ok(Err(err_msg))) => {
-                        if let Some(addr) = self.get_stale(&key) {
-                            tracing::warn!(
-                                host = %host, port = port, error = %err_msg,
-                                "In-flight DNS lookup failed, using stale cached IP"
-                            );
-                            return Ok(addr);
-                        }
-                        return Err(anyhow::anyhow!("DNS lookup failed: {}", err_msg));
-                    }
-                    Ok(Err(_)) | Err(_) => {
-                        // Channel lagged/closed or resolution timed out, retry the loop
-                        continue;
-                    }
-                }
+            if let Some(rx) = rx {
+                return self.wait_for_inflight(rx, &key, host, port).await;
             }
 
             let (tx, _rx) = broadcast::channel(1);
@@ -115,61 +130,52 @@ impl EgressDnsCache {
                 }
             }
 
-            let host_clone = host.to_string();
             let key_clone = key.clone();
+            let rx = tx.subscribe();
+            let host_clone = host.to_string();
+            let cache = self.cache.clone();
+            let inflight = self.inflight.clone();
+            let ttl = self.ttl;
 
-            let lookup_res = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::net::lookup_host((host_clone.clone(), port)),
-            )
-            .await;
+            tokio::spawn(async move {
+                let lookup_res = tokio::time::timeout(
+                    DNS_LOOKUP_TIMEOUT,
+                    tokio::net::lookup_host((host_clone.clone(), port)),
+                )
+                .await;
 
-            let result = match lookup_res {
-                Ok(Ok(resolved)) => {
-                    let resolved_vec: Vec<SocketAddr> = resolved.collect();
-                    if resolved_vec.is_empty() {
-                        Err("lookup returned empty address list".to_string())
-                    } else {
-                        Ok(resolved_vec)
+                let result = match lookup_res {
+                    Ok(Ok(resolved)) => {
+                        let resolved_vec: Vec<SocketAddr> = resolved.collect();
+                        if resolved_vec.is_empty() {
+                            Err("lookup returned empty address list".to_string())
+                        } else {
+                            Ok(resolved_vec)
+                        }
                     }
-                }
-                Ok(Err(e)) => Err(e.to_string()),
-                Err(_) => Err("DNS resolution timed out".to_string()),
-            };
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_) => Err("DNS resolution timed out".to_string()),
+                };
 
-            if let Ok(resolved_vec) = &result {
-                self.cache.insert(
-                    key_clone.clone(),
-                    DnsEntry::new(resolved_vec.clone(), Instant::now() + self.ttl),
-                );
-            }
-
-            let _ = tx.send(result.clone());
-            self.inflight.remove(&key);
-
-            match result {
-                Ok(resolved_vec) => {
-                    if let Some(addr) = self.get_stale(&key_clone) {
-                        return Ok(addr);
-                    }
-                    return Ok(resolved_vec[0]);
-                }
-                Err(err_msg) => {
-                    if let Some(addr) = self.get_stale(&key_clone) {
-                        tracing::warn!(
-                            host = %host_clone, port = port, error = %err_msg,
-                            "DNS lookup failed, using stale cached IP"
+                match &result {
+                    Ok(resolved_vec) => {
+                        cache.insert(
+                            key_clone.clone(),
+                            DnsEntry::new(resolved_vec.clone(), Instant::now() + ttl),
                         );
-                        return Ok(addr);
                     }
-                    return Err(anyhow::anyhow!(
-                        "DNS lookup failed for {}:{}: {}",
-                        host_clone,
-                        port,
-                        err_msg
-                    ));
+                    Err(_) => {
+                        if let Some(mut entry) = cache.get_mut(&key_clone) {
+                            entry.expires_at = Instant::now() + DNS_FAILURE_STALE_BACKOFF;
+                        }
+                    }
                 }
-            }
+
+                let _ = tx.send(result);
+                inflight.remove(&key_clone);
+            });
+
+            return self.wait_for_inflight(rx, &key, host, port).await;
         }
     }
 }

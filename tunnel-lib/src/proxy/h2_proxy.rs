@@ -26,10 +26,20 @@ pub fn new_h2_sender() -> H2Sender {
     })
 }
 
-fn try_get_sender(cache: &H2SenderCache) -> Option<SendRequest<BoxBody>> {
-    match cache.sender.load().as_ref() {
-        Some(s) if s.is_ready() => Some(s.clone()),
+fn try_get_sender(
+    cache: &H2SenderCache,
+) -> Option<(SendRequest<BoxBody>, Arc<Option<SendRequest<BoxBody>>>)> {
+    let sender_arc = cache.sender.load_full();
+    match sender_arc.as_ref() {
+        Some(s) if s.is_ready() => Some((s.clone(), sender_arc)),
         _ => None,
+    }
+}
+
+fn clear_sender_if_current(cache: &H2SenderCache, expected: &Arc<Option<SendRequest<BoxBody>>>) {
+    let previous = cache.sender.compare_and_swap(expected, Arc::new(None));
+    if Arc::ptr_eq(&previous, expected) {
+        debug!("cleared failed H2 sender");
     }
 }
 
@@ -46,13 +56,13 @@ where
 {
     let sender = try_get_sender(sender_cache);
 
-    let sender = match sender {
-        Some(s) => s,
+    let (sender, sender_arc) = match sender {
+        Some(pair) => pair,
         None => {
             let _rebuild_guard = sender_cache.rebuild_mu.lock().await;
 
             match try_get_sender(sender_cache) {
-                Some(s) => s,
+                Some(pair) => pair,
                 None => {
                     debug!("H2 sender miss, establishing new connection");
 
@@ -71,18 +81,20 @@ where
                             .await?;
 
                     let sender = new_sender.clone();
-                    sender_cache.sender.store(Arc::new(Some(new_sender)));
+                    let sender_arc = Arc::new(Some(new_sender));
+                    sender_cache.sender.store(sender_arc.clone());
 
                     let cache = sender_cache.clone();
+                    let driver_sender_arc = sender_arc.clone();
                     tokio::spawn(async move {
                         let _inflight_guard = inflight;
                         if let Err(e) = conn_driver.await {
                             debug!(error = %e, "H2 connection driver exited");
                         }
-                        cache.sender.store(Arc::new(None));
+                        clear_sender_if_current(&cache, &driver_sender_arc);
                     });
 
-                    sender
+                    (sender, sender_arc)
                 }
             }
         }
@@ -91,7 +103,7 @@ where
     match send_via(sender, request).await {
         Ok(response) => Ok(response),
         Err(error) => {
-            sender_cache.sender.store(Arc::new(None));
+            clear_sender_if_current(sender_cache, &sender_arc);
             Err(error)
         }
     }
