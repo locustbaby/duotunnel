@@ -89,11 +89,35 @@ impl EgressDnsCache {
                 }
                 Err(anyhow::anyhow!("DNS lookup failed: {}", err_msg))
             }
-            Ok(Err(_)) | Err(_) => Err(anyhow::anyhow!(
-                "DNS lookup did not complete for {}:{}",
-                host,
-                port
-            )),
+            Ok(Err(recv_err)) => {
+                if let Some(addr) = self.get_stale(key) {
+                    tracing::warn!(
+                        host = %host, port = port, error = %recv_err,
+                        "In-flight DNS lookup channel failed, using stale cached IP"
+                    );
+                    return Ok(addr);
+                }
+                Err(anyhow::anyhow!(
+                    "DNS lookup channel failed for {}:{}: {}",
+                    host,
+                    port,
+                    recv_err
+                ))
+            }
+            Err(_) => {
+                if let Some(addr) = self.get_stale(key) {
+                    tracing::warn!(
+                        host = %host, port = port,
+                        "In-flight DNS lookup timed out, using stale cached IP"
+                    );
+                    return Ok(addr);
+                }
+                Err(anyhow::anyhow!(
+                    "DNS lookup did not complete for {}:{}",
+                    host,
+                    port
+                ))
+            }
         }
     }
 
