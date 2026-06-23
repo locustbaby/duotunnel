@@ -7,18 +7,18 @@ use std::collections::HashSet;
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
-    ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent, WatchRequest,
-    send_watch_request,
+    send_watch_request, ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent,
+    WatchRequest,
 };
-use tunnel_lib::models::msg::{MessageType, recv_typed_message};
+use tunnel_lib::models::msg::{recv_typed_message, MessageType};
 
 use crate::bootstrap::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -27,7 +27,7 @@ use crate::bootstrap::config::{
 };
 use crate::control::local_auth::CacheEntry;
 use crate::control::service::BackgroundService;
-use crate::{ServerState, build_routing_snapshot};
+use crate::{build_routing_snapshot, ServerState};
 use tokio_util::sync::CancellationToken;
 
 pub struct ControlClientService {

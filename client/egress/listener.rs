@@ -10,9 +10,9 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    default_client_detectors, maybe_slow_path, relay_quic_to_tcp, run_accept_worker,
-    AcceptedConn, ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool, ProxyError,
-    RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
+    default_client_detectors, maybe_slow_path, relay_quic_to_tcp, run_accept_worker, AcceptedConn,
+    ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool, ProxyError, RoutingInfo,
+    SniffPolicy, SniffRuntime, TcpParams,
 };
 
 const EMFILE_BACKOFF: Duration = Duration::from_millis(100);
@@ -180,7 +180,12 @@ async fn handle_entry_connection(
             None => break,
         };
         tried_conn_ids.push(conn.handle.stable_id());
-        maybe_slow_path(conn.handle.inflight_table(), conn.handle.slot_id(), overload).await;
+        maybe_slow_path(
+            conn.handle.inflight_table(),
+            conn.handle.slot_id(),
+            overload,
+        )
+        .await;
         let routing_info = RoutingInfo {
             proxy_name: "entry".into(),
             src_addr: peer_addr.ip().to_string(),

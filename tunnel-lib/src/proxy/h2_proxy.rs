@@ -57,11 +57,12 @@ where
                     debug!("H2 sender miss, establishing new connection");
 
                     let opened = client_conn.open_stream(stream_request).await?;
-                    let crate::OpenedStream { send, recv, inflight } = opened;
-                    let quic_stream = QuinnStream {
+                    let crate::OpenedStream {
                         send,
                         recv,
-                    };
+                        inflight,
+                    } = opened;
+                    let quic_stream = QuinnStream { send, recv };
                     let io = TokioIo::new(quic_stream);
                     let (new_sender, conn_driver) =
                         H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())

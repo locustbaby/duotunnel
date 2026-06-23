@@ -60,7 +60,9 @@ impl EntryConnPool {
         let (tx, mut rx) = mpsc::channel(1024);
 
         tokio::spawn(async move {
-            let mut shards = (0..shard_count).map(|_| PoolShard::new()).collect::<Vec<_>>();
+            let mut shards = (0..shard_count)
+                .map(|_| PoolShard::new())
+                .collect::<Vec<_>>();
 
             while let Some(msg) = rx.recv().await {
                 match msg {
@@ -107,7 +109,7 @@ impl EntryConnPool {
                             preferred_shard,
                             |shard| {
                                 pick_p2c_inflight_owned(
-                                shard.conns.as_slice(),
+                                    shard.conns.as_slice(),
                                     |c| {
                                         c.handle.close_reason().is_none()
                                             && !excluded.contains(&c.handle.stable_id())

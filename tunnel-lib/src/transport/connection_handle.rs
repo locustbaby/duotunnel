@@ -1,6 +1,6 @@
 use crate::{
-    open_bi_guarded, send_routing_info, InflightSlotId, InflightTable, OpenBiOutcome,
-    OpenedStream, OverloadLimits, ProxyError, RoutingInfo,
+    open_bi_guarded, send_routing_info, InflightSlotId, InflightTable, OpenBiOutcome, OpenedStream,
+    OverloadLimits, ProxyError, RoutingInfo,
 };
 use bytes::Bytes;
 use quinn::Connection;
@@ -73,7 +73,8 @@ impl ConnectionHandle {
                                 {
                                     Err(ProxyError::quic_connection_lost(error.to_string()))
                                 } else if let Some(initial_bytes) = request.initial_bytes {
-                                    if let Err(error) = opened.send.write_all(&initial_bytes).await {
+                                    if let Err(error) = opened.send.write_all(&initial_bytes).await
+                                    {
                                         Err(ProxyError::quic_connection_lost(error.to_string()))
                                     } else {
                                         Ok(opened)
@@ -125,7 +126,10 @@ impl ConnectionHandle {
         self.slot_id
     }
 
-    pub async fn open_stream(&self, request: OpenStreamRequest) -> Result<OpenedStream, ProxyError> {
+    pub async fn open_stream(
+        &self,
+        request: OpenStreamRequest,
+    ) -> Result<OpenedStream, ProxyError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ConnectionOp::OpenStream {

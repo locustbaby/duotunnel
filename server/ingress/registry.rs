@@ -36,7 +36,9 @@ impl ClientGroup {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(|snapshot| snapshot.load().is_empty())
+        self.shards
+            .iter()
+            .all(|snapshot| snapshot.load().is_empty())
     }
 
     pub fn select_healthy(&self, preferred_shard: usize) -> Option<Arc<SelectedConnection>> {
@@ -155,7 +157,9 @@ impl ClientRegistry {
                                 shard_id: shard_id % shard_count,
                             },
                         ) {
-                            if old_info.group_id != group_id || old_info.shard_id != shard_id % shard_count {
+                            if old_info.group_id != group_id
+                                || old_info.shard_id != shard_id % shard_count
+                            {
                                 if let Some(old_shards) = group_conns.get_mut(&old_info.group_id) {
                                     let old_idx = &mut old_shards[old_info.shard_id];
                                     if let Some(existing) = old_idx.remove(&client_id) {
@@ -166,7 +170,8 @@ impl ClientRegistry {
                                             .store(Arc::new(build_snapshot(old_idx)));
                                         if old_group.is_empty() {
                                             drop(old_group);
-                                            groups_clone.remove_if(&old_info.group_id, |_, g| g.is_empty());
+                                            groups_clone
+                                                .remove_if(&old_info.group_id, |_, g| g.is_empty());
                                         }
                                     }
                                 }
@@ -187,12 +192,14 @@ impl ClientRegistry {
                                 if let Some(existing) = idx.remove(&client_id) {
                                     inflight_table.free_slot(existing.slot_id());
                                 }
-                                let should_remove = if let Some(group) = groups_clone.get(&info.group_id) {
-                                    group.shards[info.shard_id].store(Arc::new(build_snapshot(idx)));
-                                    group.is_empty()
-                                } else {
-                                    false
-                                };
+                                let should_remove =
+                                    if let Some(group) = groups_clone.get(&info.group_id) {
+                                        group.shards[info.shard_id]
+                                            .store(Arc::new(build_snapshot(idx)));
+                                        group.is_empty()
+                                    } else {
+                                        false
+                                    };
                                 if should_remove {
                                     groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
                                 }
