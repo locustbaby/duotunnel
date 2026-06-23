@@ -207,11 +207,11 @@ flowchart TD
   在保证生命周期和 Buffer 回收安全的前提下，将其全部改写为引用计数的 `BytesMut::split_to().freeze()`。
 
 ### [TODO-22 / TODO-34 / TODO-86] 消除中继路径上的 Generic tokio::io::split 锁竞争
-* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Priority**: Medium | **Status**: 🚧 Partial / Production TCP Specialized | **Track**: Zero-Copy & Buffer Pooling
 * **Problem**:
   中继核心接口使用的是 Tokio 提供的通用 `tokio::io::split(stream)`。该通用接口在内部使用 `BiLock<Mutex>` 锁来在 Generic 抽象上模拟全双工，高负载下会导致严重的多核 CPU 锁争用。
 * **Fix**:
-  针对具体的套接字类型进行直接的类型特化。TCP 连接直接使用 `stream.into_split()`（操作系统层面的 FD 拆分），QUIC 连接直接使用拥有的 `SendStream` 和 `RecvStream`。避免引入任何用户态包装级互斥锁。
+  针对具体的套接字类型进行直接的类型特化。TCP 连接直接使用 `stream.into_split()`（操作系统层面的 FD 拆分），QUIC 连接直接使用拥有的 `SendStream` 和 `RecvStream`。当前 QUIC↔TCP production helpers and `relay_tcp_*` paths are specialized; remaining generic `tokio::io::split` usage is retained only for generic fallback/test-only relay helpers.
 
 ### [TODO-77] Unified multi-protocol session handling inspired by Pingora
 * **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol

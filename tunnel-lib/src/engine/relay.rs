@@ -49,7 +49,19 @@ pub async fn relay_tcp_bidirectional(
     quic_send: SendStream,
     stream: TcpStream,
 ) -> Result<(u64, u64)> {
-    let (stream_read, stream_write) = tokio::io::split(stream);
+    relay_tcp_with_initial(quic_recv, quic_send, stream, &[]).await
+}
+
+pub async fn relay_tcp_with_initial(
+    quic_recv: RecvStream,
+    quic_send: SendStream,
+    mut stream: TcpStream,
+    initial_data: &[u8],
+) -> Result<(u64, u64)> {
+    if !initial_data.is_empty() {
+        stream.write_all(initial_data).await?;
+    }
+    let (stream_read, stream_write) = stream.into_split();
     let quic_to_stream = copy_quic_to_shutdown(quic_recv, stream_write);
     let stream_to_quic = copy_buffered_then_finish(stream_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
     let (a, b) = tokio::try_join!(quic_to_stream, stream_to_quic)?;
