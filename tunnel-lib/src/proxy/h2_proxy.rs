@@ -87,7 +87,13 @@ where
         }
     };
 
-    send_via(sender, request).await
+    match send_via(sender, request).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            sender_cache.sender.store(Arc::new(None));
+            Err(error)
+        }
+    }
 }
 
 async fn send_via<B>(

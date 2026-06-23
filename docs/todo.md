@@ -227,9 +227,9 @@ flowchart TD
   创建 `H1Session` / `H2Session` 等生命周期宿主，使重试判定与会话逻辑拥有清晰的作用域。
 
 ### [TODO-68] Ingress request lifecycle convergence
-* **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
+* **Priority**: Medium | **Status**: 🚧 Partial / H2 sender invalidation tightened | **Track**: Core Proxy & Protocol
 * **Fix**:
-  收敛 h2c per-connection request 生命周期的异常重试逻辑，与 TLS/H1 通路对齐。
+  收敛 h2c per-connection request 生命周期的异常重试逻辑，与 TLS/H1 通路对齐。Current implementation invalidates stale H2 sender state on request failures so subsequent requests rebuild the QUIC-backed H2 connection instead of reusing a failed sender. Broader H1/TLS/H2C retry boundary unification remains open.
 
 ### [TODO-62] Full per-peer protocol capability memory
 * **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
