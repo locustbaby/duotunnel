@@ -17,7 +17,7 @@ use tunnel_lib::plugin::{
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{ErrorKind, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::{SelectedConnection, SharedRegistry};
 
@@ -126,6 +126,22 @@ fn invalidate_sender_if_matches(
         .is_some_and(|entry| entry.selected.handle.stable_id() == conn_id)
     {
         guard.remove(route_target);
+    }
+}
+
+fn unregister_if_connection_lost(
+    registry: &SharedRegistry,
+    selected: &SelectedConnection,
+    err: &anyhow::Error,
+) {
+    let fatal_proxy_error = err.downcast_ref::<ProxyError>().is_some_and(|proxy_err| {
+        matches!(
+            proxy_err.kind,
+            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+        )
+    });
+    if selected.handle.close_reason().is_some() || fatal_proxy_error {
+        registry.unregister(&selected.conn_id);
     }
 }
 
@@ -310,7 +326,11 @@ impl IngressProtocolHandler for H2cHandler {
                             &route_target,
                             sender_entry.selected.handle.stable_id(),
                         );
-                        registry.unregister(&sender_entry.selected.conn_id);
+                        unregister_if_connection_lost(
+                            &registry,
+                            &sender_entry.selected,
+                            &first_err,
+                        );
 
                         if let Some(template) = retryable_request.as_ref() {
                             if let Some(retry_entry) =
@@ -349,7 +369,11 @@ impl IngressProtocolHandler for H2cHandler {
                                             &route_target,
                                             retry_entry.selected.handle.stable_id(),
                                         );
-                                        registry.unregister(&retry_entry.selected.conn_id);
+                                        unregister_if_connection_lost(
+                                            &registry,
+                                            &retry_entry.selected,
+                                            &retry_err,
+                                        );
                                         let err = ProxyError::h2c_forward(retry_err.to_string());
                                         observe_h2c_error(&metrics, &err);
                                         tracing::error!(

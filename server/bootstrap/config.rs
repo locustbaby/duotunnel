@@ -234,6 +234,30 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
             ));
         }
     }
+    for rule in &cfg.server_egress_upstream.rules.vhost {
+        if rule.match_host.is_empty() {
+            errors.push("server_egress_upstream.rules.vhost: match_host must not be empty".into());
+        }
+        match cfg
+            .server_egress_upstream
+            .upstreams
+            .get(&rule.action_upstream)
+        {
+            Some(upstream) if upstream.servers.is_empty() => {
+                errors.push(format!(
+                    "server_egress_upstream.rules.vhost \"{}\": upstream \"{}\" has no servers",
+                    rule.match_host, rule.action_upstream
+                ));
+            }
+            Some(_) => {}
+            None => {
+                errors.push(format!(
+                    "server_egress_upstream.rules.vhost \"{}\": upstream \"{}\" not found",
+                    rule.match_host, rule.action_upstream
+                ));
+            }
+        }
+    }
     let groups = &cfg.tunnel_management.client_configs.groups;
     let mut seen_ports: HashSet<u16> = HashSet::new();
     for listener in &cfg.tunnel_management.server_ingress_routing.listeners {
@@ -349,6 +373,31 @@ pub fn build_client_config_for_group(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tunnel_store::server_config::ServerBasicConfig;
+
+    fn base_server_config() -> ServerConfigFile {
+        ServerConfigFile {
+            server: ServerBasicConfig {
+                tunnel_port: 8080,
+                log_level: None,
+                trace_enabled: false,
+                database_url: "sqlite::memory:".to_string(),
+                metrics_port: None,
+                quic: Default::default(),
+                tcp: Default::default(),
+                http_pool: Default::default(),
+                proxy_buffers: Default::default(),
+                pki: Default::default(),
+                login_timeout_secs: 10,
+                open_stream_timeout_ms: 5000,
+                h2_single_authority: true,
+                accept_workers: None,
+                overload: Default::default(),
+            },
+            server_egress_upstream: Default::default(),
+            tunnel_management: Default::default(),
+        }
+    }
 
     #[test]
     fn test_build_client_config_for_group_not_found() {
@@ -435,5 +484,17 @@ mod tests {
 
         assert_eq!(upstream.servers[1].address, "example.com:80");
         assert!(upstream.servers[1].resolve);
+    }
+
+    #[test]
+    fn validate_server_config_rejects_missing_egress_upstream() {
+        let mut cfg = base_server_config();
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "egress.example.com".to_string(),
+            action_upstream: "missing".to_string(),
+        });
+
+        let err = validate_server_config(&cfg).expect_err("config should be rejected");
+        assert!(err.to_string().contains("upstream \"missing\" not found"));
     }
 }

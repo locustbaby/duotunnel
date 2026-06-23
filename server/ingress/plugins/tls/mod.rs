@@ -11,12 +11,28 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{ErrorKind, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::SharedRegistry;
 
 pub struct TlsHandler {
     pub registry: SharedRegistry,
+}
+
+fn unregister_if_connection_lost(
+    registry: &SharedRegistry,
+    selected: &crate::ingress::registry::SelectedConnection,
+    err: &anyhow::Error,
+) {
+    let fatal_proxy_error = err.downcast_ref::<ProxyError>().is_some_and(|proxy_err| {
+        matches!(
+            proxy_err.kind,
+            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+        )
+    });
+    if selected.handle.close_reason().is_some() || fatal_proxy_error {
+        registry.unregister(&selected.conn_id);
+    }
 }
 
 #[async_trait]
@@ -143,7 +159,10 @@ impl IngressProtocolHandler for TlsHandler {
 
                     debug!(
                         "L7 Proxy (TLS terminated): rewriting authority to {}, forwarding {} {} (attempt {})",
-                        target_host, req_to_send.method(), req_to_send.uri(), attempts
+                        target_host,
+                        req_to_send.method(),
+                        req_to_send.uri(),
+                        attempts
                     );
 
                     match tunnel_lib::forward_h2_request(
@@ -166,7 +185,7 @@ impl IngressProtocolHandler for TlsHandler {
                                 let mut guard = sender_cache.lock();
                                 guard.remove(&*selected.conn_id);
                             }
-                            registry.unregister(&selected.conn_id);
+                            unregister_if_connection_lost(&registry, &selected, &e);
 
                             if attempts >= max_attempts {
                                 let err = ProxyError::upstream_forward(e.to_string());

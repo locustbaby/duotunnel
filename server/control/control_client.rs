@@ -7,18 +7,18 @@ use std::collections::HashSet;
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    send_watch_request, ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent,
-    WatchRequest,
+    ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
+    ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent, WatchRequest,
+    send_watch_request,
 };
-use tunnel_lib::models::msg::{recv_typed_message, MessageType};
+use tunnel_lib::models::msg::{MessageType, recv_typed_message};
 
 use crate::bootstrap::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -27,7 +27,7 @@ use crate::bootstrap::config::{
 };
 use crate::control::local_auth::CacheEntry;
 use crate::control::service::BackgroundService;
-use crate::{build_routing_snapshot, ServerState};
+use crate::{ServerState, build_routing_snapshot};
 use tokio_util::sync::CancellationToken;
 
 pub struct ControlClientService {
@@ -229,8 +229,8 @@ async fn connect_and_watch(
 async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
     update_token_cache(&snap.token_cache, state);
     let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state);
-    crate::ingress::sync_all_listeners(state, &listeners).await;
     state.replace_routing(routing_snapshot);
+    crate::ingress::sync_all_listeners(state, &listeners).await;
 }
 
 fn update_token_cache(
@@ -291,10 +291,10 @@ async fn apply_patch_to_runtime(
         return;
     }
     let (listeners, routing_snapshot) = build_runtime_snapshot(snapshot, state);
+    state.replace_routing(routing_snapshot);
     if !patch.ingress_listeners.is_empty() {
         crate::ingress::sync_listener_subset(state, &listeners, affected_ports).await;
     }
-    state.replace_routing(routing_snapshot);
 }
 
 fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {

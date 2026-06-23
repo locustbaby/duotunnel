@@ -1,9 +1,9 @@
-use crate::bootstrap::config::{IngressListener, IngressMode};
 use crate::ServerState;
+use crate::bootstrap::config::{IngressListener, IngressMode};
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -71,6 +71,11 @@ impl ListenerManager {
     }
 }
 
+fn notify_listener_drained(drained: &Notify) {
+    drained.notify_waiters();
+    drained.notify_one();
+}
+
 async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: IngressListener) {
     let accept_workers = state.accept_workers();
     let generation = state.listeners().next_generation();
@@ -102,6 +107,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let cancel = cancel.clone();
                 let drained = drained.clone();
                 let remaining = remaining.clone();
+                remaining.fetch_add(1, Ordering::Release);
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = crate::ingress::handlers::http::run_http_accept_loop(
                         listener_socket,
@@ -114,7 +120,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                         error!(port = %port, error = %e, "HTTP accept loop failed");
                     }
                     if remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        drained.notify_waiters();
+                        notify_listener_drained(&drained);
                     }
                 }));
             }
@@ -136,6 +142,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let remaining = remaining.clone();
                 let group_id = cfg.client_group.clone();
                 let proxy_name = cfg.proxy_name.clone();
+                remaining.fetch_add(1, Ordering::Release);
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = crate::ingress::handlers::tcp::run_tcp_accept_loop(
                         listener_socket,
@@ -150,7 +157,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                         error!(port = %port, error = %e, "TCP accept loop failed");
                     }
                     if remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        drained.notify_waiters();
+                        notify_listener_drained(&drained);
                     }
                 }));
             }
@@ -159,9 +166,9 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
 
     if handles.is_empty() {
         cancel.cancel();
+        notify_listener_drained(&drained);
         return;
     }
-    remaining.store(handles.len(), Ordering::Release);
 
     info!(port = %port, generation, "listener active");
     state.listeners().activate(port, kind, cancel, drained);
