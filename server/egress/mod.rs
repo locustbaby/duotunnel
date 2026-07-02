@@ -6,17 +6,17 @@ use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
 use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, PeerSpec, TlsPeerSpec};
 use tunnel_lib::proxy::tcp::UpstreamScheme;
-use tunnel_lib::{HttpClientParams, ProxyError, UpstreamGroup};
+use tunnel_lib::{HttpClientParams, ProxyError, UpstreamGroup, VhostRouter};
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
-    http_rules: HashMap<String, String>,
+    http_rules: VhostRouter<String>,
     http_connector: SharedHttpConnector,
     dns_cache: tunnel_lib::EgressDnsCache,
 }
 impl ServerEgressMap {
     pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
         let mut upstreams = HashMap::new();
-        let mut http_rules = HashMap::new();
+        let http_rules = VhostRouter::new();
         for (name, upstream_def) in &egress.upstreams {
             let servers: Vec<String> = upstream_def
                 .servers
@@ -26,13 +26,7 @@ impl ServerEgressMap {
             upstreams.insert(name.clone(), UpstreamGroup::new(servers));
         }
         for rule in &egress.rules.vhost {
-            let host_key = rule
-                .match_host
-                .split(':')
-                .next()
-                .unwrap_or(&rule.match_host)
-                .to_string();
-            http_rules.insert(host_key, rule.action_upstream.clone());
+            http_rules.add_route(&rule.match_host, rule.action_upstream.clone());
         }
         let https_client = tunnel_lib::create_https_client_with(http_params);
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
@@ -96,19 +90,17 @@ impl UpstreamResolver for ServerEgressMap {
             .host
             .as_deref()
             .ok_or_else(ProxyError::routing_missing_host)?;
-        let host = host_raw.split(':').next().unwrap_or(host_raw);
         let upstream_name = self
             .http_rules
-            .get(host)
-            .cloned()
-            .ok_or_else(|| ProxyError::route_not_found(format!("host={host}")))?;
+            .get(host_raw)
+            .ok_or_else(|| ProxyError::route_not_found(format!("host={host_raw}")))?;
         let group = self.upstreams.get(&upstream_name).ok_or_else(|| {
             ProxyError::route_not_found(format!("upstream_group={upstream_name}"))
         })?;
         let upstream_addr = group
             .next_healthy()
             .ok_or_else(|| {
-                ProxyError::route_not_found(format!("no healthy backends for host={host}"))
+                ProxyError::route_not_found(format!("no healthy backends for host={host_raw}"))
             })?
             .clone();
 

@@ -132,50 +132,38 @@ async fn handle_entry_connection(
     debug!(protocol = ? protocol, host = ? host, "detected protocol from entry");
 
     if let Some(ref host_raw) = host {
-        let host_clean = host_raw.split(':').next().unwrap_or(host_raw);
-        let rules = pool.egress_rules();
-        for rule in rules {
-            let rule_host_clean = rule
-                .match_host
-                .split(':')
-                .next()
-                .unwrap_or(&rule.match_host);
-            if rule_host_clean == host_clean && rule.action_upstream == "reject" {
-                warn!(target: "client::egress", "Target '{}' rejected locally by rule '{}'", host_raw, rule.match_host);
-                crate::metrics::egress_rejection("rule_match", host_clean);
+        if pool.is_rejected_host(host_raw) {
+            warn!(target: "client::egress", "Target '{}' rejected locally by egress allowlist", host_raw);
+            crate::metrics::egress_rejection("no_egress_route", host_raw);
 
-                if protocol == tunnel_lib::proxy::core::Protocol::H1 {
-                    let body = "502 Bad Gateway - Rejected by Egress Rule\n";
-                    let resp = format!(
-                        "HTTP/1.1 502 Bad Gateway\r\n\
-                         Connection: close\r\n\
-                         Content-Type: text/plain\r\n\
-                         Content-Length: {}\r\n\
-                         X-DuoTunnel-Reject: rule-match\r\n\
-                         \r\n\
-                         {}",
-                        body.len(),
-                        body
-                    );
-                    let _ = local_stream.write_all(resp.as_bytes()).await;
-                    let _ = local_stream.shutdown().await;
-                } else {
-                    let _ = local_stream.shutdown().await;
-                }
-                return Ok(());
+            if protocol == tunnel_lib::proxy::core::Protocol::H1 {
+                let body = "502 Bad Gateway - No Egress Route\n";
+                let resp = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\n\
+                     Connection: close\r\n\
+                     Content-Type: text/plain\r\n\
+                     Content-Length: {}\r\n\
+                     X-DuoTunnel-Reject: no-egress-route\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                );
+                let _ = local_stream.write_all(resp.as_bytes()).await;
+                let _ = local_stream.shutdown().await;
+            } else {
+                let _ = local_stream.shutdown().await;
             }
+            return Ok(());
         }
     }
 
-    let pool_size = pool.pool_size().await;
+    let pool_size = pool.pool_size();
     let preferred_shard = pool.shard_for_hash(&(host.clone(), "entry"));
     let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
-        let conn = match pool
-            .next_conn_for_shard_excluding(preferred_shard, tried_conn_ids.clone())
-            .await
-        {
+        let conn = match pool.next_conn_for_shard_excluding(preferred_shard, &tried_conn_ids) {
             Some(c) => c,
             None => break,
         };
@@ -292,8 +280,8 @@ mod tests {
     async fn test_handle_entry_connection_http_reject() {
         let pool = EntryConnPool::new(100, 1, 1);
         pool.set_egress_rules(vec![EgressVhostRuleDef {
-            match_host: "blocked.com".to_string(),
-            action_upstream: "reject".to_string(),
+            match_host: "allowed.com".to_string(),
+            action_upstream: "backend".to_string(),
         }]);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -340,15 +328,15 @@ mod tests {
         let client_response = client_handle.await.unwrap();
         let resp_str = String::from_utf8_lossy(&client_response);
         assert!(resp_str.contains("HTTP/1.1 502 Bad Gateway"));
-        assert!(resp_str.contains("X-DuoTunnel-Reject: rule-match"));
+        assert!(resp_str.contains("X-DuoTunnel-Reject: no-egress-route"));
     }
 
     #[tokio::test]
     async fn test_handle_entry_connection_tls_reject() {
         let pool = EntryConnPool::new(100, 1, 1);
         pool.set_egress_rules(vec![EgressVhostRuleDef {
-            match_host: "blocked.com".to_string(),
-            action_upstream: "reject".to_string(),
+            match_host: "allowed.com".to_string(),
+            action_upstream: "backend".to_string(),
         }]);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

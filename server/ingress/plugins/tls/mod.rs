@@ -11,9 +11,50 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{OpenStreamRequest, ProxyError, RouteTarget};
 
-use crate::ingress::registry::{unregister_if_connection_lost, SharedRegistry};
+use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection, SharedRegistry};
+
+#[derive(Clone)]
+struct CachedSender {
+    selected: Arc<SelectedConnection>,
+    sender: tunnel_lib::H2Sender,
+}
+
+fn get_or_create_sender(
+    sender_cache: &parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
+    registry: &SharedRegistry,
+    route_target: &RouteTarget,
+) -> Option<CachedSender> {
+    let mut guard = sender_cache.lock();
+    if let Some(entry) = guard.get(route_target) {
+        if entry.selected.handle.close_reason().is_none() {
+            return Some(entry.clone());
+        }
+        guard.remove(route_target);
+    }
+    let selected = registry.select_client_for_group(&route_target.group_id)?;
+    let entry = CachedSender {
+        selected,
+        sender: tunnel_lib::new_h2_sender(),
+    };
+    guard.insert(route_target.clone(), entry.clone());
+    Some(entry)
+}
+
+fn invalidate_sender_if_matches(
+    sender_cache: &parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
+    route_target: &RouteTarget,
+    stable_id: usize,
+) {
+    let mut guard = sender_cache.lock();
+    if guard
+        .get(route_target)
+        .is_some_and(|entry| entry.selected.handle.stable_id() == stable_id)
+    {
+        guard.remove(route_target);
+    }
+}
 
 pub struct TlsHandler {
     pub registry: SharedRegistry,
@@ -49,7 +90,10 @@ impl IngressProtocolHandler for TlsHandler {
             .map_err(|e| ProxyError::tls_handshake(e.to_string()))?;
         info!("TLS terminated, serving H2 with authority rewriting");
 
-        let (group_id, proxy_name) = (route.group_id.clone(), route.proxy_name.clone());
+        let route_target = RouteTarget {
+            group_id: route.group_id.clone(),
+            proxy_name: route.proxy_name.clone(),
+        };
         let peer_addr = ctx.peer_addr;
         let src_addr = peer_addr.ip().to_string();
         let src_port = peer_addr.port();
@@ -59,7 +103,7 @@ impl IngressProtocolHandler for TlsHandler {
 
         let registry = self.registry.clone();
         let sender_cache: Arc<
-            parking_lot::Mutex<std::collections::HashMap<String, tunnel_lib::H2Sender>>,
+            parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
         > = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let metrics = ctx.metrics.clone();
 
@@ -67,10 +111,9 @@ impl IngressProtocolHandler for TlsHandler {
             let registry = registry.clone();
             let sender_cache = sender_cache.clone();
             let metrics = metrics.clone();
-            let proxy_name = proxy_name.clone();
             let target_host = target_host.clone();
+            let route_target = route_target.clone();
             let src_addr = src_addr.clone();
-            let group_id = group_id.clone();
             let overload = overload.clone();
             async move {
                 let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
@@ -91,8 +134,8 @@ impl IngressProtocolHandler for TlsHandler {
                 }
 
                 let routing_info = tunnel_lib::RoutingInfo {
-                    proxy_name: proxy_name.clone(),
-                    src_addr,
+                    proxy_name: route_target.proxy_name.clone(),
+                    src_addr: src_addr.clone(),
                     src_port,
                     protocol: tunnel_lib::proxy::core::Protocol::H2,
                     host: Some(target_host.clone()),
@@ -107,26 +150,21 @@ impl IngressProtocolHandler for TlsHandler {
 
                 loop {
                     attempts += 1;
-                    let selected = match registry.select_client_for_group(&group_id) {
-                        Some(s) => s,
-                        None => {
-                            let err = ProxyError::no_client_available(group_id.to_string());
-                            tunnel_lib::plugin::observe_proxy_error(
-                                metrics.as_ref(),
-                                ProtocolKind::Tls.as_label(),
-                                &err,
-                            );
-                            return Ok(error_response(&err));
-                        }
-                    };
-
-                    let sender = {
-                        let mut guard = sender_cache.lock();
-                        guard
-                            .entry(selected.conn_id.to_string())
-                            .or_insert_with(tunnel_lib::new_h2_sender)
-                            .clone()
-                    };
+                    let sender_entry =
+                        match get_or_create_sender(&sender_cache, &registry, &route_target) {
+                            Some(entry) => entry,
+                            None => {
+                                let err = ProxyError::no_client_available(
+                                    route_target.group_id.to_string(),
+                                );
+                                tunnel_lib::plugin::observe_proxy_error(
+                                    metrics.as_ref(),
+                                    ProtocolKind::Tls.as_label(),
+                                    &err,
+                                );
+                                return Ok(error_response(&err));
+                            }
+                        };
 
                     let req_to_send = if attempts == 1 {
                         current_req
@@ -150,8 +188,8 @@ impl IngressProtocolHandler for TlsHandler {
                     );
 
                     match tunnel_lib::forward_h2_request(
-                        selected.handle.as_ref(),
-                        &sender,
+                        sender_entry.selected.handle.as_ref(),
+                        &sender_entry.sender,
                         OpenStreamRequest {
                             routing_info: routing_info.clone(),
                             initial_bytes: None,
@@ -165,11 +203,12 @@ impl IngressProtocolHandler for TlsHandler {
                     {
                         Ok(resp) => return Ok::<_, hyper::Error>(resp),
                         Err(e) => {
-                            {
-                                let mut guard = sender_cache.lock();
-                                guard.remove(&*selected.conn_id);
-                            }
-                            unregister_if_connection_lost(&registry, &selected, &e);
+                            invalidate_sender_if_matches(
+                                &sender_cache,
+                                &route_target,
+                                sender_entry.selected.handle.stable_id(),
+                            );
+                            unregister_if_connection_lost(&registry, &sender_entry.selected, &e);
 
                             if attempts >= max_attempts {
                                 let err = ProxyError::upstream_forward(e.to_string());

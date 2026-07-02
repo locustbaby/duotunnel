@@ -15,7 +15,7 @@ use serde::Deserialize;
 /// that never need YAML parsing (e.g. pure-store binaries) pay no extra deps.
 use std::collections::HashMap;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
-use tunnel_lib::PkiParams;
+use tunnel_lib::{canonicalize_egress_host, PkiParams};
 
 // ── Full server config file schema ───────────────────────────────────────────
 
@@ -413,7 +413,8 @@ pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
         .vhost
         .iter()
         .map(|r| EgressVhostRule {
-            match_host: r.match_host.clone(),
+            match_host: canonicalize_egress_host(&r.match_host)
+                .unwrap_or_else(|_| r.match_host.clone()),
             action_upstream: r.action_upstream.clone(),
         })
         .collect();
@@ -521,7 +522,7 @@ mod tests {
                 upstreams: egress_upstreams,
                 rules: EgressRules {
                     vhost: vec![EgressHttpRule {
-                        match_host: "example.com".to_string(),
+                        match_host: "Example.COM:443".to_string(),
                         action_upstream: "egress_up_1".to_string(),
                     }],
                 },

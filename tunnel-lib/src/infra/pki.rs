@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use parking_lot::RwLock;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, Issuer,
     KeyPair, KeyUsagePurpose,
@@ -8,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 

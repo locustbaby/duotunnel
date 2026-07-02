@@ -62,8 +62,8 @@ pub use proxy::UpstreamGroup;
 pub use transport::accept::{run_accept_worker, AcceptedConn};
 pub use transport::connection_handle::{ConnectionHandle, OpenStreamRequest, OpenWaitObserver};
 pub use transport::listener::{
-    build_reuseport_listener, extract_host_from_http, RouteTarget, VhostRouter,
-    DEFAULT_ACCEPT_WORKERS,
+    build_reuseport_listener, canonicalize_egress_host, extract_host_from_http, RouteTarget,
+    VhostRouter, DEFAULT_ACCEPT_WORKERS,
 };
 pub use transport::open_bi::{open_bi_guarded, OpenBiOutcome, OpenedStream};
 pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};

@@ -557,6 +557,15 @@ tunnel_management:
               action_upstream: "local-web"
 ```
 
+Egress vhost matching semantics:
+
+- Egress vhost rules are an allowlist: a matched host forwards to the named upstream group, and an unmatched host is rejected by default.
+- `action_upstream` is always an upstream group name. `reject` has no special meaning unless a normal upstream group is actually named `reject`.
+- Egress host matching strips an optional `:port` suffix before comparison and lowercases domain names. For example, `Example.COM:443` and `example.com:8443` resolve to the same rule key.
+- Duplicate canonical egress hosts are configuration errors, including case-only duplicates and host-with-port duplicates.
+- Wildcards follow `VhostRouter` semantics: exact routes win over wildcard routes, and `*.example.com` matches `api.example.com` but not `example.com`.
+- Client-side local rejection is an early fast-fail mirror of the same allowlist. If a sniffed host has no matching egress vhost rule, HTTP/1.x receives `502 Bad Gateway` with `X-DuoTunnel-Reject: no-egress-route`; TLS/Other connections receive a clean EOF. Connections with no sniffed host continue to the server for final routing.
+
 ### 9.2 Client Configuration (YAML)
 
 ```yaml

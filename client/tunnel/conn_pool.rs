@@ -1,5 +1,5 @@
+use arc_swap::ArcSwap;
 use quinn::Connection;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
-    stable_shard_index, ConnectionHandle,
+    stable_shard_index, ConnectionHandle, VhostRouter,
 };
 
 pub struct PooledConnection {
@@ -27,8 +27,8 @@ impl PoolShard {
         }
     }
 
-    fn len(&self) -> usize {
-        self.conns.len()
+    fn snapshot(&self) -> Arc<Vec<Arc<PooledConnection>>> {
+        Arc::new(self.conns.clone())
     }
 }
 
@@ -36,21 +36,39 @@ enum PoolMsg {
     Push {
         conn: Connection,
         shard_id: usize,
+        reply: oneshot::Sender<()>,
     },
-    Remove(usize),
-    NextConn {
-        preferred_shard: usize,
-        excluded: Vec<usize>,
-        reply: oneshot::Sender<Option<Arc<PooledConnection>>>,
+    Remove {
+        stable_id: usize,
+        reply: oneshot::Sender<()>,
     },
-    PoolSize(oneshot::Sender<usize>),
+}
+
+#[derive(Default)]
+struct AllowedHostIndex {
+    hosts: VhostRouter<()>,
+}
+
+impl AllowedHostIndex {
+    fn build(rules: Vec<tunnel_lib::EgressVhostRuleDef>) -> Self {
+        let hosts = VhostRouter::new();
+        for rule in rules {
+            hosts.add_route(&rule.match_host, ());
+        }
+        Self { hosts }
+    }
+
+    fn is_rejected_host(&self, host: &str) -> bool {
+        self.hosts.get(host).is_none()
+    }
 }
 
 pub struct EntryConnPool {
     tx: mpsc::Sender<PoolMsg>,
     shard_count: usize,
-    next_push_shard: AtomicUsize,
-    egress_rules: RwLock<Vec<tunnel_lib::EgressVhostRuleDef>>,
+    shards: Vec<Arc<ArcSwap<Vec<Arc<PooledConnection>>>>>,
+    total_size: Arc<AtomicUsize>,
+    egress_rules: ArcSwap<AllowedHostIndex>,
 }
 
 impl EntryConnPool {
@@ -59,6 +77,12 @@ impl EntryConnPool {
         let inflight_table = new_inflight_table(capacity);
         let shard_count = shard_count.max(1);
         let (tx, mut rx) = mpsc::channel(1024);
+        let snapshots = (0..shard_count)
+            .map(|_| Arc::new(ArcSwap::from_pointee(Vec::new())))
+            .collect::<Vec<_>>();
+        let snapshots_for_actor = snapshots.clone();
+        let total_size = Arc::new(AtomicUsize::new(0));
+        let total_size_for_actor = total_size.clone();
 
         tokio::spawn(async move {
             let mut shards = (0..shard_count)
@@ -67,13 +91,20 @@ impl EntryConnPool {
 
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    PoolMsg::Push { conn, shard_id } => {
+                    PoolMsg::Push {
+                        conn,
+                        shard_id,
+                        reply,
+                    } => {
                         let stable_id = conn.stable_id();
-                        let shard = &mut shards[shard_id % shard_count];
+                        let shard_id = shard_id % shard_count;
+                        let shard = &mut shards[shard_id];
                         if shard.ids.contains_key(&stable_id) {
+                            let _ = reply.send(());
                             continue;
                         }
                         let Some(slot_id) = inflight_table.alloc_slot() else {
+                            let _ = reply.send(());
                             continue;
                         };
                         let index = shard.conns.len();
@@ -82,13 +113,16 @@ impl EntryConnPool {
                             conn,
                             inflight_table.clone(),
                             slot_id,
-                            shard_id % shard_count,
+                            shard_id,
                             max_concurrent_streams,
                         );
                         shard.conns.push(Arc::new(PooledConnection { handle }));
+                        snapshots_for_actor[shard_id].store(shard.snapshot());
+                        total_size_for_actor.fetch_add(1, Ordering::Release);
+                        let _ = reply.send(());
                     }
-                    PoolMsg::Remove(stable_id) => {
-                        for shard in &mut shards {
+                    PoolMsg::Remove { stable_id, reply } => {
+                        for (shard_id, shard) in shards.iter_mut().enumerate() {
                             if let Some(index) = shard.ids.remove(&stable_id) {
                                 let existing = &shard.conns[index];
                                 inflight_table.free_slot(existing.handle.slot_id());
@@ -97,39 +131,12 @@ impl EntryConnPool {
                                     let swapped_id = shard.conns[index].handle.stable_id();
                                     shard.ids.insert(swapped_id, index);
                                 }
+                                snapshots_for_actor[shard_id].store(shard.snapshot());
+                                total_size_for_actor.fetch_sub(1, Ordering::Release);
                                 break;
                             }
                         }
-                    }
-                    PoolMsg::NextConn {
-                        preferred_shard,
-                        excluded,
-                        reply,
-                    } => {
-                        let chosen = pick_from_preferred_shards(
-                            shards.as_slice(),
-                            preferred_shard,
-                            |shard| {
-                                pick_p2c_inflight_owned(
-                                    shard.conns.as_slice(),
-                                    |c| {
-                                        c.handle.close_reason().is_none()
-                                            && !excluded.contains(&c.handle.stable_id())
-                                    },
-                                    |c| {
-                                        inflight_load(
-                                            c.handle.inflight_table(),
-                                            c.handle.slot_id(),
-                                            Ordering::Relaxed,
-                                        )
-                                    },
-                                )
-                            },
-                        );
-                        let _ = reply.send(chosen);
-                    }
-                    PoolMsg::PoolSize(reply) => {
-                        let _ = reply.send(shards.iter().map(PoolShard::len).sum());
+                        let _ = reply.send(());
                     }
                 }
             }
@@ -138,8 +145,9 @@ impl EntryConnPool {
         Arc::new(Self {
             tx,
             shard_count,
-            next_push_shard: AtomicUsize::new(0),
-            egress_rules: RwLock::new(Vec::new()),
+            shards: snapshots,
+            total_size,
+            egress_rules: ArcSwap::from_pointee(AllowedHostIndex::default()),
         })
     }
 
@@ -148,16 +156,26 @@ impl EntryConnPool {
     }
 
     pub fn set_egress_rules(&self, rules: Vec<tunnel_lib::EgressVhostRuleDef>) {
-        *self.egress_rules.write() = rules;
+        self.egress_rules
+            .store(Arc::new(AllowedHostIndex::build(rules)));
     }
 
-    pub fn egress_rules(&self) -> Vec<tunnel_lib::EgressVhostRuleDef> {
-        self.egress_rules.read().clone()
+    pub fn is_rejected_host(&self, host: &str) -> bool {
+        self.egress_rules.load().is_rejected_host(host)
     }
 
     pub async fn push(&self, conn: Connection) {
-        let shard_id = self.next_push_shard.fetch_add(1, Ordering::Relaxed) % self.shard_count;
-        let _ = self.tx.send(PoolMsg::Push { conn, shard_id }).await;
+        let shard_id = stable_shard_index(&conn.stable_id(), self.shard_count);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(PoolMsg::Push {
+                conn,
+                shard_id,
+                reply: reply_tx,
+            })
+            .await;
+        let _ = reply_rx.await;
     }
 
     pub async fn remove(&self, conn: &Connection) {
@@ -165,34 +183,76 @@ impl EntryConnPool {
     }
 
     pub async fn remove_stable_id(&self, stable_id: usize) {
-        let _ = self.tx.send(PoolMsg::Remove(stable_id)).await;
-    }
-
-    pub async fn next_conn_for_shard_excluding(
-        &self,
-        preferred_shard: usize,
-        excluded: Vec<usize>,
-    ) -> Option<Arc<PooledConnection>> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self
+        let _ = self
             .tx
-            .send(PoolMsg::NextConn {
-                preferred_shard: preferred_shard % self.shard_count,
-                excluded,
+            .send(PoolMsg::Remove {
+                stable_id,
                 reply: reply_tx,
             })
-            .await
-            .is_err()
-        {
-            return None;
-        }
-        reply_rx.await.ok().flatten()
+            .await;
+        let _ = reply_rx.await;
     }
-    pub async fn pool_size(&self) -> usize {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(PoolMsg::PoolSize(reply_tx)).await.is_err() {
-            return 0;
+
+    pub fn next_conn_for_shard_excluding(
+        &self,
+        preferred_shard: usize,
+        excluded: &[usize],
+    ) -> Option<Arc<PooledConnection>> {
+        pick_from_preferred_shards(&self.shards, preferred_shard, |shard| {
+            let snapshot = shard.load();
+            pick_p2c_inflight_owned(
+                snapshot.as_slice(),
+                |c| c.handle.close_reason().is_none() && !excluded.contains(&c.handle.stable_id()),
+                |c| {
+                    inflight_load(
+                        c.handle.inflight_table(),
+                        c.handle.slot_id(),
+                        Ordering::Relaxed,
+                    )
+                },
+            )
+        })
+    }
+
+    pub fn pool_size(&self) -> usize {
+        self.total_size.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AllowedHostIndex;
+    use tunnel_lib::EgressVhostRuleDef;
+
+    fn rule(host: &str, action: &str) -> EgressVhostRuleDef {
+        EgressVhostRuleDef {
+            match_host: host.to_string(),
+            action_upstream: action.to_string(),
         }
-        reply_rx.await.unwrap_or(0)
+    }
+
+    #[test]
+    fn allowed_index_rejects_hosts_without_matching_rule() {
+        let index = AllowedHostIndex::build(vec![rule("example.com", "upstream")]);
+
+        assert!(!index.is_rejected_host("example.com"));
+        assert!(index.is_rejected_host("unknown.example.com"));
+    }
+
+    #[test]
+    fn allowed_index_canonicalizes_case_and_ports() {
+        let index = AllowedHostIndex::build(vec![rule("Blocked.COM:443", "upstream")]);
+
+        assert!(!index.is_rejected_host("Blocked.COM:8443"));
+        assert!(!index.is_rejected_host("blocked.com:8443"));
+    }
+
+    #[test]
+    fn allowed_index_supports_wildcards_without_matching_parent() {
+        let index = AllowedHostIndex::build(vec![rule("*.example.com", "upstream")]);
+
+        assert!(!index.is_rejected_host("api.example.com"));
+        assert!(index.is_rejected_host("example.com"));
     }
 }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
+type CachedSendRequest = Arc<Option<SendRequest<BoxBody>>>;
 
 pub struct H2SenderCache {
     sender: ArcSwap<Option<SendRequest<BoxBody>>>,
@@ -26,9 +27,7 @@ pub fn new_h2_sender() -> H2Sender {
     })
 }
 
-fn try_get_sender(
-    cache: &H2SenderCache,
-) -> Option<(SendRequest<BoxBody>, Arc<Option<SendRequest<BoxBody>>>)> {
+fn try_get_sender(cache: &H2SenderCache) -> Option<(SendRequest<BoxBody>, CachedSendRequest)> {
     let sender_arc = cache.sender.load_full();
     match sender_arc.as_ref() {
         Some(s) if s.is_ready() => Some((s.clone(), sender_arc)),

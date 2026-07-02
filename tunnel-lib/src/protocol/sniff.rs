@@ -32,6 +32,18 @@ impl std::fmt::Debug for PooledBufInner {
     }
 }
 
+struct PooledBytesOwner {
+    inner: Arc<PooledBufInner>,
+    offset: usize,
+    len: usize,
+}
+
+impl AsRef<[u8]> for PooledBytesOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.inner.buf[self.offset..self.offset + self.len]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum SniffPrefix {
     Empty,
@@ -118,7 +130,7 @@ impl SniffPrefix {
             Self::Empty => Bytes::new(),
             Self::Bytes(b) => b,
             Self::Pooled { inner, offset, len } => {
-                Bytes::copy_from_slice(&inner.buf[offset..offset + len])
+                Bytes::from_owner(PooledBytesOwner { inner, offset, len })
             }
         }
     }

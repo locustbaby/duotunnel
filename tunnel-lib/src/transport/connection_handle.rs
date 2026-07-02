@@ -33,7 +33,8 @@ impl ConnectionHandle {
         shard_id: usize,
         max_concurrent_streams: u32,
     ) -> Arc<Self> {
-        let stream_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams as usize));
+        let stream_semaphore =
+            Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams as usize));
 
         Arc::new(Self {
             conn,

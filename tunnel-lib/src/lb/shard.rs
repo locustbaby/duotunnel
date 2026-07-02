@@ -71,6 +71,14 @@ mod tests {
     }
 
     #[test]
+    fn stable_shard_index_is_deterministic() {
+        let first = stable_shard_index(&"group-a", 16);
+        for _ in 0..32 {
+            assert_eq!(stable_shard_index(&"group-a", 16), first);
+        }
+    }
+
+    #[test]
     fn preferred_shard_is_tried_before_fallback() {
         let shards = vec![
             vec![Candidate {

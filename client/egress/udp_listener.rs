@@ -25,8 +25,14 @@ impl UdpListenerRegistry {
     }
 
     pub async fn forward_reply(&self, envelope: UdpDatagramEnvelope) -> Result<()> {
-        let socket = self.sockets.read().get(&envelope.session.proxy_name).cloned()
-            .ok_or_else(|| anyhow::anyhow!("no udp listener for {}", envelope.session.proxy_name))?;
+        let socket = self
+            .sockets
+            .read()
+            .get(&envelope.session.proxy_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("no udp listener for {}", envelope.session.proxy_name)
+            })?;
         let addr: std::net::IpAddr = envelope.session.client_addr.parse()?;
         socket
             .send_to(
@@ -79,15 +85,14 @@ async fn start_udp_listener(
                         continue;
                     }
                 };
-                let pool_size = pool.pool_size().await;
+                let pool_size = pool.pool_size();
                 let preferred_shard =
                     pool.shard_for_hash(&(entry.proxy_name.as_str(), client_addr.ip(), client_addr.port()));
                 let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
                 let mut delivered = false;
                 for _ in 0..pool_size.max(1) {
                     let Some(conn) = pool
-                        .next_conn_for_shard_excluding(preferred_shard, tried_conn_ids.clone())
-                        .await
+                        .next_conn_for_shard_excluding(preferred_shard, &tried_conn_ids)
                     else {
                         break;
                     };

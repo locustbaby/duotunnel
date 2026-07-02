@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 // Re-export the canonical config types from tunnel-store so the rest of the
 // server crate can keep importing from `crate::config`.
+use tunnel_lib::canonicalize_egress_host;
 pub use tunnel_store::server_config::routing_data_from_server_config;
 pub use tunnel_store::server_config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerDef as HttpListenerConfig,
@@ -140,17 +141,36 @@ impl ConfigSource for DbSource {
             })
             .collect();
 
+        let mut seen_egress_hosts = HashSet::new();
+        let egress_vhost = data
+            .egress_vhost_rules
+            .into_iter()
+            .map(|r| {
+                let match_host = canonicalize_egress_host(&r.match_host).map_err(|e| {
+                    anyhow::anyhow!(
+                        "egress vhost rule {:?} has invalid match_host: {}",
+                        r.match_host,
+                        e
+                    )
+                })?;
+                if !seen_egress_hosts.insert(match_host.clone()) {
+                    anyhow::bail!(
+                        "egress vhost rule {:?} duplicates canonical host {:?}",
+                        r.match_host,
+                        match_host
+                    );
+                }
+                Ok(EgressHttpRule {
+                    match_host,
+                    action_upstream: r.action_upstream,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         let egress = ServerEgressUpstream {
             upstreams: egress_upstreams,
             rules: EgressRules {
-                vhost: data
-                    .egress_vhost_rules
-                    .into_iter()
-                    .map(|r| EgressHttpRule {
-                        match_host: r.match_host,
-                        action_upstream: r.action_upstream,
-                    })
-                    .collect(),
+                vhost: egress_vhost,
             },
         };
 
@@ -234,9 +254,23 @@ pub fn validate_server_config(cfg: &ServerConfigFile) -> Result<()> {
             ));
         }
     }
+    let mut seen_egress_hosts: HashSet<String> = HashSet::new();
     for rule in &cfg.server_egress_upstream.rules.vhost {
-        if rule.match_host.is_empty() {
-            errors.push("server_egress_upstream.rules.vhost: match_host must not be empty".into());
+        match canonicalize_egress_host(&rule.match_host) {
+            Ok(canonical) => {
+                if !seen_egress_hosts.insert(canonical.clone()) {
+                    errors.push(format!(
+                        "server_egress_upstream.rules.vhost \"{}\": duplicate canonical match_host \"{}\"",
+                        rule.match_host, canonical
+                    ));
+                }
+            }
+            Err(e) => {
+                errors.push(format!(
+                    "server_egress_upstream.rules.vhost \"{}\": invalid match_host: {}",
+                    rule.match_host, e
+                ));
+            }
         }
         match cfg
             .server_egress_upstream
@@ -399,6 +433,19 @@ mod tests {
         }
     }
 
+    fn add_egress_upstream(cfg: &mut ServerConfigFile, name: &str) {
+        cfg.server_egress_upstream.upstreams.insert(
+            name.to_string(),
+            UpstreamDef {
+                servers: vec![ServerDef {
+                    address: "127.0.0.1:8080".to_string(),
+                    resolve: false,
+                }],
+                lb_policy: "round_robin".to_string(),
+            },
+        );
+    }
+
     #[test]
     fn test_build_client_config_for_group_not_found() {
         let tm = TunnelManagement {
@@ -496,5 +543,67 @@ mod tests {
 
         let err = validate_server_config(&cfg).expect_err("config should be rejected");
         assert!(err.to_string().contains("upstream \"missing\" not found"));
+    }
+
+    #[test]
+    fn validate_server_config_rejects_reject_without_upstream_group() {
+        let mut cfg = base_server_config();
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "egress.example.com".to_string(),
+            action_upstream: "reject".to_string(),
+        });
+
+        let err = validate_server_config(&cfg).expect_err("config should be rejected");
+        assert!(err.to_string().contains("upstream \"reject\" not found"));
+    }
+
+    #[test]
+    fn validate_server_config_allows_reject_as_regular_upstream_group() {
+        let mut cfg = base_server_config();
+        add_egress_upstream(&mut cfg, "reject");
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "egress.example.com".to_string(),
+            action_upstream: "reject".to_string(),
+        });
+
+        validate_server_config(&cfg).expect("reject is an ordinary upstream name");
+    }
+
+    #[test]
+    fn validate_server_config_rejects_duplicate_canonical_egress_hosts() {
+        let mut cfg = base_server_config();
+        add_egress_upstream(&mut cfg, "backend");
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "Example.COM:443".to_string(),
+            action_upstream: "backend".to_string(),
+        });
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "example.com".to_string(),
+            action_upstream: "backend".to_string(),
+        });
+
+        let err = validate_server_config(&cfg).expect_err("config should be rejected");
+        assert!(err
+            .to_string()
+            .contains("duplicate canonical match_host \"example.com\""));
+    }
+
+    #[test]
+    fn validate_server_config_rejects_duplicate_wildcard_egress_hosts() {
+        let mut cfg = base_server_config();
+        add_egress_upstream(&mut cfg, "backend");
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "*.Example.COM".to_string(),
+            action_upstream: "backend".to_string(),
+        });
+        cfg.server_egress_upstream.rules.vhost.push(EgressHttpRule {
+            match_host: "*.example.com:443".to_string(),
+            action_upstream: "backend".to_string(),
+        });
+
+        let err = validate_server_config(&cfg).expect_err("config should be rejected");
+        assert!(err
+            .to_string()
+            .contains("duplicate canonical match_host \"*.example.com\""));
     }
 }

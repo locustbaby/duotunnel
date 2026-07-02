@@ -61,6 +61,75 @@ pub struct RouteTarget {
     pub proxy_name: ProxyName,
 }
 
+pub fn canonicalize_egress_host(host: &str) -> Result<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        anyhow::bail!("host must not be empty");
+    }
+    if host.contains("://") || host.contains('/') || host.contains('?') || host.contains('#') {
+        anyhow::bail!("host must be a bare host or authority, not a URL");
+    }
+
+    let (wildcard, authority) = if let Some(rest) = host.strip_prefix("*.") {
+        if rest.is_empty() {
+            anyhow::bail!("wildcard host must include a suffix");
+        }
+        (true, rest)
+    } else {
+        (false, host)
+    };
+
+    let canonical = canonicalize_authority_host(authority)?;
+    if wildcard {
+        Ok(format!("*.{canonical}"))
+    } else {
+        Ok(canonical)
+    }
+}
+
+fn canonicalize_authority_host(authority: &str) -> Result<String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest
+            .find(']')
+            .ok_or_else(|| anyhow::anyhow!("bracketed IPv6 host is missing closing bracket"))?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        if !suffix.is_empty() {
+            let port = suffix
+                .strip_prefix(':')
+                .ok_or_else(|| anyhow::anyhow!("unexpected characters after bracketed host"))?;
+            validate_port(port)?;
+        }
+        if host.is_empty() {
+            anyhow::bail!("host must not be empty");
+        }
+        return Ok(host.to_lowercase());
+    }
+
+    let colon_count = authority.as_bytes().iter().filter(|b| **b == b':').count();
+    let host = if colon_count == 1 {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid authority host"))?;
+        validate_port(port)?;
+        host
+    } else {
+        authority
+    };
+
+    if host.is_empty() {
+        anyhow::bail!("host must not be empty");
+    }
+    Ok(host.to_lowercase())
+}
+
+fn validate_port(port: &str) -> Result<()> {
+    if port.is_empty() || port.parse::<u16>().is_err() {
+        anyhow::bail!("port must be a valid u16");
+    }
+    Ok(())
+}
+
 pub struct VhostRouter<T: Clone + Send + Sync> {
     exact: DashMap<String, T>,
     wildcards: RwLock<Vec<(String, T)>>,
@@ -75,23 +144,22 @@ impl<T: Clone + Send + Sync> VhostRouter<T> {
         }
     }
     pub fn add_route(&self, host: &str, value: T) {
-        let host_lower = host.to_lowercase();
-        if host_lower.starts_with("*.") {
+        let host_key = canonicalize_egress_host(host).unwrap_or_else(|_| host.to_lowercase());
+        if host_key.starts_with("*.") {
             let mut wildcards = self.wildcards.write();
-            wildcards.push((host_lower, value));
+            wildcards.push((host_key, value));
             self.has_wildcards.store(true, Ordering::Relaxed);
         } else {
-            self.exact.insert(host_lower, value);
+            self.exact.insert(host_key, value);
         }
     }
     pub fn get(&self, host: &str) -> Option<T> {
-        let bare = host.split(':').next().unwrap_or(host);
+        let lower = canonicalize_egress_host(host).ok()?;
         let mut buf = [0u8; 256];
-        if bare.len() <= 256 && bare.is_ascii() {
-            let n = bare.len();
-            buf[..n].copy_from_slice(bare.as_bytes());
-            buf[..n].make_ascii_lowercase();
-            // SAFETY: buf[..n] was just populated by make_ascii_lowercase on an ASCII-validated slice
+        if lower.len() <= 256 && lower.is_ascii() {
+            let n = lower.len();
+            buf[..n].copy_from_slice(lower.as_bytes());
+            // SAFETY: lower is ASCII-validated above.
             let lower = unsafe { std::str::from_utf8_unchecked(&buf[..n]) };
             if let Some(entry) = self.exact.get(lower) {
                 return Some(entry.value().clone());
@@ -109,7 +177,6 @@ impl<T: Clone + Send + Sync> VhostRouter<T> {
             }
             None
         } else {
-            let lower = bare.to_lowercase();
             if let Some(entry) = self.exact.get(&lower) {
                 return Some(entry.value().clone());
             }
@@ -128,15 +195,15 @@ impl<T: Clone + Send + Sync> VhostRouter<T> {
         }
     }
     pub fn remove(&self, host: &str) {
-        let host_lower = host.to_lowercase();
-        if host_lower.starts_with("*.") {
+        let host_key = canonicalize_egress_host(host).unwrap_or_else(|_| host.to_lowercase());
+        if host_key.starts_with("*.") {
             let mut wildcards = self.wildcards.write();
-            wildcards.retain(|(p, _)| p != &host_lower);
+            wildcards.retain(|(p, _)| p != &host_key);
             if wildcards.is_empty() {
                 self.has_wildcards.store(false, Ordering::Relaxed);
             }
         } else {
-            self.exact.remove(&host_lower);
+            self.exact.remove(&host_key);
         }
     }
     pub fn len(&self) -> usize {
@@ -186,6 +253,22 @@ pub fn new_shared_vhost_router<T: Clone + Send + Sync>() -> SharedVhostRouter<T>
 mod tests {
     use super::*;
     #[test]
+    fn canonicalize_egress_host_strips_ports_and_lowercases_domains() {
+        assert_eq!(
+            canonicalize_egress_host("Example.COM:443").unwrap(),
+            "example.com"
+        );
+        assert_eq!(canonicalize_egress_host("[::1]:443").unwrap(), "::1");
+        assert_eq!(
+            canonicalize_egress_host("*.Example.COM:443").unwrap(),
+            "*.example.com"
+        );
+    }
+    #[test]
+    fn canonicalize_egress_host_rejects_urls() {
+        assert!(canonicalize_egress_host("https://example.com").is_err());
+    }
+    #[test]
     fn test_vhost_router_exact_match() {
         let router: VhostRouter<String> = VhostRouter::new();
         router.add_route("example.com", "group-a".to_string());
@@ -204,8 +287,14 @@ mod tests {
     #[test]
     fn test_vhost_router_with_port() {
         let router: VhostRouter<String> = VhostRouter::new();
-        router.add_route("example.com", "group-a".to_string());
+        router.add_route("example.com:443", "group-a".to_string());
         assert_eq!(router.get("example.com:8080"), Some("group-a".to_string()));
+    }
+    #[test]
+    fn test_vhost_router_bracketed_ipv6_with_port() {
+        let router: VhostRouter<String> = VhostRouter::new();
+        router.add_route("[::1]:443", "group-a".to_string());
+        assert_eq!(router.get("[::1]:8443"), Some("group-a".to_string()));
     }
     #[test]
     fn test_extract_host() {

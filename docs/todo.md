@@ -129,7 +129,7 @@ flowchart TD
 
 ### [TODO-76] Client-side local egress rule evaluation and early truncation
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Core Proxy & Protocol
-* **Fix**: Egress vhost rules pushed to client config via `EntryConnPool::set_egress_rules`. In [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/egress/listener.rs), after SNI/host sniff, rules are evaluated locally: HTTP plain → `502 Bad Gateway` with `X-DuoTunnel-Reject: rule-match`; TLS/Other → clean EOF. Warning log + `egress_rejections_total` Prometheus counter incremented. Server-side rule check still active as final defense. Current matching is exact host comparison only (no wildcard).
+* **Fix**: Egress vhost rules pushed to client config via `EntryConnPool::set_egress_rules`. In [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/egress/listener.rs), after SNI/host sniff, rules are evaluated as a local allowlist: HTTP plain without a matching route → `502 Bad Gateway` with `X-DuoTunnel-Reject: no-egress-route`; TLS/Other → clean EOF. Warning log + `egress_rejections_total` Prometheus counter incremented with reason `no_egress_route`. Server-side rule check still active as final defense. Matching strips optional ports, lowercases domains, and supports the same exact/wildcard semantics as server egress routing.
 
 ### [TODO-82] Decouple SQLite from Edge Server (Stateless Edge)
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Control Plane & Config
@@ -317,10 +317,10 @@ flowchart TD
 * **Fix**:
   集成 `cargo-fuzz` 框架，为嗅探器和并发无锁表单独设计模糊测试靶标。
 
-### [TODO-24] Multi-endpoint + thread-per-core architecture
-* **Priority**: Medium | **Status**: Research | **Track**: Future/Research & CI
+### [TODO-24] Multi-endpoint + SO_REUSEPORT UDP research
+* **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
 * **Fix**:
-  为解决超大规模并发下 `open_bi` 的跨线程唤醒及端点锁竞争，探索 thread-per-core 架构的实现。
+  仅在压测证明单个 Quinn endpoint UDP driver 单核打满、其他核空闲，且连接池读路径、注册 shard、H2 sender 缓存、egress reject 索引和 UDP 拷贝链均不是主瓶颈后，再研究 multi-endpoint + `SO_REUSEPORT` UDP。当前明确不推进 thread-per-core：它会丢失 Tokio work-stealing，显著抬高 Quinn/Hyper 生态改造成本，并且不适合 DuoTunnel 常见的 N 对 M 汇聚隧道流量。
 
 ---
 

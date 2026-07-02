@@ -1,173 +1,67 @@
-# QUIC Topology And Endpoint Actor Plan
+# QUIC Topology Performance Plan
 
 ## Summary
 
-This note captures the next topology refactor after the existing connection-actor work.
+The near-term topology work is not an endpoint-actor rewrite. The current priority is to remove self-inflicted hot-path cross-core costs while keeping the existing Tokio multi-thread runtime and Quinn endpoint model.
 
-Current state:
+Current target:
 
-- request-side shard selection is already stable-hash plus shard-local P2C
-- connection ownership is already handled by per-connection actors
-- shard registration is still round-robin
-- endpoint lifecycle is still driven by bare `quinn::Endpoint` values
+- client entry TCP/UDP selection reads the connection pool through lock-free snapshots
+- server client registration uses stable hashing so registration shard and request preferred shard align
+- TLS-terminated H2 reuses the selected client and H2 sender per route target
+- local egress reject checks are O(1) snapshot reads
+- endpoint actors, thread-per-core, and multi-endpoint fanout stay out of the current implementation
 
-Target state:
+## Why Not Endpoint Actors Now
 
-- shard registration uses an explicit topology policy
-- client and server both introduce real endpoint actors
-- connection actors remain the owner of per-connection QUIC control operations
-- the runtime shape becomes `endpoint actor -> shard directory -> connection actor`
+`quinn::Endpoint` is already cheap to clone and supports concurrent `connect` / `accept` use. Moving endpoint access behind an actor mailbox would add another wakeup to connection setup while leaving the more likely bottlenecks untouched:
 
-## Topology Policy
+- Quinn internal per-connection synchronization
+- endpoint UDP driver capacity
+- request-side selection and local rule lookup
+- H2 sender reuse after a route has already selected a client
 
-The default topology policy should become stable-hash based, not round-robin.
+Endpoint actors only become interesting if profiling shows a single endpoint UDP driver core saturated while other cores are idle after the current hot-path fixes land.
 
-Required capabilities:
+## Current Work
 
-- choose the preferred shard for a request key
-- choose the target shard for a new connection identity
-- keep the policy swappable so future alternatives can be added without changing callers
+### Client Entry Pool
 
-Default policy:
+`EntryConnPool` keeps its actor for cold-path mutation only. Push and remove messages acknowledge after the actor updates write-side indexes, publishes shard snapshots, and updates total size. TCP and UDP entry paths read synchronously from `ArcSwap` shard snapshots and use shard-local P2C without a mailbox round trip.
 
-- `StableHashTopologyPolicy`
-- client connection registration key: server address plus logical endpoint identity
-- server connection registration key: client group plus client connection id
-- request-side keys remain request-local:
-  - client TCP and UDP use host or proxy-derived keys
-  - server uses `group_id`
+Client connection registration uses deterministic spreading by `Connection::stable_id()` rather than a shared round-robin counter. Request preferred shards remain request-key based, so fallback across shards is still required and expected.
 
-Round-robin should stop being the default registration behavior. It may remain as a future optional policy, but not the baseline implementation.
+### Server Registry
 
-Shard-count changes:
+`ClientRegistry::register` maps each group to `stable_shard_index(group_id, shard_count)`. This puts a group's registered clients in the same shard that `select_client_for_group` checks first, reducing fallback scans while preserving existing actor-owned mutation and snapshot publication.
 
-- first implementation uses stable hash plus modulo shard count
-- changing shard count intentionally remaps some connection identities and request keys
-- this is acceptable for static runtime configuration and restart-based topology changes
-- online scale-up/down needs a later consistent-hash or rendezvous-hash policy before it is safe to treat shard-count changes as low churn
-- the policy trait should expose shard count as an input so the implementation can be replaced without touching callers
+### Data Plane
 
-## Endpoint Actor Responsibilities
+Local egress rules are compiled into an allowed-host snapshot. Reads are lock-free snapshot loads and answer whether the sniffed host has any matching allowlist rule. Matching strips optional ports, lowercases domains, and supports the same exact/wildcard semantics as server egress routing; `action_upstream` is only an upstream group name.
 
-Endpoint actors are needed on both client and server.
+TLS-terminated H2 caches `SelectedConnection + H2Sender` by `RouteTarget { group_id, proxy_name }`, matching the h2c invalidation model. Forward failures invalidate the route-target cache entry and unregister lost connections before retrying.
 
-They should own:
+`SniffPrefix::Pooled` converts to `Bytes` using an owner wrapper, so cloning the initial prefix is a reference-counted clone instead of copying the peek buffer.
 
-- the `quinn::Endpoint`
-- endpoint-level connect or accept loops
-- shard topology policy
-- connection actor creation
-- registration into shard-aware directories
-- endpoint shutdown and cleanup
+## Deferred Work
 
-They should not own:
+UDP datagram wire-format migration is intentionally separate from the pool and registry changes. It should move session keys to native `SocketAddr`, replace rkyv envelope encoding with a manual header, return borrowed/`Bytes` decode views, and replace per-packet wall-clock calls with coarse aging.
 
-- TCP listener accept loops
-- protocol sniffing or route resolution
-- upstream TCP, HTTP, or H2 drivers
-- relay of already-opened QUIC streams
+Thread-per-core is not a current goal. It would give up Tokio work stealing, force broad Quinn/Hyper integration rewrites, and complicate operations for tunnel traffic that naturally aggregates N clients to M upstreams rather than staying shared-nothing.
 
-Connection actors remain necessary because endpoint actors do not remove connection-level serialization needs such as `open_bi`, initial control writes, and datagram sends.
+Multi-endpoint plus `SO_REUSEPORT` remains a research item. It should only be designed after benchmarks show endpoint UDP driver saturation that cannot be explained by per-connection locks, route selection, H2 sender churn, local rule scans, or datagram copies.
 
-## Client Shape
+## Validation
 
-Client runtime should move from:
-
-- bare endpoint passed into supervisor and connect loop
-- pool deciding shard assignment internally
-
-To:
-
-- endpoint actor owns the client endpoint and reconnect loop
-- endpoint actor computes shard assignment before registration
-- entry pool becomes a shard-aware directory, not a shard allocator
-- per-connection session tasks still handle:
-  - login handshake
-  - reverse `accept_bi`
-  - incoming datagrams
-  - connection closed handling
-
-The client endpoint actor should expose capability-style handles, not raw endpoint access.
-
-## Server Shape
-
-Server runtime should move from:
-
-- bare endpoint in `run_quic_server`
-- registry deciding shard assignment internally
-
-To:
-
-- endpoint actor owns server `accept()` lifecycle
-- login-success path computes target shard before registry insertion
-- registry becomes a shard-aware directory and query surface
-- per-connection tasks still handle:
-  - login handshake body after accept
-  - reverse streams from client
-  - incoming datagrams
-  - token revocation shutdown
-
-The registry should stop owning shard assignment policy state.
-
-## Interfaces
-
-Expected shared additions:
-
-- `ShardTopologyPolicy`
-- `StableHashTopologyPolicy`
-- `ConnectionIdentity`
-- `RequestShardKey`
-
-Expected runtime boundary changes:
-
-- client pool registration should accept an explicit `shard_id`
-- server registry registration should accept an explicit `shard_id`
-- endpoint actor handles should replace raw endpoint ownership in long-running runtime code
-
-Existing connection-handle APIs should remain the data-plane boundary:
-
-- `open_stream(...)`
-- `send_datagram(...)`
-
-## Migration Plan
-
-The migration should land in small compatibility-preserving steps.
-
-1. Add `ShardTopologyPolicy`, key types, and deterministic unit tests while keeping current round-robin registration behavior.
-2. Change client pool and server registry registration APIs to accept explicit `shard_id`; keep temporary call sites passing the old round-robin value.
-3. Move client registration shard choice into a client endpoint actor, leaving session tasks and connection actors unchanged.
-4. Move server registration shard choice into a server endpoint actor after login success, leaving auth, token revocation, and datagram handling in existing per-connection tasks.
-5. Remove registry/pool-owned round-robin state once both endpoint actors own shard assignment.
-6. Run the local integration matrix, then delete compatibility shims in a follow-up commit.
-
-Rollback strategy:
-
-- keep endpoint actor handles behind existing runtime constructors until both client and server paths pass integration tests
-- avoid changing wire protocol or connection-handle APIs in this refactor
-- if a phase regresses, revert that phase without touching already-landed policy tests or data-plane connection actors
-
-## Testing
-
-The refactor should be accepted only if these behaviors hold:
-
-- stable request keys map to stable preferred shards
-- stable connection identities map to stable target shards
-- single-shard mode still resolves to shard `0`
-- client registration no longer uses round-robin
-- server registration no longer uses round-robin
-- preferred-shard request routing still falls back across shards when needed
-- connection cleanup removes entries from the correct shard
-- existing TCP, HTTP, H2, WebSocket, gRPC, and datagram paths do not regress
-
-Validation baseline:
+Required checks:
 
 - `cargo clippy --workspace -- -D warnings`
-- local integration test stack in `ci-helpers/local-test/test.sh`
+- `cargo test --workspace`
+- `ci-helpers/local-test/test.sh`
 
-## Assumptions
+Performance comparisons:
 
-- stable-hash is the default topology policy
-- policy abstraction should support later replacement, but only stable-hash is required now
-- endpoint actors are introduced on both client and server
-- connection actors remain in place
-- multi-endpoint or endpoint-per-core is not required yet, but this refactor must keep that path open
+- entry TCP open-stream P99 before and after lock-free pool reads
+- UDP packets per second before and after lock-free pool reads
+- TLS/H2 throughput and CPU before and after route-target sender caching
+- `connections = 1` versus `connections = 4` to separate per-connection bottlenecks from endpoint-driver bottlenecks
