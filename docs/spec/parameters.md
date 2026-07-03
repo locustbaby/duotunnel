@@ -1,5 +1,7 @@
 # Parameter Reference: Timeouts, Limits, and Buffers
 
+> Architecture, module layout, and call flows: [architecture.md](./architecture.md)
+
 Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (upstream)`
 
 ---
@@ -13,8 +15,10 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **EMFILE backoff** | `client/egress/listener.rs`: `EMFILE_BACKOFF_MS` | 100ms | ❌ (client 常量) / `overload.emfile_backoff_ms` (server) | errno 24 (Too many open files) 时暂停 Accept | 日志: `entry accept: too many open files, backing off` |
 | **peek_buf_size** | `PeekBufPool::new(size)` | 16 KiB | `proxy_buffers.peek_buf_size` | 缓冲区不足会导致协议识别失败 (Protocol::Unknown) | 日志: `detected protocol: Unknown`; 代码见 `core.rs:48` |
 | **http_header_buf_size** | `Http1Driver` header 解析缓冲 | 8 KiB | `proxy_buffers.http_header_buf_size` | HTTP header 最大尺寸；过小会拒绝带大 Cookie 的请求 | 代码见 `proxy_buffers.rs:18` |
-| **sniff_timeout_ms** | `SniffRuntime::sniff` 嗅探超时 | 默认: 5000ms | `proxy_buffers.sniff_timeout_ms` | 协议识别的最大时间预算；超时会主动断开以防御 Slowloris 攻击 | 日志: `protocol sniffing timed out`; 见各 `sniff` 包装 |
-| **entry.port / http_entry_port** | client `EntryConfig.port` / client 顶层 `http_entry_port` | None / 未启用 | `entry.port` / `http_entry_port` | Client 本地 TCP/HTTP 入口端口；未配置则不起入口 | `config/client.yaml:19` |
+| **sniff_timeout_ms** | `SniffRuntime::sniff` 嗅探超时 | 2500ms | `proxy_buffers.sniff_timeout_ms` | 协议识别的最大时间预算；超时会主动断开以防御 Slowloris 攻击 | 日志: `protocol sniffing timed out`; 见各 `sniff` 包装 |
+| **entry.port** | client `EntryConfig.port` → `EgressListenerService` | None = 不启用 | `entry.port` | Client 本地 TCP/HTTP 入口端口（协议嗅探 + 转发） | `client/runtime/app.rs` |
+| **entry.accept_workers** | `client/egress/listener.rs` / `resolve_accept_workers` | 未配置 → `effective_runtime_parallelism()` | `entry.accept_workers` | Client 入口 accept worker 数 | 同 **accept_workers** |
+| **udp_entries[]** | `client/egress/udp_listener.rs` `UdpEgressListenerService` | `[]` (空) | `udp_entries[].port` / `udp_entries[].proxy_name` | 本地 UDP 入口；每项绑定一个 proxy_name | `client/runtime/app.rs` |
 | **metrics_port** | server/client runtime startup | None | `metrics_port` (client 顶层 / server `server.metrics_port`) | Prometheus 指标端点；None = 不暴露 | `server/runtime/app.rs` |
 
 ---
@@ -23,16 +27,17 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 (Consumer / Used by) | 默认值 / 其他值 | YAML 路径 | 阈值影响 (Impact) | 排查手段 (Debugging / Logs) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **max_concurrent_streams** | `quinn::TransportConfig`: `max_concurrent_bidi_streams` | **server default: 1000**；**client default: 100** (code) / 1000 (示例 yaml) / CI: 1000 | `quic.max_concurrent_streams` | `open_bi()` 等待空闲槽位；压力过大导致超时失败。**注意 client 代码 default 与 yaml 示例不一致** | 指标: `open_bi_wait_ms`; 代码见 `quic.rs:30`, `client/bootstrap/config.rs:43` |
-| **open_stream_timeout** | `client/egress/listener.rs`: `tokio::time::timeout` / server 对称 | 5s / CI: 5s | client: `reconnect.open_stream_timeout_ms`；server: `server.open_stream_timeout_ms` | 超过此值放弃当前 QUIC 连接并尝试下一个；最终 client 报超时。⚠️ `client/bootstrap/config.rs:177` docstring 写 3000ms，与实际 default 5000ms 不符（源码注释 bug） | 日志: `open_bi timed out after ...`; 见 `client/egress/listener.rs` |
+| **max_concurrent_streams** | `quinn::TransportConfig`: `max_concurrent_bidi_streams` | **1000**（client/server 代码 default 与 yaml 示例一致）/ CI: 1000 | `quic.max_concurrent_streams` | `open_bi()` 等待空闲槽位；压力过大导致超时失败 | 指标: `open_bi_wait_ms`; 代码见 `quic.rs:30`, `client/bootstrap/config.rs:43` |
+| **open_stream_timeout** | `client/egress/listener.rs`: `tokio::time::timeout` / server 对称 | 5s / CI: 5s | client: `reconnect.open_stream_timeout_ms`；server: `server.open_stream_timeout_ms` | 超过此值放弃当前 QUIC 连接并尝试下一个；最终 client 报超时 | 日志: `open_bi timed out after ...`; 见 `client/egress/listener.rs` |
 | **stream_window** | `quinn::TransportConfig`: `stream_receive_window` | 4 MiB | `quic.stream_window_mb` | 单个流的流量窗口，耗尽时发送端挂起 (L4 背压) | 指标: `quic_stream_data_blocked` |
 | **connection_window** | `quinn::TransportConfig`: `receive_window` (连接聚合流控) | 32 MiB | `quic.connection_window_mb` | 一条 QUIC 连接上所有流共享的总接收窗口；小于 N × stream_window 会提前阻塞 | 代码见 `transport/quic.rs:21` |
 | **send_window** | `quinn::TransportConfig`: `send_window` | 8 MiB (client 回退到 `connection_window_mb`) | `quic.send_window_mb` (仅 client) | 本端发送缓冲上限；非对称链路（上下行差异大）时可独立设置 | 代码见 `client/bootstrap/config.rs:67-71` |
 | **keepalive_secs** | `quinn::TransportConfig.keep_alive_interval` | 20s | `quic.keepalive_secs` | QUIC 心跳 PING 间隔；必须 < `idle_timeout_secs` 否则空闲连接会被关 | 代码见 `transport/quic.rs:35` |
-| **idle_timeout_secs** | `quinn::TransportConfig.max_idle_timeout` | 60s | `quic.idle_timeout_secs` | 空闲 QUIC 连接被关闭的阈值；同步日志阻塞时可能先触发 | §4 Logging Latency 相关 |
+| **idle_timeout_secs** | `quinn::TransportConfig.max_idle_timeout` | 180s | `quic.idle_timeout_secs` | 空闲 QUIC 连接被关闭的阈值；同步日志阻塞时可能先触发 | §4 Logging Latency 相关 |
 | **connections** | `client/tunnel/pool.rs`: 启动 supervisor 的数量 | `0` = auto (`effective_runtime_parallelism()`；CI `CPUQuota=100%` → **1**) | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | resolver: `resolve_connection_count` |
+| **shards** | `ClientRegistry` / `EntryConnPool` shard 数 | 未配置 → `effective_runtime_parallelism()`；client 上限为 `connections` | `quic.shards` | 注册表/连接池分片数；影响选路与 actor 并行度 | `resolve_shard_count`; env `TUNNEL_CLIENT__quic.shards` |
 | **congestion_controller** | `quinn::BbrConfig` / `CubicConfig` / `NewRenoConfig` | bbr | `quic.congestion` | 丢包重传与吞吐爬坡算法；bbr 适合高带宽波动链路；未知值 fallback 到 quinn 默认（NewReno） | 代码见 `quic.rs:41-54` |
-| **login_timeout_secs** | `server/ingress/handlers/quic.rs` | 10s | `server.login_timeout_secs` | 服务端对 client QUIC 登录握手超时；与 client `reconnect.login_timeout_ms` (5000ms) **不对称** | 代码见 `tunnel-store/src/server_config.rs:143` |
+| **login_timeout_secs** | `server/ingress/handlers/quic.rs` | 10s | `server.login_timeout_secs` | 服务端对 client QUIC 登录握手超时；与 client `reconnect.login_timeout_ms` (10000ms) 对齐 | 代码见 `tunnel-store/src/config/mod.rs` |
 | **udp_recv_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_RCVBUF` | 8 MiB | `quic.udp_recv_buf_mb` | Linux 内核将请求值翻倍（受 `net.core.rmem_max` 上限约束）。过小导致高 RPS 下 UDP 丢包（`recvmsg ENOBUFS`），是 8000 RPS 延迟尖刺主因之一 | `ss -udp -e` 看 `rmem`；`/proc/net/udp` 的 `drops` 列 |
 | **udp_send_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_SNDBUF` | 8 MiB | `quic.udp_send_buf_mb` | 发送侧内核队列；过小时 quinn GSO batch 被截断，单次 `sendmmsg` 提交的包数减少，CPU 消耗上升 | `ss -udp -e` 看 `wmem` |
 
@@ -53,6 +58,7 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **overload.inflight_sleep_pct** | 同上 | 0.95 (两侧一致) | `overload.inflight_sleep_pct` | 同上，覆盖 `inflight_sleep_threshold` | 同上 |
 | **overload.backoff_strategy** | `tunnel-lib/src/overload.rs` `maybe_slow_path` | `exponential` (默认) / `fixed` / `none` | `overload.backoff_strategy` | `exponential`: 每轮重查 inflight，从 `budget/16` 翻倍到 `budget/4`，槽位一空立刻返回；`fixed`: 直接 sleep 一整个 budget；`none`: 不等，交给 QUIC 背压 | 代码见 `exponential_backoff` |
 | **overload.emfile_backoff_ms** (仅 server) | `server/ingress/handlers/tcp.rs` 与 `server/ingress/handlers/http.rs` accept 循环 | 100ms | `overload.emfile_backoff_ms` | EMFILE 时暂停 accept 的时长；偏低会 CPU 打满，偏高丢连接 | 日志: `too many open files, backing off` |
+| **overload.max_pending_streams** | `tunnel-lib/src/transport/open_bi.rs` `open_bi_guarded` | 未配置 → `max(1, max_concurrent_streams / 4)` | `overload.max_pending_streams` | `open_bi()` 全局待队列上限；超限立即 `RejectedOverloaded`（`quic_open_rejected_overloaded`），client H1 入口返回 503 + `Retry-After: 1` | 指标: `stream_pending_queue_depth` |
 
 ---
 
@@ -62,9 +68,11 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **relay_buf_size** | `relay_inner` 中的 `BufReader::with_capacity` | 64 KiB / 范围 >=4K | `proxy_buffers.relay_buf_size` | **内存风险**: 1w 并发 = 1.25GB RAM 消耗 (双向 Buffer) | `top/htop` 观察 RSS 增长速度; 见 `relay.rs:25` |
 | **http_body_chunk** | `Http1Driver` / `H2Peer` 读块大小 | 8 KiB | `proxy_buffers.http_body_chunk_size` | 影响 L7 转发的系统调用频率及单次 IO 耗时 | 代码见 `h1.rs` 和 `h2_proxy.rs` |
-| **max_idle_per_host** | `hyper::client::pool::Config` | **代码 default: 128**；yaml 示例: 10 | `http_pool.max_idle_per_host` | 超过负载时，闲置连接被关闭，新请求需重新建连 (TCP Handshake)。⚠️ 代码 default 与 `config/server.yaml:43` 示例值不一致 | 见 `server/egress/mod.rs` 的 pool 初始化 |
+| **max_idle_per_host** | `hyper::client::pool::Config` | 128 | `http_pool.max_idle_per_host` | 超过负载时，闲置连接被关闭，新请求需重新建连 (TCP Handshake) | 见 `server/egress/mod.rs` 的 pool 初始化 |
 | **http_pool.idle_timeout_secs** | `HttpClientParams.pool_idle_timeout_secs` | None (yaml 示例: 90) | `http_pool.idle_timeout_secs` | 池内空闲连接最大存活时间；None = 不主动关闭 | `tunnel-lib/src/config/http_pool.rs:13` |
 | **http_pool.tcp_keepalive_secs** | `HttpClientParams.tcp_keepalive_secs` | 15s | `http_pool.tcp_keepalive_secs` | egress 池连接的 TCP_KEEPALIVE 间隔 | `tunnel-lib/src/config/http_pool.rs:15` |
+| **H2c→H1 pin TTL** | `tunnel-lib/src/proxy/http_connector.rs` `prefer_h1` 缓存 | 300s (硬编码) | ❌ | cleartext H2c 请求失败后，该 upstream host 在 TTL 内强制走 H1 | 日志: `cleartext h2c request failed; retrying once with H1` |
+| **DNS cache TTL** | `client/plugins/resolver_cached/mod.rs` | 30s / 上限 1024 条 (硬编码) | ❌ | client 侧 upstream DNS 解析缓存；IP literal 不走缓存 | — |
 
 ---
 
@@ -105,7 +113,7 @@ Client → Server QUIC 建连与登录握手的时间预算。`initial_delay_ms 
 | **reconnect.grace_ms** | 取消后重连前的 grace | 100ms | `reconnect.grace_ms` | 避免取消→立即重连抖动 | — |
 | **reconnect.connect_timeout_ms** | QUIC 连接建立超时 | 10000ms | `reconnect.connect_timeout_ms` | 链路慢或 MTU 问题时会频繁触发 | — |
 | **reconnect.resolve_timeout_ms** | DNS 解析超时 | 5000ms | `reconnect.resolve_timeout_ms` | DNS 故障时阻塞 reconnect 循环 | — |
-| **reconnect.login_timeout_ms** | Client 侧 login 握手超时 | 5000ms | `reconnect.login_timeout_ms` | 与 server `login_timeout_secs` (10s) **不对称**；短的一侧先触发 | 日志: `login timed out` |
+| **reconnect.login_timeout_ms** | Client 侧 login 握手超时 | 10000ms | `reconnect.login_timeout_ms` | 与 server `login_timeout_secs` (10s) 对齐 | 日志: `login timed out` |
 | **reconnect.startup_jitter_ms** | 启动抖动窗口 | 300ms | `reconnect.startup_jitter_ms` | 集群冷启动时避免 thundering herd | — |
 | **reconnect.open_stream_timeout_ms** | `open_bi()` 等待流槽超时 | 5000ms | `reconnect.open_stream_timeout_ms` | 见 §2 同项说明 | — |
 
@@ -118,7 +126,7 @@ Client → Server QUIC 建连与登录握手的时间预算。`initial_delay_ms 
 | **tunnel_port** | `server/ingress/handlers/quic.rs` | 必填 | `server.tunnel_port` | QUIC 监听端口 | `server/bootstrap/config.rs` 有 validate |
 | **h2_single_authority** | `server/bootstrap/mod.rs` | true | `server.h2_single_authority` | H2 跨 vhost 共用 authority；关闭后每 host 独立池 | — |
 | **database_url** | standalone 模式 SQLite 路径 | (empty) | `server.database_url` | ctld 模式下不使用；standalone 模式必填 | — |
-| **max_connections** / **max_tcp_connections** | ⚠️ **未消费** | yaml 注释 10000 | `config/server.yaml:20-21` | **YAML 注释里有但代码里 grep 不到任何消费者**，是历史遗留/未实现 | 应从 YAML 模板中删除 |
+| **TOKIO_WORKER_THREADS** | `tunnel-lib/src/infra/runtime.rs` `effective_runtime_parallelism` | 未设置 → `available_parallelism()` | ❌ (环境变量) | Tokio worker 线程数；与 cgroup `CPUQuota` 取 min | 启动日志: `effective_parallelism` |
 
 ---
 
@@ -176,13 +184,14 @@ duotunnel 当前只有**全局一份**（`ClientConfigFile` / `ServerConfigFile`
 | CLI `Opt::merge_with_opt(&mut ServerConf)` | 仅 `TUNNEL_CLIENT__` 环境变量覆盖少数字段 | 没有完整 CLI override 层 |
 | `overload.inflight_{yield,sleep}_pct` 百分比覆盖 | ✅ 已有 | **duotunnel 独有的好设计**，pingora 没有 |
 
-### 5.3 当前文档化已发现的不一致
+### 5.3 历史不一致项（已修复）
 
-1. **`max_concurrent_streams` client 代码 default=100，yaml 示例=1000**（`client/bootstrap/config.rs:43` vs `config/client.yaml:25`）
-2. **`max_idle_per_host` 代码 default=128，yaml 示例=10**（`http_pool.rs:14` vs `config/server.yaml:43`）
-3. **`open_stream_timeout_ms` 源码 docstring 写 3000ms，实际 default=5000ms**（`client/bootstrap/config.rs:177`）
-4. **`login_timeout` 两侧不对称**：server 10s，client 5s
-5. **`max_connections` / `max_tcp_connections`** YAML 注释里有但代码无消费者，是死配置
+以下项曾在代码 / yaml / 文档间漂移，现已对齐：
+
+- client `quic.max_concurrent_streams` default → **1000**
+- `http_pool.max_idle_per_host` 模板示例 → **128**（与代码 default 一致）
+- client `reconnect.login_timeout_ms` default → **10000ms**（与 server `login_timeout_secs` 10s 一致）
+- 顶层 `http_entry_port` 废弃 → 使用 `entry.port`
 
 ---
 
@@ -198,9 +207,8 @@ duotunnel 当前只有**全局一份**（`ClientConfigFile` / `ServerConfigFile`
 
 **Step 1 — YAML schema 版本化 + 清理死配置**
 - 顶层加 `version: 1` 字段（参考 `ServerConf.version`），便于未来做破坏性 migration
-- 删除 `config/server.yaml` 里的 `max_connections` / `max_tcp_connections` 注释（无消费者）
+- 清理历史字段：`http_entry_port`（改用 `entry.port`）、`max_connections` / `max_tcp_connections`（无消费者）
 - 统一所有 timeout 的单位后缀（`_ms` 或 `_secs`），目前混用：`connect_timeout_ms`、`login_timeout_secs`、`idle_timeout_secs`、`open_stream_timeout_ms`
-- 修复 client `max_concurrent_streams` default（100→1000）与 yaml 示例一致
 
 **Step 2 — 抽出 `TimeoutConfig` (语义化拆分)**
 

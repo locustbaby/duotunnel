@@ -16,21 +16,18 @@ server:
   trace_enabled: false
   database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone mode only
 
-  # ── Connection limits ───────────────────────────────────────────────────────
-  # max_connections: 10000        # Max concurrent tunnel client (QUIC) connections (default: 10000)
-  # max_tcp_connections: 10000    # Max concurrent ingress TCP connections from external clients (default: 10000)
-
   # ── TCP socket options (applied to ingress TCP connections) ─────────────────
   tcp:
     nodelay: true
-    # recv_buf_size: 262144   # Socket receive buffer in bytes (default: OS default)
-    # send_buf_size: 262144   # Socket send buffer in bytes (default: OS default)
-    # keepalive: false        # Enable TCP keepalive (default: false)
-    # user_timeout_ms: 0      # TCP user timeout in ms, 0 = disabled (default: 0)
+    # recv_buf_size: 4194304  # Socket receive buffer in bytes (default: 4 MiB)
+    # send_buf_size: 4194304  # Socket send buffer in bytes (default: 4 MiB)
+    # keepalive: true         # Enable TCP keepalive (default: true)
+    # user_timeout_ms: 30000  # TCP user timeout in ms, 0 = disabled (default: 30000)
 
   # ── QUIC transport (tunnel channel between server and client) ───────────────
   quic:
     max_concurrent_streams: 1000  # Max concurrent bidi QUIC streams per connection (default: 1000)
+    # shards: 4                 # optional; default = effective_runtime_parallelism
     keepalive_secs: 20            # QUIC keepalive ping interval in seconds (default: 20)
     idle_timeout_secs: 180        # Close idle QUIC connections after N seconds (default: 180)
     # congestion: "bbr"           # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
@@ -43,7 +40,7 @@ server:
   # ── Outbound HTTP connection pool (egress forward proxy) ───────────────────
   http_pool:
     idle_timeout_secs: 90   # Keep idle connections alive for N seconds (default: 90)
-    max_idle_per_host: 10   # Max idle connections per upstream host (default: 10)
+    max_idle_per_host: 128  # Max idle connections per upstream host (default: 128)
 
   # ── Protocol detection buffer ───────────────────────────────────────────────
   proxy_buffers:

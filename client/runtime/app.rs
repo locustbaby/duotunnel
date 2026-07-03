@@ -51,12 +51,9 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         crate::metrics::set_handle(handle);
         spawn_task(run_healthz_server(port, ready.clone(), cancel.clone()));
     }
-    let resolved_connections =
-        tunnel_lib::resolve_connection_count(config.quic.connections);
-    let shard_count = tunnel_lib::resolve_shard_count(
-        config.quic.shards,
-        Some(resolved_connections as usize),
-    );
+    let resolved_connections = tunnel_lib::resolve_connection_count(config.quic.connections);
+    let shard_count =
+        tunnel_lib::resolve_shard_count(config.quic.shards, Some(resolved_connections as usize));
     let accept_workers = tunnel_lib::resolve_accept_workers(config.entry.accept_workers);
     info!(
         configured_connections = config.quic.connections,

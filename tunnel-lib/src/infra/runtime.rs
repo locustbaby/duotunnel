@@ -56,7 +56,9 @@ fn read_cgroup_v2_cpu_max() -> Option<usize> {
         let cpu_max = if path.is_empty() {
             std::path::PathBuf::from("/sys/fs/cgroup/cpu.max")
         } else {
-            std::path::PathBuf::from("/sys/fs/cgroup").join(path).join("cpu.max")
+            std::path::PathBuf::from("/sys/fs/cgroup")
+                .join(path)
+                .join("cpu.max")
         };
         if let Ok(contents) = std::fs::read_to_string(&cpu_max) {
             if let Some(cpus) = parse_cpu_max_contents(&contents) {
@@ -74,7 +76,9 @@ fn read_cgroup_v1_cpu_quota() -> Option<usize> {
         if line.contains("::") {
             continue;
         }
-        let path = line.rsplit_once(':').map(|(_, p)| p.trim_start_matches('/'))?;
+        let path = line
+            .rsplit_once(':')
+            .map(|(_, p)| p.trim_start_matches('/'))?;
         let base = std::path::PathBuf::from("/sys/fs/cgroup/cpu").join(path);
         let quota = std::fs::read_to_string(base.join("cpu.cfs_quota_us")).ok()?;
         let period = std::fs::read_to_string(base.join("cpu.cfs_period_us")).ok()?;
@@ -168,9 +172,9 @@ pub fn build_single_thread_runtime(name: &str) -> tokio::runtime::Runtime {
 #[cfg(test)]
 mod tests {
     use super::{
-        cpu_count_from_quota_period, parse_cpu_max_contents, parse_cfs_quota_contents,
-        parse_worker_threads, resolve_accept_workers, resolve_connection_count,
-        effective_runtime_parallelism,
+        cpu_count_from_quota_period, effective_runtime_parallelism, parse_cfs_quota_contents,
+        parse_cpu_max_contents, parse_worker_threads, resolve_accept_workers,
+        resolve_connection_count,
     };
 
     #[test]

@@ -185,6 +185,7 @@ If a wrapper only renames existing calls without reducing coupling, it should no
 When major module boundaries change:
 
 - update the relevant spec in `docs/spec`
+- start from [architecture.md](./architecture.md) for cross-cutting topology and call flows
 - keep file structure examples current
 - prefer concise invariants over prose-heavy explanation
 
@@ -246,7 +247,8 @@ Characteristics:
 Applies to:
 
 - `ingress/registry.rs` (`ClientRegistry` — register/unregister/purge via mpsc)
-- `tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
+- `client/tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
+- `tunnel-lib/src/transport/open_bi.rs` (`open_bi_guarded` — pending-queue gate before `open_bi` wait)
 
 ### Applying the Framework
 

@@ -40,7 +40,7 @@ impl Default for ClientQuicConfig {
         Self {
             connections: 0,
             shards: None,
-            max_concurrent_streams: 100,
+            max_concurrent_streams: 1000,
             stream_window_mb: None,
             connection_window_mb: None,
             send_window_mb: None,
@@ -185,7 +185,7 @@ pub struct ReconnectConfig {
     pub startup_jitter_ms: u64,
     /// Timeout for `open_bi()` in the entry listener (waiting for a QUIC stream slot).
     /// Separate from login_timeout_ms — stream acquisition can legitimately take longer
-    /// under backpressure. Defaults to 3000ms.
+    /// under backpressure. Defaults to 5000ms.
     pub open_stream_timeout_ms: u64,
 }
 impl Default for ReconnectConfig {
@@ -196,7 +196,7 @@ impl Default for ReconnectConfig {
             grace_ms: 100,
             connect_timeout_ms: 10_000,
             resolve_timeout_ms: 5_000,
-            login_timeout_ms: 5_000,
+            login_timeout_ms: 10_000,
             startup_jitter_ms: 300,
             open_stream_timeout_ms: 5_000,
         }

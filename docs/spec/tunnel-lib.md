@@ -29,7 +29,7 @@ tunnel-lib/src/
     msg.rs             (Login, LoginResp, RoutingInfo, send_message, recv_message, ...)
   plugin/              (plugin trait system)
     ctx.rs             (ServerCtx, EgressCtx, PhaseResult, Timeouts, Route, ...)
-    dispatcher.rs      (IngressDispatcher)
+    dispatcher.rs      (IngressDispatcher — 6-phase ingress pipeline)
     egress.rs          (LoadBalancer, UpstreamDialer, Resolver)
     ingress.rs         (IngressProtocolHandler, ProtocolHint, ProtocolKind)
     metrics.rs         (MetricsSink, NoopSink)
@@ -79,8 +79,11 @@ These exist for callers that predate the reorganization. New code should use can
 
 - All public types are re-exported from `lib.rs` at stable paths
 - Module boundaries follow runtime responsibility (guideline §4)
-- `lb/` owns all backpressure and load-selection primitives
+- `lb/` owns all backpressure, overload limits, and load-selection primitives
+- `transport/open_bi.rs` owns guarded `open_bi()` with pending-queue rejection
 - `protocol/` owns all wire format and protocol detection code
 - `transport/` owns all connection-level I/O primitives
 - `models/` owns all shared domain data types and message framing
+- `proxy/http_connector.rs` implements cleartext H2c→H1 adaptive fallback (300s pin TTL)
+- `plugin/dispatcher.rs` implements the server ingress 6-phase pipeline (sniff → pre_admission → admission → route → handle → log); see [architecture.md](./architecture.md) §6
 - Internal `crate::` paths use canonical submodule paths, not the compat aliases

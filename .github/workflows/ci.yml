@@ -245,7 +245,7 @@ jobs:
   #   ci-test-client
   #     │ ingress → echo.local:8080 (server http listener) ──QUIC:10086──→ client
   #     │                                                                   │ egress
-  #     │ egress  → 127.0.0.1:8082 (client http_entry_port)                │
+  #     │ egress  → 127.0.0.1:8082 (client entry.port)                     │
   #     └─────────────────────────────────────────────────────────────────────→ backends
   #
   # Test sections:

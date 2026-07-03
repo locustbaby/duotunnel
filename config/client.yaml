@@ -16,13 +16,16 @@ server_port: 10086
 auth_token: "dt_replace_with_token_from_ctld"
 
 # Optional: enable local HTTP entry listener (forward proxy entry point)
-http_entry_port: 8003
+entry:
+  port: 8003
+  # accept_workers: 4   # optional; default = effective_runtime_parallelism()
 # metrics_port: 9090  # Expose Prometheus metrics (default: disabled)
 
 # ── QUIC transport ─────────────────────────────────────────────────────────────
 quic:
   connections: 0                  # 0 = auto (effective_runtime_parallelism); 1 = single-connection debug
-  max_concurrent_streams: 1000    # Max concurrent bidi streams / semaphore size (default: 100)
+  # shards: 4                   # optional; default = effective_runtime_parallelism (capped by connections)
+  max_concurrent_streams: 1000    # Max concurrent bidi streams / semaphore size (default: 1000)
   keepalive_secs: 20              # QUIC keepalive ping interval in seconds (default: 20)
   idle_timeout_secs: 180          # Close idle QUIC connections after N seconds (default: 180)
   congestion: "bbr"               # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
@@ -36,15 +39,15 @@ quic:
 # ── TCP socket options (applied to upstream connections) ──────────────────────
 tcp:
   nodelay: true
-  # recv_buf_size: 262144  # Socket receive buffer in bytes (default: OS default)
-  # send_buf_size: 262144  # Socket send buffer in bytes (default: OS default)
-  # keepalive: false       # Enable TCP keepalive (default: false)
-  # user_timeout_ms: 0     # TCP user timeout in ms, 0 = disabled (default: 0)
+  # recv_buf_size: 4194304  # Socket receive buffer in bytes (default: 4 MiB)
+  # send_buf_size: 4194304  # Socket send buffer in bytes (default: 4 MiB)
+  # keepalive: true         # Enable TCP keepalive (default: true)
+  # user_timeout_ms: 30000  # TCP user timeout in ms, 0 = disabled (default: 30000)
 
 # ── Outbound HTTP connection pool ──────────────────────────────────────────────
 http_pool:
   idle_timeout_secs: 90   # Keep idle connections alive for N seconds (default: 90)
-  max_idle_per_host: 10   # Max idle connections per upstream host (default: 10)
+  max_idle_per_host: 128  # Max idle connections per upstream host (default: 128)
 
 # ── Protocol detection buffer ──────────────────────────────────────────────────
 proxy_buffers:
@@ -60,6 +63,6 @@ reconnect:
   grace_ms: 100                  # Wait after cancel before reconnect (default: 100)
   connect_timeout_ms: 10000      # QUIC connect timeout in ms (default: 10000)
   resolve_timeout_ms: 5000       # DNS resolve timeout in ms (default: 5000)
-  login_timeout_ms: 5000         # Login handshake timeout in ms (default: 5000)
+  login_timeout_ms: 10000        # Login handshake timeout in ms (default: 10000; matches server login_timeout_secs)
   startup_jitter_ms: 300         # Random jitter on startup to avoid thundering herd (default: 300)
   # open_stream_timeout_ms: 5000 # Timeout waiting for a QUIC stream slot (default: 5000)

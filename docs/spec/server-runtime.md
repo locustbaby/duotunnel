@@ -110,6 +110,18 @@ Main ingress/runtime modules:
 
 These modules consume runtime capabilities from `ServerState` and should not perform top-level runtime assembly.
 
+## Call Relationships
+
+See [architecture.md](./architecture.md) for full diagrams. Server-side summary:
+
+| Direction | Entry | Core path |
+| :--- | :--- | :--- |
+| **Forward** (external → client) | `handlers/{http,tcp}.rs` accept | `IngressDispatcher` → plugin handler → `ClientRegistry` → `open_bi_guarded` → QUIC |
+| **Client egress** (client → internet) | QUIC stream from client | `tunnel_handler.rs` → `ProxyEngine(ServerEgressMap)` → external upstream |
+| **Tunnel control** | `handlers/quic.rs` | auth → register in `ClientRegistry` → `accept_bi` loop for server-initiated streams |
+
+Routing reads always go through `routing_snapshot()` guard; mutations via `replace_routing()` only from control/hot-reload paths.
+
 ## Runtime State
 
 `ServerState` is the runtime capability surface for request-time and background-time code.
@@ -174,6 +186,27 @@ The server supports two background modes.
 - managed: ctld watch stream and local token cache
 
 Mode selection belongs to bootstrap and supervisor wiring, not handlers.
+
+## Shutdown
+
+`ServerApp` installs SIGINT/SIGTERM handlers, cancels the shared shutdown token, and waits up to 30 seconds (`SHUTDOWN_DRAIN_TIMEOUT`) for `wait_for_resource_drain` before forcing exit.
+
+During drain, `tunnel_lib::METRICS` reports `active_connections` and `pending_streams`.
+
+## Plugin Ingress Pipeline
+
+Bootstrap builds `PluginRegistry` at startup and wires server ingress plugins:
+
+- `plugins::tls::TlsHandler`
+- `plugins::h2c::H2cHandler` (respects `h2_single_authority`)
+- `plugins::h1::H1Handler`
+- `plugins::tcp_pass::TcpPassHandler`
+- `plugins::vhost::VhostPlugin` as `RouteResolver`
+- `plugins::prometheus::PrometheusSink` as `MetricsSink`
+
+Request-time ingress uses `IngressDispatcher` with this registry; handlers do not construct plugins ad hoc.
+
+Shard topology is resolved at bootstrap: `resolve_shard_count(server.quic.shards)` feeds `new_shared_registry(shard_count, max_streams)`.
 
 ## Invariants
 

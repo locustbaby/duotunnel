@@ -92,6 +92,25 @@ Owns:
 
 These modules are for process-lifetime control-plane work, not bootstrap concerns.
 
+## Control Plane Flow
+
+```
+CtldApp::run
+  → open SQLite (auth + routing)
+  → seed routing from server_config YAML on first boot (if configured)
+  → ControlService::new (in-memory snapshot + watch channel)
+  → WatchServer::run (TCP watch_addr)
+       client connects → WatchRequest
+       → Snapshot (full ConfigSnapshot)
+       → loop: Patch on DB mutation (debounced via reactor)
+```
+
+Managed server consumes patches via `server/control/control_client.rs` → `replace_routing` + `sync_listeners`.
+
+Standalone server uses `hot_reload.rs` (file notify + `ConfigSource::load`) instead of watch TCP.
+
+Wire types: `tunnel-lib/protocol/ctld.rs`, events wrapped in `MessageType::ConfigPush`.
+
 ## Invariants
 
 - there is one public runtime entry

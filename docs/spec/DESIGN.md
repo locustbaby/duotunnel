@@ -4,6 +4,8 @@
 >
 > Inspired by frp design philosophy, implementing transparent tunneling + configuration distribution + grouping + Rules-based routing
 
+**Spec index:** [architecture.md](./architecture.md) (topology & call flows) · [parameters.md](./parameters.md) · per-crate `*-runtime.md`
+
 ---
 
 ## 1. Design Goals
@@ -65,10 +67,13 @@ Reverse Proxy (Egress):   Internal Request → Client → Server → External Se
 tunnel/
 ├── tunnel-lib/                    # Core library
 │   └── src/
-│       ├── accept.rs              # Concurrency Accept with SO_REUSEPORT
+│       ├── config/                # Startup-time config types (QuicConfig, TcpConfig, ...)
 │       ├── models/msg.rs          # Message protocol definitions
 │       ├── transport/             # QUIC/TCP transport layer
-│       │   ├── listener.rs        # VhostRouter, PortRouter
+│       │   ├── accept.rs          # Concurrency accept with SO_REUSEPORT
+│       │   ├── listener.rs        # VhostRouter, build_reuseport_listener
+│       │   ├── open_bi.rs         # open_bi_guarded, pending-queue overload gate
+│       │   ├── quic.rs            # QuicTransportParams, UDP socket tuning
 │       │   ├── quinn_io.rs        # QUIC stream adapter
 │       │   └── addr.rs            # Address resolution
 │       ├── protocol/              # Protocol handling
@@ -76,21 +81,24 @@ tunnel/
 │       │   └── rewrite.rs         # Header rewriting
 │       ├── proxy/                 # Proxy core
 │       │   ├── core.rs            # UpstreamResolver trait
-│       │   ├── peers.rs           # PeerSpec enum (replaces old UpstreamPeer)
+│       │   ├── peers.rs           # PeerSpec enum
+│       │   ├── http_connector.rs  # H2c→H1 adaptive fallback
 │       │   ├── tcp.rs             # TCP passthrough
 │       │   ├── http.rs            # HTTP/1.1 proxy
 │       │   └── h2.rs              # HTTP/2 proxy
 │       ├── engine/                # Data engine
-│       │   ├── relay.rs           # Bidirectional data relay
 │       │   └── bridge.rs          # QUIC-TCP bridge
-│       ├── egress/                # Outbound proxy
-│       ├── plugin/                # 6-phase pipeline plugin core
+│       ├── egress/                # Outbound HTTP client factories
+│       ├── lb/                    # Backpressure and load selection
+│       │   ├── inflight.rs        # InflightTable, pick_p2c_inflight
+│       │   └── overload.rs        # OverloadLimits, maybe_slow_path
+│       ├── plugin/                # Ingress pipeline plugin core
 │       │   ├── dispatcher.rs      # Pipeline dispatcher
 │       │   ├── ingress.rs         # IngressProtocolHandler trait
-│       │   └── egress.rs          # Egress plugins
+│       │   └── egress.rs          # Egress plugin traits
 │       ├── error.rs               # Structured proxy errors
-│       ├── overload.rs            # Overload protection backoff
 │       └── infra/                 # Infrastructure
+│           ├── runtime.rs         # effective_runtime_parallelism, cgroup CPU limit
 │           ├── pki.rs             # Certificate generation (MITM)
 │           ├── peek_buf.rs        # PeekBufPool thread-local cache
 │           └── observability.rs   # Logging and tracing
@@ -126,7 +134,7 @@ tunnel/
 │   │   │   ├── tcp_pass/          # TCP passthrough plugin
 │   │   │   └── prometheus/        # Prometheus metrics plugin
 │   │   ├── listener_mgr.rs        # Ingress listener lifecycle
-│   │   ├── registry.rs            # ClientRegistry (DashMap)
+│   │   ├── registry.rs            # ClientRegistry (sharded, actor via mpsc)
 │   │   ├── tunnel_handler.rs      # Reverse stream handling
 │   │   └── tunnel_service.rs      # Tunnel service implementation
 │   └── egress/
@@ -171,13 +179,16 @@ tunnel/
     │   ├── app.rs                 # LocalProxyMap
     │   └── handler.rs             # Local service handler
     ├── egress/
-    │   └── listener.rs            # Reverse proxy entry listener
-    └── plugins/                   # Client-side adapters
+    │   ├── listener.rs            # Reverse TCP entry (forward proxy from local apps)
+    │   └── udp_listener.rs        # Reverse UDP entry
+    └── plugins/                   # Client-side adapters (resolver, LB)
 ```
 
 ---
 
 ## 3. Message Protocol
+
+> Canonical architecture and call flows: [architecture.md](./architecture.md). This section documents the on-wire format.
 
 ### 3.1 Frame Format
 
@@ -186,9 +197,9 @@ tunnel/
 │  Type (1B)   │  Length (4B) │              Payload (variable)        │
 └──────────────┴──────────────┴────────────────────────────────────────┘
 
-Type:    Message type (u8)
+Type:    MessageType (u8)
 Length:  Payload length (u32, big-endian)
-Payload: bincode serialized message body
+Payload: rkyv-serialized message body (not bincode)
 ```
 
 ### 3.2 Message Types
@@ -196,49 +207,48 @@ Payload: bincode serialized message body
 ```rust
 #[repr(u8)]
 pub enum MessageType {
-    Login      = 0x01,  // Client → Server: Login authentication
-    LoginResp  = 0x02,  // Server → Client: Login response + config distribution
-    RoutingInfo= 0x10,  // Workflow routing information
-    Ping       = 0x04,  // Heartbeat
-    Pong       = 0x05,  // Heartbeat response
-    ConfigPush = 0x06,  // Config push (reserved)
+    Login       = 0x01,  // Client → Server: token auth
+    LoginResp   = 0x02,  // Server → Client: success + ClientConfig
+    Ping        = 0x04,
+    Pong        = 0x05,
+    ConfigPush  = 0x06,  // ctld watch: Snapshot / Patch
+    RoutingInfo = 0x10,  // First message on each forwarded bidi stream
 }
 ```
 
 ### 3.3 Core Message Structures
 
 ```rust
-// Login request
+// Login request (token only — group derived server-side from auth store)
 pub struct Login {
-    pub client_id: String,
-    pub group_id: Option<String>,
     pub token: String,
 }
 
-// Login response (includes config distribution)
+// Login response includes distributed client config
 pub struct LoginResp {
     pub success: bool,
     pub error: Option<String>,
     pub config: ClientConfig,
+    pub client_group: GroupId,
 }
 
-// Client configuration
 pub struct ClientConfig {
     pub config_version: String,
-    pub proxies: Vec<ProxyConfig>,      // Proxy definitions
-    pub upstreams: Vec<UpstreamConfig>, // Upstream services
-    pub rules: Vec<RuleConfig>,         // Routing rules
+    pub upstreams: Vec<UpstreamConfig>,       // proxy_name → servers + lb_policy
+    pub egress_rules: Vec<EgressVhostRuleDef>, // allowlist for client entry fast-fail
 }
 
-// Routing information (workflow)
+// Per-stream routing header (after open_bi on forward or reverse paths)
 pub struct RoutingInfo {
-    pub proxy_name: String,
+    pub proxy_name: ProxyName,
     pub src_addr: String,
     pub src_port: u16,
-    pub protocol: String,  // "http", "h2", "tcp", "ws"
+    pub protocol: Protocol,  // H1 | H2 | Tcp | WebSocket | Unknown
     pub host: Option<String>,
 }
 ```
+
+Implementation: `tunnel-lib/src/models/msg.rs`.
 
 ---
 
@@ -276,27 +286,20 @@ pub struct RoutingInfo {
 
 ### 4.2 Client Reconnection Mechanism
 
-```rust
-// Exponential backoff reconnection
-let mut retry_delay = Duration::from_secs(1);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+Implemented in `client/tunnel/supervisor.rs`:
 
-loop {
-    match run_client(&config).await {
-        Ok(_) => {
-            retry_delay = Duration::from_secs(1);  // Reset
-        }
-        Err(e) => {
-            tokio::time::sleep(retry_delay).await;
-            retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY);  // Exponential backoff
-        }
-    }
-}
-```
+- `JitterBackoff` over `reconnect.initial_delay_ms` … `max_delay_ms` (doubling with jitter per step).
+- `startup_jitter_ms` before first connect (thundering herd avoidance).
+- `ConnectError::Fatal` vs `Transient` — fatal login errors stop the supervisor; transient errors retry.
+- On session end: `reconnect.grace_ms` before reconnect loop resumes.
+
+See [client-runtime.md](./client-runtime.md) and [architecture.md](./architecture.md) §5.
 
 ---
 
 ## 5. Forward Proxy (Ingress)
+
+> Full call graph: [architecture.md](./architecture.md) §5.1.
 
 ### 5.1 Data Flow
 
@@ -475,23 +478,20 @@ pub struct MitmPeerSpec {
 
 ## 8. Concurrency Control
 
-### 8.1 Connection Limits (Semaphore)
+### 8.1 Overload Protection (current)
 
-```rust
-pub struct ServerState {
-    // QUIC connection limit
-    pub quic_semaphore: Arc<Semaphore>,  // default: 10000
-    // TCP connection limit
-    pub tcp_semaphore: Arc<Semaphore>,   // default: 10000
-}
+Overload is enforced at three layers:
 
-// Usage
-let permit = state.tcp_semaphore.clone().try_acquire_owned()?;
-tokio::spawn(async move {
-    let _permit = permit;  // Hold until completion
-    handle_connection(stream).await;
-});
-```
+1. **Inflight slow-path** (`lb/overload.rs` `maybe_slow_path`) — yield/sleep before `open_bi()` when per-connection inflight streams approach `max_concurrent_streams`
+2. **Pending queue cap** (`transport/open_bi.rs` `open_bi_guarded`) — global `pending_streams` metric gated by `overload.max_pending_streams` (default: `max_concurrent_streams / 4`); rejects with `quic_open_rejected_overloaded`
+3. **QUIC transport limits** — `max_concurrent_bidi_streams`, stream/connection windows
+
+Client entry overload responses:
+
+- HTTP/1.x: `503 Service Unavailable` + `Retry-After: 1`
+- TCP/TLS: clean connection close
+
+Historical note: global `quic_semaphore` / `tcp_semaphore` connection caps were removed; per-stream backpressure replaced process-wide semaphores.
 
 ### 8.2 Flow Control
 
@@ -507,54 +507,49 @@ tokio::spawn(async move {
 
 ```yaml
 server:
-  tunnel_port: 4433        # QUIC tunnel port
-  entry_port: 8443         # HTTP entry port
-  max_connections: 10000   # Max QUIC connections
-  max_tcp_connections: 10000
-  metrics_port: 9090       # Prometheus metrics
-  auth_tokens:
-    group-a: "secret-token-a"
-    group-b: "secret-token-b"
+  tunnel_port: 4433
+  database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone only
+  metrics_port: 9090
+  login_timeout_secs: 10
+  open_stream_timeout_ms: 5000
+  h2_single_authority: true
+  quic:
+    max_concurrent_streams: 1000
+    shards: 4                    # optional; default = effective_runtime_parallelism
+  overload:
+    inflight_yield_pct: 0.80
+    inflight_sleep_pct: 0.95
+    max_pending_streams: 250     # optional; default = max_concurrent_streams / 4
 
-# Server egress proxy configuration
 server_egress_upstream:
   upstreams:
     external-api:
       servers:
         - address: "api.external.com:443"
   rules:
-    http:
+    vhost:
       - match_host: "*.external.com"
         action_upstream: "external-api"
 
-# Tunnel management configuration
 tunnel_management:
-  # Inbound routing (external → private network)
   server_ingress_routing:
-    rules:
-      vhost:
-        - match_host: "app.example.com"
-          action_client_group: "group-a"
-        - match_host: "*.internal.com"
-          action_client_group: "group-b"
-      tcp:
-        - match_port: 2222
-          action_client_group: "group-a"
-          action_proxy_name: "ssh"
-
-  # Client configuration distribution
+    listeners:
+      - port: 8443
+        mode:
+          http:
+            vhost:
+              - match_host: "app.example.com"
+                client_group: "group-a"
+                proxy_name: "local-web"
   client_configs:
-    client_egress_routings:
+    groups:
       group-a:
         config_version: "v1"
         upstreams:
           local-web:
             servers:
               - address: "127.0.0.1:8080"
-        rules:
-          vhost:
-            - match_host: "app.example.com"
-              action_upstream: "local-web"
+            lb_policy: "round_robin"
 ```
 
 Egress vhost matching semantics:
@@ -569,27 +564,30 @@ Egress vhost matching semantics:
 ### 9.2 Client Configuration (YAML)
 
 ```yaml
-server_host: "tunnel.example.com"
+server_addr: "tunnel.example.com"
 server_port: 4433
-client_id: "client-001"
-client_group_id: "group-a"
-auth_token: "secret-token-a"
+auth_token: "dt_replace_with_token"
 
-# TLS configuration
-tls_skip_verify: false       # Should be false in production
-tls_ca_cert: "/path/to/ca.pem"  # Optional: custom CA
+entry:
+  port: 8080                   # optional local HTTP/TCP entry (forward proxy)
+  # accept_workers: 4          # optional; default = effective_runtime_parallelism
 
-# Performance configuration
-max_concurrent_streams: 100
+# udp_entries:                 # optional local UDP entries
+#   - port: 5353
+#     proxy_name: "dns-proxy"
 
-# Reverse proxy entry (optional)
-http_entry_port: 8080
+quic:
+  connections: 0               # 0 = auto (effective_runtime_parallelism)
+  max_concurrent_streams: 1000 # code default when omitted: 100
+  # shards: 4
 
-# Local proxy mapping (can be overridden by server distribution)
-local_proxies:
-  app.example.com: "127.0.0.1:3000"
-  ssh: "127.0.0.1:22"
+tls_skip_verify: false
+reconnect:
+  login_timeout_ms: 10000
+  open_stream_timeout_ms: 5000
 ```
+
+Upstream routing for reverse proxy is distributed from server `tunnel_management.client_configs` at login time; the client does not hardcode local proxy maps in YAML.
 
 ---
 

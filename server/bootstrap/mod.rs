@@ -318,8 +318,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         "overload protection resolved"
     );
     let shard_count = tunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
-    let accept_workers =
-        tunnel_lib::resolve_accept_workers(bootstrap.config.server.accept_workers);
+    let accept_workers = tunnel_lib::resolve_accept_workers(bootstrap.config.server.accept_workers);
     info!(
         shards = shard_count,
         accept_workers = accept_workers,

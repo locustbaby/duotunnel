@@ -155,12 +155,12 @@ server:
   quic:
     max_concurrent_streams: 1000
     keepalive_secs: 20
-    idle_timeout_secs: 60
+    idle_timeout_secs: 180
   tcp:
     nodelay: true
   http_pool:
     idle_timeout_secs: 90
-    max_idle_per_host: 10
+    max_idle_per_host: 128
   proxy_buffers:
     peek_buf_size: 16384
   pki:
@@ -221,21 +221,23 @@ server_port: 10086
 auth_token: "dt_xxxxxxxxxxxxxxxx"
 
 # Optional: expose a local HTTP entry for egress (forward proxy)
-http_entry_port: 8003
+entry:
+  port: 8003
 
 # Optional tuning
 quic:
   connections: 0                # 0 = auto; 1 = single-connection debug
-  max_concurrent_streams: 100
+  max_concurrent_streams: 1000
 tcp:
   nodelay: true
 http_pool:
   idle_timeout_secs: 90
-  max_idle_per_host: 10
+  max_idle_per_host: 128
 reconnect:
   initial_delay_ms: 1000
   max_delay_ms: 60000
   connect_timeout_ms: 10000
+  login_timeout_ms: 10000
 ```
 
 ---
