@@ -18,6 +18,7 @@ pub(crate) struct TunnelPoolService {
     pub(crate) entry_pool: Arc<EntryConnPool>,
     pub(crate) ready: Arc<AtomicBool>,
     pub(crate) udp_registry: Arc<UdpListenerRegistry>,
+    pub(crate) resolved_connections: u32,
 }
 
 #[async_trait::async_trait]
@@ -26,8 +27,11 @@ impl ClientService for TunnelPoolService {
         "wan-tunnel-pool"
     }
     async fn start(&self, shutdown: CancellationToken) -> anyhow::Result<()> {
-        if self.config.quic.connections > 1 {
-            info!(connections = %self.config.quic.connections, "using multi-QUIC connection pool");
+        if self.resolved_connections > 1 {
+            info!(
+                connections = self.resolved_connections,
+                "using multi-QUIC connection pool"
+            );
             pool::run_pool(
                 self.config.clone(),
                 self.endpoint.clone(),
@@ -35,6 +39,7 @@ impl ClientService for TunnelPoolService {
                 self.ready.clone(),
                 self.entry_pool.clone(),
                 self.udp_registry.clone(),
+                self.resolved_connections,
             )
             .await
             .map_err(|e| anyhow::anyhow!("run_pool failed: {}", e))

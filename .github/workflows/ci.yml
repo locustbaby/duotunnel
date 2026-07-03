@@ -44,83 +44,56 @@ on:
     inputs:
       # ── Build ─────────────────────────────────────────────────────────────────
       build_profile:
-        description: 'Build profile: release | dial9 | both'
+        description: 'Binaries for bench-8k trace: release (no trace), dial9 (tokio-console trace), or both'
         type: choice
         options: [both, release, dial9]
         default: both
       # ── Test ──────────────────────────────────────────────────────────────────
       run_unit:
-        description: 'Run unit tests + clippy'
+        description: 'Run cargo test, clippy, audit (unit-tests job)'
         type: boolean
         default: true
       run_integration:
-        description: 'Run integration tests (all protocols)'
+        description: 'Run integration-test job (ci-test-client, all protocols)'
         type: boolean
         default: true
       run_stress:
-        description: 'Run k6 stress test (core profile)'
+        description: 'Run all bench-* jobs (basic, 3k, 6k, 8k)'
         type: boolean
         default: true
       run_stress_trace:
-        description: 'Run 8k stress trace (dial9 profiling)'
+        description: 'Run bench-8k dial9 trace cases (run-trace-8k.sh). No effect when run_stress=false'
         type: boolean
         default: true
       run_frp:
-        description: 'Run frp baseline benchmark alongside stress test'
+        description: 'Run frp_* baseline cases inside bench-3k/6k/8k. No effect when run_stress=false'
         type: boolean
         default: true
+      # ── Runtime tuning (bench + integration on manual runs; see BENCHMARK_SPEC.md) ─
       worker_threads:
-        description: 'Tokio worker threads for server/client in stress jobs (0 = CPU count)'
+        description: 'Parallelism anchor for server AND client. 0 = auto (min of host CPUs and cgroup CPUQuota). N>0 sets TOKIO_WORKER_THREADS request, still capped by quota. Derives accept_workers, shards, connections (yaml 0). Push to main uses 0. See stress_cpu_quota.'
         type: number
         default: 0
-      stress_quic_connections:
-        description: 'QUIC client connection count for stress jobs'
-        type: number
-        default: 4
       stress_core_target_rate:
-        description: 'Target RPS for stress-category cases in core profile (0 = use catalog default of 3000)'
+        description: 'Override RPS for 3k-tier stress cases only (ingress_3000qps, egress_3000qps, ingress_multihost, egress_multihost). 0 = use stress.json catalog rate (3000). Does not change *_6000qps or *_8000qps cases.'
         type: number
         default: 0
       stress_cpu_quota:
-        description: 'CPU quota limit for server/client (e.g., 50%, 100%, 200%)'
+        description: 'systemd CPUQuota per scope (server, client, frp). 100% = 1 CPU (CI default → derived threads/connections/shards = 1). 400% ≈ 4 CPUs. none | unlimited | 0 = no cap (use host CPU count).'
         type: string
         default: '100%'
-      # ── Monitor ───────────────────────────────────────────────────────────────
-      monitor_cpu:
-        description: 'Collect CPU/memory/IO/ctxsw metrics (bench-tool.py collect via psutil)'
+      # ── Observability ─────────────────────────────────────────────────────────
+      collect_resource_metrics:
+        description: 'Run bench-tool.py collect during k6 (CPU, memory, net, TCP, ctx switches). Disabling skips resource panels on the dashboard for this run.'
         type: boolean
         default: true
-      monitor_io:
-        description: 'Collect disk I/O metrics (via psutil)'
-        type: boolean
-        default: true
-      monitor_ctxsw:
-        description: 'Collect context-switch & interrupt metrics (via psutil)'
-        type: boolean
-        default: true
-      monitor_net:
-        description: 'Collect network interface metrics (via psutil)'
-        type: boolean
-        default: true
-      monitor_tcp:
-        description: 'Collect TCP connection state metrics (ss snapshot)'
-        type: boolean
-        default: true
-      monitor_psi:
-        description: 'Collect pressure-stall metrics (PSI avg10)'
-        type: boolean
-        default: false
-      monitor_paging:
-        description: 'Collect paging metrics (via psutil/sys/fs)'
-        type: boolean
-        default: false
       # ── Publish ───────────────────────────────────────────────────────────────
       tune_kernel:
-        description: 'Apply kernel tuning (tune-os.sh) before stress tests'
+        description: 'Run scripts/tune-os.sh before bench jobs'
         type: boolean
         default: true
       publish_pages:
-        description: 'Publish benchmark results to gh-pages (auto-enabled on main push)'
+        description: 'Publish merged benchmark results to gh-pages (also auto-enabled on push to main)'
         type: boolean
         default: false
 
@@ -133,7 +106,9 @@ env:
   # Override .cargo/config.toml target-cpu=native — CI runners have
   # varying CPU micro-architectures so we must build portable binaries.
   CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
-  STRESS_CPU_QUOTA: "${{ inputs.stress_cpu_quota || '100%' }}"
+  STRESS_CPU_QUOTA: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
+  K6_CORE_STRESS_RATE: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate > 0 && inputs.stress_core_target_rate || '' }}"
+  COLLECT_RESOURCE_METRICS: "${{ (github.event_name != 'workflow_dispatch' || inputs.collect_resource_metrics != false) && '1' || '0' }}"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -863,7 +838,7 @@ jobs:
   #   gRPC Health + Echo       — grpc.local:8080 → QUIC → client → grpc:50051
   #   Bidirectional            — ingress + egress simultaneously
   #
-  # Thresholds: p99 < 500ms, error rate < 5%  (fail CI if exceeded)
+  # Thresholds: per-case k6 thresholds in ci-helpers/k6/cases/defaults.json (p95<60s, err<5%)
   # Resource usage (CPU/RSS) sampled before + after via /proc
   # ─────────────────────────────────────────────────────────────────────────────
   bench-basic:
@@ -892,47 +867,62 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           mode: 'ctld'
-          quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — basic
         run: |
-          python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-basic.jsonl 2>/dev/null &
-          echo $! > /tmp/collect-basic.pid
-          date +%s > /tmp/basic_sampling_start
+          COLLECT=1
+          if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+            COLLECT=0
+          fi
+          if [ "$COLLECT" = "1" ]; then
+            python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-basic.jsonl 2>/dev/null &
+            echo $! > /tmp/collect-basic.pid
+            date +%s > /tmp/basic_sampling_start
+          fi
           date +%s > /tmp/basic_k6_start
           cd ci-helpers/k6
           k6 run -e BENCH_PROFILE=basic -e BENCH_RESULT_PATH=/tmp/bench-results-basic.json bench.js
           cd "${{ github.workspace }}"
-          kill -9 "$(cat /tmp/collect-basic.pid 2>/dev/null)" 2>/dev/null || true
-          S=$(cat /tmp/basic_sampling_start); K=$(cat /tmp/basic_k6_start)
-          python3 ci-helpers/bench-tool.py parse \
-            --input /tmp/collect-basic.jsonl --k6-offset $(( K - S )) \
-            --output /tmp/resource-basic.json || true
-          if [ -s /tmp/resource-basic.json ] && [ -s /tmp/bench-results-basic.json ]; then
-            python3 ci-helpers/bench-tool.py inject \
-              --result /tmp/bench-results-basic.json \
-              --resources /tmp/resource-basic.json --case-name basic
+          if [ "$COLLECT" = "1" ]; then
+            kill -9 "$(cat /tmp/collect-basic.pid 2>/dev/null)" 2>/dev/null || true
+            S=$(cat /tmp/basic_sampling_start); K=$(cat /tmp/basic_k6_start)
+            python3 ci-helpers/bench-tool.py parse \
+              --input /tmp/collect-basic.jsonl --k6-offset $(( K - S )) \
+              --output /tmp/resource-basic.json || true
+            if [ -s /tmp/resource-basic.json ] && [ -s /tmp/bench-results-basic.json ]; then
+              python3 ci-helpers/bench-tool.py inject \
+                --result /tmp/bench-results-basic.json \
+                --resources /tmp/resource-basic.json --case-name basic
+            fi
           fi
 
       - name: Bench — body_size
         run: |
-          python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-body.jsonl 2>/dev/null &
-          echo $! > /tmp/collect-body.pid
-          date +%s > /tmp/body_sampling_start
+          COLLECT=1
+          if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+            COLLECT=0
+          fi
+          if [ "$COLLECT" = "1" ]; then
+            python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-body.jsonl 2>/dev/null &
+            echo $! > /tmp/collect-body.pid
+            date +%s > /tmp/body_sampling_start
+          fi
           date +%s > /tmp/body_k6_start
           cd ci-helpers/k6
           k6 run -e BENCH_PROFILE=body_size -e BENCH_RESULT_PATH=/tmp/bench-results-body.json bench.js
           cd "${{ github.workspace }}"
-          kill -9 "$(cat /tmp/collect-body.pid 2>/dev/null)" 2>/dev/null || true
-          S=$(cat /tmp/body_sampling_start); K=$(cat /tmp/body_k6_start)
-          python3 ci-helpers/bench-tool.py parse \
-            --input /tmp/collect-body.jsonl --k6-offset $(( K - S )) \
-            --output /tmp/resource-body.json || true
-          if [ -s /tmp/resource-body.json ] && [ -s /tmp/bench-results-body.json ]; then
-            python3 ci-helpers/bench-tool.py inject \
-              --result /tmp/bench-results-body.json \
-              --resources /tmp/resource-body.json --case-name body_size
+          if [ "$COLLECT" = "1" ]; then
+            kill -9 "$(cat /tmp/collect-body.pid 2>/dev/null)" 2>/dev/null || true
+            S=$(cat /tmp/body_sampling_start); K=$(cat /tmp/body_k6_start)
+            python3 ci-helpers/bench-tool.py parse \
+              --input /tmp/collect-body.jsonl --k6-offset $(( K - S )) \
+              --output /tmp/resource-body.json || true
+            if [ -s /tmp/resource-body.json ] && [ -s /tmp/bench-results-body.json ]; then
+              python3 ci-helpers/bench-tool.py inject \
+                --result /tmp/bench-results-body.json \
+                --resources /tmp/resource-body.json --case-name body_size
+            fi
           fi
 
       - name: Merge basic + body results
@@ -996,6 +986,7 @@ jobs:
         run: sudo bash scripts/tune-os.sh
 
       - name: Install frp
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -1007,7 +998,6 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           mode: 'ctld'
-          quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_3000qps
@@ -1023,9 +1013,11 @@ jobs:
         run: bash ci-helpers/run-bench-case.sh egress_multihost "${{ github.sha }}"
 
       - name: Bench — frp_ingress_3000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: bash ci-helpers/run-bench-case.sh frp_ingress_3000qps "${{ github.sha }}"
 
       - name: Bench — frp_ingress_multihost
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost "${{ github.sha }}"
 
       - name: Merge 3k results
@@ -1094,6 +1086,7 @@ jobs:
         run: sudo bash scripts/tune-os.sh
 
       - name: Install frp
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -1105,7 +1098,7 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           mode: 'ctld'
-          quic_connections: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}"
+          worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_6000qps
         run: bash ci-helpers/run-bench-case.sh ingress_6000qps "${{ github.sha }}"
@@ -1120,6 +1113,7 @@ jobs:
         run: bash ci-helpers/run-bench-case.sh egress_multihost_6000qps "${{ github.sha }}"
 
       - name: Bench — frp_ingress_multihost_6000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_6000qps "${{ github.sha }}"
 
       - name: Merge 6k results
@@ -1203,6 +1197,7 @@ jobs:
         run: sudo bash scripts/tune-os.sh
 
       - name: Install frp
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: |
           FRP_VER=0.61.0
           wget -q "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -O /tmp/frp.tar.gz
@@ -1221,50 +1216,62 @@ jobs:
           } | sudo tee -a /etc/hosts
 
       - name: Bench — ingress_8000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false }}
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh ingress_8000qps "${{ github.sha }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — egress_8000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false }}
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh egress_8000qps "${{ github.sha }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_multihost_8000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false }}
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh ingress_multihost_8000qps "${{ github.sha }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — egress_multihost_8000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_stress_trace != false }}
         timeout-minutes: 8
         run: |
           bash ci-helpers/run-trace-8k.sh egress_multihost_8000qps "${{ github.sha }}" \
-            "${{ github.event_name == 'workflow_dispatch' && inputs.stress_quic_connections || '4' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.build_profile || 'dial9' }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — frp_ingress_multihost_8000qps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_frp != false }}
         run: bash ci-helpers/run-bench-case.sh frp_ingress_multihost_8000qps "${{ github.sha }}"
 
       - name: Merge 8k results
         shell: bash
         run: |
-          python3 ci-helpers/merge-results.py \
-            /tmp/trace-ingress_8000qps/bench-results.json \
-            /tmp/bench-results-8k.json \
-            /tmp/trace-egress_8000qps/bench-results.json \
-            /tmp/trace-ingress_multihost_8000qps/bench-results.json \
-            /tmp/trace-egress_multihost_8000qps/bench-results.json \
+          CANDIDATES=(
+            /tmp/trace-ingress_8000qps/bench-results.json
+            /tmp/trace-egress_8000qps/bench-results.json
+            /tmp/trace-ingress_multihost_8000qps/bench-results.json
+            /tmp/trace-egress_multihost_8000qps/bench-results.json
             /tmp/bench-results-frp_ingress_multihost_8000qps.json
+          )
+          CORE=""
+          EXTRAS=()
+          for f in "${CANDIDATES[@]}"; do
+            [ -f "$f" ] || continue
+            if [ -z "$CORE" ]; then CORE="$f"; else EXTRAS+=("$f"); fi
+          done
+          if [ -z "$CORE" ]; then
+            echo '{"cases":{},"summary":{"totalRPS":0,"totalErr":0,"totalRequests":0}}' > /tmp/bench-results-8k.json
+            exit 0
+          fi
+          python3 ci-helpers/merge-results.py "$CORE" /tmp/bench-results-8k.json "${EXTRAS[@]}"
 
       - name: Upload benchmark outputs (8k)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

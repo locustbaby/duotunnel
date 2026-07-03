@@ -7,7 +7,7 @@ entry:
   port: 8082
 metrics_port: 9092
 quic:
-  connections: 1
+  connections: 0
   max_concurrent_streams: 1000
   keepalive_secs: 10
   idle_timeout_secs: 30

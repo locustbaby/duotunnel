@@ -13,8 +13,9 @@ pub async fn run_pool(
     ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
     udp_registry: Arc<UdpListenerRegistry>,
+    connections: u32,
 ) -> Result<()> {
-    let n = config.quic.connections.max(1) as usize;
+    let n = connections.max(1) as usize;
     info!(connections = n, "starting QUIC connection pool");
     let mut slots = JoinSet::new();
     for _i in 0..n {

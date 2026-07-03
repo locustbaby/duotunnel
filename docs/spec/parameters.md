@@ -8,7 +8,7 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 (Consumer / Used by) | 默认值 / 其他值 | YAML 路径 | 阈值影响 (Impact) | 排查手段 (Debugging / Logs) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **accept_workers** | `server/ingress/listener_mgr.rs`: `sync_listeners` / `client/egress/listener.rs` | 默认: 4 (client `DEFAULT_ACCEPT_WORKERS`; server `Option<usize>`, None → 4) | `entry.accept_workers` (client) / `server.accept_workers` (server) | Accept 串行化；突发流量下建连延迟 (Sync 延迟) | 指标: `connection_latency`; 代码见 `server/ingress/listener_mgr.rs` |
+| **accept_workers** | `server/ingress/listener_mgr.rs`: `sync_listeners` / `client/egress/listener.rs` | 未配置 → `effective_runtime_parallelism()`（受 cgroup `CPUQuota` 约束；CI `100%` → **1**） | `entry.accept_workers` (client) / `server.accept_workers` (server) | Accept 串行化；突发流量下建连延迟 (Sync 延迟) | resolver: `resolve_accept_workers` |
 | **Listen backlog** | `tunnel-lib/transport/listener.rs`: `listen(4096)` | 4096 | ❌ (硬编码) | 内核丢弃新连接；报 `ECONNREFUSED` | 命令: `netstat -s \| grep "SYNs to LISTEN sockets dropped"` |
 | **EMFILE backoff** | `client/egress/listener.rs`: `EMFILE_BACKOFF_MS` | 100ms | ❌ (client 常量) / `overload.emfile_backoff_ms` (server) | errno 24 (Too many open files) 时暂停 Accept | 日志: `entry accept: too many open files, backing off` |
 | **peek_buf_size** | `PeekBufPool::new(size)` | 16 KiB | `proxy_buffers.peek_buf_size` | 缓冲区不足会导致协议识别失败 (Protocol::Unknown) | 日志: `detected protocol: Unknown`; 代码见 `core.rs:48` |
@@ -30,7 +30,7 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **send_window** | `quinn::TransportConfig`: `send_window` | 8 MiB (client 回退到 `connection_window_mb`) | `quic.send_window_mb` (仅 client) | 本端发送缓冲上限；非对称链路（上下行差异大）时可独立设置 | 代码见 `client/bootstrap/config.rs:67-71` |
 | **keepalive_secs** | `quinn::TransportConfig.keep_alive_interval` | 20s | `quic.keepalive_secs` | QUIC 心跳 PING 间隔；必须 < `idle_timeout_secs` 否则空闲连接会被关 | 代码见 `transport/quic.rs:35` |
 | **idle_timeout_secs** | `quinn::TransportConfig.max_idle_timeout` | 60s | `quic.idle_timeout_secs` | 空闲 QUIC 连接被关闭的阈值；同步日志阻塞时可能先触发 | §4 Logging Latency 相关 |
-| **connections** | `client/tunnel/pool.rs`: 启动 supervisor 的数量 | 1 / CI: 4 | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | 见 `client/tunnel/pool.rs` 的 slot 启动逻辑 |
+| **connections** | `client/tunnel/pool.rs`: 启动 supervisor 的数量 | `0` = auto (`effective_runtime_parallelism()`；CI `CPUQuota=100%` → **1**) | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | resolver: `resolve_connection_count` |
 | **congestion_controller** | `quinn::BbrConfig` / `CubicConfig` / `NewRenoConfig` | bbr | `quic.congestion` | 丢包重传与吞吐爬坡算法；bbr 适合高带宽波动链路；未知值 fallback 到 quinn 默认（NewReno） | 代码见 `quic.rs:41-54` |
 | **login_timeout_secs** | `server/ingress/handlers/quic.rs` | 10s | `server.login_timeout_secs` | 服务端对 client QUIC 登录握手超时；与 client `reconnect.login_timeout_ms` (5000ms) **不对称** | 代码见 `tunnel-store/src/server_config.rs:143` |
 | **udp_recv_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_RCVBUF` | 8 MiB | `quic.udp_recv_buf_mb` | Linux 内核将请求值翻倍（受 `net.core.rmem_max` 上限约束）。过小导致高 RPS 下 UDP 丢包（`recvmsg ENOBUFS`），是 8000 RPS 延迟尖刺主因之一 | `ss -udp -e` 看 `rmem`；`/proc/net/udp` 的 `drops` 列 |

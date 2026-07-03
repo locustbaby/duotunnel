@@ -160,12 +160,7 @@ impl ServerState {
     }
 
     pub(crate) fn accept_workers(&self) -> usize {
-        self.ingress
-            .config
-            .server
-            .accept_workers
-            .unwrap_or(tunnel_lib::DEFAULT_ACCEPT_WORKERS)
-            .max(1)
+        tunnel_lib::resolve_accept_workers(self.ingress.config.server.accept_workers)
     }
 
     pub(crate) fn emfile_backoff(&self) -> std::time::Duration {
@@ -323,10 +318,14 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         "overload protection resolved"
     );
     let shard_count = tunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
+    let accept_workers =
+        tunnel_lib::resolve_accept_workers(bootstrap.config.server.accept_workers);
     info!(
         shards = shard_count,
+        accept_workers = accept_workers,
         configured_worker_threads = tunnel_lib::configured_worker_threads(),
         cpu_parallelism = tunnel_lib::available_parallelism(),
+        cgroup_cpu_limit = ?tunnel_lib::cgroup_cpu_limit(),
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );

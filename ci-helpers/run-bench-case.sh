@@ -177,27 +177,41 @@ fi
 
 python3 ci-helpers/bench-tool.py collect 1 > "/tmp/collect-${CASE_NAME}.jsonl" 2>/dev/null &
 echo $! > "/tmp/collect-${CASE_NAME}.pid"
+COLLECT_PID="$(cat "/tmp/collect-${CASE_NAME}.pid")"
+COLLECT_ENABLED=1
+if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+  kill -9 "${COLLECT_PID}" 2>/dev/null || true
+  rm -f "/tmp/collect-${CASE_NAME}.jsonl" "/tmp/collect-${CASE_NAME}.pid"
+  COLLECT_ENABLED=0
+fi
 
-(cd ci-helpers/k6 && k6 run \
-  -e GITHUB_SHA="${GITHUB_SHA}" \
-  -e BENCH_CASE="${CASE_NAME}" \
-  -e FRP_HTTP_PORT="${FRP_HTTP_PORT}" \
-  -e BENCH_RESULT_PATH="/tmp/bench-results-${CASE_NAME}.json" \
-  bench.js)
+K6_ENV=(
+  -e GITHUB_SHA="${GITHUB_SHA}"
+  -e BENCH_CASE="${CASE_NAME}"
+  -e FRP_HTTP_PORT="${FRP_HTTP_PORT}"
+  -e BENCH_RESULT_PATH="/tmp/bench-results-${CASE_NAME}.json"
+)
+if [ -n "${K6_CORE_STRESS_RATE}" ]; then
+  K6_ENV+=(-e K6_CORE_STRESS_RATE="${K6_CORE_STRESS_RATE}")
+fi
 
-kill -9 "$(cat "/tmp/collect-${CASE_NAME}.pid" 2>/dev/null)" 2>/dev/null || true
-sleep 0.5
+(cd ci-helpers/k6 && k6 run "${K6_ENV[@]}" bench.js)
 
-python3 ci-helpers/bench-tool.py parse \
-  --input  "/tmp/collect-${CASE_NAME}.jsonl" \
-  --k6-offset 0 \
-  --output "/tmp/resource-${CASE_NAME}.json" || true
+if [ "${COLLECT_ENABLED}" = "1" ]; then
+  kill -9 "$(cat "/tmp/collect-${CASE_NAME}.pid" 2>/dev/null)" 2>/dev/null || true
+  sleep 0.5
 
-if [ -s "/tmp/resource-${CASE_NAME}.json" ] && [ -s "/tmp/bench-results-${CASE_NAME}.json" ]; then
-  python3 ci-helpers/bench-tool.py inject \
-    --result    "/tmp/bench-results-${CASE_NAME}.json" \
-    --resources "/tmp/resource-${CASE_NAME}.json" \
-    --case-name "${CASE_NAME}" || true
+  python3 ci-helpers/bench-tool.py parse \
+    --input  "/tmp/collect-${CASE_NAME}.jsonl" \
+    --k6-offset 0 \
+    --output "/tmp/resource-${CASE_NAME}.json" || true
+
+  if [ -s "/tmp/resource-${CASE_NAME}.json" ] && [ -s "/tmp/bench-results-${CASE_NAME}.json" ]; then
+    python3 ci-helpers/bench-tool.py inject \
+      --result    "/tmp/bench-results-${CASE_NAME}.json" \
+      --resources "/tmp/resource-${CASE_NAME}.json" \
+      --case-name "${CASE_NAME}" || true
+  fi
 fi
 
 if [ "$IS_FRP" -eq 1 ]; then

@@ -225,7 +225,7 @@ http_entry_port: 8003
 
 # Optional tuning
 quic:
-  connections: 1
+  connections: 0                # 0 = auto; 1 = single-connection debug
   max_concurrent_streams: 100
 tcp:
   nodelay: true
@@ -394,19 +394,27 @@ Key settings applied:
 
 Live results: **https://locustbaby.github.io/duotunnel/bench/**
 
-Every push to `main` runs the full benchmark suite and publishes results to the dashboard automatically.
+Every push to `main` runs the benchmark suite and publishes results to the dashboard automatically.
+
+Full parameter and case catalog documentation: [ci-helpers/BENCHMARK_SPEC.md](ci-helpers/BENCHMARK_SPEC.md).
 
 ### Pipeline overview
 
 | Job | What it does |
 |-----|-------------|
-| `stress-test` | k6 multi-protocol benchmark (13 cases: HTTP/WS/gRPC/bidir, ramp + fixed-rate) |
-| `stress-trace-8k` | High-QPS (8000 RPS) dial9 trace capture for ingress/egress/multihost |
-| `publish-bench` | Merges results, publishes to gh-pages |
+| `unit-tests` | Workspace tests, clippy, audit |
+| `integration-test` | End-to-end protocols via `ci-test-client` |
+| `bench-basic` | k6 `basic` + `body_size` profiles (ramp + mixed protocols) |
+| `bench-3k` | HTTP stress @ 3000 RPS + multihost + optional frp baseline |
+| `bench-6k` | HTTP stress @ 6000 RPS + optional frp |
+| `bench-8k` | HTTP stress @ 8000 RPS with dial9 traces + optional frp |
+| `publish-bench` | Merges job artifacts and publishes to gh-pages |
+
+Manual runs (`workflow_dispatch`) can toggle jobs and tune `worker_threads` (parallelism anchor, `0` = auto), `stress_core_target_rate`, and `stress_cpu_quota` (default **100%** = 1 CPU per scope). On push to `main`, CI uses `worker_threads=0` and `stress_cpu_quota=100%`; Tokio workers, `accept_workers`, shards, and QUIC connections resolve to **1** each (via cgroup-aware `effective_runtime_parallelism()`). See [BENCHMARK_SPEC.md](ci-helpers/BENCHMARK_SPEC.md).
 
 ### Dashboard panels
 
-Each benchmark entry shows a latency/throughput table followed by resource panels (populated when `monitor_cpu=true`):
+Each benchmark entry shows a latency/throughput table followed by resource panels when resource sampling succeeded:
 
 | Row | Left panel | Right panel |
 |-----|-----------|------------|

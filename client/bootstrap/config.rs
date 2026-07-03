@@ -8,20 +8,11 @@ use std::collections::HashSet;
 use tunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use tunnel_lib::transport::quic::QuicTransportParams;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct EntryConfig {
     pub port: Option<u16>,
-    pub accept_workers: usize,
-}
-
-impl Default for EntryConfig {
-    fn default() -> Self {
-        Self {
-            port: None,
-            accept_workers: tunnel_lib::DEFAULT_ACCEPT_WORKERS,
-        }
-    }
+    pub accept_workers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +38,7 @@ pub struct ClientQuicConfig {
 impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
-            connections: 1,
+            connections: 0,
             shards: None,
             max_concurrent_streams: 100,
             stream_window_mb: None,
@@ -328,9 +319,6 @@ impl ClientConfigFile {
                     entry.proxy_name.trim()
                 ));
             }
-        }
-        if self.quic.connections == 0 {
-            errors.push("quic.connections must be >= 1".into());
         }
         if matches!(self.quic.shards, Some(0)) {
             errors.push("quic.shards must be >= 1 when set".into());

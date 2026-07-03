@@ -3,12 +3,11 @@ set -eo pipefail
 
 CASE_NAME=$1
 GITHUB_SHA=$2
-QUIC_CONNS=${3:-4}
-BUILD_PROFILE=${4:-dial9}
-WORKER_THREADS=${5:-0}
+BUILD_PROFILE=${3:-dial9}
+WORKER_THREADS=${4:-0}
 
 SUFFIX="${CASE_NAME}"
-echo "==> Running Case: ${CASE_NAME} (QUIC: ${QUIC_CONNS}, Profile: ${BUILD_PROFILE}, WorkerThreads: ${WORKER_THREADS})"
+echo "==> Running Case: ${CASE_NAME} (Profile: ${BUILD_PROFILE}, WorkerThreads: ${WORKER_THREADS})"
 
 CPU_QUOTA_ARG=()
 if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
@@ -69,7 +68,7 @@ if [ ! -f /tmp/trace-8k-initialized ]; then
     client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
   TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
 
-  python3 -c "import re,sys; f='ci-helpers/configs/client.yaml'; t=sys.argv[1]; n=sys.argv[2]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); c=re.sub(r'^(\\s*connections:)\\s*\\d+', r'\\1 '+n, c, flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN" "$QUIC_CONNS"
+  python3 -c "import re,sys; f='ci-helpers/configs/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
 
   touch /tmp/trace-8k-initialized
 fi
@@ -122,25 +121,33 @@ chmod +x ci-helpers/warmup.sh
 ./ci-helpers/warmup.sh ctld 8080 "/tmp/ci-server-${SUFFIX}.log" "/tmp/ci-client-${SUFFIX}.log"
 
 # 6. Collect & k6
-python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect.jsonl 2>/tmp/collect-resources-err.log &
-echo $! > /tmp/collect-resources.pid
+COLLECT_ENABLED=1
+if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+  COLLECT_ENABLED=0
+fi
+if [ "${COLLECT_ENABLED}" = "1" ]; then
+  python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect.jsonl 2>/tmp/collect-resources-err.log &
+  echo $! > /tmp/collect-resources.pid
+fi
 
 (cd ci-helpers/k6 && k6 run -e GITHUB_SHA=${GITHUB_SHA} -e BENCH_PROFILE=8k -e BENCH_CASE="${CASE_NAME}" bench.js)
 
 # 7. Stop resource sampling
-kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
-pkill -9 -f "bench-tool.py collect" 2>/dev/null || true
-sleep 0.5
+if [ "${COLLECT_ENABLED}" = "1" ]; then
+  kill -9 "$(cat /tmp/collect-resources.pid 2>/dev/null)" 2>/dev/null || true
+  pkill -9 -f "bench-tool.py collect" 2>/dev/null || true
+  sleep 0.5
 
-# 8. Parse
-python3 ci-helpers/bench-tool.py parse --input /tmp/collect.jsonl --k6-offset 0 --output "/tmp/resource-data-${CASE_NAME}.json" || true
+  # 8. Parse
+  python3 ci-helpers/bench-tool.py parse --input /tmp/collect.jsonl --k6-offset 0 --output "/tmp/resource-data-${CASE_NAME}.json" || true
 
-# 8b. Inject resource into bench-results.json case
-if [ -s "/tmp/resource-data-${CASE_NAME}.json" ] && [ -s /tmp/bench-results.json ]; then
-  python3 ci-helpers/bench-tool.py inject \
-    --result    /tmp/bench-results.json \
-    --resources "/tmp/resource-data-${CASE_NAME}.json" \
-    --case-name "${CASE_NAME}" || true
+  # 8b. Inject resource into bench-results.json case
+  if [ -s "/tmp/resource-data-${CASE_NAME}.json" ] && [ -s /tmp/bench-results.json ]; then
+    python3 ci-helpers/bench-tool.py inject \
+      --result    /tmp/bench-results.json \
+      --resources "/tmp/resource-data-${CASE_NAME}.json" \
+      --case-name "${CASE_NAME}" || true
+  fi
 fi
 
 # 9. Stop server/client, wait for trace flush

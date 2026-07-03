@@ -51,19 +51,27 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         crate::metrics::set_handle(handle);
         spawn_task(run_healthz_server(port, ready.clone(), cancel.clone()));
     }
-    let shard_count =
-        tunnel_lib::resolve_shard_count(config.quic.shards, Some(config.quic.connections as usize));
+    let resolved_connections =
+        tunnel_lib::resolve_connection_count(config.quic.connections);
+    let shard_count = tunnel_lib::resolve_shard_count(
+        config.quic.shards,
+        Some(resolved_connections as usize),
+    );
+    let accept_workers = tunnel_lib::resolve_accept_workers(config.entry.accept_workers);
     info!(
-        connections = config.quic.connections,
+        configured_connections = config.quic.connections,
+        resolved_connections = resolved_connections,
         shards = shard_count,
+        accept_workers = accept_workers,
         configured_worker_threads = tunnel_lib::configured_worker_threads(),
         cpu_parallelism = tunnel_lib::available_parallelism(),
+        cgroup_cpu_limit = ?tunnel_lib::cgroup_cpu_limit(),
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "client QUIC ownership topology resolved"
     );
     let entry_pool = EntryConnPool::new(
         config.quic.max_concurrent_streams,
-        config.quic.connections,
+        resolved_connections,
         shard_count,
     );
     let udp_registry = Arc::new(UdpListenerRegistry::default());
@@ -88,7 +96,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
             tcp_params: entry_tcp_params,
             peek_buf_size,
             open_stream_timeout,
-            accept_workers: config.entry.accept_workers.max(1),
+            accept_workers,
             overload: Arc::new(overload_limits),
             sniff_timeout: Duration::from_millis(config.proxy_buffers.sniff_timeout_ms),
         };
@@ -113,6 +121,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         entry_pool,
         ready,
         udp_registry,
+        resolved_connections,
     }));
 
     let result = engine.run_until_shutdown().await;

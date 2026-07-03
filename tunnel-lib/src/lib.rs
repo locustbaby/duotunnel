@@ -23,7 +23,8 @@ pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
 pub use infra::runtime::{
-    available_parallelism, configured_worker_threads, effective_runtime_parallelism,
+    available_parallelism, cgroup_cpu_limit, configured_worker_threads,
+    effective_runtime_parallelism, resolve_accept_workers, resolve_connection_count,
     resolve_shard_count,
 };
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
