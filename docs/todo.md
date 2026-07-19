@@ -1,6 +1,6 @@
 # Tunnel TODO
 
-> Last synced against code: 2026-06-23.
+> Last synced against code and analysis reports 1–7: 2026-07-11.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
@@ -18,6 +18,33 @@
    - 实施任务绑定缓冲区（Task-Bound Buffer）解决协程跨核调度导致的 CPU 缓存局部性变冷问题。消除 Generic `split` 带来的 Bilock 锁竞争，并落地类似 Pingora 的统一多协议 Session 管理架构。
 4. **Phase 3: 前瞻性性能实验与长尾微调 (Low Priority & Research)**
    - 包括粗粒度单调时钟遥测、配置流式模型演进以及其他的内核旁路（io_uring/AF_XDP）前瞻性探索。
+
+### 报告索引（2026-07-11）
+
+| 报告 | 报告结论 | 对应记录 | 代码核对后的进度与决策 |
+| --- | --- | --- | --- |
+| 1 | TCP ingress 已使用每 worker 独立的 `SO_REUSEPORT` listener | TODO-CR-AUDIT-1 | ✅ 已实现；`ListenerManager` 为每个 accept worker 独立 bind。无需新增工作项。 |
+| 1 | 默认强制 4 MiB TCP buffer 会覆盖内核的自适应策略 | TODO-105 | ⏳ 可直接实施，但应先补齐默认值、显式配置覆盖和 Linux 回归测试；这是本报告中唯一不依赖压测即可推进的改动。 |
+| 1–2 | 单个 QUIC endpoint 可能成为 UDP 单核瓶颈 | TODO-24 | 🔬 保持研究状态。先用压测证明 endpoint driver 饱和；多 endpoint 必须用 CID 感知的 eBPF reuseport 路由，不能只靠四元组哈希。 |
+| 1 | `EntryConnPool` 单写 Actor 在重连风暴时可能积压 | TODO-106 | 🔬 保持证据驱动。先采集队列深度、mutation latency 和重连风暴下的 CPU；若确认瓶颈，将删除/slot 管理一并做成每 shard 所有，避免把全局 `InflightTable` 锁带入多个 Actor。 |
+| 2 | 将 `ConnectionHandle` 构造移出 Actor、并把 remove 定位为 O(1) | TODO-107、TODO-108 | ⏸️ 前者会引入去重和 slot 回滚协议，继续延后；后者直接由 `stable_id` 重算 shard，并随 TODO-106 合并。 |
+| 2 | 合并 `pending_opens` / `active_streams`，简化 Drop 与 slot allocator | TODO-109、TODO-110、TODO-111、TODO-134 | ⏳ 计数合并在当前调用方语义下可行，但性能收益必须压测确认；PendingOpen 失败会降低总 inflight，当前通知是正确的，需为总量与通知语义补测试后再处理 slot allocator。 |
+| 3 | `Vec::set_len` 后以 `&mut [u8]` 交给 `AsyncReadExt::read` | TODO-97 | 🚨 重开为内存安全修复。`Vec::set_len` 要求新长度范围已初始化；改用池化 `BytesMut` + `read_buf`，而不是以注释证明未初始化 slice 可安全写入。 |
+| 3 | 嗅探 pool 的零填充与 `BytesMut` / `read_buf` 方案 | TODO-136 | 🔬 当前 `PeekBufPool` 的零填充是安全的；不能用 `set_len` 消除它。只有完整迁移为安全的 `BytesMut` / `read_buf` 所有权模型且压测证明收益时才推进。 |
+| 3 | HTTP egress 的 8 KiB header scratch 与响应行格式化 | TODO-137 | 🔬 先用分配/CPU profile 证明热点。`write!` 的格式串并非运行时解析；直接字节拼接只是一项可测量的微优化，不能据此引入跨 task 缓冲池复杂度。 |
+| 3 | 过载路径每次 inflight 下降的 `notify_one()` | TODO-95、TODO-134 | ✅ 无新增缺陷。慢路径是 advisory backoff：中间档醒来后直接返回，不会按报告所述必然重新挂起；高压档仍需要每次下降通知以缩短等待，阈值唤醒方案必须先以 P99/CPU 验证。 |
+| 4 | 全量内存/缓冲区矩阵 | TODO-97、TODO-98、TODO-20、TODO-136、TODO-137 | ✅ 已覆盖。报告将 sniff 路径也描述为 `set_len`，但当前 sniff 使用零初始化的 `Vec`，只有 copy 路径需立即修复 UB。 |
+| 4 | 全量同步/中继矩阵 | TODO-109、TODO-110、TODO-106–111、TODO-22/34/86、TODO-95 | ✅ 已覆盖。Actor 拆分、原子合并和精准唤醒均保持语义/基准门槛；生产 QUIC↔TCP 中继已采用拥有式拆分。 |
+| 4 | 网络协议矩阵 | TODO-24、TODO-105、TODO-137、TODO-78、TODO-39、TODO-62 | ✅ 已覆盖。多 endpoint 仍需 CID-aware eBPF；HTTP header fmt 与 DNS connector 均不是无条件改造。 |
+| 4 | 控制面与辅助矩阵 | TODO-CR-AUDIT-5、TODO-84、TODO-79、TODO-88、TODO-31 | ✅ 已覆盖。控制面事件应从写入路径可靠发布，文件系统 WAL 监听只能作为不可靠提示。 |
+| 5 | 嗅探与 `open_bi` 入口 | TODO-136、TODO-109/110、TODO-95 | ✅ 已覆盖。`PeekBufPool::new` 只是复制 buffer-size 配置，实际 free-list 为 thread-local static；`InflightGuard` 已有 Pending/Active phase，两个 pending 计数的作用域也不同。 |
+| 5 | QUIC↔TCP relay | TODO-97、TODO-98、TODO-22/34/86、TODO-138 | ⏳ UB 修复优先。生产 QUIC↔TCP 已使用拥有式 TCP split；小 QUIC chunk 聚合只作为吞吐压测实验，不能默认加入 `BufWriter`。 |
+| 5 | H1/H2 upstream 转发 | TODO-137、TODO-139、TODO-96 | 🔬 H2 热路径已是 `ArcSwap` 无锁读取；重建 mutex 保证只有一次握手，CAS/Notify 替换和 driver 生命周期收敛均需以高 fan-in miss 压测验证。 |
+| 6 | 性能基线与有效配置 | TODO-140、TODO-105、TODO-141 | ⏳ 新增 P0：统一场景矩阵、p99/p99.9、完成率、资源曲线和最终生效配置日志；buffer 调参必须先贯通路径再作结论。 |
+| 6 | 过载、H2、UDP 扩展 | TODO-142、TODO-143、TODO-144、TODO-24、TODO-106 | ⏳ 分层 admission、H2 sender 小池和 UDP PPS 重构均仅在相应场景证明为瓶颈后推进；多 endpoint 与 actor 分片继续排在其后。 |
+| 7 | Work-stealing 与 buffer 生命周期 | TODO-97、TODO-98、TODO-136 | ✅ 已覆盖。TLS pool miss 是可测的 allocator/reuse 问题，不代表 buffer 或 cache line 会随 future 跨核迁移；先修复安全性，再以基准决定 task-owned buffer。 |
+| 7 | Inflight 生命周期与 RAII | TODO-109、TODO-110、TODO-135、TODO-134 | ✅ 已覆盖。RAII 是取消/错误路径的必要兜底，不应被全面移除；正常状态转移与 total-load 语义应显式测试。PendingOpen Drop 使总 inflight 下降，通知并非虚假唤醒。 |
+| 7 | Actor 风暴与入口资源治理 | TODO-106–111、TODO-142 | ✅ 已覆盖。分片 Actor 仅在 reconnect storm 证实队列主导时采用；admission 采用入口全局预算、路由后 group 预算、连接级预算的分层模型。 |
 
 ---
 
@@ -55,6 +82,18 @@ flowchart TD
         TODO-62[TODO-62 Peer 协议记忆与 fallback 机制]
         TODO-99[TODO-99 TLS 证书监听与热重载]
         TODO-96[TODO-96 JoinSet 协程生命周期生命管控]
+        TODO-105[TODO-105 TCP 默认 Buffer 设为 None 启用 Autotuning]
+        TODO-106[TODO-106 Shard 写 Actor 提升 EntryConnPool 吞吐]
+        TODO-111[TODO-111 Actor 所有的 Inflight slot 管理]
+        TODO-136[TODO-136 安全的零填充免除嗅探 Buffer]
+        TODO-137[TODO-137 HTTP egress scratch 与响应头微优化]
+        TODO-138[TODO-138 QUIC→TCP chunk 聚合实验]
+        TODO-139[TODO-139 H2 sender 重建风暴实验]
+        TODO-140[TODO-140 可归因性能基线]
+        TODO-145[TODO-145 hotpath 函数级性能剖析]
+        TODO-141[TODO-141 Relay/HTTP Buffer 参数贯通]
+        TODO-142[TODO-142 分层 active-stream Admission]
+        TODO-143[TODO-143 H2 sender 自适应小池]
     end
 
     %% Dependencies
@@ -65,6 +104,12 @@ flowchart TD
     TODO-64 -->|ID 强类型统一| TODO-77
     TODO-77 -->|需要 keepalive session| TODO-67b
     TODO-82 -->|去 DB 瓶颈| TODO-84[TODO-84 CP 选路同步]
+    TODO-111 -->|每 shard 独立 slot 所有权| TODO-106
+    TODO-97 -->|复用安全 read_buf 模型| TODO-136
+    TODO-140 -->|基线先行| TODO-141
+    TODO-140 -->|基线先行| TODO-142
+    TODO-140 -->|基线先行| TODO-143
+    TODO-140 -->|基线先行| TODO-145
 ```
 
 ---
@@ -87,16 +132,18 @@ flowchart TD
 
 ## 🚀 Phase 1: 核心用户态零拷贝、内存池与高并发连接管理 (High Priority: Performance & Zero-Copy)
 
-> Phase 1 is effectively closed. Remaining work in this area should be treated as scoped follow-up, not as an open mandate to keep adding speculative performance features. The confirmed low-risk tail items are DNS address rotation and overload metrics exposure; raw L4 pooling remains discarded in favor of Hyper's protocol-aware pooling.
+> Phase 1 is effectively closed except for the reopened memory-safety fix TODO-97 and its configuration-propagation follow-up TODO-141. Other remaining work in this area should be treated as scoped follow-up, not as an open mandate to keep adding speculative performance features. The confirmed low-risk tail items are DNS address rotation and overload metrics exposure; raw L4 pooling remains discarded in favor of Hyper's protocol-aware pooling.
 
 ### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
 * **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
 
-### [TODO-97] Buffer pool capacity lax matching & uninitialized allocation
-* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
-* **Fix**: Reuse paths now accept `capacity >= buffer_size` and use `unsafe { buf.set_len(buffer_size) }` instead of `resize(..., 0)`. `PooledBufGuard` (RAII) ensures the buffer is always returned on drop, preventing leaks across cancellation points.
-* **Fix**: Cold-start / pool-empty allocation now also uses the same uninitialized-length strategy, so the zero-fill fallback is removed from the hot relay buffer path.
+### [TODO-97] Replace unsound uninitialized `Vec<u8>` relay buffer with `read_buf`
+* **Priority**: Critical | **Status**: 🚨 Reopened — memory safety fix | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  `copy.rs::take_buffer` calls `unsafe { Vec::set_len(buffer_size) }` before initializing the newly exposed elements, then `copy_buffered` passes the resulting `&mut [u8]` to `AsyncReadExt::read`. This violates `Vec::set_len`'s safety contract: every element in `old_len..new_len` must already be initialized. `PooledBufGuard` correctly returns memory on cancellation, but does not make the uninitialized slice valid.
+* **Fix**:
+  Keep capacity-lax reuse, but replace the pooled `Vec<u8>` hot buffer with a pooled `BytesMut`: acquire it at length zero, call `AsyncReadExt::read_buf`, write only the filled bytes, then `clear()` before return. Add cancellation, short-read, EOF and buffer-reuse tests. Do not retain `unsafe set_len` or substitute an uninitialized `Vec` in `PeekBufPool`.
 
 ### [performance_optimization_proposal.md §1] L7 Zero-Copy Body Streaming
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
@@ -112,7 +159,7 @@ flowchart TD
 ### [TODO-81] Optimize Peek Buffer Copy in ProxyEngine (Zero-Copy)
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
 * **Fix**: `SniffRuntime::sniff` in [sniff.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/protocol/sniff.rs) now takes a `&PeekBufPool`, reads directly into a pooled `Vec<u8>`, and returns a `SniffPrefix::Pooled` — an `Arc<PooledBufInner>` that returns the buffer to `PeekBufPool` on the last drop. No intermediate `Bytes::copy_from_slice` on the fast (Matched) path.
-* **Residual**: `PeekBufPool::take()` still zero-fills when a reused buffer is shorter than `buf_size`. Since the bytes are immediately overwritten by `stream.read()`, this is safe but costs ~4 KiB memset per connection. Deferred to TODO-98.
+* **Residual**: `PeekBufPool::take()` zero-fills when a reused buffer is shorter than `buf_size`. This is sound; replacing it with `Vec::set_len` before `AsyncReadExt::read` would not be. Its zero-fill removal is now explicitly tracked as TODO-136 rather than deferred to task locality work.
 
 ### [TODO-104] EgressDnsCache global Mutex lock removal via DashMap & Single-Flight
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
@@ -193,11 +240,11 @@ flowchart TD
 ## 🧱 Phase 2: 协程与局部性优化、长连接生命周期与架构重构 (Medium Priority: Sessions)
 
 ### [TODO-98] Bind buffer lifecycle to async tasks (Cache hit improvement)
-* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
+* **Priority**: Medium | **Status**: Research / benchmark-gated | **Track**: Zero-Copy & Buffer Pooling
 * **Problem**:
-  在多线程 Tokio 协程调度下，中继 Task 经常会被 work-stealing 窃取到其他 CPU 核心执行。而目前的 `LOCAL_POOL`（`copy.rs`）是严格绑定在 Thread Local 上的。一旦 Task 被窃取到新线程，它在原线程 TLS 归还的 buffer 就会变成“冷池”，而在新线程需要重新从 TLS 获取，这会导致 **CPU L1/L2 缓存局部性变差**。
-* **Fix**:
-  重构 `relay_inner`，将两个方向的中继缓冲区生命周期直接通过 struct/Future 字段与中继 Task 绑定。让 Buffer 实体作为状态机一部分，随着 Task 本身在核心间调度转移，彻底解决 Thread-Local 缓冲池冷化问题。
+  多线程 Tokio 的 work-stealing 会使 task 在不同 worker 上恢复；thread-local pool 因此可能在新 worker miss。把 buffer 放入 task state 可减少一次 pool 交接，但 future 的堆内存和 CPU cache line 不会随 task 物理迁移，不能据此承诺 L1/L2 locality 改善。
+* **Implementation plan**:
+  先完成 TODO-97 的安全 `BytesMut/read_buf` 缓冲模型，再在 relay benchmark 中比较 thread-local reuse、task-owned buffer 和有界全局 fallback 的 allocator 事件、P99 与吞吐。仅在 pool miss 是可观测瓶颈时保留 task-owned buffer；保持取消安全和每个 relay 两个方向 buffer 的明确上限。
 
 ### [TODO-20] Bytes::copy_from_slice -> split_to().freeze() (消减 HTTP 驱动拷贝)
 * **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
@@ -205,6 +252,80 @@ flowchart TD
   HTTP 转发在部分 H1 驱动中仍然执行了冗余的 `copy_from_slice` 动作，生成了新的堆分配。
 * **Fix**:
   在保证生命周期和 Buffer 回收安全的前提下，将其全部改写为引用计数的 `BytesMut::split_to().freeze()`。
+
+### [TODO-136] Safely remove sniff-buffer zero initialization with `BytesMut` / `read_buf`
+* **Priority**: Medium | **Status**: Research / benchmark-gated | **Track**: Zero-Copy & Buffer Pooling
+* **Problem**:
+  当前 `PeekBufPool` 用已初始化的 `Vec<u8>` 为 `SniffRuntime::sniff` 提供可写 slice，因此在 buffer 短于目标长度或冷启动时会清零。它是安全的，但在高连接创建率下会消耗内存带宽；不能以未初始化的 `Vec<u8>` 加 `set_len` 取代，因为 `AsyncReadExt::read` 需要有效的已初始化 slice。
+* **Implementation plan**:
+  先在连接建立压测中测量 memset 占比。若确认为热点，再将 pool 与 `SniffPrefix::Pooled` 的所有权模型整体迁移为长度为零的 `BytesMut`：使用 `read_buf` 追加已初始化字节，检测时只借用 filled region，并在 prefix 的最后一个 owner drop 后安全回收容量。必须覆盖 partial read、detector 多轮读取、prefix advance、跨 Tokio worker 迁移和取消；不要引入仅靠 thread-local 归还假设的跨 await 缓冲池。
+
+### [TODO-137] Benchmark-gated H1 egress scratch-buffer and response-line optimization
+* **Priority**: Low | **Status**: Research | **Track**: Transport & Performance
+* **Problem**:
+  `egress/http.rs::forward_http` 为请求头创建 8 KiB `BytesMut`，并为响应头创建独立 buffer；响应状态行经 `write!` 格式化。是否为真实热点尚无分配/CPU profile 证据，且 `write!` 的格式串是编译期解析，不存在报告所称的运行时格式串解析。
+* **Implementation plan**:
+  先在 H1 小请求高 QPS profile 中分离 allocator、header parse、upstream I/O 与 response write 的占比。仅当 scratch allocation 可见时，设计取消安全、容量有上限的 scoped `BytesMut` reuse；不能因为 Tokio task 可跨 worker 迁移就简单依赖 thread-local pool。若响应行格式化进入 profile，再以 `status.as_str()` 和 `extend_from_slice` 取代通用 fmt，并保持现有 header buffer 的单次写入语义。
+
+### [TODO-138] Benchmark QUIC-to-TCP small-chunk aggregation
+* **Priority**: Low | **Status**: Research | **Track**: Transport & Performance
+* **Problem**:
+  `copy_quic_to_shutdown` 正确地通过 `RecvStream::read_chunk` 将 Quinn 的 `Bytes` 直接交给 TCP writer，避免用户态中间拷贝。若真实流量呈现大量小 chunk，可能增加 TCP `write_all` 调用次数；但 `BufWriter` 会重新引入拷贝、改变 flush 延迟，内核 TCP 本身也会聚合发送。
+* **Implementation plan**:
+  先记录 chunk-size 分布、write syscall 次数、吞吐与 P99，在 bulk 与 latency-sensitive 两种负载下比较。只有 bulk profile 证明 syscall 成本主导时，才加入有明确容量和 flush 边界的可选聚合模式；默认保留现有零拷贝路径。
+
+### [TODO-139] Benchmark H2 sender rebuild stampede mitigation
+* **Priority**: Low | **Status**: Research | **Track**: Core Proxy & Protocol
+* **Problem**:
+  `H2SenderCache` 的正常请求通过 `ArcSwap` 无锁读取；sender miss 时用 `rebuild_mu` 串行化一次 QUIC stream + H2 handshake，并在获取锁后 double-check。并发 miss 可能产生等待队列，但这同时避免了重复握手与连接风暴。
+* **Implementation plan**:
+  在 sender 失效后模拟高 fan-in 请求，测量 rebuild wait、握手次数、P99 和取消行为。仅当 mutex reacquire 明确主导时，才评估 CAS + `Notify` 单飞协议；实现必须防止 winner 取消、失败后未广播、waiter 饥饿和多次重建。H2 driver 的 spawn 生命周期由 TODO-96 的结构化任务收敛统一处理。
+
+### [TODO-140] Establish attributable performance baselines and effective-config telemetry
+* **Priority**: High | **Status**: P0 prerequisite | **Track**: HA, Overload & Observability
+* **Problem**:
+  现有 benchmark 与 `/metrics` 已覆盖部分请求、连接和 `open_bi` 指标，但缺少按流量类型可复现的 p99/p99.9、完成率、UDP drop、CPU/GB 与阶段延迟矩阵；不同 cgroup、runtime 和配置默认值也难以从一次结果中复原。
+* **Implementation plan**:
+  定义 H1/H2 小请求、单/多 H2 connection、1/10/100 MiB L4、受控 RTT/丢包、UDP PPS 和 1→N 核扩展场景。每次输出 achieved RPS/PPS、dropped iterations、错误率、p50/p95/p99/p99.9、open_bi outcome、CPU/RSS/FD/context switch 与 UDP socket drop/`RcvbufErrors`；分阶段采样 sniff、route、connection selection、open stream、first byte 与 relay。启动日志必须打印最终生效的 runtime/accept worker、connection/shard、QUIC/TCP window、buffer、admission 和 pending 限制。以 `QPS(N)/(N × QPS(1))` 记录多核效率。
+
+### [TODO-145] Integrate hotpath-rs for benchmark-scoped function profiling
+* **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
+* **Problem**:
+  现有 benchmark 能看到端到端延迟、吞吐和部分 runtime 指标，但难以直接归因到具体函数边界。很多性能 TODO（HTTP egress scratch、relay buffer、H2 sender、UDP PPS、EntryConnPool actor）都需要先确认热点是否真的落在目标路径上。
+* **Implementation plan**:
+  以可选 Cargo feature 接入 `hotpath`，优先只启用函数耗时 profiling：在 server/client runtime 入口创建 guard，并对 QUIC stream open、sniff、route lookup、HTTP egress、TCP relay、UDP datagram encode/decode、H2 sender rebuild 和 EntryConnPool mutation 等少量关键边界加 `#[measure]`。先产出静态 JSON 报告并接入现有 benchmark artifact；不要默认打开 `hotpath-alloc` 或 `hotpath-cpu`，前者需先验证与现有 `mimalloc` 全局 allocator 的关系，后者需要独立 profiling profile/debug symbols，不能混入常规 release/CI 结果。
+* **Adoption stages**:
+  Stage 1 uses only `functions-timing` + `threads` with `HOTPATH_OUTPUT_FORMAT=json`, `HOTPATH_OUTPUT_PATH`, `HOTPATH_REPORT` and `HOTPATH_FOCUS`, so benchmark artifacts answer "which measured boundary got slower" without changing allocator/runtime behavior. Stage 2 may add `channel!`, `future!`, `stream!`, `mutex!` and `rw_lock!` only for suspected contention or backpressure points such as EntryConnPool, control watch, H2 sender rebuild and UDP session paths; wrapper macros can change named endpoint/lock types, so use `hotpath::wrap::*` deliberately and keep the profiled build semantically identical to the normal build. Stage 3 may add TUI/live inspection for local debugging and PR comment-style CI comparison after the benchmark matrix is stable.
+* **Do not copy blindly**:
+  Treat external hotpath guides as practice references, not exact API contracts. Prefer current 0.21.x names (`HOTPATH_OUTPUT_FORMAT`, `HOTPATH_OUTPUT_PATH`, `HOTPATH_REPORT`, `HOTPATH_ALLOC_METRIC`, `HOTPATH_ALLOC_CUMULATIVE`) over older names such as `HOTPATH_OUTPUT` or `HOTPATH_MEMORY_MODE`. Do not add a custom Prometheus reporter unless the current crate API explicitly supports that integration; the first production-grade output path should remain static JSON artifacts plus existing DuoTunnel metrics. CI should compare controlled head/base artifacts and post a report before it becomes a blocking gate.
+
+### [TODO-141] Propagate relay and HTTP body buffer configuration end-to-end
+* **Priority**: High | **Status**: Ready after TODO-97 | **Track**: Transport & Performance
+* **Problem**:
+  `ProxyBufferParams` 已提供 relay/body 参数，但 `bridge::relay_with_first_data`、`relay_quic_to_tcp` 和通用 relay 仍直接使用 `DEFAULT_RELAY_BUF_SIZE`，`forward_http` body chunk 也固定为 8 KiB。配置在部分调用链没有实际生效，导致调参和压测结论不可预测。
+* **Implementation plan**:
+  在不改变默认值的前提下，将 relay size 和 HTTP body chunk 显式传过 bridge、client entry/server ingress 与 HTTP egress callsites；保留默认 wrapper 仅供测试/兼容。以 16/32/64/128 KiB 与并发上限组合测试吞吐、P99、CPU/GB 和 RSS，避免把更大的 buffer 作为默认答案。完成 TODO-97 后使用同一安全 buffer 抽象实现 relay 方向。
+
+### [TODO-142] Add global and group-level active-stream admission control
+* **Priority**: High | **Status**: Design and benchmark gated | **Track**: HA, Overload & Observability
+* **Problem**:
+  当前 `open_bi` 有每 connection semaphore、pending queue 上限和 slowpath，但没有跨 connection 的 global active-relay 预算或按 client group 的公平预算。慢后端/慢客户端可在多个连接上同时占用 task 与 buffer，直到局部限制才生效。
+* **Implementation plan**:
+  分层区分入口前的全局连接预算、路由后可识别 group 的 active-stream/relay budget、以及既有 per-connection 限制；permit 覆盖 sniff 后的实际 proxy/relay 生命周期，退出时 RAII 归还。H1 拒绝返回 503，其他协议按可观测的关闭/错误策略快速失败，并记录 reject、queue wait、permit-held duration。先以 TODO-140 的慢客户端/慢后端测试选择阈值，避免对所有协议施加同一静态上限。
+
+### [TODO-143] Evaluate adaptive small H2 sender pools per route
+* **Priority**: Medium | **Status**: Research / H2-gated | **Track**: Core Proxy & Protocol
+* **Problem**:
+  单个下游 H2 connection 内的 route 当前通常复用一个 H2-over-QUIC sender；高并发 gRPC/API 流量可能集中在该 sender 的 H2 flow-control 与 driver 上，但小流量场景不应为此维持多条连接。
+* **Implementation plan**:
+  基于 TODO-140 的单/多 H2 connection 和 sender queue/inflight 结果，实验从 1 条按阈值扩到 2–4 条 sender 的小池；选择需保持 route affinity，逐 sender 记录活跃 request、等待、重建次数与 peer max streams。失效时只驱逐对应 sender。未证明单 sender 是 P99/QPS 瓶颈前，不改变当前缓存形状。
+
+### [TODO-144] Profile and redesign the UDP PPS data plane when warranted
+* **Priority**: Medium | **Status**: Research / UDP-gated | **Track**: Transport & Performance
+* **Problem**:
+  UDP 路径当前每包使用 rkyv envelope encode/decode，并在 session reply path 分配 payload/`Bytes`；每个 session 也维护 socket、reply pump 与定时清理。它保证了独立 upstream source-port 语义，但高 PPS、短 session 工作负载可能受 allocator、FD、task 和 wall-clock 调用限制。
+* **Implementation plan**:
+  先在 TODO-140 的 PPS/session-density 基线中拆分 encode/decode、copy、DashMap、socket/task、timer 和 drop 成本。若确认瓶颈，再设计版本化紧凑 header、borrowed/`Bytes` decode view、粗粒度时间和带上限的 session shard；共享 socket 只能作为会改变 upstream source-port 语义的显式模式，不能替换默认语义。不要把 UDP datagram payload 上限硬编码为 1200 bytes，须依据协商的 QUIC datagram/path MTU 处理。
 
 ### [TODO-22 / TODO-34 / TODO-86] 消除中继路径上的 Generic tokio::io::split 锁竞争
 * **Priority**: Medium | **Status**: 🚧 Partial / Production TCP Specialized | **Track**: Zero-Copy & Buffer Pooling
@@ -257,8 +378,8 @@ flowchart TD
 * **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
 * **Problem**:
   `tunnel-service` 使用 1500ms 的强轮询 `db_poll_task` 来同步数据更改。
-* **Fix**:
-  利用 SQLite 的 WAL 变更通知或文件系统锁变化（notify）机制，将拉取模式（Pull）改造为事件驱动（Push）推送。
+* **Implementation plan**:
+  在控制面自己的成功 DB mutation 路径中，于事务提交后发布带 resource version 的事件（必要时使用 outbox/sequence 表保证重启恢复）；`ControlService` 继续以现有 watch channel 向 server 推送 Patch/Snapshot。不要把 SQLite WAL 或文件系统 `notify` 当作正确性来源：事件可能合并、遗漏或无法区分写入语义。保留低频 reconciliation poll 作为外部写入与故障恢复 fallback，直到所有写入都统一经过发布路径。
 
 ### [TODO-99] TLS certificate watch and hot reload
 * **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
@@ -277,9 +398,9 @@ flowchart TD
 ### [TODO-96] JoinSet task lifetime tracking
 * **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
 * **Problem**:
-  散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。
+  散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。已知 callsite 包括 `H2SenderCache` 的 H2 connection driver：它有意持有 sender cache 与 inflight guard 直至连接 driver 退出，但服务 shutdown 时仍需由所属组件统一取消/等待。
 * **Fix**:
-  引入一个对 `JoinSet` 的弱 Arc 引用包装器，确保当父服务被 drop 之后，所有派生的异步协程自动级联 `abort_all` 取消。
+  引入组件拥有的 `JoinSet` / `TaskTracker` 与 `CancellationToken`，确保父服务停止时先协作取消、再在 deadline 后 `abort_all`；不要只依赖 `Drop`。为 H2 driver、listener worker 和 background cache task 明确登记所属组件与 drain 行为。
 
 ### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
 * **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
@@ -294,11 +415,11 @@ flowchart TD
   对 `QuicConnectionFatal` 异常进行细化归类，结合上下文流向区分其具体是属于 `Upstream` 还是 `Downstream`，防止由于网络异常误报核心故障。
 
 ### [TODO-CR-AUDIT-4] 高频 BufReader 用户态双重拷贝 (BufReader Double-Copy) 与内存压力
-* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
+* **Priority**: Low | **Status**: ❌ Discarded after code search | **Track**: Transport & Performance
 * **Problem**:
-  `quinn::RecvStream` 常常被包在 `BufReader` 中，引发了无意义的双重拷贝（OS Socket -> 堆内存 Buffer -> 目的 Socket）。
-* **Fix**:
-  对于纯 Passthrough 流量，直接使用裸的 `read_buf` 循环写入，绕过 `BufReader` 这一层用户态中间缓存。
+  原假设是 `quinn::RecvStream` 在 passthrough 路径被 `BufReader` 包装。代码搜索显示 `BufReader` 仅用于控制面 framing 和证书解析；QUIC↔TCP relay 使用 `RecvStream::read_chunk`，TCP→QUIC 使用 relay buffer，并不存在所述的 Quinn→BufReader→socket 复制链。
+* **Decision**:
+  不做此重构。若未来 profile 发现新的 passthrough `BufReader<RecvStream>` callsite，再以该具体 callsite 新建任务；当前数据拷贝的安全修复由 TODO-97 负责。
 
 ### [TODO-27] QUIC certificate and 0-RTT persistence
 * **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
@@ -317,10 +438,77 @@ flowchart TD
 * **Fix**:
   集成 `cargo-fuzz` 框架，为嗅探器和并发无锁表单独设计模糊测试靶标。
 
+### [TODO-105] Enable TCP Autotuning by defaulting buffer sizes to None
+* **Priority**: High | **Status**: Ready for implementation | **Track**: Transport & Performance
+* **Problem**:
+  在 `tunnel-lib/src/transport/tcp_params.rs` 中，`recv_buf_size` 和 `send_buf_size` 默认被设置为 `Some(4 * 1024 * 1024)`；`TcpConfig::default()` 会透传这两个值，所有未显式配置的 TCP 路径都会调用 `setsockopt`。这会固定 socket buffer 的策略，放弃由 Linux 的 `tcp_rmem` / `tcp_wmem` 随 RTT 与 BDP 调节的默认能力，并为大量空闲连接保留过高的缓冲上限。
+* **Implementation plan**:
+  将 `TcpParams` 默认值改为 `None`，让 `TcpConfig::default()` 自然继承；保留配置文件中显式 `recv_buf_size` / `send_buf_size` 的覆盖语义。补充默认值、显式覆盖和 `apply()` 不调用对应 `setsockopt` 的测试，并在 Linux 上对低 RTT 与高 BDP 两组负载做吞吐/内存回归。不要修改 QUIC 的 UDP buffer 参数，它们是独立的收包队列调优项。
+
+### [TODO-106] Shard EntryConnPool write actor by shard_id to scale write throughput
+* **Priority**: Medium | **Status**: Research / benchmark-gated | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  目前 `EntryConnPool` 中所有的 `Push`/`Remove` 写操作均串行发送给单个 MPSC 通道后台 Actor 进行更改。在极端网络闪断和海量连接重连时，单个 Actor 可能会因消息积压成为写吞吐瓶颈。
+* **Decision and implementation plan**:
+  当前 Actor 只承载冷路径 mutation，读路径已经通过 `ArcSwap` 分片快照无锁执行；因此不应仅凭设计推断拆分。先在重连风暴压测中采集 MPSC queue depth、push/remove acknowledgement latency、Actor CPU 和 snapshot clone 时间。若 Actor 确认占主导，再按 `stable_id` 选择每 shard channel/Actor，并让每个 Actor 独占其 `PoolShard` 与 slot free-list（TODO-111）；`Remove` 直接从 `stable_id` 重算 shard，避免跨 shard 搜索。TODO-108 应随此改造合并完成，不作为单独优化；TODO-107 的预构造 handle 会增加去重和 slot 回滚协议，除非 profile 显示 spawn/alloc 是主因，否则继续延后。
+
+### [TODO-107] Offload connection handle spawning from EntryConnPool actor
+* **Priority**: Medium | **Status**: Deferred pending profile evidence | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  目前的 `EntryConnPool` 在处理 `Push` 消息时，在 Actor 线程内执行了 `inflight_table.alloc_slot()` 以及 `ConnectionHandle::spawn`（涉及创建信号量 `Semaphore` 等堆内存分配动作），增加了单线程 Actor 的负载与延迟。
+* **Decision**:
+  预构造 handle 会引入重复 Push 的去重、slot 回滚和 actor 关闭时的资源归还协议；在 reconnect 冷路径上不应先支付这份复杂度。仅在 TODO-106 的压测证明 `alloc_slot` / `ConnectionHandle::spawn` 是主导耗时后再设计两阶段 reserve/commit 协议。
+
+### [TODO-108] O(1) EntryConnPool connection removal by passing shard_id
+* **Priority**: Medium | **Status**: Fold into TODO-106 if it is approved | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  目前的 `PoolMsg::Remove` 仅包含 `stable_id`，导致 Actor 必须遍历所有的 `shards` ($O(S)$ 复杂度) 来查找并移除对应的连接。
+* **Fix**:
+  不必从连接对象额外携带 `shard_id`：当前 shard 选择已经是 `stable_id` 的确定性哈希，可在 `remove_stable_id` 中重算。该收益只在分片 Actor 落地后才值得引入，届时与 TODO-106 一次完成并验证重复/未知 remove 仍为幂等。
+
+### [TODO-109] Optimize InflightTable atomic operations by merging counters
+* **Priority**: Medium | **Status**: Semantics and benchmark gated | **Track**: Transport & Performance
+* **Problem**:
+  `InflightSlot` 维护了 `pending_opens` 和 `active_streams` 两个独立的原子变量；当前选择与 slowpath 只读取二者之和。`promote()` 因而会执行一次减法和一次加法，`inflight_load()` 会执行两次读取。
+* **Implementation plan**:
+  可以改为 `total_inflight: AtomicUsize`，使 `promote()` 无需再改计数，load 只读取一个原子，Drop 在任何 phase（即时失败、等待超时、取消或正常关闭）递减后都 `notify_one()`：slowpath 等待的正是总 inflight 下降。先覆盖即时成功、即时失败、等待超时、取消和并发选择的 invariant/notification 测试，再以 flamegraph/基准确认是否值得合并。原子操作数量减少不等于端到端性能按相同比例提升。
+
+### [TODO-110] Replace InflightGuard drop CAS loop with fetch_sub
+* **Priority**: Low | **Status**: Fold into TODO-109 after invariants are tested | **Track**: Transport & Performance
+* **Problem**:
+  `InflightGuard` 的 `Drop` 实现中使用 `compare_exchange_weak` 循环来防止计数器下溢。
+* **Analysis**:
+  同一 QUIC connection 的流结束确实可能令 CAS 竞争；但现有 CAS 同时承担 release build 的饱和减法保护，不能在没有 invariant 测试的情况下机械替换成会下溢的 `fetch_sub`。计数合并后，此项自然收敛为 TODO-109 的 Drop 实现。
+* **Fix**:
+  先保证每个 guard 恰好递减一次，再用 `fetch_sub` 的返回值配合断言/明确的失败策略维护不下溢 invariant；无论 guard 处于哪个 phase，只要总 inflight 降低都应通知 slowpath 等待者。不要将其作为独立微优化提交。
+
+### [TODO-111] Remove Mutex lock from InflightTable slot allocation
+* **Priority**: Medium | **Status**: Ready after actor-ownership tests | **Track**: Transport & Performance
+* **Problem**:
+  `InflightTable` 中的 `free: Mutex<Vec<InflightSlotId>>` 在申请/释放槽位时使用了阻塞锁。虽然 low contention，但有 Mutex 锁操作开销。
+* **Pre-condition**:
+  已核对当前 callsite：client `EntryConnPool` 和 server `ClientRegistry` 都只在各自的单线程 actor mutation loop 中申请/释放 slot。实施时仍须补 actor 内重复注册、注销、连接替换与 purge 的测试，防止未来绕开 actor 新增调用方。
+* **Fix**:
+  将 slot free-list 的所有权移到各 Actor 的私有状态，或抽成只暴露给 actor 的 allocator；不要仅删除 `Mutex` 后继续让通用 `InflightTable` 暴露可并发的 alloc/free API。若 TODO-106 获批，每 shard actor 还必须拥有独立 slot allocator/table，避免把当前全局锁竞争扩散到多个 actor。
+
+### [TODO-134] Fix spurious notify_one in open_bi_guarded fast-path error branch
+* **Priority**: Low | **Status**: ❌ Discarded after code review | **Track**: Transport & Performance
+* **Problem**:
+  先前将 `PendingOpen` 的 Drop 通知判断为误唤醒；但 `inflight_load()` 使用的是 `pending_opens + active_streams`，而 slowpath 也以此总数决定等待。快路径失败会使 pending 计数下降，因此通知等待者是正确且必要的。
+* **Decision**:
+  不修改当前通知语义。TODO-109 若合并成单一总计数，任何 guard drop 后的总数下降仍应触发通知；补充这一 invariant 的测试即可。
+
+### [TODO-135] Document and test inflight_load non-atomic double read behavior
+* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Problem**:
+  `inflight_load` 对 `pending_opens` 和 `active_streams` 执行两次独立的原子 `load`，中间无屏障保证。在 `promote()` 执行过程中（`pending -= 1`，`active += 1`），并发读取可能得到 `pending + active - 1`（瞬态少算 1），影响 load balancing 精度。
+* **Fix**:
+  在 TODO-109（合并为单一计数器）实施后可自然消除。短期应在代码中明确注释此 invariant："inflight 读值在 `promote()` 期间可能瞬态偏低 1"，避免调用方依赖此值做精确决策。
+
 ### [TODO-24] Multi-endpoint + SO_REUSEPORT UDP research
 * **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
 * **Fix**:
-  仅在压测证明单个 Quinn endpoint UDP driver 单核打满、其他核空闲，且连接池读路径、注册 shard、H2 sender 缓存、egress reject 索引和 UDP 拷贝链均不是主瓶颈后，再研究 multi-endpoint + `SO_REUSEPORT` UDP。当前明确不推进 thread-per-core：它会丢失 Tokio work-stealing，显著抬高 Quinn/Hyper 生态改造成本，并且不适合 DuoTunnel 常见的 N 对 M 汇聚隧道流量。
+  仅在压测证明单个 Quinn endpoint UDP driver 单核打满、其他核空闲，且连接池读路径、注册 shard , H2 sender 缓存、egress reject 索引和 UDP 拷贝链均不是主瓶颈后，再研究 multi-endpoint + `SO_REUSEPORT` UDP。当前明确不推进 thread-per-core：它会丢失 Tokio work-stealing，显著抬高 Quinn/Hyper 生态改造成本，并且不适合 DuoTunnel 常见的 N 对 M 汇聚隧道流量。研究路径需包含在前端挂载轻量级 eBPF (XDP / Socket Redirect) 程序，根据 QUIC CID 路由数据包，解决 SO_REUSEPORT 因连接迁移/NAT重绑定导致的路由失效和丢包问题。
 
 ---
 
@@ -383,11 +571,11 @@ flowchart TD
   Server and client `/metrics` now append `duotunnel_slowpath_waiting_tasks` from `tunnel_lib::METRICS.waiting_tasks()`, exposing the in-memory overload backoff queue depth to Prometheus.
 
 ### [TODO-CR-AUDIT-1] 共享 Arc<TcpListener> 与 SO_REUSEPORT 概念背离
-* **Priority**: Low | **Status**: 🚧 Partial / Resolved by ListenerManager | **Track**: Transport & Performance
+* **Priority**: Low | **Status**: ✅ Done for managed ingress | **Track**: Transport & Performance
 * **Problem**:
   克隆 `Arc<TcpListener>` 在工作 Worker 之间只是共享同一个底层 Socket FD。真实的 `SO_REUSEPORT` 需要每个 Worker 独立绑定属于自己的独立文件描述符以做真正的内核负载分发。
 * **Current state**:
-  Server `ListenerManager` now binds a separate `SO_REUSEPORT` listener per accept worker for managed HTTP/TCP ingress listeners. The generic `run_accept_worker` API still accepts `Arc<TcpListener>` because some non-managed or fallback loops pass a single listener, so this is no longer a standalone Phase 1 performance project.
+  Server `ListenerManager` now binds a separate `SO_REUSEPORT` listener per accept worker for managed HTTP/TCP ingress listeners. The generic `run_accept_worker` API still accepts `Arc<TcpListener>` for non-managed or fallback loops, which is intentional API reuse rather than a remaining managed-ingress performance gap.
 
 ### [TODO-CR-AUDIT-2] 缓存行填充与堆内存分离的开销权衡 (False Sharing vs Heap Allocation)
 * **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance

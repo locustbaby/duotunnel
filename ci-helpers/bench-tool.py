@@ -460,7 +460,7 @@ def main():
     b.add_argument("--trace-cases-file", default="")
     b.add_argument("--max-entries", type=int, default=50)
     b.add_argument("--run-id", default="")
-    b.add_argument("--max-traces", type=int, default=10)
+    b.add_argument("--max-traces", type=int, default=3)
 
     i = sub.add_parser("inject")
     i.add_argument("--result", required=True)
