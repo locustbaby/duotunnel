@@ -161,6 +161,7 @@ impl RootCa {
             let c_path = std::path::Path::new(c_path);
             let k_path = std::path::Path::new(k_path);
             if c_path.exists() && k_path.exists() {
+                harden_existing_private_key(k_path);
                 if let (Ok(cert_pem), Ok(key_pem)) = (
                     std::fs::read_to_string(c_path),
                     std::fs::read_to_string(k_path),
@@ -242,25 +243,113 @@ impl RootCa {
     }
 }
 
-/// Write key material owner-read/write only; also tightens permissions of a
-/// pre-existing file, since `mode` on OpenOptions only applies at creation.
+/// Write key material owner-read/write only.
+///
+/// The default key path is relative, so it resolves against the process CWD,
+/// which may be writable by other local users. A pre-planted `ca.key` must not
+/// be able to capture the root CA key: `O_NOFOLLOW` refuses a symlink,
+/// `O_NONBLOCK` keeps a FIFO from blocking the open until the attacker attaches
+/// as reader, the file-type and uid checks (done through the returned fd, so
+/// they cannot be raced) reject anything but a regular file we own, and the
+/// fchmod covers the case where the file already existed, since `mode` only
+/// applies to files this call creates. Truncation happens only after those
+/// checks pass, so a rejected path is left untouched.
+#[cfg(unix)]
 fn write_private_key(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to write CA private key to non-regular file {}",
+                path.display()
+            ),
+        ));
     }
-    let mut file = opts.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let uid = unsafe { libc::getuid() };
+    if meta.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to write CA private key to {}: owned by uid {}, expected {}",
+                path.display(),
+                meta.uid(),
+                uid
+            ),
+        ));
     }
+
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.set_len(0)?;
     file.write_all(pem)
 }
+
+#[cfg(not(unix))]
+fn write_private_key(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(pem)
+}
+
+/// Tighten an already-persisted CA private key to 0600.
+///
+/// Deployments created before `write_private_key` enforced the mode still carry
+/// world-readable keys, and nothing else in the load path narrows them.
+#[cfg(unix)]
+fn harden_existing_private_key(path: &std::path::Path) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not open CA private key to check permissions");
+            return;
+        }
+    };
+    let mode = match file.metadata() {
+        Ok(meta) => meta.permissions().mode() & 0o777,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not stat CA private key to check permissions");
+            return;
+        }
+    };
+    if mode & 0o177 == 0 {
+        return;
+    }
+    match file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %path.display(),
+                found_mode = format!("{mode:04o}"),
+                "CA private key had permissions wider than 0600; tightened to 0600"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), found_mode = format!("{mode:04o}"), "CA private key has permissions wider than 0600 and could not be tightened");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_existing_private_key(_path: &std::path::Path) {}
 
 fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
     use base64::prelude::*;
