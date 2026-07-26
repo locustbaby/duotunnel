@@ -36,6 +36,10 @@ pub fn quic_connection_closed() {
     metrics::gauge!("duotunnel_active_quic_connections").decrement(1.0);
 }
 
+pub fn unauthenticated_connection_refused() {
+    metrics::counter!("duotunnel_unauthenticated_connections_refused_total").increment(1);
+}
+
 pub fn tcp_connection_opened() {
     metrics::counter!("duotunnel_total_tcp_connections").increment(1);
     metrics::gauge!("duotunnel_active_tcp_connections").increment(1.0);

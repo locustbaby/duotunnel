@@ -6,6 +6,7 @@ use crate::ServerState;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{
@@ -26,10 +27,16 @@ pub async fn run_quic_server(
         udp_socket,
         Arc::new(quinn::TokioRuntime),
     )?;
+    // Admission budget for connections that have not yet authenticated. It
+    // bounds the pre-auth flood surface (tasks + accept_bi waiters) only;
+    // authenticated connections release their permit and are governed by the
+    // registry instead (D-9: slot table stays out of scope here).
+    let unauth_budget = Arc::new(Semaphore::new(state.max_unauthenticated_connections()));
     info!(
         addr = %addr,
         udp_recv_buf_mb = quic_params.udp_recv_buf_bytes / (1024 * 1024),
         udp_send_buf_mb = quic_params.udp_send_buf_bytes / (1024 * 1024),
+        max_unauthenticated_connections = state.max_unauthenticated_connections(),
         "QUIC server listening"
     );
     loop {
@@ -42,11 +49,20 @@ pub async fn run_quic_server(
                 let Some(incoming) = incoming else {
                     break;
                 };
+                let Ok(permit) = unauth_budget.clone().try_acquire_owned() else {
+                    // Refuse instead of queueing: quinn answers with
+                    // CONNECTION_REFUSED before completing the handshake, so an
+                    // over-budget flood costs no task, stream, or crypto state.
+                    warn!(addr = %incoming.remote_address(), "refusing QUIC connection: unauthenticated connection budget exhausted");
+                    metrics::unauthenticated_connection_refused();
+                    incoming.refuse();
+                    continue;
+                };
                 let state = state.clone();
                 let ready = ready.clone();
                 tokio::task::spawn(async move {
                     metrics::quic_connection_opened();
-                    if let Err(e) = handle_quic_connection(state, ready, incoming).await {
+                    if let Err(e) = handle_quic_connection(state, ready, incoming, permit).await {
                         error!(error = % e, "QUIC connection error");
                     }
                     metrics::quic_connection_closed();
@@ -57,10 +73,14 @@ pub async fn run_quic_server(
     endpoint.close(0u32.into(), b"server shutting down");
     Ok(())
 }
+// `unauth_permit` accounts this connection against the pre-auth budget for the
+// whole handshake + login window; every failure path releases it by returning,
+// and the success path drops it explicitly once authentication concludes.
 async fn handle_quic_connection(
     state: Arc<ServerState>,
     ready: Arc<AtomicBool>,
     incoming: quinn::Incoming,
+    unauth_permit: OwnedSemaphorePermit,
 ) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
@@ -161,6 +181,7 @@ async fn handle_quic_connection(
         }
     };
     let client_group = auth_result.client_group;
+    drop(unauth_permit);
     info!(addr = % remote_addr, client_group = % client_group, "authenticated");
     metrics::auth_success(&client_group);
     let client_config = state.client_config_for_group(&client_group);

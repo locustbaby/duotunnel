@@ -145,6 +145,12 @@ pub struct ServerBasicConfig {
     pub pki: PkiParams,
     #[serde(default = "default_login_timeout_secs")]
     pub login_timeout_secs: u64,
+    /// Cap on concurrent QUIC connections that have not yet completed
+    /// authentication; incomings beyond it are refused before the handshake.
+    /// Sized for the expected 2-3 clients per group plus reconnect bursts,
+    /// not for the authenticated slot table.
+    #[serde(default = "default_max_unauthenticated_connections")]
+    pub max_unauthenticated_connections: usize,
     #[serde(default = "default_open_stream_timeout_ms")]
     pub open_stream_timeout_ms: u64,
     #[serde(default = "default_h2_single_authority")]
@@ -157,6 +163,9 @@ pub struct ServerBasicConfig {
 
 fn default_login_timeout_secs() -> u64 {
     10
+}
+fn default_max_unauthenticated_connections() -> usize {
+    64
 }
 fn default_open_stream_timeout_ms() -> u64 {
     5000
@@ -293,6 +302,9 @@ impl ServerConfigFile {
         }
         if self.server.login_timeout_secs == 0 {
             errors.push("server.login_timeout_secs must be >= 1".into());
+        }
+        if self.server.max_unauthenticated_connections == 0 {
+            errors.push("server.max_unauthenticated_connections must be >= 1".into());
         }
         if self.server.open_stream_timeout_ms == 0 {
             errors.push("server.open_stream_timeout_ms must be >= 1".into());

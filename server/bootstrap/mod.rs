@@ -183,6 +183,10 @@ impl ServerState {
         std::time::Duration::from_secs(self.ingress.config.server.login_timeout_secs)
     }
 
+    pub(crate) fn max_unauthenticated_connections(&self) -> usize {
+        self.ingress.config.server.max_unauthenticated_connections
+    }
+
     pub(crate) fn routing_snapshot(&self) -> arc_swap::Guard<Arc<RoutingSnapshot>> {
         self.ingress.routing.load()
     }
@@ -328,7 +332,8 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );
-    let shared_registry = new_shared_registry(shard_count, max_streams);
+    let shared_registry =
+        new_shared_registry(shard_count, max_streams, overload_limits.max_pending_streams);
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
