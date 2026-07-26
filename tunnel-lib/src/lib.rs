@@ -47,10 +47,11 @@ pub use models::defs::{
 pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
     decode_udp_datagram_envelope, encode_udp_datagram_envelope, negotiate_protocol, recv_message,
-    recv_message_type, recv_routing_info, recv_typed_message, send_message, send_routing_info,
-    ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol, RoutingInfo,
+    recv_message_bounded, recv_message_type, recv_routing_info, recv_typed_message, send_message,
+    send_routing_info, ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol, RoutingInfo,
     UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
-    MAX_DATAGRAM_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION, SUPPORTED_CAPABILITIES,
+    MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
+    SUPPORTED_CAPABILITIES,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::sniff::{

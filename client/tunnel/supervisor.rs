@@ -158,12 +158,13 @@ fn random_delay_range(min: Duration, max: Duration) -> Duration {
 fn random_delay_up_to(cap: Duration) -> Duration {
     random_delay_range(Duration::ZERO, cap)
 }
-pub fn classify_login_failure(resp_error: Option<&str>) -> ConnectError {
+/// The server sets `retryable` explicitly; error text is deliberately generic
+/// for unauthenticated peers and must not be pattern-matched to decide whether
+/// to reconnect — a transient backing-store fault would otherwise be read as a
+/// rejected token and stop the client for good.
+pub fn classify_login_failure(retryable: bool, resp_error: Option<&str>) -> ConnectError {
     let msg = resp_error.unwrap_or("unknown login error");
-    if msg.contains("timeout")
-        || msg.contains("unexpected message type")
-        || msg.contains("registration failed")
-    {
+    if retryable {
         ConnectError::transient(anyhow!("login rejected by server: {}", msg))
     } else {
         ConnectError::fatal(anyhow!("login rejected by server: {}", msg))

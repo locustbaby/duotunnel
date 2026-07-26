@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{
-    negotiate_protocol, recv_message, recv_message_type, send_message, ClientId, Login, LoginResp,
-    MessageType, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
+    negotiate_protocol, recv_message_bounded, recv_message_type, send_message, ClientId, Login,
+    LoginResp, MessageType, MAX_LOGIN_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
 
 // Per-connection drain window; kept shorter than the app-level 30s
@@ -22,6 +22,9 @@ use tunnel_lib::{
 const CONN_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 // Drain window plus margin for handlers still inside the login handshake.
 const CONN_TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+// Refusals are driven by the peer, so they must not turn the accept loop into a
+// log amplifier; the counter metric carries the exact rate.
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run_quic_server(
     state: Arc<ServerState>,
@@ -39,9 +42,9 @@ pub async fn run_quic_server(
         Arc::new(quinn::TokioRuntime),
     )?;
     // Admission budget for connections that have not yet authenticated. It
-    // bounds the pre-auth flood surface (tasks + accept_bi waiters) only;
-    // authenticated connections release their permit and are governed by the
-    // registry instead (D-9: slot table stays out of scope here).
+    // bounds concurrent pre-auth handlers (tasks, login streams, per-connection
+    // buffers); authenticated connections release their permit and are governed
+    // by the registry instead (D-9: slot table stays out of scope here).
     let unauth_budget = Arc::new(Semaphore::new(state.max_unauthenticated_connections()));
     info!(
         addr = %addr,
@@ -51,6 +54,7 @@ pub async fn run_quic_server(
         "QUIC server listening"
     );
     let conn_tasks = TaskTracker::new();
+    let mut last_refusal_log: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -61,12 +65,32 @@ pub async fn run_quic_server(
                 let Some(incoming) = incoming else {
                     break;
                 };
+                // Force a Retry round-trip before spending any budget on an
+                // unvalidated source address. Without this, spoofed Initial
+                // packets would each hold a permit for the whole handshake
+                // window and could deterministically lock out every real
+                // client. Costs honest clients one extra RTT per connect.
+                if !incoming.remote_address_validated() {
+                    if incoming.may_retry() {
+                        if let Err(e) = incoming.retry() {
+                            debug!(error = %e, "failed to send retry for unvalidated address");
+                        }
+                        continue;
+                    }
+                    debug!(addr = %incoming.remote_address(), "unvalidated address cannot be retried; ignoring");
+                    incoming.ignore();
+                    continue;
+                }
                 let Ok(permit) = unauth_budget.clone().try_acquire_owned() else {
                     // Refuse instead of queueing: quinn answers with
                     // CONNECTION_REFUSED before completing the handshake, so an
                     // over-budget flood costs no task, stream, or crypto state.
-                    warn!(addr = %incoming.remote_address(), "refusing QUIC connection: unauthenticated connection budget exhausted");
                     metrics::unauthenticated_connection_refused();
+                    let now = tokio::time::Instant::now();
+                    if last_refusal_log.is_none_or(|last| now.duration_since(last) >= REFUSAL_LOG_INTERVAL) {
+                        last_refusal_log = Some(now);
+                        warn!(addr = %incoming.remote_address(), "refusing QUIC connection: unauthenticated connection budget exhausted");
+                    }
                     incoming.refuse();
                     continue;
                 };
@@ -105,9 +129,11 @@ pub async fn run_quic_server(
     endpoint.close(0u32.into(), b"server shutting down");
     Ok(())
 }
-// `unauth_permit` accounts this connection against the pre-auth budget for the
-// whole handshake + login window; every failure path releases it by returning,
-// and the success path drops it explicitly once authentication concludes.
+// `unauth_permit` accounts this connection against the pre-auth budget; every
+// failure path releases it by returning, and the success path drops it
+// explicitly once authentication concludes. The whole pre-auth phase shares one
+// deadline so a peer that stalls each step cannot hold a permit for a multiple
+// of the configured login timeout.
 async fn handle_quic_connection(
     state: Arc<ServerState>,
     ready: Arc<AtomicBool>,
@@ -115,11 +141,20 @@ async fn handle_quic_connection(
     unauth_permit: OwnedSemaphorePermit,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let conn = incoming.await?;
+    let login_timeout = state.login_timeout();
+    let pre_auth_deadline = tokio::time::Instant::now() + login_timeout;
+    let conn = match tokio::time::timeout_at(pre_auth_deadline, incoming).await {
+        Ok(result) => result?,
+        Err(_elapsed) => {
+            debug!("QUIC handshake did not complete within the login timeout");
+            return Ok(());
+        }
+    };
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
-    let login_timeout = state.login_timeout();
-    let (mut send, mut recv) = match tunnel_lib::timeout(login_timeout, conn.accept_bi()).await {
+    let (mut send, mut recv) = match tokio::time::timeout_at(pre_auth_deadline, conn.accept_bi())
+        .await
+    {
         Ok(Ok(streams)) => streams,
         Ok(Err(e)) => return Err(e.into()),
         Err(_elapsed) => {
@@ -131,26 +166,27 @@ async fn handle_quic_connection(
             return Ok(());
         }
     };
-    let msg_type = match tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv)).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => return Err(e),
-        Err(_elapsed) => {
-            warn!(
-                addr = % remote_addr,
-                "login handshake timed out waiting for message type"
-            );
-            if let Err(e) = send_message(
-                &mut send,
-                MessageType::LoginResp,
-                &LoginResp::failure("login timeout"),
-            )
-            .await
-            {
-                debug!(addr = %remote_addr, error = %e, "send login timeout response failed");
+    let msg_type =
+        match tokio::time::timeout_at(pre_auth_deadline, recv_message_type(&mut recv)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Err(e),
+            Err(_elapsed) => {
+                warn!(
+                    addr = % remote_addr,
+                    "login handshake timed out waiting for message type"
+                );
+                if let Err(e) = send_message(
+                    &mut send,
+                    MessageType::LoginResp,
+                    &LoginResp::failure_retryable("login timeout"),
+                )
+                .await
+                {
+                    debug!(addr = %remote_addr, error = %e, "send login timeout response failed");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
     if msg_type != MessageType::Login {
         warn!(addr = % remote_addr, msg_type = ? msg_type, "expected Login message");
         if let Err(e) = send_message(
@@ -164,38 +200,45 @@ async fn handle_quic_connection(
         }
         return Ok(());
     }
-    let login: Login = match tunnel_lib::timeout(login_timeout, recv_message(&mut recv)).await {
-        Ok(Ok(l)) => l,
-        Ok(Err(e)) => return Err(e),
-        Err(_elapsed) => {
-            warn!(
-                addr = % remote_addr, "login handshake timed out waiting for login body"
-            );
-            if let Err(e) = send_message(
-                &mut send,
-                MessageType::LoginResp,
-                &LoginResp::failure("login timeout"),
-            )
-            .await
-            {
-                debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
+    let login: Login =
+        match tokio::time::timeout_at(
+            pre_auth_deadline,
+            recv_message_bounded(&mut recv, MAX_LOGIN_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return Err(e),
+            Err(_elapsed) => {
+                warn!(
+                    addr = % remote_addr, "login handshake timed out waiting for login body"
+                );
+                if let Err(e) = send_message(
+                    &mut send,
+                    MessageType::LoginResp,
+                    &LoginResp::failure_retryable("login timeout"),
+                )
+                .await
+                {
+                    debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
     let Some(negotiated) = negotiate_protocol(login.protocol_version, login.capabilities) else {
         warn!(
             addr = %remote_addr,
             client_version = login.protocol_version,
+            supported = format!("{}..={}", MIN_SUPPORTED_VERSION, PROTOCOL_VERSION),
             "rejecting login: incompatible protocol version"
         );
+        // The supported range stays out of the response: ALPN already gates
+        // generations, so only malformed or hostile peers reach this path and
+        // there is no reason to hand them a version fingerprint.
         if let Err(e) = send_message(
             &mut send,
             MessageType::LoginResp,
-            &LoginResp::failure(format!(
-                "incompatible protocol version {}: server supports {}..={}",
-                login.protocol_version, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION
-            )),
+            &LoginResp::failure("incompatible protocol version"),
         )
         .await
         {
@@ -209,7 +252,7 @@ async fn handle_quic_connection(
         if let Err(e) = send_message(
             &mut send,
             MessageType::LoginResp,
-            &LoginResp::failure("server not ready"),
+            &LoginResp::failure_retryable("server not ready"),
         )
         .await
         {
@@ -218,19 +261,47 @@ async fn handle_quic_connection(
         conn.close(0u32.into(), b"server not ready");
         return Ok(());
     }
-    let auth_result = match state.auth_store().authenticate(&login.token).await {
+    let auth_outcome = match tokio::time::timeout_at(
+        pre_auth_deadline,
+        state.auth_store().authenticate(&login.token),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            // An unbounded auth store (SQL lock contention, stalled ctld) would
+            // otherwise pin the permit indefinitely.
+            warn!(addr = %remote_addr, "authentication timed out");
+            metrics::auth_failure("unknown");
+            if let Err(e) = send_message(
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure_retryable("authentication unavailable"),
+            )
+            .await
+            {
+                debug!(addr = %remote_addr, error = %e, "send auth timeout response failed");
+            }
+            return Ok(());
+        }
+    };
+    let auth_result = match auth_outcome {
         Ok(result) => result,
         Err(e) => {
             warn!(addr = % remote_addr, error = % e, "authentication failed");
             metrics::auth_failure("unknown");
             // Never echo internal error details (DB errors, cache state) to an
-            // unauthenticated peer; the reason stays in server logs only.
-            send_message(
-                &mut send,
-                MessageType::LoginResp,
-                &LoginResp::failure("authentication failed"),
-            )
-            .await?;
+            // unauthenticated peer; the reason stays in server logs only. The
+            // retryable flag carries the one bit the client legitimately needs:
+            // a backing-store fault must not be read as a rejected token, or a
+            // transient database blip would permanently stop every client.
+            let resp = match e {
+                tunnel_store::AuthError::Internal(_) => {
+                    LoginResp::failure_retryable("authentication unavailable")
+                }
+                _ => LoginResp::failure("authentication failed"),
+            };
+            send_message(&mut send, MessageType::LoginResp, &resp).await?;
             return Ok(());
         }
     };
@@ -255,7 +326,7 @@ async fn handle_quic_connection(
         let _ = send_message(
             &mut send,
             MessageType::LoginResp,
-            &LoginResp::failure("registration failed: slot table exhausted"),
+            &LoginResp::failure_retryable("registration failed: slot table exhausted"),
         )
         .await;
         conn.close(0u32.into(), b"registration failed");

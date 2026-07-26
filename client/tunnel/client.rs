@@ -31,73 +31,18 @@ pub(crate) async fn run_client(
     entry_pool: Arc<EntryConnPool>,
     udp_registry: Arc<UdpListenerRegistry>,
 ) -> std::result::Result<(), ConnectError> {
-    let conn = connect_to_server(config, endpoint).await?;
-    info!("Connected to server");
-    let login_timeout = Duration::from_millis(config.reconnect.login_timeout_ms);
-    let (mut send, mut recv) = tunnel_lib::timeout(login_timeout, conn.open_bi())
-        .await
-        .map_err(|_| ConnectError::transient(anyhow!("open_bi timed out")))?
-        .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
-    let login = Login {
-        token: config.auth_token.clone(),
-        protocol_version: PROTOCOL_VERSION,
-        capabilities: SUPPORTED_CAPABILITIES,
+    // Nothing is in flight until the connection joins the pool, so racing this
+    // phase against shutdown is both safe and necessary: connect walks every
+    // resolved address and login spans several timeouts, so a sequential await
+    // would keep the process alive for minutes after a stop signal.
+    let (conn, resp, negotiated) = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            info!("shutdown signal received before tunnel session was established");
+            return Ok(());
+        }
+        established = establish_session(config, endpoint) => established?,
     };
-    tunnel_lib::timeout(
-        login_timeout,
-        send_message(&mut send, MessageType::Login, &login),
-    )
-    .await
-    .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
-    .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
-    debug!("Login message sent");
-    let msg_type = tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv))
-        .await
-        .map_err(|_| ConnectError::transient(anyhow!("waiting login response timed out")))?
-        .map_err(|e| {
-            ConnectError::transient(anyhow!("failed to read login response type: {}", e))
-        })?;
-    if msg_type != MessageType::LoginResp {
-        return Err(ConnectError::fatal(anyhow!(
-            "protocol mismatch: expected LoginResp, got {:?}",
-            msg_type
-        )));
-    }
-    let resp: LoginResp = tunnel_lib::timeout(login_timeout, recv_message(&mut recv))
-        .await
-        .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
-        .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
-    if !resp.success {
-        return Err(crate::tunnel::supervisor::classify_login_failure(
-            resp.error.as_deref(),
-        ));
-    }
-    // The server negotiates min(its max, our reported version), so anything
-    // outside our own supported range means a broken or hostile server —
-    // retrying cannot help.
-    if resp.negotiated_version < MIN_SUPPORTED_VERSION
-        || resp.negotiated_version > PROTOCOL_VERSION
-    {
-        return Err(ConnectError::fatal(anyhow!(
-            "protocol version negotiation failed: server negotiated v{}, client supports v{}..=v{}",
-            resp.negotiated_version,
-            MIN_SUPPORTED_VERSION,
-            PROTOCOL_VERSION
-        )));
-    }
-    let negotiated = NegotiatedProtocol {
-        version: resp.negotiated_version,
-        // Re-mask: never enable a capability the server echoes back but this
-        // build did not advertise.
-        capabilities: resp.capabilities & SUPPORTED_CAPABILITIES,
-    };
-    info!(
-        client_group = %resp.client_group,
-        upstreams = resp.config.upstreams.len(),
-        negotiated_version = negotiated.version,
-        capabilities = negotiated.capabilities,
-        "Login successful, config received"
-    );
     entry_pool.set_egress_rules(resp.config.egress_rules.clone());
     let lb = Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
     let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
@@ -176,6 +121,84 @@ pub(crate) async fn run_client(
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}
     }
     result
+}
+
+/// Connects and completes the login handshake. Split out of `run_client` so the
+/// caller can race the whole phase against shutdown: no stream is in flight
+/// yet, so dropping this future loses nothing that needs draining.
+async fn establish_session(
+    config: &ClientConfigFile,
+    endpoint: &quinn::Endpoint,
+) -> std::result::Result<(quinn::Connection, LoginResp, NegotiatedProtocol), ConnectError> {
+    let conn = connect_to_server(config, endpoint).await?;
+    info!("Connected to server");
+    let login_timeout = Duration::from_millis(config.reconnect.login_timeout_ms);
+    let (mut send, mut recv) = tunnel_lib::timeout(login_timeout, conn.open_bi())
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("open_bi timed out")))?
+        .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
+    let login = Login {
+        token: config.auth_token.clone(),
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: SUPPORTED_CAPABILITIES,
+    };
+    tunnel_lib::timeout(
+        login_timeout,
+        send_message(&mut send, MessageType::Login, &login),
+    )
+    .await
+    .map_err(|_| ConnectError::transient(anyhow!("sending login timed out")))?
+    .map_err(|e| ConnectError::transient(anyhow!("failed to send login: {}", e)))?;
+    debug!("Login message sent");
+    let msg_type = tunnel_lib::timeout(login_timeout, recv_message_type(&mut recv))
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("waiting login response timed out")))?
+        .map_err(|e| {
+            ConnectError::transient(anyhow!("failed to read login response type: {}", e))
+        })?;
+    if msg_type != MessageType::LoginResp {
+        return Err(ConnectError::fatal(anyhow!(
+            "protocol mismatch: expected LoginResp, got {:?}",
+            msg_type
+        )));
+    }
+    let resp: LoginResp = tunnel_lib::timeout(login_timeout, recv_message(&mut recv))
+        .await
+        .map_err(|_| ConnectError::transient(anyhow!("reading LoginResp payload timed out")))?
+        .map_err(|e| ConnectError::transient(anyhow!("failed to decode LoginResp: {}", e)))?;
+    if !resp.success {
+        return Err(crate::tunnel::supervisor::classify_login_failure(
+            resp.retryable,
+            resp.error.as_deref(),
+        ));
+    }
+    // The server negotiates min(its max, our reported version), so anything
+    // outside our own supported range means a broken or hostile server —
+    // retrying cannot help.
+    if resp.negotiated_version < MIN_SUPPORTED_VERSION
+        || resp.negotiated_version > PROTOCOL_VERSION
+    {
+        return Err(ConnectError::fatal(anyhow!(
+            "protocol version negotiation failed: server negotiated v{}, client supports v{}..=v{}",
+            resp.negotiated_version,
+            MIN_SUPPORTED_VERSION,
+            PROTOCOL_VERSION
+        )));
+    }
+    let negotiated = NegotiatedProtocol {
+        version: resp.negotiated_version,
+        // Re-mask: never enable a capability the server echoes back but this
+        // build did not advertise.
+        capabilities: resp.capabilities & SUPPORTED_CAPABILITIES,
+    };
+    info!(
+        client_group = %resp.client_group,
+        upstreams = resp.config.upstreams.len(),
+        negotiated_version = negotiated.version,
+        capabilities = negotiated.capabilities,
+        "Login successful, config received"
+    );
+    Ok((conn, resp, negotiated))
 }
 
 async fn connect_to_server(

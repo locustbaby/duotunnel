@@ -24,6 +24,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(crate) const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_DATAGRAM_BYTES: usize = 1200;
+/// Ceiling for the `Login` frame, which is read before the peer is
+/// authenticated. A real Login is a token plus two integers; the generous
+/// headroom covers token length growth without letting an unauthenticated peer
+/// dictate a large allocation.
+pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
 
 /// Highest wire-protocol version this build speaks.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -115,6 +120,11 @@ pub struct LoginResp {
     pub client_group: GroupId,
     pub negotiated_version: u16,
     pub capabilities: u64,
+    /// Whether the client should retry. Machine-readable on purpose: error
+    /// strings sent to unauthenticated peers are deliberately generic, so the
+    /// client cannot tell a transient server-side fault from a rejected token
+    /// by inspecting text.
+    pub retryable: bool,
 }
 impl LoginResp {
     pub fn success(
@@ -129,8 +139,10 @@ impl LoginResp {
             client_group,
             negotiated_version: negotiated.version,
             capabilities: negotiated.capabilities,
+            retryable: false,
         }
     }
+    /// Permanent rejection: the client must not retry with the same input.
     pub fn failure(error: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -140,6 +152,15 @@ impl LoginResp {
             // 0 = no agreement reached; valid versions start at 1.
             negotiated_version: 0,
             capabilities: CAP_NONE,
+            retryable: false,
+        }
+    }
+    /// Transient rejection: the same client may succeed on a later attempt
+    /// (server still starting, backing store unavailable, capacity exhausted).
+    pub fn failure_retryable(error: impl Into<String>) -> Self {
+        Self {
+            retryable: true,
+            ..Self::failure(error)
         }
     }
 }
@@ -216,8 +237,23 @@ where
     M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
         + Deserialize<M, HighDeserializer<rancor::Error>>,
 {
+    recv_message_bounded(reader, MAX_MESSAGE_BYTES).await
+}
+
+/// Like [`recv_message`] but with a caller-supplied ceiling. The buffer is
+/// allocated from the peer-declared length before any payload arrives, so paths
+/// that read from an unauthenticated peer must pass a bound that fits the
+/// message they expect rather than the generic 10 MiB frame limit.
+pub async fn recv_message_bounded<R, M>(reader: &mut R, max_bytes: usize) -> Result<M>
+where
+    R: AsyncReadExt + Unpin,
+    M: Archive,
+    M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
+        + Deserialize<M, HighDeserializer<rancor::Error>>,
+{
+    let max_bytes = max_bytes.min(MAX_MESSAGE_BYTES);
     let len = reader.read_u32().await? as usize;
-    if len > MAX_MESSAGE_BYTES {
+    if len > max_bytes {
         return Err(anyhow!("Message too large: {} bytes", len));
     }
     let mut buf = AlignedVec::<16>::with_capacity(len);
@@ -387,6 +423,7 @@ mod tests {
             client_group: "test-client".into(),
             negotiated_version: PROTOCOL_VERSION,
             capabilities: CAP_NONE,
+            retryable: false,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
@@ -410,6 +447,7 @@ mod tests {
             client_group: "".into(),
             negotiated_version: 0,
             capabilities: CAP_NONE,
+            retryable: false,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
