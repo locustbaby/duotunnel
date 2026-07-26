@@ -24,6 +24,7 @@ pub struct ConnectionHandle {
     shard_id: usize,
     stream_semaphore: Arc<tokio::sync::Semaphore>,
     pending_semaphore: Arc<tokio::sync::Semaphore>,
+    pending_limit: usize,
 }
 
 impl ConnectionHandle {
@@ -37,7 +38,8 @@ impl ConnectionHandle {
     ) -> Arc<Self> {
         let stream_semaphore =
             Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams as usize));
-        let pending_semaphore = Arc::new(tokio::sync::Semaphore::new(max_pending_streams.max(1)));
+        let pending_limit = max_pending_streams.max(1);
+        let pending_semaphore = Arc::new(tokio::sync::Semaphore::new(pending_limit));
 
         Arc::new(Self {
             conn,
@@ -46,6 +48,7 @@ impl ConnectionHandle {
             shard_id,
             stream_semaphore,
             pending_semaphore,
+            pending_limit,
         })
     }
 
@@ -86,10 +89,12 @@ impl ConnectionHandle {
             &self.conn,
             &self.inflight_table,
             self.slot_id,
-            &request.overload_limits,
             request.stream_timeout,
             Some(permit),
-            &self.pending_semaphore,
+            crate::transport::open_bi::PendingAdmission {
+                semaphore: &self.pending_semaphore,
+                limit: self.pending_limit,
+            },
             move |elapsed, outcome| {
                 if let Some(observer) = wait_observer.take() {
                     observer(elapsed, outcome);

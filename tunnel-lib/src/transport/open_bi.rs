@@ -47,14 +47,20 @@ impl Drop for PendingSlot {
     }
 }
 
+/// Per-connection gate for streams waiting on QUIC flow-control credit.
+/// `limit` is the semaphore's configured size, reported when admission fails.
+pub struct PendingAdmission<'a> {
+    pub semaphore: &'a Arc<tokio::sync::Semaphore>,
+    pub limit: usize,
+}
+
 pub async fn open_bi_guarded<F>(
     conn: &Connection,
     inflight_table: &Arc<InflightTable>,
     slot_id: InflightSlotId,
-    overload_limits: &crate::lb::overload::OverloadLimits,
     stream_timeout: Duration,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    pending_semaphore: &Arc<tokio::sync::Semaphore>,
+    admission: PendingAdmission<'_>,
     on_wait_done: F,
 ) -> Result<OpenedStream, ProxyError>
 where
@@ -81,13 +87,13 @@ where
     let started = Instant::now();
     // Admission is per-connection via the semaphore; the global gauge inside
     // PendingSlot is kept as a pure metric and no longer gates anything.
-    let _pending_slot = match pending_semaphore.clone().try_acquire_owned() {
+    let _pending_slot = match admission.semaphore.clone().try_acquire_owned() {
         Ok(pending_permit) => PendingSlot::new(pending_permit),
         Err(_) => {
             on_wait_done(Duration::ZERO, OpenBiOutcome::RejectedOverloaded);
             return Err(ProxyError::quic_open_rejected_overloaded(format!(
-                "pending queue full: limit={}",
-                overload_limits.max_pending_streams
+                "per-connection pending stream limit reached: limit={}",
+                admission.limit
             )));
         }
     };
