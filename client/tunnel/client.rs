@@ -19,6 +19,10 @@ use crate::plugins;
 use crate::tunnel::conn_pool::EntryConnPool;
 use crate::tunnel::supervisor::ConnectError;
 
+// Kept shorter than the app-level 30s drain backstop in runtime::app so both
+// waits stay bounded even when the local drain times out.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
@@ -110,6 +114,10 @@ pub(crate) async fn run_client(
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("shutdown signal received, stopping tunnel stream accept");
+                break Ok(());
+            }
             reason = conn.closed() => {
                 warn!(reason = ?reason, "Connection closed by server");
                 break Err(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
@@ -120,6 +128,10 @@ pub(crate) async fn run_client(
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
+                        // Deliberately untracked: work-stream tasks end when
+                        // the connection closes (their QUIC streams error
+                        // out), and per-stream tracking would tax the hot
+                        // path.
                         crate::runtime::spawn_task(async move {
                             if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 debug!(error = %e, "work stream error");
@@ -150,6 +162,15 @@ pub(crate) async fn run_client(
     session_cancel.cancel();
     entry_pool.remove(&conn).await;
     ready.store(false, Ordering::Release);
+    if shutdown.is_cancelled() {
+        // Entry listeners stop accepting on the same token; drain local
+        // in-flight relays before closing, because CONNECTION_CLOSE aborts
+        // every open stream — the close must come after the drain.
+        let drained = tunnel_lib::wait_for_resource_drain(SHUTDOWN_DRAIN_TIMEOUT).await;
+        info!(drained, "closing tunnel connection: client shutting down");
+        conn.close(0u32.into(), b"client shutting down");
+        return Ok(());
+    }
     tokio::select! {
         _ = shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}

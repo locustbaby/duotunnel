@@ -6,13 +6,23 @@ use crate::ServerState;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{
     negotiate_protocol, recv_message, recv_message_type, send_message, ClientId, Login, LoginResp,
     MessageType, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
+
+// Per-connection drain window; kept shorter than the app-level 30s
+// SHUTDOWN_DRAIN_TIMEOUT so the runtime backstop still fires after
+// connections have closed.
+const CONN_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+// Drain window plus margin for handlers still inside the login handshake.
+const CONN_TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+
 pub async fn run_quic_server(
     state: Arc<ServerState>,
     ready: Arc<AtomicBool>,
@@ -40,6 +50,7 @@ pub async fn run_quic_server(
         max_unauthenticated_connections = state.max_unauthenticated_connections(),
         "QUIC server listening"
     );
+    let conn_tasks = TaskTracker::new();
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -61,15 +72,35 @@ pub async fn run_quic_server(
                 };
                 let state = state.clone();
                 let ready = ready.clone();
-                tokio::task::spawn(async move {
+                let conn_shutdown = shutdown.clone();
+                conn_tasks.spawn(async move {
                     metrics::quic_connection_opened();
-                    if let Err(e) = handle_quic_connection(state, ready, incoming, permit).await {
+                    if let Err(e) = handle_quic_connection(state, ready, incoming, permit, conn_shutdown).await {
                         error!(error = % e, "QUIC connection error");
                     }
                     metrics::quic_connection_closed();
                 });
             }
         }
+    }
+    conn_tasks.close();
+    if !conn_tasks.is_empty() {
+        info!(
+            connections = conn_tasks.len(),
+            "waiting for QUIC connection tasks to finish"
+        );
+    }
+    // Connection handlers drain in-flight streams and close their own
+    // connections; endpoint.close() before that wait would abort them all.
+    if tokio::time::timeout(CONN_TASK_WAIT_TIMEOUT, conn_tasks.wait())
+        .await
+        .is_err()
+    {
+        warn!(
+            remaining = conn_tasks.len(),
+            wait_timeout_secs = CONN_TASK_WAIT_TIMEOUT.as_secs(),
+            "QUIC connection tasks did not finish in time; forcing endpoint close"
+        );
     }
     endpoint.close(0u32.into(), b"server shutting down");
     Ok(())
@@ -82,6 +113,7 @@ async fn handle_quic_connection(
     ready: Arc<AtomicBool>,
     incoming: quinn::Incoming,
     unauth_permit: OwnedSemaphorePermit,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let conn = incoming.await?;
     let remote_addr = conn.remote_address();
@@ -244,6 +276,16 @@ async fn handle_quic_connection(
     let udp_sessions = UdpSessionManager::new(conn.clone(), state.egress_map());
     loop {
         tokio::select! {
+            _ = shutdown.cancelled() => {
+                // Stop taking new streams here, but let in-flight proxied
+                // streams finish first (public listeners are cancelled on the
+                // same token): QUIC CONNECTION_CLOSE aborts every open stream,
+                // so the close must come after the drain, not before.
+                let drained = tunnel_lib::wait_for_resource_drain(CONN_SHUTDOWN_DRAIN_TIMEOUT).await;
+                info!(conn_id = %conn_id, drained, "closing connection: server shutting down");
+                conn.close(0u32.into(), b"server shutting down");
+                break;
+            }
             _ = conn.closed() => {
                 info!(conn_id = %conn_id, "connection closed");
                 break;
@@ -253,6 +295,9 @@ async fn handle_quic_connection(
                     Ok((send, recv)) => {
                         debug!("accepted reverse stream from client");
                         let state = state.clone();
+                        // Deliberately untracked: these tasks end when the
+                        // connection closes (their QUIC streams error out),
+                        // and per-stream tracking would tax the hot path.
                         tokio::task::spawn(async move {
                             let egress_map = state.egress_map();
                             if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
@@ -307,6 +352,7 @@ async fn handle_quic_connection(
             }
         }
     }
+    udp_sessions.shutdown().await;
     state.registry().unregister(&conn_id);
     metrics::client_unregistered(&client_group);
     Ok(())

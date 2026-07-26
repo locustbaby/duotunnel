@@ -86,6 +86,10 @@ where
 
                     let cache = sender_cache.clone();
                     let driver_sender_arc = sender_arc.clone();
+                    // Untracked by design: the driver's lifetime is bounded by
+                    // the QUIC stream it owns — connection close (including
+                    // graceful shutdown) errors the stream, so the driver
+                    // exits and clears the cached sender.
                     tokio::spawn(async move {
                         let _inflight_guard = inflight;
                         if let Err(e) = conn_driver.await {
