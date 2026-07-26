@@ -222,7 +222,7 @@ impl RootCa {
             if let Err(e) = std::fs::write(c_path, cert_pem) {
                 tracing::error!(error = %e, path = %c_path.display(), "failed to save CA cert to disk");
             }
-            if let Err(e) = std::fs::write(k_path, key_pem) {
+            if let Err(e) = write_private_key(k_path, key_pem.as_bytes()) {
                 tracing::error!(error = %e, path = %k_path.display(), "failed to save CA private key to disk");
             }
 
@@ -240,6 +240,26 @@ impl RootCa {
             })
         }
     }
+}
+
+/// Write key material owner-read/write only; also tightens permissions of a
+/// pre-existing file, since `mode` on OpenOptions only applies at creation.
+fn write_private_key(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(pem)
 }
 
 fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
