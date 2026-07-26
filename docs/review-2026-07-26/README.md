@@ -104,19 +104,28 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 ### P0 — 正确性/安全，上线前必须闭合（不依赖压测/架构改造）
 
+> **✅ 本批已全部实施并合入 main（2026-07-26，PR #58）。** 实施过程中经三轮对抗式
+> review（并发/内存、HTTP 协议合规、安全/协商），又查出 8 项后续问题一并修复——其中
+> 两项是本批自己引入的回归：未认证配额一度可被 64 个伪造源 IP 包确定性锁死；
+> Content-Length 修复因 `MapFrame` 不转发 `size_hint` 而**完全没生效**。
+> 另有一项超出原清单的重大发现：ctld 模式下 listener 被 spawn 到单线程 runtime，
+> 既导致停机死锁（CI stop 92s → 1s），也让整条公网 ingress 无法多核（新增串行点 S0，
+> 见 [02 §2.0](./02-scalability-and-cpu-affinity.md)）。
+> 逐条落地细节见 [`docs/todo.md`](../todo.md) 各条目的 Outcome。
+
 | 项 | 文档 | 证据 | todo 关系 |
 | --- | --- | --- | --- |
-| relay buffer 未初始化内存 UB | 01 §3.1 | `engine/copy.rs:17-44,127` | TODO-97 reopened |
-| 响应无条件 chunked + 204/304/HEAD 违规致 keep-alive 失步 | 01 §3.2 | `http_utils.rs:112-115`+`h1.rs:291,322` | **新发现** |
-| 未认证连接无限流 → DoS/槽位耗尽 | 07 §3.1 | `handlers/quic.rs:47`+`registry.rs:89` | 关联 TODO-146/142 |
-| CA 私钥落盘无权限控制 | 07 §3.3 | `infra/pki.rs:225` | **新发现** |
-| 认证内部错误回传未认证方 | 07 §4.2 | `handlers/quic.rs:152-157` | CR-AUDIT-22 |
-| open_bi pending 上限竞态 + 全局/单连接语义混用 | 01 §3.3 | `open_bi.rs:57-67`+`overload.rs:53` | TODO-80 reopened + 新语义问题 |
-| 优雅停机不完整（漏 QUIC/stream/UDP/H2）+ 孤儿 spawn | 05 M1 | `client.rs:97`等 | CR-AUDIT-21 + TODO-96 |
-| 请求走私面（CL/TE 冲突未拒绝） | 07 §4.7 | `h1.rs:173-177` | **新发现** |
-| `Expect: 100-continue` 下游挂起（60s 超时） | 09 §4.5 | `h1.rs:103-261` | **新发现** |
-| 面向公网 H2 未设显式防滥用上界（rapid-reset） | 09 §4.4 | `h2.rs:81`+`tls/mod.rs:230` | **新发现**（并入安全批次） |
-| 线协议无版本协商 → 无法滚动升级/灰度（新旧混跑批量断连） | 13 §4 | `msg.rs:41,56,119`+`quic.rs:83` | **新发现**·建议尽早 |
+| ✅ relay buffer 未初始化内存 UB | 01 §3.1 | `engine/copy.rs:17-44,127` | TODO-97 **已闭合** |
+| ✅ 响应无条件 chunked + 204/304/HEAD 违规致 keep-alive 失步 | 01 §3.2 | `http_utils.rs:112-115`+`h1.rs:291,322` | **已闭合**（初版修复无效，见上方说明） |
+| ✅ 未认证连接无限流 → DoS/槽位耗尽 | 07 §3.1 | `handlers/quic.rs:47`+`registry.rs:89` | **已闭合**（含地址验证前置） |
+| ✅ CA 私钥落盘无权限控制 | 07 §3.3 | `infra/pki.rs:225` | **已闭合**（含 O_NOFOLLOW/属主校验） |
+| ✅ 认证内部错误回传未认证方 | 07 §4.2 | `handlers/quic.rs:152-157` | CR-AUDIT-22 **已闭合**（+ `retryable` 字段） |
+| ✅ open_bi pending 上限竞态 + 全局/单连接语义混用 | 01 §3.3 | `open_bi.rs:57-67`+`overload.rs:53` | TODO-80 **已闭合**；进程级兜底转 TODO-142 |
+| ✅ 优雅停机不完整（漏 QUIC/stream/UDP/H2）+ 孤儿 spawn | 05 M1 | `client.rs:97`等 | CR-AUDIT-21 + TODO-96 **已闭合**（残留缺口见 todo） |
+| ✅ 请求走私面（CL/TE 冲突未拒绝） | 07 §4.7 | `h1.rs:173-177` | **已闭合**；代价见 TODO-147（chunked 请求体被拒） |
+| ✅ `Expect: 100-continue` 下游挂起（60s 超时） | 09 §4.5 | `h1.rs:103-261` | **已闭合**（其他 Expect 回 417） |
+| ✅ 面向公网 H2 未设显式防滥用上界（rapid-reset） | 09 §4.4 | `h2.rs:81`+`tls/mod.rs:230` | **已闭合**；顺带修 TLS 侧 ALPN 分派缺失 |
+| ✅ 线协议无版本协商 → 无法滚动升级/灰度（新旧混跑批量断连） | 13 §4 | `msg.rs:41,56,119`+`quic.rs:83` | **已闭合**（ALPN 世代化为 `tunnel-quic/v1`） |
 
 ### P1 — 性能/测量，达成可信基线与确定性优化
 
@@ -175,9 +184,19 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 ```
 M1 正确性/安全闭合 ──▶ M2 可信测量+线性扩展 ──▶ M3 抽象收敛
-   (敢上不可信流量)      (性能可证明 ≥0.8 线性)     (可长期演进)
-   成熟度 ~3.5            成熟度 ~3.8                成熟度 ~4.0
+   ✅ 已完成 2026-07-26   ◀── 当前所在          (可长期演进)
+   (PR #58)              (性能可证明 ≥0.8 线性)     成熟度 ~4.0
+   成熟度 ~3.5            成熟度 ~3.8
 ```
+
+**M1 完成情况（2026-07-26，PR #58）**：P0 清单 11 项全部闭合，另修 8 项 review 追加问题。
+遗留的已知缺口都已显式记录而非默认解决：无应用层 GOAWAY、反向 stream 无 drain 计数、
+chunked 请求体被 411 拒绝（TODO-147）、metrics/healthz 端口仍无认证。
+
+**M2 的第一步已被 M1 意外推进**：S0（listener runtime 归属）修复后公网 ingress 才真正
+跑在多线程 runtime 上——但**这也意味着此前所有多核压测数字都不足以支撑扩展性结论**。
+M2 的顺序因此不变且更紧迫：先做 [06](./06-bench-methodology.md) / [02 §6](./02-scalability-and-cpu-affinity.md#6-ci-4c-runner-的绑核配比立即可做解决争抢)
+的 cpuset 隔离建立可信基线，再谈 Phase B（多 Endpoint）。
 
 **顺序铁律**：M1 未闭合前，任何 benchmark-gated 微优化都不应启动（与 todo.md 的
 evidence-driven 原则一致）；CI 可信基线（M2 首步）建立前，所有 CI 数字不可作为

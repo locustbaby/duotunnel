@@ -56,7 +56,7 @@ Dependency rule: binaries depend on `tunnel-lib` + `tunnel-store`; `tunnel-lib` 
 
 ### Client
 
-- Always outbound-connects to `server_addr:server_port` over QUIC (ALPN `tunnel-quic`).
+- Always outbound-connects to `server_addr:server_port` over QUIC (ALPN `tunnel-quic/v1` — generation-scoped, so an incompatible peer fails at the QUIC handshake rather than at login).
 - Upstream map and egress allowlist come from `LoginResp.config` at login — not from local YAML.
 - Optional `entry.port` exposes a local forward-proxy entry; optional `udp_entries[]` for UDP.
 
@@ -149,7 +149,7 @@ Overload at entry: `QuicOpenRejectedOverloaded` → H1 returns `503` + `Retry-Af
 
 Every forwarded flow uses a **bidi QUIC stream**:
 
-1. Caller acquires stream via `open_bi_guarded` (server ingress) or `ConnectionHandle::open_stream` (client entry).
+1. Caller acquires a stream via `ConnectionHandle::open_stream` on both sides; it takes the per-connection concurrency permit and delegates to `open_bi_guarded`, which applies the per-connection pending-stream gate.
 2. First frame on stream: `MessageType::RoutingInfo` (rkyv payload).
 3. `ProxyEngine::run_stream` resolves `PeerSpec` and bridges QUIC ↔ upstream.
 4. `InflightGuard` on stream drop decrements per-connection inflight counters.
@@ -257,7 +257,7 @@ control/       ControlService, WatchServer, proto (snapshot/patch), reactor (deb
 | Server calls `open_bi` on registered client connections | Avoids extra control round-trips; stream creation is 0-RTT relative to login |
 | `RoutingSnapshot` + `ArcSwap` | Lock-free readers on hot path; atomic routing updates |
 | Registry / conn pool as actors | Serialize mutation; snapshots for reads; prevents DashMap churn on forward path |
-| `open_bi_guarded` pending cap | Fail fast under global queue pressure instead of timing out every caller |
+| `open_bi_guarded` pending cap | Fail fast under per-connection queue pressure instead of timing out every caller (a process-wide budget is still open — TODO-142) |
 | Ingress 6-phase dispatcher | Separates sniff, admission, routing, protocol handling; plugins swap without touching accept loop |
 | `LoginResp` carries `ClientConfig` | Client upstream map authoritative from server; YAML only has connection tuning |
 | Egress allowlist on client | Fast local reject (`502`/`EOF`) before opening QUIC stream for disallowed hosts |

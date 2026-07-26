@@ -1,6 +1,7 @@
 # Tunnel TODO
 
-> Last synced against code, analysis reports 1–7, and the 2026-07-22 runtime audit: 2026-07-22.
+> Last synced against code, analysis reports 1–7, the 2026-07-22 runtime audit, and the
+> 2026-07-26 review series + M1 batch (PR #58): 2026-07-26.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
@@ -29,7 +30,7 @@
 | 1 | `EntryConnPool` 单写 Actor 在重连风暴时可能积压 | TODO-106 | 🔬 保持证据驱动。先采集队列深度、mutation latency 和重连风暴下的 CPU；若确认瓶颈，将删除/slot 管理一并做成每 shard 所有，避免把全局 `InflightTable` 锁带入多个 Actor。 |
 | 2 | 将 `ConnectionHandle` 构造移出 Actor、并把 remove 定位为 O(1) | TODO-107、TODO-108 | ⏸️ 前者会引入去重和 slot 回滚协议，继续延后；后者直接由 `stable_id` 重算 shard，并随 TODO-106 合并。 |
 | 2 | 合并 `pending_opens` / `active_streams`，简化 Drop 与 slot allocator | TODO-109、TODO-110、TODO-111、TODO-134 | ⏳ 计数合并在当前调用方语义下可行，但性能收益必须压测确认；PendingOpen 失败会降低总 inflight，当前通知是正确的，需为总量与通知语义补测试后再处理 slot allocator。 |
-| 3 | `Vec::set_len` 后以 `&mut [u8]` 交给 `AsyncReadExt::read` | TODO-97 | 🚨 重开为内存安全修复。`Vec::set_len` 要求新长度范围已初始化；改用池化 `BytesMut` + `read_buf`，而不是以注释证明未初始化 slice 可安全写入。 |
+| 3 | `Vec::set_len` 后以 `&mut [u8]` 交给 `AsyncReadExt::read` | TODO-97 | ✅ 已修复（2026-07-26）。池改为 `BytesMut` + `read_buf`，不再构造指向未初始化内存的 slice，也不付 memset 代价。 |
 | 3 | 嗅探 pool 的零填充与 `BytesMut` / `read_buf` 方案 | TODO-136 | 🔬 当前 `PeekBufPool` 的零填充是安全的；不能用 `set_len` 消除它。只有完整迁移为安全的 `BytesMut` / `read_buf` 所有权模型且压测证明收益时才推进。 |
 | 3 | HTTP egress 的 8 KiB header scratch 与响应行格式化 | TODO-137 | 🔬 先用分配/CPU profile 证明热点。`write!` 的格式串并非运行时解析；直接字节拼接只是一项可测量的微优化，不能据此引入跨 task 缓冲池复杂度。 |
 | 3 | 过载路径每次 inflight 下降的 `notify_one()` | TODO-95、TODO-134 | ✅ 无新增缺陷。慢路径是 advisory backoff：中间档醒来后直接返回，不会按报告所述必然重新挂起；高压档仍需要每次下降通知以缩短等待，阈值唤醒方案必须先以 P99/CPU 验证。 |
@@ -50,10 +51,10 @@
 
 | 审计结论 | 对应记录 | 代码核对后的进度与决策 |
 | --- | --- | --- |
-| `max_pending_streams` 使用 load/check 后再 `fetch_add`，并发突发可越过配置上限 | TODO-80 | 🚨 重新打开。改用严格 permit/CAS reservation，并覆盖取消、超时和并发 overshoot 测试。 |
-| shutdown drain 只观察 accepted TCP 与 pending `open_bi`，未等待 QUIC connection、活跃 stream/relay、UDP session 或 H2 driver | TODO-CR-AUDIT-21、TODO-96 | 🚨 重新打开。结构化任务所有权与真实 active-session drain 必须一起完成。 |
+| `max_pending_streams` 使用 load/check 后再 `fetch_add`，并发突发可越过配置上限 | TODO-80 | ✅ 已修复（2026-07-26）。改为 per-connection semaphore；同时纠正"单连接阈值套全局计数"的语义错配。进程级总量兜底转入 TODO-142。 |
+| shutdown drain 只观察 accepted TCP 与 pending `open_bi`，未等待 QUIC connection、活跃 stream/relay、UDP session 或 H2 driver | TODO-CR-AUDIT-21、TODO-96 | ✅ 已修复（2026-07-26），残留缺口见条目内 Residual gaps（无应用层 GOAWAY、反向 stream 无计数）。 |
 | Server `ClientRegistry` 的 inflight slot table 固定为 4096 | TODO-146 | ⏳ 新增容量治理任务：配置/推导或安全增长、usage/exhaustion 指标及边界测试。 |
-| 未认证客户端会收到 `AuthError::Internal` 的底层错误文本 | TODO-CR-AUDIT-22 | 🚨 新增安全任务：公开稳定错误，详细原因仅写服务端日志。 |
+| 未认证客户端会收到 `AuthError::Internal` 的底层错误文本 | TODO-CR-AUDIT-22 | ✅ 已修复（2026-07-26）。回传泛化文案；重试判定改用 `LoginResp.retryable` 字段，避免泛化后把可恢复故障误判为致命。 |
 | QUIC window 转换存在 `try_into().unwrap()`，连接池容量存在未检查乘法，且相关参数无合理上界 | TODO-CR-AUDIT-5、TODO-CR-AUDIT-6 | ⏳ 具体化现有健壮性任务：checked arithmetic、无 panic 转换、静态上界与内存预算。 |
 
 ---
@@ -151,16 +152,30 @@ flowchart TD
 * **Status update (2026-07-26)**: ✅ Implemented on `fix/p0-m1-correctness`. Internal errors now return a generic message; the retry decision moved to a machine-readable `LoginResp.retryable` flag, because string-matching a generic message had made a transient auth-store fault indistinguishable from a rejected token — one database blip would have made every client exit permanently.
 
 ### [TODO-148] Listener runtime ownership (fixed 2026-07-26) — guard against regression
-* **Priority**: High | **Status**: ✅ Fixed on `fix/p0-m1-correctness`; follow-up guard open | **Track**: Runtime & Scalability
+* **Priority**: High | **Status**: ✅ Fixed (2026-07-26, PR #58); follow-up guard open | **Track**: Runtime & Scalability
 * **What happened**:
   In ctld mode the ingress listeners were created from `apply_snapshot` (background single-threaded runtime) with a bare `tokio::spawn`, so accept loops — and, through `run_accept_worker`'s per-connection spawn, the entire public ingress path — ran on that one thread while the proxy workers idled. The same ownership bug deadlocked shutdown: the background runtime was dropped before the accept workers observed cancellation, so their tail never fired the drained notification and the process hung until systemd's 90s `TimeoutStopSec` (the long-standing 91-92s "Stop ctld-mode tunnel" CI step). See `docs/review-2026-07-26/02-scalability-and-cpu-affinity.md` §2.0 for the full evidence.
 * **Fix applied**:
   `ServerState` carries the proxy runtime handle; listeners spawn through it, so their lifetime no longer depends on which runtime applied the config. The drained wait is bounded so a lost notification degrades to a slow shutdown.
+* **First fix was incomplete (corrected same day)**:
+  The initial change moved only the *accept tasks*. The `tokio::spawn` that builds the listener was missed, and since `TcpListener::from_std` registers the fd with the **calling** runtime's IO driver, listener readiness was still driven by the background single-threaded runtime. Both spawns now go through the proxy handle. General rule for reviewing this class of bug: **ask which runtime the fd was created on, not just which runtime the task runs on.**
 * **Follow-up (open)**:
   Nothing prevents the next `tokio::spawn` in a config-apply path from re-introducing this. Worth a guard: assert at listener startup that the current runtime is the proxy runtime, or add an integration assertion that shutdown completes well inside the systemd stop timeout. Also worth re-measuring multi-core ingress scaling now that the path is no longer single-threaded — historical benchmarks ran with `CPUQuota=100%`, which masked the bottleneck entirely.
 
+### [TODO-149] Batching candidates on the hot path (benchmark-gated)
+* **Priority**: Low until the baseline is trustworthy | **Status**: Recorded 2026-07-26, **do not start yet** | **Track**: Zero-Copy & Buffer Pooling
+* **Context**:
+  Assessed the "batch everything" lens (writev / io_uring / SIMD) against this codebase. Most of it is already in place or already decided: `httparse` is SIMD internally, quinn batches UDP via GSO/GRO, io_uring is rejected (decision D-12), and the chunked response path already vectorizes its stream writes. Magnitude check: batching a few stream writes is worth ~1–3 µs/req against a 25–55 µs/req L7 cost — a second-order effect next to the per-request allocations (TODO-97 neighbours, review 01 §3.4/§4.1) and the structural serialization points (review 02). Full reasoning in `docs/review-2026-07-26/01-hotpath-analysis.md` §4.8.
+* **Candidates**:
+  1. **Relay read batching** — `read_chunk` (singular) → `read_chunks(&mut [Bytes])`, which quinn 0.11.9 provides (`recv_stream.rs:215`) and which nothing in the repo uses. Highest-frequency loop in the system, but 64 KiB buffers already amortize much of it and the win depends on how often more than one chunk is actually available; profile the chunk-arrival distribution first.
+  2. **Merge response head with the first body frame** — the Content-Length and close-delimited branches write the header separately and then one `write_chunk` per frame, so a small GET response costs two stream writes. Same open question as `docs/guide/counter_intuitive_network_practices.md` §1.4 (contiguous assembly vs vectored); measure both.
+  3. **UDP per-packet allocation and per-packet `send_datagram`** — already folded into TODO-144; the clearest of the three, since one allocation per packet is unambiguous waste.
+  4. **Per-core counters (K1)** — the same principle applied to cache lines rather than syscalls; already scheduled as review 02 Phase A, and this lens argues for keeping it ahead of the others.
+* **Gate**:
+  Blocked on the cpuset baseline work (review 06, review 02 §6). This is not bureaucratic: every multi-core number taken before 2026-07-26 was measured with public ingress pinned to a single thread (TODO-148), so there is currently no baseline that could tell whether any of these helps.
+
 ### [TODO-147] Chunked request bodies are rejected with 411
-* **Priority**: Medium | **Status**: Open (capability gap, recorded 2026-07-26) | **Track**: L7 Protocol
+* **Priority**: Medium | **Status**: Open (capability gap introduced by the PR #58 smuggling fix) | **Track**: L7 Protocol
 * **Problem**:
   `Http1Driver::read_request` frames request bodies by `content-length` only. Before 2026-07-26 a `Transfer-Encoding: chunked` request body was silently ignored and its bytes were parsed as the next request on the stream — a real smuggling primitive, now closed by rejecting TE bodies with `411 Length Required`. The rejection is correct but leaves a functional hole: `curl -T -`, `fetch` with a `ReadableStream` body, `docker push`, and `git http-backend` all send chunked request bodies and now fail.
 * **Fix**:
@@ -177,11 +192,13 @@ flowchart TD
 * **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
 
 ### [TODO-97] Replace unsound uninitialized `Vec<u8>` relay buffer with `read_buf`
-* **Priority**: Critical | **Status**: 🚨 Reopened — memory safety fix | **Track**: Zero-Copy & Buffer Pooling
+* **Priority**: Critical | **Status**: ✅ Done (2026-07-26, PR #58) | **Track**: Zero-Copy & Buffer Pooling
 * **Problem**:
   `copy.rs::take_buffer` calls `unsafe { Vec::set_len(buffer_size) }` before initializing the newly exposed elements, then `copy_buffered` passes the resulting `&mut [u8]` to `AsyncReadExt::read`. This violates `Vec::set_len`'s safety contract: every element in `old_len..new_len` must already be initialized. `PooledBufGuard` correctly returns memory on cancellation, but does not make the uninitialized slice valid.
 * **Fix**:
   Keep capacity-lax reuse, but replace the pooled `Vec<u8>` hot buffer with a pooled `BytesMut`: acquire it at length zero, call `AsyncReadExt::read_buf`, write only the filled bytes, then `clear()` before return. Add cancellation, short-read, EOF and buffer-reuse tests. Do not retain `unsafe set_len` or substitute an uninitialized `Vec` in `PeekBufPool`.
+* **Outcome**:
+  Implemented as specified — the pool holds `BytesMut`, buffers are handed out empty and filled via `read_buf`, so no `&mut [u8]` over uninitialized memory is ever constructed and no zeroing memset is paid. `PeekBufPool` still uses zero-initialized `Vec` and was left alone (TODO-136 owns that migration).
 
 ### [performance_optimization_proposal.md §1] L7 Zero-Copy Body Streaming
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
@@ -248,7 +265,7 @@ flowchart TD
   当前 server 运行时鉴权路径已只剩两种：Standalone 模式走 `SqliteAuthStore`，ctld-managed 模式走 `LocalTokenCache` 的只读快照缓存；配置 schema 与 bootstrap 路径中也不再存在 `auth_tokens`/静态 token map 的生产入口。该条目已由现有实现收口，文档此前状态滞后。
 
 ### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
-* **Priority**: High | **Status**: 🚨 Reopened — pending cap is advisory under concurrency | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: ✅ Residual race closed (2026-07-26, PR #58); tiered budget remains with TODO-142 | **Track**: HA, Overload & Observability
 * **Problem**:
   在并发高峰期，请求可能会在 open_bi 队列上无限期排队等待，引起 upstream 协程淤积和内存爆满。
 * **Current state**:
@@ -257,9 +274,11 @@ flowchart TD
   `open_bi_guarded` 先读取全局 pending 计数并判断，再单独执行 `fetch_add(1)`。多个并发任务可同时观察到未超限并一起进入等待，因此配置值不是严格容量上限，突发时 overshoot 大小可接近同时竞争的任务数。
 * **Fix**:
   使用 `Semaphore::try_acquire_owned` 或有界 CAS reservation 原子地获取 pending permit；permit 必须覆盖完整 `open_bi` 等待生命周期，并在成功、失败、超时和取消路径 RAII 归还。补充 barrier 驱动的并发上限、取消、超时、立即成功和拒绝响应测试，并为 permit usage/rejection 暴露指标。
+* **Outcome**:
+  改为 `ConnectionHandle` 上的 per-connection semaphore + `try_acquire_owned`，permit 由 `PendingSlot` guard 持有，成功/失败/超时/取消四条路径统一 RAII 归还。同时修正了一处语义错配——阈值本就派生自单连接的 `max_concurrent_streams/4`，却套在进程全局计数上，连接越多越容易误杀；全局计数现退化为纯指标。顺带修掉旧代码在 `fetch_add` 与 `fetch_sub` 之间被取消时永久抬高 gauge 的泄漏。**进程级总量兜底仍缺**（原全局闸门被移除后没有替代），归入 TODO-142 的分层模型。
 
 ### [TODO-CR-AUDIT-21] SIGTERM Graceful Connection Draining
-* **Priority**: High | **Status**: 🚨 Reopened — drain coverage incomplete | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: ✅ Done (2026-07-26, PR #58) with documented residual gaps | **Track**: HA, Overload & Observability
 * **Problem**:
   Server 和 Client 均缺乏优雅停机机制，SIGTERM 信号会引发粗暴的进程退出，瞬间掐断成千上万个活跃会话。
 * **Current state**:
@@ -268,6 +287,14 @@ flowchart TD
   当前“drain completed”不代表 QUIC connection、已打开 stream、活跃 relay、UDP session 或 H2 driver 已退出，运行时结束时这些任务仍可能被截断。该状态不能继续视为完整 graceful drain。
 * **Fix**:
   与 TODO-96 一起引入组件所有的 `JoinSet` / `TaskTracker`，登记 QUIC accept loop、每 connection task、每 stream/relay、UDP session 和 H2 driver。shutdown 顺序固定为：停止新入口、取消后台工作、等待真实 active session/relay 归零、deadline 后 abort 剩余任务。补充长连接、半关闭、慢后端、UDP session 与超时强退集成测试。
+* **Outcome**:
+  顺序落地为：停 listener accept → 每连接 drain → `conn.close`（必须在 drain 之后，CONNECTION_CLOSE 会 abort 全部 stream）→ UDP session manager shutdown → 连接 TaskTracker wait → app 层 30s 兜底，各层超时严格递进。顺带修掉一处真实泄漏：淘汰循环退出后残留的空闲 UDP reply pump 会永远挂在 `socket.recv` 上。
+  **实测口径**：CI 的 "Stop ctld-mode tunnel" 步骤从长期 91–92s（systemd `TimeoutStopSec` 后 SIGKILL）降到 1s。注意那 90 秒的真因不是 drain 太慢而是**死锁**，根因是 listener 的 runtime 归属（见 TODO-148），本条的 drain 补全并不足以单独解决它。
+* **Residual gaps（已知，未做）**:
+  1. 无应用层 GOAWAY——QUIC close 会 abort 全部 stream，"drain 后 close" 只是近似，drain 窗口内对端仍可能 open_bi 成功却在 close 时被 abort；
+  2. server 侧 drain 计数只覆盖公网 ingress TCP + pending open_bi，client-entry 方向的反向 egress stream 无计数；
+  3. 每 stream 短任务与 healthz 每请求任务仍是 detached（连接级收编的有意取舍，已在代码注释说明）；
+  4. 停机路径只有编译与手工验证，无集成测试。
 
 ### [TODO-35] Two-tier upstream connection pool
 * **Priority**: High | **Status**: ❌ Discarded (Phase 1) | **Track**: Performance Ideas
@@ -442,11 +469,13 @@ flowchart TD
   拆分为 `tunnel-proto` (协议帧), `tunnel-engine` (复制中继) 与 `tunnel-plugins` (接口插件)。
 
 ### [TODO-96] JoinSet task lifetime tracking
-* **Priority**: High | **Status**: Ready for implementation; required by TODO-CR-AUDIT-21 | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: ✅ Done at connection granularity (2026-07-26, PR #58); per-stream tracking deliberately skipped | **Track**: HA, Overload & Observability
 * **Problem**:
   散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。已确认的生产 callsite 包括 Server QUIC connection task、每个 client-initiated egress stream、TCP accept handler、UDP session/reply pump、`H2SenderCache` connection driver、health/metrics connection handler 与后台 cache/control task。Server `proxy_main` 在 shutdown 分支 drop QUIC server join handle 后不会等待这些子任务，因此 TODO-CR-AUDIT-21 的 drain 不能依赖当前 detached task 结构完成。
 * **Fix**:
   引入组件拥有的 `JoinSet` / `TaskTracker` 与 `CancellationToken`，确保父服务停止时先协作取消、再在 deadline 后 `abort_all`；不要只依赖 `Drop`。为 QUIC accept/connection/stream、relay、UDP session、H2 driver、listener worker 和 background cache/control task 明确登记所属组件与 drain 行为。任务错误必须由 owner 汇总并按 fatal/transient 分类，避免 join error 静默丢失。
+* **Outcome**:
+  server QUIC 连接任务收编进 `TaskTracker`（close 后带超时 wait），UDP session 的 reply pump / 淘汰循环由 root `CancellationToken` + `TaskTracker` 管控，client 侧 QUIC 槽位本就在 `JoinSet`。**每 stream 短任务有意不收编**——连接关闭时其 QUIC stream 自然出错退出，per-stream tracker 触碰属热路径开销；该取舍已在代码注释写明。H2 driver 生命周期受它持有的 QUIC stream 约束，同理未挂 token。
 
 ### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
 * **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
