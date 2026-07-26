@@ -46,10 +46,11 @@ pub use models::defs::{
 };
 pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
-    decode_udp_datagram_envelope, encode_udp_datagram_envelope, recv_message, recv_message_type,
-    recv_routing_info, recv_typed_message, send_message, send_routing_info, ClientConfig, Login,
-    LoginResp, MessageType, RoutingInfo, UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig,
-    UpstreamServer, MAX_DATAGRAM_BYTES,
+    decode_udp_datagram_envelope, encode_udp_datagram_envelope, negotiate_protocol, recv_message,
+    recv_message_type, recv_routing_info, recv_typed_message, send_message, send_routing_info,
+    ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol, RoutingInfo,
+    UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
+    MAX_DATAGRAM_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION, SUPPORTED_CAPABILITIES,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::sniff::{
@@ -67,7 +68,9 @@ pub use transport::listener::{
     VhostRouter, DEFAULT_ACCEPT_WORKERS,
 };
 pub use transport::open_bi::{open_bi_guarded, OpenBiOutcome, OpenedStream};
-pub use transport::quic::{build_transport_config, build_udp_socket, QuicTransportParams};
+pub use transport::quic::{
+    build_transport_config, build_udp_socket, QuicTransportParams, TUNNEL_ALPN,
+};
 pub use transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 pub use transport::tcp_params::TcpParams;
 

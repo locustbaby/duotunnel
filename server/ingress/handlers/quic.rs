@@ -10,7 +10,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tunnel_lib::{
-    recv_message, recv_message_type, send_message, ClientId, Login, LoginResp, MessageType,
+    negotiate_protocol, recv_message, recv_message_type, send_message, ClientId, Login, LoginResp,
+    MessageType, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
 pub async fn run_quic_server(
     state: Arc<ServerState>,
@@ -150,6 +151,27 @@ async fn handle_quic_connection(
             return Ok(());
         }
     };
+    let Some(negotiated) = negotiate_protocol(login.protocol_version, login.capabilities) else {
+        warn!(
+            addr = %remote_addr,
+            client_version = login.protocol_version,
+            "rejecting login: incompatible protocol version"
+        );
+        if let Err(e) = send_message(
+            &mut send,
+            MessageType::LoginResp,
+            &LoginResp::failure(format!(
+                "incompatible protocol version {}: server supports {}..={}",
+                login.protocol_version, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION
+            )),
+        )
+        .await
+        {
+            debug!(addr = %remote_addr, error = %e, "send version-mismatch response failed");
+        }
+        conn.close(0u32.into(), b"incompatible protocol version");
+        return Ok(());
+    };
     if !ready.load(Ordering::Acquire) {
         warn!(addr = %remote_addr, "server not ready for login yet");
         if let Err(e) = send_message(
@@ -182,13 +204,19 @@ async fn handle_quic_connection(
     };
     let client_group = auth_result.client_group;
     drop(unauth_permit);
-    info!(addr = % remote_addr, client_group = % client_group, "authenticated");
+    info!(
+        addr = % remote_addr,
+        client_group = % client_group,
+        negotiated_version = negotiated.version,
+        capabilities = negotiated.capabilities,
+        "authenticated"
+    );
     metrics::auth_success(&client_group);
     let client_config = state.client_config_for_group(&client_group);
     let conn_id = ClientId::from(uuid::Uuid::new_v4().to_string());
     if let Err(e) = state
         .registry()
-        .register(conn_id.clone(), client_group.clone(), conn.clone())
+        .register(conn_id.clone(), client_group.clone(), conn.clone(), negotiated)
         .await
     {
         warn!(conn_id = %conn_id, error = %e, "failed to register client connection");
@@ -204,7 +232,7 @@ async fn handle_quic_connection(
     if let Err(e) = send_message(
         &mut send,
         MessageType::LoginResp,
-        &LoginResp::success(client_config, client_group.clone()),
+        &LoginResp::success(client_config, client_group.clone(), negotiated),
     )
     .await
     {

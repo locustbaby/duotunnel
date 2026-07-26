@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use tunnel_lib::{recv_message, recv_message_type, send_message, Login, LoginResp, MessageType};
+use tunnel_lib::{
+    recv_message, recv_message_type, send_message, Login, LoginResp, MessageType,
+    NegotiatedProtocol, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION, SUPPORTED_CAPABILITIES,
+};
 
 use crate::bootstrap::config::ClientConfigFile;
 use crate::egress::udp_listener::{forward_incoming_datagram, UdpListenerRegistry};
@@ -33,6 +36,8 @@ pub(crate) async fn run_client(
         .map_err(|e| ConnectError::transient(anyhow!("failed to open login stream: {}", e)))?;
     let login = Login {
         token: config.auth_token.clone(),
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: SUPPORTED_CAPABILITIES,
     };
     tunnel_lib::timeout(
         login_timeout,
@@ -63,9 +68,30 @@ pub(crate) async fn run_client(
             resp.error.as_deref(),
         ));
     }
+    // The server negotiates min(its max, our reported version), so anything
+    // outside our own supported range means a broken or hostile server —
+    // retrying cannot help.
+    if resp.negotiated_version < MIN_SUPPORTED_VERSION
+        || resp.negotiated_version > PROTOCOL_VERSION
+    {
+        return Err(ConnectError::fatal(anyhow!(
+            "protocol version negotiation failed: server negotiated v{}, client supports v{}..=v{}",
+            resp.negotiated_version,
+            MIN_SUPPORTED_VERSION,
+            PROTOCOL_VERSION
+        )));
+    }
+    let negotiated = NegotiatedProtocol {
+        version: resp.negotiated_version,
+        // Re-mask: never enable a capability the server echoes back but this
+        // build did not advertise.
+        capabilities: resp.capabilities & SUPPORTED_CAPABILITIES,
+    };
     info!(
         client_group = %resp.client_group,
         upstreams = resp.config.upstreams.len(),
+        negotiated_version = negotiated.version,
+        capabilities = negotiated.capabilities,
         "Login successful, config received"
     );
     entry_pool.set_egress_rules(resp.config.egress_rules.clone());
@@ -80,7 +106,7 @@ pub(crate) async fn run_client(
     let session_cancel = CancellationToken::new();
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
-    entry_pool.push(conn.clone()).await;
+    entry_pool.push(conn.clone(), negotiated).await;
     ready.store(true, Ordering::Release);
     let result = loop {
         tokio::select! {
