@@ -148,6 +148,14 @@ flowchart TD
   Server QUIC login currently constructs `LoginResp::failure(e.to_string())` for every authentication failure. For `AuthError::Internal`, this returns the underlying database or implementation error text to an unauthenticated peer. Token masking from TODO-CR-AUDIT-8 prevents credential disclosure in logs, but it does not define a safe network-facing error boundary.
 * **Fix**:
   Map authentication failures to stable public codes/messages and return a generic response for internal failures. Preserve the full error and causal chain only in structured server logs. Add tests proving that Invalid/Revoked/Disabled retain the intended public semantics while Internal never exposes database paths, SQL text, schema details, token material, or nested causes.
+* **Status update (2026-07-26)**: ✅ Implemented on `fix/p0-m1-correctness`. Internal errors now return a generic message; the retry decision moved to a machine-readable `LoginResp.retryable` flag, because string-matching a generic message had made a transient auth-store fault indistinguishable from a rejected token — one database blip would have made every client exit permanently.
+
+### [TODO-147] Chunked request bodies are rejected with 411
+* **Priority**: Medium | **Status**: Open (capability gap, recorded 2026-07-26) | **Track**: L7 Protocol
+* **Problem**:
+  `Http1Driver::read_request` frames request bodies by `content-length` only. Before 2026-07-26 a `Transfer-Encoding: chunked` request body was silently ignored and its bytes were parsed as the next request on the stream — a real smuggling primitive, now closed by rejecting TE bodies with `411 Length Required`. The rejection is correct but leaves a functional hole: `curl -T -`, `fetch` with a `ReadableStream` body, `docker push`, and `git http-backend` all send chunked request bodies and now fail.
+* **Fix**:
+  Implement chunked transfer decoding in the driver (parse chunk sizes, surface chunks as body frames, handle trailers) so unknown-length uploads are relayed instead of refused. Until then the limitation should be visible: consider a dedicated metric for TE-rejected requests so the gap shows up in operations rather than as unexplained client failures.
 
 ---
 
