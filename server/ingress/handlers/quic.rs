@@ -149,10 +149,12 @@ async fn handle_quic_connection(
         Err(e) => {
             warn!(addr = % remote_addr, error = % e, "authentication failed");
             metrics::auth_failure("unknown");
+            // Never echo internal error details (DB errors, cache state) to an
+            // unauthenticated peer; the reason stays in server logs only.
             send_message(
                 &mut send,
                 MessageType::LoginResp,
-                &LoginResp::failure(e.to_string()),
+                &LoginResp::failure("authentication failed"),
             )
             .await?;
             return Ok(());
