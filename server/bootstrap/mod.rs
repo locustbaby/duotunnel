@@ -134,6 +134,11 @@ struct IngressRuntime {
     listeners: listener_mgr::ListenerManager,
     overload_limits: tunnel_lib::OverloadLimits,
     plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
+    /// Listeners must always run on the multi-threaded proxy runtime, never on
+    /// whichever runtime happened to apply a config update: the control-plane
+    /// runtime is single-threaded and outlived by the listeners it would
+    /// otherwise own.
+    proxy_handle: tokio::runtime::Handle,
 }
 
 struct ConnectionRuntime {
@@ -157,6 +162,10 @@ pub(crate) struct ServerState {
 impl ServerState {
     pub(crate) fn http_client_params(&self) -> HttpClientParams {
         HttpClientParams::from(&self.ingress.config.server.http_pool)
+    }
+
+    pub(crate) fn proxy_handle(&self) -> &tokio::runtime::Handle {
+        &self.ingress.proxy_handle
     }
 
     pub(crate) fn accept_workers(&self) -> usize {
@@ -373,6 +382,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             listeners: listener_mgr::ListenerManager::new(),
             overload_limits,
             plugin_registry,
+            proxy_handle: tokio::runtime::Handle::current(),
         },
         connection: ConnectionRuntime {
             registry: shared_registry,
