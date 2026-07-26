@@ -150,6 +150,15 @@ flowchart TD
   Map authentication failures to stable public codes/messages and return a generic response for internal failures. Preserve the full error and causal chain only in structured server logs. Add tests proving that Invalid/Revoked/Disabled retain the intended public semantics while Internal never exposes database paths, SQL text, schema details, token material, or nested causes.
 * **Status update (2026-07-26)**: ✅ Implemented on `fix/p0-m1-correctness`. Internal errors now return a generic message; the retry decision moved to a machine-readable `LoginResp.retryable` flag, because string-matching a generic message had made a transient auth-store fault indistinguishable from a rejected token — one database blip would have made every client exit permanently.
 
+### [TODO-148] Listener runtime ownership (fixed 2026-07-26) — guard against regression
+* **Priority**: High | **Status**: ✅ Fixed on `fix/p0-m1-correctness`; follow-up guard open | **Track**: Runtime & Scalability
+* **What happened**:
+  In ctld mode the ingress listeners were created from `apply_snapshot` (background single-threaded runtime) with a bare `tokio::spawn`, so accept loops — and, through `run_accept_worker`'s per-connection spawn, the entire public ingress path — ran on that one thread while the proxy workers idled. The same ownership bug deadlocked shutdown: the background runtime was dropped before the accept workers observed cancellation, so their tail never fired the drained notification and the process hung until systemd's 90s `TimeoutStopSec` (the long-standing 91-92s "Stop ctld-mode tunnel" CI step). See `docs/review-2026-07-26/02-scalability-and-cpu-affinity.md` §2.0 for the full evidence.
+* **Fix applied**:
+  `ServerState` carries the proxy runtime handle; listeners spawn through it, so their lifetime no longer depends on which runtime applied the config. The drained wait is bounded so a lost notification degrades to a slow shutdown.
+* **Follow-up (open)**:
+  Nothing prevents the next `tokio::spawn` in a config-apply path from re-introducing this. Worth a guard: assert at listener startup that the current runtime is the proxy runtime, or add an integration assertion that shutdown completes well inside the systemd stop timeout. Also worth re-measuring multi-core ingress scaling now that the path is no longer single-threaded — historical benchmarks ran with `CPUQuota=100%`, which masked the bottleneck entirely.
+
 ### [TODO-147] Chunked request bodies are rejected with 411
 * **Priority**: Medium | **Status**: Open (capability gap, recorded 2026-07-26) | **Track**: L7 Protocol
 * **Problem**:

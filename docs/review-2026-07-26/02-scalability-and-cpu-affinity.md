@@ -52,6 +52,7 @@ nginx worker、envoy worker thread、pingora `NoSteal` runtime 都是这个形�
 
 | # | 共享/串行点 | 位置 | 影响等级 |
 | --- | --- | --- | --- |
+| **S0** | **ctld 模式下整条公网 ingress 数据面跑在单线程 runtime 上**（2026-07-26 实测新增，见下方补录） | `listener_mgr.rs` 的 `tokio::spawn` + `control_client.rs:233` `apply_snapshot` 调用链 | **最高·已修复**——比 S1 更靠前的硬串行点 |
 | S1 | **每进程单 quinn Endpoint（单 UDP socket）**：所有 QUIC 包**收包**经一个 endpoint driver task（详见 §2.1） | server `handlers/quic.rs:23-28`；client `endpoint.rs:24-31`（`pool.rs:23` 全部 supervisor 共享同一 clone） | **最高**——不可分割的串行段，决定扩展上限 |
 | S2 | hyper 共享连接池：`HttpsClient`/`H2cClient` 各一个进程级实例，per-host idle 列表内部有锁；8k rps 全打同一 host 时 checkout/checkin 全核过同一把锁 | `egress/http.rs:51-89`（进程级构建）、`LocalProxyMap`/`ServerEgressMap` 各持一份 | 中-高（QPS 越高越陡） |
 | K1 | 全局原子计数在热路径写共享缓存行：`accepted_connections_active`（每连接 ±1）、`stream_pending_queue_depth`（每排队 stream ±1） | `infra/metrics.rs:5-39`、`accept.rs:37`、`open_bi.rs:65-73` | 中（核数↑线性放大一致性流量） |
@@ -63,6 +64,44 @@ nginx worker、envoy worker thread、pingora `NoSteal` runtime 都是这个形�
 **结论**：数据面读路径的无锁化（ArcSwap/DashMap/P2C/thread-local pool）已经做得
 相当好；剩下的线性扩展障碍集中在 **S1（单 endpoint）、S2（共享 hyper 池）、
 K1（全局计数）**——注意 tokio work-stealing 的迁移抖动影响**小于**这三项（§3.5）。
+
+### 2.0 补录（2026-07-26 实测）：S0 —— 本文原分析遗漏的、比 S1 更靠前的串行点
+
+**本节修正上表之前的一处遗漏。** 原分析从代码静态推断串行点，未核对
+**listener 任务实际落在哪个 runtime 上**，因而漏掉了一个在 ctld 模式下压倒性的串行点。
+
+**现象与证据**：ctld 模式的 ingress listener 不是由 `proxy_main` 创建的，而是由
+`control_client.rs:233` 的 `apply_snapshot` → `sync_all_listeners` →
+`spawn_single_listener` 创建；后者用**裸 `tokio::spawn`**，因此 accept loop 继承
+**调用方所在的 runtime**——而 `apply_snapshot` 跑在 `BackgroundComponent` 的
+`build_single_thread_runtime("bg-worker")`（`new_current_thread`）上。又因为
+`run_accept_worker`（`tunnel-lib/src/transport/accept.rs`）对每条连接同样用
+`tokio::spawn`，**accept + sniff + dispatch + relay 全链条都落在那一个线程上**，
+而 N 个 `proxy-worker` 线程只处理 QUIC 侧、公网侧完全空转。
+
+采样实证（10 核机器，ctld 模式，`curl` 持续打 :8080）：修复前全部 ingress 栈帧
+集中在单个未命名线程（bg 组件的 current_thread runtime 所在线程）；修复后分布到
+多个 `proxy-worker`。
+
+**为什么此前从未被发现**：CI 压测**恰好**同时具备两个掩盖条件——用的是 ctld 模式，
+且 `STRESS_CPU_QUOTA=100%`（1 CPU）。在 1 核配额下"全部挤在一个线程"与"分布到多线程"
+的吞吐表现无法区分，因此历史压测数字既真实又完全无法暴露该瓶颈。这也说明
+**§6 的 cpuset 改造必须先落地**，否则任何多核结论都不可信。
+
+**同一根因还导致停机死锁**：bg runtime 先于 accept worker 观察到 cancel 就被 drop，
+worker 任务被**丢弃而非取消**，其尾部的 `remaining.fetch_sub` → `notify_listener_drained`
+永不执行，于是 `shutdown_all_listeners` 等一个永不到来的通知，进程挂到 systemd
+`TimeoutStopSec=90s` 被 SIGKILL（CI "Stop ctld-mode tunnel" 步骤长期 91-92s 的真因；
+该现象在本次改动前的 main 上同样存在）。
+
+**修复**：`ServerState` 持有 proxy runtime 的 `Handle`，listener 一律经它 spawn，
+生命周期与"谁应用了配置"解耦；`drained` 等待另加超时兜底，使将来任何丢通知退化为
+慢停机而非挂死。验证：连续 6 次停机 0.0-0.6s 干净退出（修复前首次即挂），accept
+worker 取消日志从 0/10 变 10/10。
+
+**对本文路线的影响**：S0 已闭合，**Phase B（多 Endpoint）仍是性能线第一优先**不变；
+但结论"主串行点是 S1"需附加前提——**那是在 S0 修复之后才成立**。此前 ctld 模式下真正
+的瓶颈是 S0，不是 S1。
 
 ### 2.1 S1 展开：quinn 内部哪部分并行、哪部分串行（关键区分）
 
