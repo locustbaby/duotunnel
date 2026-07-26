@@ -1,6 +1,6 @@
 # Tunnel TODO
 
-> Last synced against code and analysis reports 1–7: 2026-07-11.
+> Last synced against code, analysis reports 1–7, and the 2026-07-22 runtime audit: 2026-07-22.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
@@ -11,7 +11,7 @@
 为了提高系统的安全性、稳定性与超高并发吞吐，DuoTunnel 的待办事项（TODO）被重新梳理并归纳为以下四个实施阶段：
 
 1. **Phase 0: 关键安全防御、死锁修复与日志脱敏 (Critical Security & Stability)**
-   - 立即修复可能导致网关挂起的 `DashMap` 死锁，以及可能被恶意客户端利用的协议嗅探慢速攻击（Slowloris）。治理敏感 Token 的日志泄露风险。
+   - 立即修复可能导致网关挂起的 `DashMap` 死锁，以及可能被恶意客户端利用的协议嗅探慢速攻击（Slowloris）。治理敏感 Token 的日志泄露风险，并建立鉴权失败的稳定公开错误边界。
 2. **Phase 1: 核心用户态零拷贝、并发无锁缓冲与连接重用 (High Priority: Performance & Zero-Copy)**
    - 专注于消除底层复制引擎的全局 Mutex 争用、避免 memset 置零开销、实现 Quinn L7 用户态零拷贝（使用 `read_chunk`），以及建立 Egress 端 L4 连接池与无锁并发 DNS 缓存（DashMap + Single-Flight）。提供 UDP (QUIC Datagram) 代理原生支持。
 3. **Phase 2: 协程与局部性优化、长连接生命周期与架构重构 (Medium Priority: Architecture & Sessions)**
@@ -46,6 +46,16 @@
 | 7 | Inflight 生命周期与 RAII | TODO-109、TODO-110、TODO-135、TODO-134 | ✅ 已覆盖。RAII 是取消/错误路径的必要兜底，不应被全面移除；正常状态转移与 total-load 语义应显式测试。PendingOpen Drop 使总 inflight 下降，通知并非虚假唤醒。 |
 | 7 | Actor 风暴与入口资源治理 | TODO-106–111、TODO-142 | ✅ 已覆盖。分片 Actor 仅在 reconnect storm 证实队列主导时采用；admission 采用入口全局预算、路由后 group 预算、连接级预算的分层模型。 |
 
+### 2026-07-22 runtime audit additions
+
+| 审计结论 | 对应记录 | 代码核对后的进度与决策 |
+| --- | --- | --- |
+| `max_pending_streams` 使用 load/check 后再 `fetch_add`，并发突发可越过配置上限 | TODO-80 | 🚨 重新打开。改用严格 permit/CAS reservation，并覆盖取消、超时和并发 overshoot 测试。 |
+| shutdown drain 只观察 accepted TCP 与 pending `open_bi`，未等待 QUIC connection、活跃 stream/relay、UDP session 或 H2 driver | TODO-CR-AUDIT-21、TODO-96 | 🚨 重新打开。结构化任务所有权与真实 active-session drain 必须一起完成。 |
+| Server `ClientRegistry` 的 inflight slot table 固定为 4096 | TODO-146 | ⏳ 新增容量治理任务：配置/推导或安全增长、usage/exhaustion 指标及边界测试。 |
+| 未认证客户端会收到 `AuthError::Internal` 的底层错误文本 | TODO-CR-AUDIT-22 | 🚨 新增安全任务：公开稳定错误，详细原因仅写服务端日志。 |
+| QUIC window 转换存在 `try_into().unwrap()`，连接池容量存在未检查乘法，且相关参数无合理上界 | TODO-CR-AUDIT-5、TODO-CR-AUDIT-6 | ⏳ 具体化现有健壮性任务：checked arithmetic、无 panic 转换、静态上界与内存预算。 |
+
 ---
 
 ## 🗺️ 全量依赖与阶段流转图 (Mermaid)
@@ -56,6 +66,7 @@ flowchart TD
         CR-AUDIT-17[TODO-CR-AUDIT-17 DashMap 死锁修复]
         CR-AUDIT-18[TODO-CR-AUDIT-18 协议嗅探 5s 超时]
         CR-AUDIT-8[TODO-CR-AUDIT-8 敏感凭证日志脱敏]
+        CR-AUDIT-22[TODO-CR-AUDIT-22 鉴权公开错误边界]
     end
 
     subgraph Phase 1: High Priority Performance & Core Features
@@ -94,6 +105,7 @@ flowchart TD
         TODO-141[TODO-141 Relay/HTTP Buffer 参数贯通]
         TODO-142[TODO-142 分层 active-stream Admission]
         TODO-143[TODO-143 H2 sender 自适应小池]
+        TODO-146[TODO-146 Server registry slot 容量治理]
     end
 
     %% Dependencies
@@ -110,6 +122,8 @@ flowchart TD
     TODO-140 -->|基线先行| TODO-142
     TODO-140 -->|基线先行| TODO-143
     TODO-140 -->|基线先行| TODO-145
+    TODO-96 -->|结构化任务所有权| CR-AUDIT-21[TODO-CR-AUDIT-21 完整优雅停机]
+    TODO-146 -->|容量边界统一| CR-AUDIT-6[TODO-CR-AUDIT-6 配置健壮性]
 ```
 
 ---
@@ -128,11 +142,18 @@ flowchart TD
 * **Priority**: High | **Status**: ✅ Done (Phase 0) | **Track**: Control Plane & Config
 * **Fix**: Token-like `dt_...` substrings are now masked before `AuthError` formatting/log emission using a stable hash-derived placeholder (for example `dt_masked_deadbeef`). Related `Debug` output paths also avoid printing raw token values.
 
+### [TODO-CR-AUDIT-22] Authentication public error boundary
+* **Priority**: High | **Status**: Ready for implementation | **Track**: Security, Control Plane & Config
+* **Problem**:
+  Server QUIC login currently constructs `LoginResp::failure(e.to_string())` for every authentication failure. For `AuthError::Internal`, this returns the underlying database or implementation error text to an unauthenticated peer. Token masking from TODO-CR-AUDIT-8 prevents credential disclosure in logs, but it does not define a safe network-facing error boundary.
+* **Fix**:
+  Map authentication failures to stable public codes/messages and return a generic response for internal failures. Preserve the full error and causal chain only in structured server logs. Add tests proving that Invalid/Revoked/Disabled retain the intended public semantics while Internal never exposes database paths, SQL text, schema details, token material, or nested causes.
+
 ---
 
 ## 🚀 Phase 1: 核心用户态零拷贝、内存池与高并发连接管理 (High Priority: Performance & Zero-Copy)
 
-> Phase 1 is effectively closed except for the reopened memory-safety fix TODO-97 and its configuration-propagation follow-up TODO-141. Other remaining work in this area should be treated as scoped follow-up, not as an open mandate to keep adding speculative performance features. The confirmed low-risk tail items are DNS address rotation and overload metrics exposure; raw L4 pooling remains discarded in favor of Hyper's protocol-aware pooling.
+> Phase 1 is no longer considered fully closed after the 2026-07-22 audit. The confirmed correctness tail is TODO-97, reopened TODO-80 and TODO-CR-AUDIT-21, plus their configuration/lifecycle follow-ups TODO-141, TODO-96 and TODO-142. Continue to gate speculative performance features on TODO-140/145 evidence; raw L4 pooling remains discarded in favor of Hyper's protocol-aware pooling.
 
 ### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
@@ -210,18 +231,26 @@ flowchart TD
   当前 server 运行时鉴权路径已只剩两种：Standalone 模式走 `SqliteAuthStore`，ctld-managed 模式走 `LocalTokenCache` 的只读快照缓存；配置 schema 与 bootstrap 路径中也不再存在 `auth_tokens`/静态 token map 的生产入口。该条目已由现有实现收口，文档此前状态滞后。
 
 ### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
-* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: 🚨 Reopened — pending cap is advisory under concurrency | **Track**: HA, Overload & Observability
 * **Problem**:
   在并发高峰期，请求可能会在 open_bi 队列上无限期排队等待，引起 upstream 协程淤积和内存爆满。
+* **Current state**:
+  `OverloadConfig` 已新增 `max_pending_streams`，超过阈值时会以 `quic_open_rejected_overloaded` 快速失败；Client H1 入口返回 `503 Service Unavailable` + `Retry-After: 1`，TCP/TLS 路径直接关闭本地连接。
+* **Residual problem**:
+  `open_bi_guarded` 先读取全局 pending 计数并判断，再单独执行 `fetch_add(1)`。多个并发任务可同时观察到未超限并一起进入等待，因此配置值不是严格容量上限，突发时 overshoot 大小可接近同时竞争的任务数。
 * **Fix**:
-  `OverloadConfig` 新增 `max_pending_streams`，对 QUIC `open_bi` 待队列做显式上限控制。超过阈值时直接以 `quic_open_rejected_overloaded` 快速失败；Client H1 入口返回 `503 Service Unavailable` + `Retry-After: 1`，TCP/TLS 路径则直接关闭本地连接，避免继续堆积等待。
+  使用 `Semaphore::try_acquire_owned` 或有界 CAS reservation 原子地获取 pending permit；permit 必须覆盖完整 `open_bi` 等待生命周期，并在成功、失败、超时和取消路径 RAII 归还。补充 barrier 驱动的并发上限、取消、超时、立即成功和拒绝响应测试，并为 permit usage/rejection 暴露指标。
 
 ### [TODO-CR-AUDIT-21] SIGTERM Graceful Connection Draining
-* **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: 🚨 Reopened — drain coverage incomplete | **Track**: HA, Overload & Observability
 * **Problem**:
   Server 和 Client 均缺乏优雅停机机制，SIGTERM 信号会引发粗暴的进程退出，瞬间掐断成千上万个活跃会话。
+* **Current state**:
+  Server/Client 已捕获 `SIGTERM`/`SIGINT` 并触发统一 shutdown；Server 会停止 QUIC accept 并取消 listener，双方随后最多等待 30 秒。但 `wait_for_resource_drain` 只检查 accepted TCP connection 和 pending `open_bi` 计数，Server shutdown 分支还会 drop 未完成的 QUIC server join handle，使其脱离父任务继续运行。
+* **Residual problem**:
+  当前“drain completed”不代表 QUIC connection、已打开 stream、活跃 relay、UDP session 或 H2 driver 已退出，运行时结束时这些任务仍可能被截断。该状态不能继续视为完整 graceful drain。
 * **Fix**:
-  已接入 `tokio::signal`，Server/Client 均可捕获 `SIGTERM`/`SIGINT` 并触发统一 shutdown；Server 会停止 QUIC accept 并取消所有 listener，Client healthz server 也会同步退出。随后双方都会对活动 accepted connection / pending stream 执行最长 30 秒的 drain 等待，超时后记录日志并强制退出。
+  与 TODO-96 一起引入组件所有的 `JoinSet` / `TaskTracker`，登记 QUIC accept loop、每 connection task、每 stream/relay、UDP session 和 H2 driver。shutdown 顺序固定为：停止新入口、取消后台工作、等待真实 active session/relay 归零、deadline 后 abort 剩余任务。补充长连接、半关闭、慢后端、UDP session 与超时强退集成测试。
 
 ### [TODO-35] Two-tier upstream connection pool
 * **Priority**: High | **Status**: ❌ Discarded (Phase 1) | **Track**: Performance Ideas
@@ -396,11 +425,11 @@ flowchart TD
   拆分为 `tunnel-proto` (协议帧), `tunnel-engine` (复制中继) 与 `tunnel-plugins` (接口插件)。
 
 ### [TODO-96] JoinSet task lifetime tracking
-* **Priority**: Medium | **Status**: TODO | **Track**: Future/Research & CI
+* **Priority**: High | **Status**: Ready for implementation; required by TODO-CR-AUDIT-21 | **Track**: HA, Overload & Observability
 * **Problem**:
-  散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。已知 callsite 包括 `H2SenderCache` 的 H2 connection driver：它有意持有 sender cache 与 inflight guard 直至连接 driver 退出，但服务 shutdown 时仍需由所属组件统一取消/等待。
+  散落在各处的 `tokio::spawn` 缺少集中的生命周期跟控，极易造成孤儿协程泄露。已确认的生产 callsite 包括 Server QUIC connection task、每个 client-initiated egress stream、TCP accept handler、UDP session/reply pump、`H2SenderCache` connection driver、health/metrics connection handler 与后台 cache/control task。Server `proxy_main` 在 shutdown 分支 drop QUIC server join handle 后不会等待这些子任务，因此 TODO-CR-AUDIT-21 的 drain 不能依赖当前 detached task 结构完成。
 * **Fix**:
-  引入组件拥有的 `JoinSet` / `TaskTracker` 与 `CancellationToken`，确保父服务停止时先协作取消、再在 deadline 后 `abort_all`；不要只依赖 `Drop`。为 H2 driver、listener worker 和 background cache task 明确登记所属组件与 drain 行为。
+  引入组件拥有的 `JoinSet` / `TaskTracker` 与 `CancellationToken`，确保父服务停止时先协作取消、再在 deadline 后 `abort_all`；不要只依赖 `Drop`。为 QUIC accept/connection/stream、relay、UDP session、H2 driver、listener worker 和 background cache/control task 明确登记所属组件与 drain 行为。任务错误必须由 owner 汇总并按 fatal/transient 分类，避免 join error 静默丢失。
 
 ### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
 * **Priority**: Medium | **Status**: TODO | **Track**: HA, Overload & Observability
@@ -490,6 +519,13 @@ flowchart TD
   已核对当前 callsite：client `EntryConnPool` 和 server `ClientRegistry` 都只在各自的单线程 actor mutation loop 中申请/释放 slot。实施时仍须补 actor 内重复注册、注销、连接替换与 purge 的测试，防止未来绕开 actor 新增调用方。
 * **Fix**:
   将 slot free-list 的所有权移到各 Actor 的私有状态，或抽成只暴露给 actor 的 allocator；不要仅删除 `Mutex` 后继续让通用 `InflightTable` 暴露可并发的 alloc/free API。若 TODO-106 获批，每 shard actor 还必须拥有独立 slot allocator/table，避免把当前全局锁竞争扩散到多个 actor。
+
+### [TODO-146] Make Server ClientRegistry slot capacity explicit and observable
+* **Priority**: High | **Status**: Ready for design and implementation | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `ClientRegistry::new` currently creates `new_inflight_table(4096)` regardless of configured QUIC stream limits, runtime parallelism, expected client connection count, shard count, or deployment size. Every registered client connection consumes one slot; after 4096 live registrations, authentication succeeds but registration fails with `inflight slot table exhausted`. The limit is absent from configuration, startup telemetry, capacity documentation and `/metrics`.
+* **Implementation plan**:
+  Choose one explicit model: a validated `max_client_connections` capacity, a capacity derived from a documented connection budget, or a safely segmented/growing slot table whose existing slot references remain stable. Expose capacity, allocated slots, high-water mark and exhaustion count; log the resolved value at startup. Add boundary tests for exactly-at-capacity, one-over-capacity, unregister/reuse, duplicate registration, purge, actor shutdown and inflight guards that outlive connection removal. Coordinate allocator ownership changes with TODO-111, but do not make correctness depend on the benchmark-gated EntryConnPool actor sharding in TODO-106.
 
 ### [TODO-134] Fix spurious notify_one in open_bi_guarded fast-path error branch
 * **Priority**: Low | **Status**: ❌ Discarded after code review | **Track**: Transport & Performance
@@ -583,14 +619,20 @@ flowchart TD
   使用 `CachePadded<AtomicUsize>` 包裹 `Arc` 可以防 False Sharing，但引发了多余的堆分配。
 
 ### [TODO-CR-AUDIT-5] 潜在的整型乘法溢出漏洞
-* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
-* **Problem**:
-  配置项中 `mb * 1024 * 1024` 的溢出可能导致恐慌。建议使用 `saturating_mul` 进行安全乘法保护。
+* **Priority**: High | **Status**: 🚧 Partial — MB conversions fixed, capacity arithmetic remains | **Track**: Transport & Performance
+* **Current state**:
+  QUIC 配置中的 MiB→bytes 转换已经使用 `saturating_mul`，原先该部分的直接乘法风险已消除。
+* **Residual problem**:
+  `EntryConnPool::new` 仍使用 `(max_concurrent_streams as usize) * (connections as usize) * 2` 计算 inflight table 容量。超大但可反序列化的配置在 debug build 会 panic，在 release build 可 wrap 成错误容量；即使不溢出，也可能在启动阶段申请不可接受的内存并触发 OOM。
+* **Fix**:
+  使用 `checked_mul` 和显式容量/内存预算验证，错误必须在配置加载阶段带字段名返回，不能饱和到巨大值或在 allocator 阶段失败。为边界值、乘法溢出、32/64 位差异和内存预算拒绝补测试。
 
 ### [TODO-CR-AUDIT-6] 高并发连接管理器/线程池配置健壮性检验
-* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
+* **Priority**: High | **Status**: Ready for implementation | **Track**: Transport & Performance
 * **Problem**:
-  参数缺少合理的静态验证边界。
+  参数缺少合理的静态验证边界。`apply_transport_params` 对 stream/connection receive window 使用 `try_into().unwrap()`；超出 Quinn `VarInt` 范围的配置会在启动时 panic。`connections`、`shards`、`max_concurrent_streams`、accept/runtime workers、QUIC/TCP windows、socket buffers、relay/body/peek buffers 和 pending/admission limits 也缺少统一的上界及组合内存预算。
+* **Fix**:
+  将配置转换改成返回字段化 validation error，生产启动路径禁止依赖 `unwrap`。为每个资源参数定义协议上限、实现上限和推荐范围，并验证跨字段关系，例如 `shards <= connections`、window/buffer 与最大连接/stream 数推导的最坏内存。启动日志输出最终生效值和估算容量；补零值、最大合法值、首个非法值、极端组合及环境变量覆盖测试。TODO-146 的 Server registry capacity 必须纳入同一容量模型。
 
 ### [TODO-CR-AUDIT-7] 高频请求生命周期内 Engine 对象的动态实例化开销
 * **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
