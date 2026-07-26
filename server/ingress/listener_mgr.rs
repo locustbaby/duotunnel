@@ -252,7 +252,11 @@ async fn sync_listeners_inner(
             let state_clone = state.clone();
             let listener_clone = (*listener).clone();
             let p = *port;
-            tokio::spawn(async move {
+            // Must also run on the proxy runtime: the listener socket is built
+            // inside, and TcpListener::from_std registers the fd with the
+            // calling runtime's IO driver — binding readiness for every public
+            // listener to whichever runtime applied the config.
+            state.proxy_handle().spawn(async move {
                 spawn_single_listener(state_clone, p, listener_clone).await;
             });
         }

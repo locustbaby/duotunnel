@@ -248,7 +248,7 @@ Applies to:
 
 - `ingress/registry.rs` (`ClientRegistry` — register/unregister/purge via mpsc)
 - `client/tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
-- `tunnel-lib/src/transport/open_bi.rs` (`open_bi_guarded` — pending-queue gate before `open_bi` wait)
+- `tunnel-lib/src/transport/open_bi.rs` (`open_bi_guarded` — per-connection pending-stream gate before the `open_bi` wait)
 
 ### Applying the Framework
 

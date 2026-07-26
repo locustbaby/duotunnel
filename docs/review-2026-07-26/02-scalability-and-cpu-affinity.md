@@ -99,6 +99,14 @@ worker 任务被**丢弃而非取消**，其尾部的 `remaining.fetch_sub` → 
 慢停机而非挂死。验证：连续 6 次停机 0.0-0.6s 干净退出（修复前首次即挂），accept
 worker 取消日志从 0/10 变 10/10。
 
+**首版修复不完整（2026-07-26 复查补正）**：首版只把 **accept 任务**移到 proxy runtime，
+漏了 `sync_listeners_inner` 里创建 listener 的那层 `tokio::spawn`。由于
+`build_reuseport_listener` 的 `TcpListener::from_std` 会把 fd 注册到**调用方 runtime 的
+IO driver**，公网 listener 的**就绪事件仍由 bg 单线程 driver 驱动**——功能上可用（fd 注册
+跨 runtime 轮询是合法的），但 (a) 注册生命周期仍绑在 bg runtime 上，(b) accept 就绪这一步
+仍是单线程。该层 spawn 已一并改为 proxy runtime；判断此类问题的通用规则是
+**看 fd 在哪个 runtime 上被创建，而不只是看任务在哪个 runtime 上跑**。
+
 **对本文路线的影响**：S0 已闭合，**Phase B（多 Endpoint）仍是性能线第一优先**不变；
 但结论"主串行点是 S1"需附加前提——**那是在 S0 修复之后才成立**。此前 ctld 模式下真正
 的瓶颈是 S0，不是 S1。

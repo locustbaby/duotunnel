@@ -462,6 +462,43 @@ buffer 的场景仍可显式配置。相比"下调固定值"，`None` 恢复自�
 **收益 / 改动量 / 影响面**：潜在 -6~8 allocs/stream + 省 3 次顺序 await（仅高建流率可见）；改动涉及
 线格式，须版本兼容；当前**不排期**，列为基线后再评估。
 
+### 4.8 批处理（writev / io_uring / SIMD）在本项目的实际适用性 `[2026-07-26 补录]`
+
+**背景**：外部资料常把 `writev`、`io_uring`、SIMD 归纳为同一条哲学——"拒绝零售、只做批发"，
+用批量化摊薄交互成本。这条原则本身正确，本节记录它在**本代码库**逐项核对后的落点，
+避免按哲学平均用力。
+
+**已经在用的（不是待办）**：
+- **向量化写**：M1 已把 chunked 响应从"每 chunk 三次 `write_all`（hex 前缀 / 数据 / CRLF）"
+  合并为一次 `write_all_chunks`。**注意这与 `docs/guide/counter_intuitive_network_practices.md`
+  §1.4 的字面建议相反**，取舍与未决之处见该节的补注。
+- **SIMD**：`httparse` 内部已用 SSE4.2/AVX2 扫描 header，L7 请求解析这一步**已经是**
+  向量化的。剩余候选（`canonicalize_egress_host` 的 ASCII 小写化、vhost 查找）字符串仅
+  ~20 字节，SIMD 设置成本吃掉收益——该处的正解是消除那次 `String` 分配（§4.3），不是向量化。
+- **UDP 收发批量化**：quinn 的 GSO/GRO 已覆盖，见 [03](./03-io-uring-assessment.md)。
+- **io_uring**：**已否决**（决策 D-12）。否决理由不是忽视批处理收益，而是生态契约：
+  tokio/quinn/hyper 全为 readiness 模型、pingora 亦未采用、QUIC 的 UDP 已批量化，
+  5–15% 收益需重写 I/O 层并牺牲 seccomp 部署自由度。
+
+**量级校准（决定该不该做的关键）**：1 核 8k QPS 的预算是 125 µs/req，L7 侧实测估算
+25–55 µs/req（§2）。合并几次流写量级在 **1–3 µs/req**。相比之下同一份分析里的
+S0（listener runtime 归属，[02 §2.0](./02-scalability-and-cpu-affinity.md)）决定的是整条公网
+ingress 跑在 1 个线程还是 N 个线程，§3.4 + §4.1 的 body 双拷贝 + 三重装箱是每请求
+~2 次分配 + 2 次拷贝。**结论：批处理是二阶项**；先解结构性串行点与每请求分配，再谈批处理。
+
+**尚未做、值得做的候选（均为 benchmark-gated）**：
+
+| # | 候选 | 位置 | 判据 / 风险 |
+| --- | --- | --- | --- |
+| B1 | **relay 读侧批量化**：`read_chunk`（单数）→ `read_chunks(&mut [Bytes])`（quinn 0.11.9 `recv_stream.rs:215` 已提供，全仓 4 处均用单数） | `engine/copy.rs`、`driver/h1.rs`、`egress/http.rs` | relay 是全系统频次最高的循环，但 64 KiB buffer 已摊薄大部分开销，且单次能否取到多个 chunk 取决于对端发送模式——**必须先用 microbench + profile 验证 chunk 到达分布**，否则可能零收益 |
+| B2 | **响应头与首个 body 帧合并写**：Content-Length / close-delimited 分支目前 header 用 `write_all`、body 每帧 `write_chunk`，小响应实际是 2 次流写 | `driver/h1.rs` write_response | 压测用例（GET 小响应）正好命中；与 §1.4 的"拼接 vs 向量化"未决问题同源，应一并测 |
+| B3 | **UDP 每包分配 + 每包 `send_datagram`** | 见 [11 §6](./11-passthrough-modes.md) | 已并入 TODO-144；批量化空间比 TCP relay 更明确（每包一次分配是确定的浪费） |
+| B4 | **per-core 计数消 K1** | [02 Phase A](./02-scalability-and-cpu-affinity.md) | 同一哲学在**缓存行**层面的应用：共享原子的每连接/每流 ±1 是"零售交互"。已在 Phase A，本节视角支持提高其优先级 |
+
+**顺序纪律**：以上全部受 [06](./06-bench-methodology.md) 的基线纪律约束。**此刻尤其不能启动**
+——S0 修复后我们才知道此前所有多核数字都是在 ingress 被锁在单线程时测得的。正确顺序是
+cpuset 隔离 → 重测建立可信基线 → 按 profile 挑目标，而不是按哲学挑目标。
+
 ### 4.7 其余确认项
 
 以下为微优化/确认项，保留紧凑列表（现象 + 证据 + 一句方案 + 标注）：

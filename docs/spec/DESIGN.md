@@ -263,7 +263,7 @@ Implementation: `tunnel-lib/src/models/msg.rs`.
 │  Startup       │                              │  Listen QUIC   │
 │    │           │  1. QUIC Connect             │    │           │
 │    ├───────────┼─────────────────────────────►├────┤           │
-│    │           │     (ALPN: "tunnel-quic")    │    │           │
+│    │           │   (ALPN: "tunnel-quic/v1")   │    │           │
 │    │           │                              │    │           │
 │    │           │  2. TLS 1.3 Handshake        │    │           │
 │    │           │◄────────────────────────────►│    │           │
@@ -483,7 +483,7 @@ pub struct MitmPeerSpec {
 Overload is enforced at three layers:
 
 1. **Inflight slow-path** (`lb/overload.rs` `maybe_slow_path`) — yield/sleep before `open_bi()` when per-connection inflight streams approach `max_concurrent_streams`
-2. **Pending queue cap** (`transport/open_bi.rs` `open_bi_guarded`) — global `pending_streams` metric gated by `overload.max_pending_streams` (default: `max_concurrent_streams / 4`); rejects with `quic_open_rejected_overloaded`
+2. **Pending queue cap** (`transport/open_bi.rs` `open_bi_guarded`) — **per-connection** semaphore on `ConnectionHandle`, sized from `overload.max_pending_streams` (default: `max_concurrent_streams / 4`); acquired with `try_acquire_owned` so the cap is a hard limit rather than advisory, and rejects with `quic_open_rejected_overloaded`. The global `pending_streams` metric is reported but no longer gates admission; a process-wide budget is still missing (TODO-142)
 3. **QUIC transport limits** — `max_concurrent_bidi_streams`, stream/connection windows
 
 Client entry overload responses:
@@ -621,7 +621,7 @@ duotunnel_requests_total{type,status} # Total requests (tcp/http, success/error)
 ### 11.1 Transport Security
 
 - **QUIC TLS 1.3**: All tunnel traffic encrypted
-- **ALPN**: `tunnel-quic` protocol identifier
+- **ALPN**: `tunnel-quic/v1` protocol identifier (generation-scoped; a breaking wire change takes a new generation so incompatible peers fail at the QUIC handshake). Handshake additionally negotiates `protocol_version` + capability bits — see `tunnel-lib/src/models/msg.rs`.
 - **Certificate Verification**: Supports custom CA or system certificates
 
 ### 11.2 Authentication Mechanism
