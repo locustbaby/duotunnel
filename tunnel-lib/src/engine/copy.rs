@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use crossbeam_queue::ArrayQueue;
 use quinn::{RecvStream, SendStream};
 use std::cell::RefCell;
@@ -5,45 +6,34 @@ use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 thread_local! {
-    static LOCAL_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    static LOCAL_POOL: RefCell<Vec<BytesMut>> = const { RefCell::new(Vec::new()) };
 }
 
-fn global_pool() -> &'static ArrayQueue<Vec<u8>> {
-    static GLOBAL_POOL: OnceLock<ArrayQueue<Vec<u8>>> = OnceLock::new();
+fn global_pool() -> &'static ArrayQueue<BytesMut> {
+    static GLOBAL_POOL: OnceLock<ArrayQueue<BytesMut>> = OnceLock::new();
     GLOBAL_POOL.get_or_init(|| ArrayQueue::new(1024))
 }
 
-#[allow(clippy::uninit_vec)]
-fn take_buffer(buffer_size: usize) -> Vec<u8> {
-    if let Some(mut buf) = LOCAL_POOL.with(|pool| pool.borrow_mut().pop()) {
+// Buffers are handed out empty (len 0) with at least `buffer_size` capacity;
+// `read_buf` fills the uninitialized capacity directly, so no zeroing and no
+// `set_len` over uninitialized memory is ever needed.
+fn take_buffer(buffer_size: usize) -> BytesMut {
+    if let Some(buf) = LOCAL_POOL.with(|pool| pool.borrow_mut().pop()) {
         if buf.capacity() >= buffer_size {
-            // SAFETY: The caller of `take_buffer` must immediately overwrite all bytes up to `buffer_size`
-            // before reading them (e.g. by passing the slice to `reader.read(&mut buf)`).
-            unsafe {
-                buf.set_len(buffer_size);
-            }
             return buf;
         }
     }
     let global = global_pool();
-    while let Some(mut buf) = global.pop() {
+    while let Some(buf) = global.pop() {
         if buf.capacity() >= buffer_size {
-            // SAFETY: The caller of `take_buffer` must immediately overwrite all bytes up to `buffer_size`
-            // before reading them (e.g. by passing the slice to `reader.read(&mut buf)`).
-            unsafe {
-                buf.set_len(buffer_size);
-            }
             return buf;
         }
     }
-    let mut buf = Vec::with_capacity(buffer_size);
-    unsafe {
-        buf.set_len(buffer_size);
-    }
-    buf
+    BytesMut::with_capacity(buffer_size)
 }
 
-fn return_buffer(buf: Vec<u8>, buffer_size: usize) {
+fn return_buffer(mut buf: BytesMut, buffer_size: usize) {
+    buf.clear();
     if buf.capacity() < buffer_size {
         return;
     }
@@ -69,12 +59,12 @@ fn return_buffer(buf: Vec<u8>, buffer_size: usize) {
 }
 
 pub struct PooledBufGuard {
-    buf: Option<Vec<u8>>,
+    buf: Option<BytesMut>,
     expected_size: usize,
 }
 
 impl PooledBufGuard {
-    pub fn new(buf: Vec<u8>, expected_size: usize) -> Self {
+    pub fn new(buf: BytesMut, expected_size: usize) -> Self {
         Self {
             buf: Some(buf),
             expected_size,
@@ -83,7 +73,7 @@ impl PooledBufGuard {
 }
 
 impl std::ops::Deref for PooledBufGuard {
-    type Target = [u8];
+    type Target = BytesMut;
     fn deref(&self) -> &Self::Target {
         self.buf.as_ref().unwrap()
     }
@@ -116,19 +106,12 @@ where
     let mut guard = PooledBufGuard::new(buf, buffer_size);
     let mut copied = 0u64;
     loop {
-        // SAFETY:
-        // 1. The buffer's length was set to `buffer_size` using `set_len` in `take_buffer`.
-        // 2. The memory in the buffer might be uninitialized.
-        // 3. We immediately pass the mutable slice `&mut *guard` to `reader.read`,
-        //    which will overwrite the bytes.
-        // 4. We only read or write the slice of the buffer that has been successfully
-        //    written to by the read operation: `&guard[..read]`.
-        // 5. No uninitialized bytes are ever read.
-        let read = reader.read(&mut guard).await?;
+        guard.clear();
+        let read = reader.read_buf(&mut *guard).await?;
         if read == 0 {
             break;
         }
-        writer.write_all(&guard[..read]).await?;
+        writer.write_all(&guard[..]).await?;
         copied += read as u64;
     }
     Ok(copied)

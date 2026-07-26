@@ -8,7 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
-    stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, ProxyError,
+    stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, NegotiatedProtocol,
+    ProxyError,
 };
 
 struct ClientInfo {
@@ -16,10 +17,19 @@ struct ClientInfo {
     shard_id: usize,
 }
 
+struct RegisteredConn {
+    handle: Arc<ConnectionHandle>,
+    negotiated: NegotiatedProtocol,
+}
+
 #[derive(Clone)]
 pub struct SelectedConnection {
     pub conn_id: ClientId,
     pub handle: Arc<ConnectionHandle>,
+    // Unread until the first capability-gated feature lands; stored now so
+    // gating can happen at the connection-selection site without re-plumbing.
+    #[allow(dead_code)]
+    pub negotiated: NegotiatedProtocol,
 }
 
 pub struct ClientGroup {
@@ -65,6 +75,7 @@ enum RegistryMsg {
         group_id: GroupId,
         conn: Connection,
         shard_id: usize,
+        negotiated: NegotiatedProtocol,
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
     Unregister {
@@ -83,7 +94,7 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    pub fn new(shard_count: usize, max_concurrent_streams: u32) -> Self {
+    pub fn new(shard_count: usize, max_concurrent_streams: u32, max_pending_streams: usize) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
@@ -92,15 +103,16 @@ impl ClientRegistry {
 
         tokio::spawn(async move {
             let mut clients: HashMap<ClientId, ClientInfo> = HashMap::new();
-            let mut group_conns: HashMap<GroupId, Vec<HashMap<ClientId, Arc<ConnectionHandle>>>> =
+            let mut group_conns: HashMap<GroupId, Vec<HashMap<ClientId, RegisteredConn>>> =
                 HashMap::new();
 
-            let build_snapshot = |idx: &HashMap<ClientId, Arc<ConnectionHandle>>| {
+            let build_snapshot = |idx: &HashMap<ClientId, RegisteredConn>| {
                 idx.iter()
-                    .map(|(client_id, handle)| {
+                    .map(|(client_id, registered)| {
                         Arc::new(SelectedConnection {
                             conn_id: client_id.clone(),
-                            handle: handle.clone(),
+                            handle: registered.handle.clone(),
+                            negotiated: registered.negotiated,
                         })
                     })
                     .collect::<Vec<_>>()
@@ -113,12 +125,15 @@ impl ClientRegistry {
                         group_id,
                         conn,
                         shard_id,
+                        negotiated,
                         reply,
                     } => {
                         info!(
                             client_id = %client_id,
                             group_id = %group_id,
                             shard_id,
+                            negotiated_version = negotiated.version,
+                            capabilities = negotiated.capabilities,
                             "registering client"
                         );
                         let group = {
@@ -133,7 +148,7 @@ impl ClientRegistry {
                             .or_insert_with(|| (0..shard_count).map(|_| HashMap::new()).collect());
                         let idx = &mut shards[shard_id % shard_count];
                         let slot_id = if let Some(existing) = idx.get(&client_id) {
-                            existing.slot_id()
+                            existing.handle.slot_id()
                         } else if let Some(slot) = inflight_table.alloc_slot() {
                             slot
                         } else {
@@ -147,8 +162,9 @@ impl ClientRegistry {
                             slot_id,
                             shard_id % shard_count,
                             max_concurrent_streams,
+                            max_pending_streams,
                         );
-                        idx.insert(client_id.clone(), handle);
+                        idx.insert(client_id.clone(), RegisteredConn { handle, negotiated });
                         group.shards[shard_id % shard_count].store(Arc::new(build_snapshot(idx)));
 
                         if let Some(old_info) = clients.insert(
@@ -164,7 +180,7 @@ impl ClientRegistry {
                                 if let Some(old_shards) = group_conns.get_mut(&old_info.group_id) {
                                     let old_idx = &mut old_shards[old_info.shard_id];
                                     if let Some(existing) = old_idx.remove(&client_id) {
-                                        inflight_table.free_slot(existing.slot_id());
+                                        inflight_table.free_slot(existing.handle.slot_id());
                                     }
                                     if let Some(old_group) = groups_clone.get(&old_info.group_id) {
                                         old_group.shards[old_info.shard_id]
@@ -191,7 +207,7 @@ impl ClientRegistry {
                             if let Some(shards) = group_conns.get_mut(&info.group_id) {
                                 let idx = &mut shards[info.shard_id];
                                 if let Some(existing) = idx.remove(&client_id) {
-                                    inflight_table.free_slot(existing.slot_id());
+                                    inflight_table.free_slot(existing.handle.slot_id());
                                 }
                                 let should_remove =
                                     if let Some(group) = groups_clone.get(&info.group_id) {
@@ -214,15 +230,15 @@ impl ClientRegistry {
                         for (gid, shards) in group_conns.iter_mut() {
                             for (shard_id, idx) in shards.iter_mut().enumerate() {
                                 let mut dead_in_group = Vec::new();
-                                for (cid, handle) in idx.iter() {
-                                    if handle.close_reason().is_some() {
+                                for (cid, registered) in idx.iter() {
+                                    if registered.handle.close_reason().is_some() {
                                         dead_in_group.push(cid.clone());
                                     }
                                 }
                                 if !dead_in_group.is_empty() {
                                     for cid in &dead_in_group {
                                         if let Some(existing) = idx.remove(cid) {
-                                            inflight_table.free_slot(existing.slot_id());
+                                            inflight_table.free_slot(existing.handle.slot_id());
                                         }
                                         dead_clients.push(cid.clone());
                                         dead_count += 1;
@@ -277,6 +293,7 @@ impl ClientRegistry {
         client_id: ClientId,
         group_id: GroupId,
         conn: Connection,
+        negotiated: NegotiatedProtocol,
     ) -> Result<(), &'static str> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let shard_id = self.next_register_shard.fetch_add(1, Ordering::Relaxed) % self.shard_count;
@@ -287,6 +304,7 @@ impl ClientRegistry {
                 group_id,
                 conn,
                 shard_id,
+                negotiated,
                 reply: reply_tx,
             })
             .await
@@ -326,14 +344,22 @@ impl ClientRegistry {
 
 impl Default for ClientRegistry {
     fn default() -> Self {
-        Self::new(1, 1000)
+        Self::new(1, 1000, 250)
     }
 }
 
 pub type SharedRegistry = Arc<ClientRegistry>;
 
-pub fn new_shared_registry(shard_count: usize, max_concurrent_streams: u32) -> SharedRegistry {
-    Arc::new(ClientRegistry::new(shard_count, max_concurrent_streams))
+pub fn new_shared_registry(
+    shard_count: usize,
+    max_concurrent_streams: u32,
+    max_pending_streams: usize,
+) -> SharedRegistry {
+    Arc::new(ClientRegistry::new(
+        shard_count,
+        max_concurrent_streams,
+        max_pending_streams,
+    ))
 }
 
 pub fn unregister_if_connection_lost(

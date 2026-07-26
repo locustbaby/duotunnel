@@ -165,15 +165,23 @@ async fn proxy_main(
 
     let quic_state = state.clone();
     let quic_shutdown = shutdown.clone();
-    let quic_handle = runtime::spawn_task(async move {
+    let mut quic_handle = runtime::spawn_task(async move {
         handlers::quic::run_quic_server(quic_state, ready, quic_shutdown).await
     });
 
     tokio::select! {
-        r = quic_handle => { r??; }
+        r = &mut quic_handle => {
+            r??;
+            shutdown_all_listeners(&state).await;
+            return Ok(());
+        }
         _ = shutdown.cancelled() => {}
     }
+    // Shutdown order: stop public accepts first so the drain counters can
+    // reach zero while tunnel connections are still open; run_quic_server
+    // then drains and closes connections before closing the endpoint.
     shutdown_all_listeners(&state).await;
+    quic_handle.await??;
     Ok(())
 }
 

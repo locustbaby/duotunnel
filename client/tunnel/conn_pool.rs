@@ -7,11 +7,15 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
-    stable_shard_index, ConnectionHandle, VhostRouter,
+    stable_shard_index, ConnectionHandle, NegotiatedProtocol, VhostRouter,
 };
 
 pub struct PooledConnection {
     pub handle: Arc<ConnectionHandle>,
+    // Unread until the first capability-gated feature lands; stored now so
+    // gating can happen at the connection-selection site without re-plumbing.
+    #[allow(dead_code)]
+    pub negotiated: NegotiatedProtocol,
 }
 
 struct PoolShard {
@@ -36,6 +40,7 @@ enum PoolMsg {
     Push {
         conn: Connection,
         shard_id: usize,
+        negotiated: NegotiatedProtocol,
         reply: oneshot::Sender<()>,
     },
     Remove {
@@ -72,7 +77,12 @@ pub struct EntryConnPool {
 }
 
 impl EntryConnPool {
-    pub fn new(max_concurrent_streams: u32, connections: u32, shard_count: usize) -> Arc<Self> {
+    pub fn new(
+        max_concurrent_streams: u32,
+        max_pending_streams: usize,
+        connections: u32,
+        shard_count: usize,
+    ) -> Arc<Self> {
         let capacity = ((max_concurrent_streams as usize) * (connections as usize) * 2).max(1024);
         let inflight_table = new_inflight_table(capacity);
         let shard_count = shard_count.max(1);
@@ -94,6 +104,7 @@ impl EntryConnPool {
                     PoolMsg::Push {
                         conn,
                         shard_id,
+                        negotiated,
                         reply,
                     } => {
                         let stable_id = conn.stable_id();
@@ -115,8 +126,11 @@ impl EntryConnPool {
                             slot_id,
                             shard_id,
                             max_concurrent_streams,
+                            max_pending_streams,
                         );
-                        shard.conns.push(Arc::new(PooledConnection { handle }));
+                        shard
+                            .conns
+                            .push(Arc::new(PooledConnection { handle, negotiated }));
                         snapshots_for_actor[shard_id].store(shard.snapshot());
                         total_size_for_actor.fetch_add(1, Ordering::Release);
                         let _ = reply.send(());
@@ -164,7 +178,7 @@ impl EntryConnPool {
         self.egress_rules.load().is_rejected_host(host)
     }
 
-    pub async fn push(&self, conn: Connection) {
+    pub async fn push(&self, conn: Connection, negotiated: NegotiatedProtocol) {
         let shard_id = stable_shard_index(&conn.stable_id(), self.shard_count);
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
@@ -172,6 +186,7 @@ impl EntryConnPool {
             .send(PoolMsg::Push {
                 conn,
                 shard_id,
+                negotiated,
                 reply: reply_tx,
             })
             .await;

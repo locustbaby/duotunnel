@@ -66,8 +66,17 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "client QUIC ownership topology resolved"
     );
+    let overload_limits = config.overload.resolve(config.quic.max_concurrent_streams);
+    info!(
+        mode = ?overload_limits.mode,
+        yield_threshold = overload_limits.inflight_yield_threshold,
+        sleep_threshold = overload_limits.inflight_sleep_threshold,
+        max_concurrent_streams = config.quic.max_concurrent_streams,
+        "overload protection resolved"
+    );
     let entry_pool = EntryConnPool::new(
         config.quic.max_concurrent_streams,
+        overload_limits.max_pending_streams,
         resolved_connections,
         shard_count,
     );
@@ -78,15 +87,6 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         let entry_tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
         let peek_buf_size = config.proxy_buffers.peek_buf_size;
         let open_stream_timeout = Duration::from_millis(config.reconnect.open_stream_timeout_ms);
-        let overload_limits = config.overload.resolve(config.quic.max_concurrent_streams);
-
-        info!(
-            mode = ?overload_limits.mode,
-            yield_threshold = overload_limits.inflight_yield_threshold,
-            sleep_threshold = overload_limits.inflight_sleep_threshold,
-            max_concurrent_streams = config.quic.max_concurrent_streams,
-            "overload protection resolved"
-        );
 
         let entry_cfg = EntryListenerConfig {
             port: entry_port,

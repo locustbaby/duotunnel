@@ -72,7 +72,10 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
         .unwrap_or(start);
     &value[start..end]
 }
-pub fn sanitize_request_headers(headers: &mut HeaderMap) {
+/// Drop the connection-specific fields listed in RFC 9110 §7.6.1 plus the
+/// fields `Connection` itself names. Applies to both directions: a hop-by-hop
+/// field forwarded onward leaks this hop's connection state to the peer.
+fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
     let mut headers_to_remove = Vec::new();
     if let Some(connection) = headers.get(header::CONNECTION) {
         if let Ok(conn_str) = connection.to_str() {
@@ -97,6 +100,9 @@ pub fn sanitize_request_headers(headers: &mut HeaderMap) {
     headers.remove(header::TRANSFER_ENCODING);
     headers.remove(header::UPGRADE);
     headers.remove(header::TRAILER);
+}
+pub fn sanitize_request_headers(headers: &mut HeaderMap) {
+    remove_hop_by_hop_headers(headers);
     headers.remove(header::HOST);
     if let Some(te) = headers.get(header::TE) {
         let is_trailers = if let Ok(te_str) = te.to_str() {
@@ -110,8 +116,92 @@ pub fn sanitize_request_headers(headers: &mut HeaderMap) {
     }
 }
 pub fn sanitize_response_headers(headers: &mut HeaderMap) {
-    headers.remove(header::TRANSFER_ENCODING);
+    remove_hop_by_hop_headers(headers);
+    headers.remove(header::TE);
+    // The caller re-derives framing from the length it captured before this
+    // point, so the upstream's own framing fields must not survive.
     headers.remove(header::CONTENT_LENGTH);
+}
+
+/// Whether a trailer field may be relayed to the downstream client.
+///
+/// RFC 9112 §7.1.2 forbids framing, routing and control fields in a trailer
+/// section; relaying them unfiltered lets an upstream inject `Content-Length`
+/// or `Transfer-Encoding` after the chunked terminator, which a shared
+/// downstream reads as the start of a second response. Mirrors the disallow
+/// list hyper applies when it encodes trailers, plus the hop-by-hop fields.
+pub fn is_forwardable_trailer(name: &HeaderName) -> bool {
+    if name.as_str().starts_with("proxy-") || name.as_str() == "keep-alive" {
+        return false;
+    }
+    !matches!(
+        *name,
+        header::AUTHORIZATION
+            | header::CACHE_CONTROL
+            | header::CONNECTION
+            | header::CONTENT_ENCODING
+            | header::CONTENT_LENGTH
+            | header::CONTENT_RANGE
+            | header::CONTENT_TYPE
+            | header::HOST
+            | header::MAX_FORWARDS
+            | header::SET_COOKIE
+            | header::TE
+            | header::TRAILER
+            | header::TRANSFER_ENCODING
+            | header::UPGRADE
+    )
+}
+
+/// Parse one `Content-Length` field value.
+///
+/// RFC 9112 §6.2 defines the value as `1*DIGIT`, so every byte is validated
+/// here: `usize::from_str` also accepts a `+` prefix, and a length we accept
+/// but the upstream parser rejects is forwarded verbatim next to the chunked
+/// framing hyper then adds — a CL.TE smuggling request of our own making.
+/// RFC 9110 §8.6 permits accepting a comma-separated list (legacy proxies
+/// merge duplicate fields) as long as every element carries the same value.
+pub fn parse_content_length(value: &[u8]) -> Option<u64> {
+    let mut result: Option<u64> = None;
+    for element in value.split(|byte| *byte == b',') {
+        let parsed = from_digits(element.trim_ascii())?;
+        match result {
+            None => result = Some(parsed),
+            Some(previous) if previous == parsed => {}
+            Some(_) => return None,
+        }
+    }
+    result
+}
+
+/// Resolve a message's effective `Content-Length`, rejecting malformed or
+/// conflicting field values exactly as [`parse_content_length`] does.
+pub fn content_length_from_headers(headers: &HeaderMap) -> Option<u64> {
+    let mut result: Option<u64> = None;
+    for value in headers.get_all(header::CONTENT_LENGTH) {
+        let parsed = parse_content_length(value.as_bytes())?;
+        match result {
+            None => result = Some(parsed),
+            Some(previous) if previous == parsed => {}
+            Some(_) => return None,
+        }
+    }
+    result
+}
+
+fn from_digits(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    let mut result: u64 = 0;
+    for byte in digits {
+        let digit = match byte {
+            b'0'..=b'9' => u64::from(byte - b'0'),
+            _ => return None,
+        };
+        result = result.checked_mul(10)?.checked_add(digit)?;
+    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -188,5 +278,80 @@ mod tests {
         let req = b"GET\r\nHost: example.com\r\n\r\n";
 
         assert_eq!(extract_method_path_from_http(req), None);
+    }
+
+    #[test]
+    fn content_length_rejects_signed_prefix() {
+        assert_eq!(parse_content_length(b"+5"), None);
+        assert_eq!(parse_content_length(b"-5"), None);
+        assert_eq!(parse_content_length(b""), None);
+        assert_eq!(parse_content_length(b"5x"), None);
+        assert_eq!(parse_content_length(b"0x10"), None);
+    }
+
+    #[test]
+    fn content_length_accepts_repeated_identical_values() {
+        assert_eq!(parse_content_length(b" 5 "), Some(5));
+        assert_eq!(parse_content_length(b"5, 5"), Some(5));
+        assert_eq!(parse_content_length(b"5, 6"), None);
+        assert_eq!(parse_content_length(b"5,"), None);
+    }
+
+    #[test]
+    fn content_length_from_headers_rejects_conflicts() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::CONTENT_LENGTH, "7".parse().unwrap());
+        assert_eq!(content_length_from_headers(&headers), Some(7));
+
+        headers.append(header::CONTENT_LENGTH, "7".parse().unwrap());
+        assert_eq!(content_length_from_headers(&headers), Some(7));
+
+        headers.append(header::CONTENT_LENGTH, "8".parse().unwrap());
+        assert_eq!(content_length_from_headers(&headers), None);
+    }
+
+    #[test]
+    fn response_sanitizer_strips_hop_by_hop_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, "keep-alive, X-Foo".parse().unwrap());
+        headers.insert(
+            HeaderName::from_static("keep-alive"),
+            "timeout=5".parse().unwrap(),
+        );
+        headers.insert(HeaderName::from_static("x-foo"), "leak".parse().unwrap());
+        headers.insert(header::UPGRADE, "websocket".parse().unwrap());
+        headers.insert(header::PROXY_AUTHENTICATE, "Basic".parse().unwrap());
+        headers.insert(header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        headers.insert(header::CONTENT_LENGTH, "3".parse().unwrap());
+        headers.insert(header::SERVER, "upstream".parse().unwrap());
+
+        sanitize_response_headers(&mut headers);
+
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains_key(header::SERVER));
+    }
+
+    #[test]
+    fn trailer_filter_rejects_framing_fields() {
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "te",
+            "trailer",
+            "host",
+            "connection",
+            "keep-alive",
+            "upgrade",
+            "proxy-authenticate",
+            "set-cookie",
+        ] {
+            assert!(
+                !is_forwardable_trailer(&HeaderName::from_bytes(name.as_bytes()).unwrap()),
+                "{name} must not be relayed as a trailer"
+            );
+        }
+        assert!(is_forwardable_trailer(&HeaderName::from_static(
+            "grpc-status"
+        )));
     }
 }

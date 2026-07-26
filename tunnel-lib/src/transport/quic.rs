@@ -5,6 +5,17 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+/// ALPN string carrying the wire-protocol generation; client and server must
+/// reference this single constant. Breaking layout changes bump the generation
+/// suffix so incompatible peers fail at the QUIC/TLS handshake — early and
+/// with a clear error — instead of on rkyv validation after connect.
+/// v1 replaced the unversioned "tunnel-quic" in one cut: the login structs
+/// gained version/capability fields (a layout break old clients could not
+/// parse anyway), so both ends upgrade together rather than carrying a
+/// v0-compat path.
+pub const TUNNEL_ALPN: &[u8] = b"tunnel-quic/v1";
+
 #[derive(Debug, Clone)]
 pub struct QuicTransportParams {
     pub max_concurrent_streams: u32,
@@ -80,7 +91,7 @@ pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerC
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    server_crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
+    server_crypto.alpn_protocols = vec![TUNNEL_ALPN.to_vec()];
     let mut server_config =
         ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let mut transport_config = quinn::TransportConfig::default();

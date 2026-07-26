@@ -2,7 +2,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Body;
-use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -88,7 +87,19 @@ impl IngressProtocolHandler for TlsHandler {
             .accept(stream)
             .await
             .map_err(|e| ProxyError::tls_handshake(e.to_string()))?;
-        info!("TLS terminated, serving H2 with authority rewriting");
+
+        // We advertise both `h2` and `http/1.1` in ALPN, so the wire protocol
+        // must follow what rustls actually negotiated. No ALPN extension at all
+        // (older clients) means HTTP/1.1 too.
+        let negotiated_h2 = tls_stream
+            .get_ref()
+            .1
+            .alpn_protocol()
+            .is_some_and(|proto| proto == b"h2");
+        info!(
+            alpn = if negotiated_h2 { "h2" } else { "http/1.1" },
+            "TLS terminated, serving with authority rewriting"
+        );
 
         let route_target = RouteTarget {
             group_id: route.group_id.clone(),
@@ -127,6 +138,13 @@ impl IngressProtocolHandler for TlsHandler {
                 let mut uri_parts = parts.uri.clone().into_parts();
                 if let Ok(authority) = target_host.parse() {
                     uri_parts.authority = Some(authority);
+                }
+                // HTTP/1.1 requests arrive in origin-form with no scheme. Both
+                // `Uri::from_parts` (authority + path without scheme) and the
+                // upstream H2 hop (missing `:scheme` is malformed) reject that,
+                // and this listener always terminates TLS.
+                if uri_parts.scheme.is_none() && uri_parts.path_and_query.is_some() {
+                    uri_parts.scheme = Some(hyper::http::uri::Scheme::HTTPS);
                 }
                 parts.uri = hyper::Uri::from_parts(uri_parts).unwrap_or(parts.uri);
                 if let Ok(host_value) = target_host.parse() {
@@ -227,10 +245,21 @@ impl IngressProtocolHandler for TlsHandler {
         });
 
         let io = TokioIo::new(tls_stream);
-        H2Builder::new(hyper_util::rt::TokioExecutor::new())
-            .serve_connection(io, service)
-            .await
-            .map_err(|e| ProxyError::downstream_connection(format!("H2 connection error: {e}")))?;
+        if negotiated_h2 {
+            tunnel_lib::proxy::h2::hardened_h2_server_builder(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(io, service)
+                .await
+                .map_err(|e| {
+                    ProxyError::downstream_connection(format!("H2 connection error: {e}"))
+                })?;
+        } else {
+            tunnel_lib::proxy::h2::hardened_h1_server_builder()
+                .serve_connection(io, service)
+                .await
+                .map_err(|e| {
+                    ProxyError::downstream_connection(format!("HTTP/1 connection error: {e}"))
+                })?;
+        }
         Ok(())
     }
 }

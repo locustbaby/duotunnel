@@ -2,7 +2,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Body as _;
-use hyper::server::conn::http2::Builder as H2Builder;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper_util::rt::TokioIo;
@@ -381,7 +380,7 @@ impl IngressProtocolHandler for H2cHandler {
         });
 
         let io = TokioIo::new(stream);
-        H2Builder::new(hyper_util::rt::TokioExecutor::new())
+        tunnel_lib::proxy::h2::hardened_h2_server_builder(hyper_util::rt::TokioExecutor::new())
             .serve_connection(io, service)
             .await
             .map_err(|e| ProxyError::downstream_connection(format!("H2 connection error: {e}")))?;

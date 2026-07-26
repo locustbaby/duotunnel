@@ -134,6 +134,11 @@ struct IngressRuntime {
     listeners: listener_mgr::ListenerManager,
     overload_limits: tunnel_lib::OverloadLimits,
     plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
+    /// Listeners must always run on the multi-threaded proxy runtime, never on
+    /// whichever runtime happened to apply a config update: the control-plane
+    /// runtime is single-threaded and outlived by the listeners it would
+    /// otherwise own.
+    proxy_handle: tokio::runtime::Handle,
 }
 
 struct ConnectionRuntime {
@@ -159,6 +164,10 @@ impl ServerState {
         HttpClientParams::from(&self.ingress.config.server.http_pool)
     }
 
+    pub(crate) fn proxy_handle(&self) -> &tokio::runtime::Handle {
+        &self.ingress.proxy_handle
+    }
+
     pub(crate) fn accept_workers(&self) -> usize {
         tunnel_lib::resolve_accept_workers(self.ingress.config.server.accept_workers)
     }
@@ -181,6 +190,10 @@ impl ServerState {
 
     pub(crate) fn login_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.ingress.config.server.login_timeout_secs)
+    }
+
+    pub(crate) fn max_unauthenticated_connections(&self) -> usize {
+        self.ingress.config.server.max_unauthenticated_connections
     }
 
     pub(crate) fn routing_snapshot(&self) -> arc_swap::Guard<Arc<RoutingSnapshot>> {
@@ -328,7 +341,8 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );
-    let shared_registry = new_shared_registry(shard_count, max_streams);
+    let shared_registry =
+        new_shared_registry(shard_count, max_streams, overload_limits.max_pending_streams);
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
@@ -368,6 +382,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             listeners: listener_mgr::ListenerManager::new(),
             overload_limits,
             plugin_registry,
+            proxy_handle: tokio::runtime::Handle::current(),
         },
         connection: ConnectionRuntime {
             registry: shared_registry,

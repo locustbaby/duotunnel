@@ -423,6 +423,7 @@ mod tests {
                 proxy_buffers: Default::default(),
                 pki: Default::default(),
                 login_timeout_secs: 10,
+                max_unauthenticated_connections: 64,
                 open_stream_timeout_ms: 5000,
                 h2_single_authority: true,
                 accept_workers: None,

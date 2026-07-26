@@ -4,9 +4,10 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 use tunnel_lib::{
     decode_udp_datagram_envelope, encode_udp_datagram_envelope, UdpDatagramEnvelope, UdpSessionKey,
@@ -33,20 +34,30 @@ pub struct UdpSessionManager {
     sessions: Arc<DashMap<UdpSessionKey, Arc<UdpSession>>>,
     conn: quinn::Connection,
     egress_map: Arc<ServerEgressMap>,
+    // Parent of every per-session token: one cancel stops all reply pumps.
+    root_cancel: CancellationToken,
+    tasks: TaskTracker,
 }
 
 impl UdpSessionManager {
     pub fn new(conn: quinn::Connection, egress_map: Arc<ServerEgressMap>) -> Self {
         let sessions = Arc::new(DashMap::<UdpSessionKey, Arc<UdpSession>>::new());
+        let root_cancel = CancellationToken::new();
+        let tasks = TaskTracker::new();
         let conn_clone = conn.clone();
         let sessions_clone = sessions.clone();
+        let root_clone = root_cancel.clone();
 
         // Evict idle sessions periodically to prevent resource leakage on inactive paths.
         // Evicted sessions will have their cancellation tokens triggered to break the reply pumps.
-        crate::runtime::spawn_task(async move {
+        tasks.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 tokio::select! {
+                    _ = root_clone.cancelled() => {
+                        debug!("udp session eviction loop stopping: manager shut down");
+                        break;
+                    }
                     _ = conn_clone.closed() => {
                         debug!("udp session eviction loop stopping: connection closed");
                         break;
@@ -69,12 +80,34 @@ impl UdpSessionManager {
                     }
                 }
             }
+            // On connection close nothing evicts anymore, so cancel every
+            // remaining session here or idle reply pumps outlive the
+            // connection until process exit.
+            for entry in sessions_clone.iter() {
+                entry.value().cancel_token.cancel();
+            }
+            sessions_clone.clear();
         });
 
         Self {
             sessions,
             conn,
             egress_map,
+            root_cancel,
+            tasks,
+        }
+    }
+
+    // Bounded wait: pumps exit on cancellation at their next poll, so the
+    // timeout only guards against a pump wedged in a blocking state.
+    pub async fn shutdown(&self) {
+        self.root_cancel.cancel();
+        self.tasks.close();
+        if tokio::time::timeout(Duration::from_secs(2), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            warn!("udp session tasks did not stop within shutdown timeout");
         }
     }
 
@@ -97,7 +130,7 @@ impl UdpSessionManager {
         let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
         socket.connect(upstream_addr).await?;
 
-        let cancel_token = CancellationToken::new();
+        let cancel_token = self.root_cancel.child_token();
         let last_activity = Arc::new(AtomicU64::new(current_time_secs()));
 
         use dashmap::mapref::entry::Entry;
@@ -115,7 +148,7 @@ impl UdpSessionManager {
                 let session_key = key.clone();
                 let reply_socket = value.socket.clone();
                 let cancel_clone = cancel_token.clone();
-                crate::runtime::spawn_task(async move {
+                self.tasks.spawn(async move {
                     if let Err(e) = pump_udp_replies(
                         conn,
                         reply_socket,

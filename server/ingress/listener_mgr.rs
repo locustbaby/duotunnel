@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 struct ListenerEntry {
     kind: ListenerKind,
@@ -76,6 +76,24 @@ fn notify_listener_drained(drained: &Notify) {
     drained.notify_one();
 }
 
+// Accept workers signal `drained` from their tail, so a worker that is dropped
+// rather than cancelled never signals. Bounding the wait keeps such a case a
+// slow shutdown instead of a process that hangs until the supervisor kills it.
+const LISTENER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn wait_listener_drained(port: u16, drained: &Notify) {
+    if tokio::time::timeout(LISTENER_DRAIN_TIMEOUT, drained.notified())
+        .await
+        .is_err()
+    {
+        warn!(
+            port = %port,
+            timeout_secs = LISTENER_DRAIN_TIMEOUT.as_secs(),
+            "listener did not report drained in time; continuing shutdown"
+        );
+    }
+}
+
 async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: IngressListener) {
     let accept_workers = state.accept_workers();
     let generation = state.listeners().next_generation();
@@ -109,7 +127,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let drained = drained.clone();
                 let remaining = remaining.clone();
                 spawned += 1;
-                handles.push(tokio::spawn(async move {
+                handles.push(state.proxy_handle().spawn(async move {
                     if let Err(e) = crate::ingress::handlers::http::run_http_accept_loop(
                         listener_socket,
                         s,
@@ -144,7 +162,7 @@ async fn spawn_single_listener(state: Arc<ServerState>, port: u16, listener: Ing
                 let group_id = cfg.client_group.clone();
                 let proxy_name = cfg.proxy_name.clone();
                 spawned += 1;
-                handles.push(tokio::spawn(async move {
+                handles.push(state.proxy_handle().spawn(async move {
                     if let Err(e) = crate::ingress::handlers::tcp::run_tcp_accept_loop(
                         listener_socket,
                         s,
@@ -219,8 +237,8 @@ async fn sync_listeners_inner(
                 entry.cancel.cancel();
                 let desired_opt = desired_by_port.get(&port).cloned().cloned();
                 let state_clone = state.clone();
-                tokio::spawn(async move {
-                    entry.drained.notified().await;
+                state.proxy_handle().spawn(async move {
+                    wait_listener_drained(port, &entry.drained).await;
                     if let Some(desired_listener) = desired_opt {
                         spawn_single_listener(state_clone, port, desired_listener).await;
                     }
@@ -264,14 +282,14 @@ pub(crate) async fn shutdown_all_listeners(state: &Arc<ServerState>) {
     let drained = {
         let mut map = state.listeners().lock_map();
         map.drain()
-            .map(|(_, mut entry)| {
+            .map(|(port, mut entry)| {
                 entry.state = ListenerState::Draining;
                 entry.cancel.cancel();
-                entry.drained
+                (port, entry.drained)
             })
             .collect::<Vec<_>>()
     };
-    for notify in drained {
-        notify.notified().await;
+    for (port, notify) in drained {
+        wait_listener_drained(port, &notify).await;
     }
 }

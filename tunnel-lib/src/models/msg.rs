@@ -1,3 +1,14 @@
+//! Client<->server wire protocol messages (rkyv-archived payloads).
+//!
+//! Evolution rules — rkyv binary layout is bound to the field definitions, so:
+//! - Only append fields at the end of a struct; never reorder, remove, or
+//!   change the type of an existing field.
+//! - Every appended field must be gated by a capability bit negotiated in the
+//!   login handshake; peers that did not negotiate the bit must not depend on it.
+//! - Breaking layout changes require a new ALPN generation
+//!   (see [`crate::transport::quic::TUNNEL_ALPN`]) so incompatible peers fail
+//!   at the QUIC handshake instead of choking on rkyv validation after connect.
+
 use crate::models::id::{GroupId, ProxyName};
 use crate::proxy::core::Protocol;
 use anyhow::{anyhow, Result};
@@ -13,6 +24,49 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(crate) const MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_DATAGRAM_BYTES: usize = 1200;
+/// Ceiling for the `Login` frame, which is read before the peer is
+/// authenticated. A real Login is a token plus two integers; the generous
+/// headroom covers token length growth without letting an unauthenticated peer
+/// dictate a large allocation.
+pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
+
+/// Highest wire-protocol version this build speaks.
+pub const PROTOCOL_VERSION: u16 = 1;
+/// Oldest client version this build still accepts at login.
+pub const MIN_SUPPORTED_VERSION: u16 = 1;
+/// Capability bits exchanged in the login handshake. Plain u64 masks with
+/// named constants (bitflags semantics without the dependency); no bits are
+/// defined yet.
+pub const CAP_NONE: u64 = 0;
+/// Every capability this build implements — advertised in `Login`, intersected
+/// with the peer's set for `LoginResp`.
+pub const SUPPORTED_CAPABILITIES: u64 = CAP_NONE;
+
+/// Outcome of the login handshake, kept in per-connection session state so
+/// future features can be gated on what the peer actually negotiated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NegotiatedProtocol {
+    pub version: u16,
+    pub capabilities: u64,
+}
+
+/// Server-side negotiation. A client reporting a version newer than ours is
+/// not an error — it still speaks everything up to our version, so we answer
+/// with min(ours, theirs) (forward compatibility for client-first upgrades).
+/// Only clients below `MIN_SUPPORTED_VERSION` are refused, and the caller must
+/// say so explicitly in the `LoginResp` failure.
+pub fn negotiate_protocol(
+    client_version: u16,
+    client_capabilities: u64,
+) -> Option<NegotiatedProtocol> {
+    if client_version < MIN_SUPPORTED_VERSION {
+        return None;
+    }
+    Some(NegotiatedProtocol {
+        version: PROTOCOL_VERSION.min(client_version),
+        capabilities: SUPPORTED_CAPABILITIES & client_capabilities,
+    })
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +94,8 @@ impl MessageType {
 #[derive(Clone, Archive, Serialize, Deserialize)]
 pub struct Login {
     pub token: String,
+    pub protocol_version: u16,
+    pub capabilities: u64,
 }
 
 impl std::fmt::Debug for Login {
@@ -49,7 +105,11 @@ impl std::fmt::Debug for Login {
         } else {
             "***".to_string()
         };
-        f.debug_struct("Login").field("token", &masked).finish()
+        f.debug_struct("Login")
+            .field("token", &masked)
+            .field("protocol_version", &self.protocol_version)
+            .field("capabilities", &self.capabilities)
+            .finish()
     }
 }
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -58,22 +118,49 @@ pub struct LoginResp {
     pub error: Option<String>,
     pub config: ClientConfig,
     pub client_group: GroupId,
+    pub negotiated_version: u16,
+    pub capabilities: u64,
+    /// Whether the client should retry. Machine-readable on purpose: error
+    /// strings sent to unauthenticated peers are deliberately generic, so the
+    /// client cannot tell a transient server-side fault from a rejected token
+    /// by inspecting text.
+    pub retryable: bool,
 }
 impl LoginResp {
-    pub fn success(config: ClientConfig, client_group: GroupId) -> Self {
+    pub fn success(
+        config: ClientConfig,
+        client_group: GroupId,
+        negotiated: NegotiatedProtocol,
+    ) -> Self {
         Self {
             success: true,
             error: None,
             config,
             client_group,
+            negotiated_version: negotiated.version,
+            capabilities: negotiated.capabilities,
+            retryable: false,
         }
     }
+    /// Permanent rejection: the client must not retry with the same input.
     pub fn failure(error: impl Into<String>) -> Self {
         Self {
             success: false,
             error: Some(error.into()),
             config: ClientConfig::default(),
             client_group: GroupId::default(),
+            // 0 = no agreement reached; valid versions start at 1.
+            negotiated_version: 0,
+            capabilities: CAP_NONE,
+            retryable: false,
+        }
+    }
+    /// Transient rejection: the same client may succeed on a later attempt
+    /// (server still starting, backing store unavailable, capacity exhausted).
+    pub fn failure_retryable(error: impl Into<String>) -> Self {
+        Self {
+            retryable: true,
+            ..Self::failure(error)
         }
     }
 }
@@ -150,8 +237,23 @@ where
     M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
         + Deserialize<M, HighDeserializer<rancor::Error>>,
 {
+    recv_message_bounded(reader, MAX_MESSAGE_BYTES).await
+}
+
+/// Like [`recv_message`] but with a caller-supplied ceiling. The buffer is
+/// allocated from the peer-declared length before any payload arrives, so paths
+/// that read from an unauthenticated peer must pass a bound that fits the
+/// message they expect rather than the generic 10 MiB frame limit.
+pub async fn recv_message_bounded<R, M>(reader: &mut R, max_bytes: usize) -> Result<M>
+where
+    R: AsyncReadExt + Unpin,
+    M: Archive,
+    M::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
+        + Deserialize<M, HighDeserializer<rancor::Error>>,
+{
+    let max_bytes = max_bytes.min(MAX_MESSAGE_BYTES);
     let len = reader.read_u32().await? as usize;
-    if len > MAX_MESSAGE_BYTES {
+    if len > max_bytes {
         return Err(anyhow!("Message too large: {} bytes", len));
     }
     let mut buf = AlignedVec::<16>::with_capacity(len);
@@ -231,6 +333,8 @@ mod tests {
     fn test_login_serialize() {
         let login = Login {
             token: "dt_test123".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: SUPPORTED_CAPABILITIES,
         };
         let encoded = encode(&login);
         let decoded: Login = decode(&encoded);
@@ -293,6 +397,8 @@ mod tests {
     async fn test_send_recv_login_full_frame() {
         let login = Login {
             token: "dt_s3cr3t".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: SUPPORTED_CAPABILITIES,
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         send_message(&mut writer, MessageType::Login, &login)
@@ -315,6 +421,9 @@ mod tests {
                 egress_rules: vec![],
             },
             client_group: "test-client".into(),
+            negotiated_version: PROTOCOL_VERSION,
+            capabilities: CAP_NONE,
+            retryable: false,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
@@ -336,6 +445,9 @@ mod tests {
             error: Some("auth failed".to_string()),
             config: ClientConfig::default(),
             client_group: "".into(),
+            negotiated_version: 0,
+            capabilities: CAP_NONE,
+            retryable: false,
         };
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         send_message(&mut writer, MessageType::LoginResp, &resp)
@@ -386,6 +498,8 @@ mod tests {
     async fn test_recv_routing_info_wrong_type_returns_error() {
         let login = Login {
             token: "t".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: SUPPORTED_CAPABILITIES,
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         send_message(&mut writer, MessageType::Login, &login)
@@ -421,6 +535,8 @@ mod tests {
     async fn test_multiple_messages_sequential_on_same_pipe() {
         let login = Login {
             token: "tok1".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: SUPPORTED_CAPABILITIES,
         };
         let info = RoutingInfo {
             proxy_name: "p".into(),

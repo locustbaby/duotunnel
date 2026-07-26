@@ -23,13 +23,44 @@ pub struct OpenedStream {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+/// Holds a per-connection pending permit for the duration of the slow-path
+/// wait and keeps the process-global gauge in sync. Dropping it (success,
+/// failure, timeout, or cancellation) releases both.
+struct PendingSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PendingSlot {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        crate::infra::metrics::METRICS
+            .stream_pending_queue_depth
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { _permit: permit }
+    }
+}
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        crate::infra::metrics::METRICS
+            .stream_pending_queue_depth
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Per-connection gate for streams waiting on QUIC flow-control credit.
+/// `limit` is the semaphore's configured size, reported when admission fails.
+pub struct PendingAdmission<'a> {
+    pub semaphore: &'a Arc<tokio::sync::Semaphore>,
+    pub limit: usize,
+}
+
 pub async fn open_bi_guarded<F>(
     conn: &Connection,
     inflight_table: &Arc<InflightTable>,
     slot_id: InflightSlotId,
-    overload_limits: &crate::lb::overload::OverloadLimits,
     stream_timeout: Duration,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    admission: PendingAdmission<'_>,
     on_wait_done: F,
 ) -> Result<OpenedStream, ProxyError>
 where
@@ -54,23 +85,21 @@ where
     }
 
     let started = Instant::now();
-    let pending = crate::infra::metrics::METRICS.pending_streams() as usize;
-    if pending >= overload_limits.max_pending_streams {
-        on_wait_done(Duration::ZERO, OpenBiOutcome::RejectedOverloaded);
-        return Err(ProxyError::quic_open_rejected_overloaded(format!(
-            "pending queue full: pending={} limit={}",
-            pending, overload_limits.max_pending_streams
-        )));
-    }
-    crate::infra::metrics::METRICS
-        .stream_pending_queue_depth
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Admission is per-connection via the semaphore; the global gauge inside
+    // PendingSlot is kept as a pure metric and no longer gates anything.
+    let _pending_slot = match admission.semaphore.clone().try_acquire_owned() {
+        Ok(pending_permit) => PendingSlot::new(pending_permit),
+        Err(_) => {
+            on_wait_done(Duration::ZERO, OpenBiOutcome::RejectedOverloaded);
+            return Err(ProxyError::quic_open_rejected_overloaded(format!(
+                "per-connection pending stream limit reached: limit={}",
+                admission.limit
+            )));
+        }
+    };
     let wait_span = tracing::debug_span!("waiting_for_stream_credit", conn_id = %conn.stable_id());
     use tracing::Instrument;
     let result = timeout(stream_timeout, conn.open_bi().instrument(wait_span)).await;
-    crate::infra::metrics::METRICS
-        .stream_pending_queue_depth
-        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let elapsed = started.elapsed();
     match result {
         Ok(Ok((send, recv))) => {

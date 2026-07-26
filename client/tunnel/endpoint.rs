@@ -8,7 +8,7 @@ use tunnel_lib::QuicTransportParams;
 
 pub(crate) async fn build_quic_endpoint(config: &ClientConfigFile) -> Result<quinn::Endpoint> {
     let mut crypto = build_tls_config(config).await?;
-    crypto.alpn_protocols = vec![b"tunnel-quic".to_vec()];
+    crypto.alpn_protocols = vec![tunnel_lib::TUNNEL_ALPN.to_vec()];
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
     ));

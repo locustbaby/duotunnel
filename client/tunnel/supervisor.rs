@@ -70,19 +70,49 @@ pub async fn run_supervisor(
         }
     }
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => { info!(server = % config.server_address(),
-            "shutdown signal received"); return Ok(()); } result = run_client(&
-            config, &endpoint, cancel.clone(), ready.clone(), entry_pool.clone(), udp_registry.clone()) => { match result { Ok(_) => { backoff.reset();
-            info!(server = % config.server_address(),
-            "connection ended, restarting loop"); } Err(e) => { if e.class() ==
-            FailureClass::Fatal { error!(server = % config.server_address(), error = % e,
-            "fatal connect error"); return Err(e.into_anyhow()); } let retry_delay =
-            backoff.next_delay(); warn!(server = % config.server_address(), error = % e,
-            retry_in_ms = retry_delay.as_millis(),
-            "transient connect error, scheduling retry"); tokio::select! { _ = cancel
-            .cancelled() => return Ok(()), _ = tokio::time::sleep(retry_delay) => {} } }
-            } }
+        if cancel.is_cancelled() {
+            info!(server = % config.server_address(), "shutdown signal received");
+            return Ok(());
+        }
+        // run_client observes `cancel` itself so it can drain in-flight
+        // streams and close the connection gracefully; racing it against
+        // cancel.cancelled() here would drop that future mid-drain. The
+        // connect/login phase is bounded by its own timeouts.
+        let result = run_client(
+            &config,
+            &endpoint,
+            cancel.clone(),
+            ready.clone(),
+            entry_pool.clone(),
+            udp_registry.clone(),
+        )
+        .await;
+        if cancel.is_cancelled() {
+            info!(server = % config.server_address(), "shutdown signal received");
+            return Ok(());
+        }
+        match result {
+            Ok(_) => {
+                backoff.reset();
+                info!(server = % config.server_address(), "connection ended, restarting loop");
+            }
+            Err(e) => {
+                if e.class() == FailureClass::Fatal {
+                    error!(server = % config.server_address(), error = % e, "fatal connect error");
+                    return Err(e.into_anyhow());
+                }
+                let retry_delay = backoff.next_delay();
+                warn!(
+                    server = % config.server_address(),
+                    error = % e,
+                    retry_in_ms = retry_delay.as_millis(),
+                    "transient connect error, scheduling retry"
+                );
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(retry_delay) => {}
+                }
+            }
         }
     }
 }
@@ -128,12 +158,13 @@ fn random_delay_range(min: Duration, max: Duration) -> Duration {
 fn random_delay_up_to(cap: Duration) -> Duration {
     random_delay_range(Duration::ZERO, cap)
 }
-pub fn classify_login_failure(resp_error: Option<&str>) -> ConnectError {
+/// The server sets `retryable` explicitly; error text is deliberately generic
+/// for unauthenticated peers and must not be pattern-matched to decide whether
+/// to reconnect — a transient backing-store fault would otherwise be read as a
+/// rejected token and stop the client for good.
+pub fn classify_login_failure(retryable: bool, resp_error: Option<&str>) -> ConnectError {
     let msg = resp_error.unwrap_or("unknown login error");
-    if msg.contains("timeout")
-        || msg.contains("unexpected message type")
-        || msg.contains("registration failed")
-    {
+    if retryable {
         ConnectError::transient(anyhow!("login rejected by server: {}", msg))
     } else {
         ConnectError::fatal(anyhow!("login rejected by server: {}", msg))
