@@ -72,7 +72,12 @@ pub struct EntryConnPool {
 }
 
 impl EntryConnPool {
-    pub fn new(max_concurrent_streams: u32, connections: u32, shard_count: usize) -> Arc<Self> {
+    pub fn new(
+        max_concurrent_streams: u32,
+        max_pending_streams: usize,
+        connections: u32,
+        shard_count: usize,
+    ) -> Arc<Self> {
         let capacity = ((max_concurrent_streams as usize) * (connections as usize) * 2).max(1024);
         let inflight_table = new_inflight_table(capacity);
         let shard_count = shard_count.max(1);
@@ -115,6 +120,7 @@ impl EntryConnPool {
                             slot_id,
                             shard_id,
                             max_concurrent_streams,
+                            max_pending_streams,
                         );
                         shard.conns.push(Arc::new(PooledConnection { handle }));
                         snapshots_for_actor[shard_id].store(shard.snapshot());
