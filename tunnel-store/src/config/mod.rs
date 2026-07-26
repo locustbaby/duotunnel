@@ -464,6 +464,7 @@ mod tests {
                 h2_single_authority: true,
                 accept_workers: None,
                 overload: Default::default(),
+                max_unauthenticated_connections: 64,
             },
             server_egress_upstream: Default::default(),
             tunnel_management: Default::default(),
@@ -529,6 +530,7 @@ mod tests {
                 h2_single_authority: true,
                 accept_workers: None,
                 overload: Default::default(),
+                max_unauthenticated_connections: 64,
             },
             server_egress_upstream: ServerEgressUpstream {
                 upstreams: egress_upstreams,
