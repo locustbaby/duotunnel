@@ -20,6 +20,7 @@ pub struct Http1Driver {
     read_buf: BytesMut,
     inflight_reclaim: Option<oneshot::Receiver<Reclaim>>,
     pub should_close: bool,
+    last_method: Option<Method>,
 }
 impl Http1Driver {
     pub fn new(
@@ -41,6 +42,7 @@ impl Http1Driver {
             read_buf,
             inflight_reclaim: None,
             should_close: false,
+            last_method: None,
         }
     }
     pub async fn finish(&mut self) -> Result<()> {
@@ -97,6 +99,73 @@ struct ParsedHead {
     uri: Uri,
     version: u8,
     header_map: HeaderMap,
+    content_length: usize,
+}
+
+const RESP_400: &[u8] =
+    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const RESP_411: &[u8] =
+    b"HTTP/1.1 411 Length Required\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+enum FramingDecision {
+    Accept { content_length: usize },
+    Reject {
+        resp: &'static [u8],
+        reason: &'static str,
+    },
+}
+
+/// RFC 9112 §6.3 request-smuggling defenses. This driver frames request bodies
+/// by content-length only, so a transfer-encoded body would otherwise be parsed
+/// as the next request on the stream — reject it outright (411 tells the client
+/// to resend with a content-length).
+fn validate_framing(headers: &[httparse::Header<'_>]) -> FramingDecision {
+    let mut has_te = false;
+    let mut cl: Option<&[u8]> = None;
+    for h in headers {
+        if h.name.eq_ignore_ascii_case("transfer-encoding") {
+            has_te = true;
+        } else if h.name.eq_ignore_ascii_case("content-length") {
+            match cl {
+                Some(prev) if prev != h.value => {
+                    return FramingDecision::Reject {
+                        resp: RESP_400,
+                        reason: "conflicting content-length headers",
+                    };
+                }
+                _ => cl = Some(h.value),
+            }
+        }
+    }
+    if has_te {
+        return if cl.is_some() {
+            FramingDecision::Reject {
+                resp: RESP_400,
+                reason: "content-length with transfer-encoding",
+            }
+        } else {
+            FramingDecision::Reject {
+                resp: RESP_411,
+                reason: "transfer-encoding request body unsupported",
+            }
+        };
+    }
+    let content_length = match cl {
+        None => 0,
+        Some(v) => match std::str::from_utf8(v)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+        {
+            Some(n) => n,
+            None => {
+                return FramingDecision::Reject {
+                    resp: RESP_400,
+                    reason: "invalid content-length",
+                }
+            }
+        },
+    };
+    FramingDecision::Accept { content_length }
 }
 #[async_trait]
 impl ProtocolDriver for Http1Driver {
@@ -112,6 +181,10 @@ impl ProtocolDriver for Http1Driver {
             let mut req = httparse::Request::new(&mut headers);
             match req.parse(&self.read_buf) {
                 Ok(httparse::Status::Complete(n)) => {
+                    let content_length = match validate_framing(req.headers) {
+                        FramingDecision::Reject { resp, reason } => break Err((resp, reason)),
+                        FramingDecision::Accept { content_length } => content_length,
+                    };
                     let method_str = req.method.context("no method")?;
                     let path = req.path.context("no path")?;
                     let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
@@ -129,13 +202,14 @@ impl ProtocolDriver for Http1Driver {
                             }
                         }
                     }
-                    break ParsedHead {
+                    break Ok(ParsedHead {
                         header_end: n,
                         method,
                         uri,
                         version: req.version.unwrap_or(1),
                         header_map,
-                    };
+                        content_length,
+                    });
                 }
                 Ok(httparse::Status::Partial) => {
                     if self.read_buf.len() >= 8192 {
@@ -157,6 +231,15 @@ impl ProtocolDriver for Http1Driver {
                 Err(e) => return Err(e.into()),
             }
         };
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err((resp, reason)) => {
+                self.should_close = true;
+                let _ = self.send.write_all(resp).await;
+                let _ = self.send.finish();
+                return Err(anyhow::anyhow!("rejected request: {}", reason));
+            }
+        };
         let header_end = parsed.header_end;
         let method = parsed.method;
         let uri = parsed.uri;
@@ -170,11 +253,16 @@ impl ProtocolDriver for Http1Driver {
             1 => conn_header.as_deref() == Some("close"),
             _ => conn_header.as_deref() != Some("keep-alive"),
         };
-        let content_length: usize = header_map
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let content_length = parsed.content_length;
+        self.last_method = Some(method.clone());
+        if let Some(expect) = header_map.remove(http::header::EXPECT) {
+            // Answer the interim response locally: the body is streamed to the
+            // upstream unconditionally, so waiting for the upstream's own 100
+            // would only stall the client until its timeout.
+            if http_minor == 1 && expect.as_bytes().eq_ignore_ascii_case(b"100-continue") {
+                self.send.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+            }
+        }
         sanitize_request_headers(&mut header_map);
         let _ = self.read_buf.split_to(header_end);
         let available = self.read_buf.len();
@@ -272,6 +360,22 @@ impl ProtocolDriver for Http1Driver {
             }
         }
         sanitize_response_headers(response.headers_mut());
+        // RFC 9112 §6.1 framing: 1xx/204/304 and responses to HEAD carry no
+        // body and no framing headers; a body with a known exact length is
+        // framed by content-length; chunked is reserved for genuinely
+        // unknown-length streaming bodies (the only ones that may carry
+        // trailers).
+        let head_only = self.last_method.as_ref() == Some(&Method::HEAD);
+        let no_body = head_only
+            || status.is_informational()
+            || status == http::StatusCode::NO_CONTENT
+            || status == http::StatusCode::NOT_MODIFIED;
+        let exact_len = if no_body {
+            None
+        } else {
+            use hyper::body::Body as _;
+            response.body().size_hint().exact()
+        };
         let headers = response.headers();
         let mut header_buf = BytesMut::with_capacity(32 + headers.len() * 48 + 32);
         use std::fmt::Write as FmtWrite;
@@ -288,31 +392,76 @@ impl ProtocolDriver for Http1Driver {
             header_buf.put_slice(value.as_bytes());
             header_buf.put_slice(b"\r\n");
         }
+        if no_body {
+            header_buf.put_slice(b"\r\n");
+            self.send.write_all(&header_buf).await?;
+            return Ok(());
+        }
+        if let Some(len) = exact_len {
+            write!(header_buf, "content-length: {}\r\n\r\n", len).unwrap();
+            self.send.write_all(&header_buf).await?;
+            let mut body = response.into_body();
+            let mut written: u64 = 0;
+            while let Some(frame) = body.frame().await {
+                let frame =
+                    frame.map_err(|e| anyhow::anyhow!("error reading response frame: {}", e))?;
+                match frame.into_data() {
+                    Ok(data) => {
+                        written += data.len() as u64;
+                        if written > len {
+                            self.should_close = true;
+                            return Err(anyhow::anyhow!(
+                                "response body exceeded declared length"
+                            ));
+                        }
+                        self.send.write_chunk(data).await?;
+                    }
+                    Err(frame) => {
+                        if frame.into_trailers().is_ok() {
+                            tracing::debug!("dropping trailers on content-length response");
+                        }
+                    }
+                }
+            }
+            if written != len {
+                // Closing (instead of padding) keeps the peer from misreading
+                // the next response as this one's remainder.
+                self.should_close = true;
+                return Err(anyhow::anyhow!("response body shorter than declared length"));
+            }
+            return Ok(());
+        }
         header_buf.put_slice(b"transfer-encoding: chunked\r\n\r\n");
         self.send.write_all(&header_buf).await?;
         let mut body = response.into_body();
         let mut accumulated_trailers = HeaderMap::new();
         loop {
             match body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Some(chunk) = frame.data_ref() {
-                        if !chunk.is_empty() {
-                            let mut prefix = [0u8; 32];
-                            let prefix_len = {
-                                use std::io::Write as IoWrite;
-                                let mut cursor = std::io::Cursor::new(&mut prefix[..]);
-                                write!(&mut cursor, "{:x}\r\n", chunk.len()).unwrap();
-                                cursor.position() as usize
-                            };
-                            self.send.write_all(&prefix[..prefix_len]).await?;
-                            self.send.write_all(chunk).await?;
-                            self.send.write_all(b"\r\n").await?;
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(chunk) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let mut prefix = [0u8; 32];
+                        let prefix_len = {
+                            use std::io::Write as IoWrite;
+                            let mut cursor = std::io::Cursor::new(&mut prefix[..]);
+                            write!(&mut cursor, "{:x}\r\n", chunk.len()).unwrap();
+                            cursor.position() as usize
+                        };
+                        let mut parts = [
+                            Bytes::copy_from_slice(&prefix[..prefix_len]),
+                            chunk,
+                            Bytes::from_static(b"\r\n"),
+                        ];
+                        self.send.write_all_chunks(&mut parts).await?;
+                    }
+                    Err(frame) => {
+                        if let Ok(trailers) = frame.into_trailers() {
+                            accumulated_trailers.extend(trailers);
                         }
                     }
-                    if let Ok(trailers) = frame.into_trailers() {
-                        accumulated_trailers.extend(trailers);
-                    }
-                }
+                },
                 Some(Err(e)) => {
                     return Err(anyhow::anyhow!("error reading response frame: {}", e));
                 }
