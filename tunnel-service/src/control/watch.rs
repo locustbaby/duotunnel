@@ -6,7 +6,7 @@ use anyhow::Result;
 /// Protocol flow per connection:
 ///   1. Read WatchRequest from the server
 ///   2. Send WatchEvent::Snapshot (full current state)
-///   3. Loop: await ControlService watch channel changes → send WatchEvent::Patch
+///   3. Loop: await ControlService change signal → send the latest full Snapshot
 ///   4. On peer disconnect or error, drop the connection silently
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -93,13 +93,10 @@ async fn handle_watch_connection(
     }
     debug!(peer = %peer, resource_version = req.resource_version, "received WatchRequest");
 
-    // Step 2: subscribe BEFORE reading current state to avoid a race where a
-    // Patch is published between reading the snapshot and starting to watch.
-    // tokio::sync::watch guarantees that borrow_and_update() after changed()
-    // will deliver every value published after subscribe() was called.
+    // Subscribe before reading current state so a concurrent publish either
+    // appears in this snapshot or leaves a pending change signal.
     let mut rx = svc.subscribe();
 
-    // Send the full snapshot that was current at subscribe time.
     let current = svc.snapshot();
     send_message(
         &mut writer,
@@ -123,16 +120,21 @@ async fn handle_watch_connection(
                 break;
             }
         }
-        let event: Arc<WatchEvent> = rx.borrow_and_update().clone();
-        if let Err(e) = send_message(&mut writer, MessageType::ConfigPush, &*event).await {
-            debug!(peer = %peer, error = %e, "failed to send Patch, closing connection");
+        let current = svc.snapshot();
+        let event = WatchEvent::Snapshot(current.as_ref().clone());
+        if let Err(e) = send_message(&mut writer, MessageType::ConfigPush, &event).await {
+            debug!(peer = %peer, error = %e, "failed to send Snapshot, closing connection");
             break;
         }
         if let Err(e) = writer.flush().await {
             debug!(peer = %peer, error = %e, "flush failed, closing connection");
             break;
         }
-        debug!(peer = %peer, "sent Patch event");
+        debug!(
+            peer = %peer,
+            resource_version = current.resource_version,
+            "sent Snapshot event"
+        );
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-use crate::control::proto::{build_patch, ConfigSnapshot, TokenCacheEntry, WatchEvent};
+use crate::control::proto::{ConfigSnapshot, TokenCacheEntry};
 use crate::control::token::cache::TokenCacheProvider;
 use anyhow::Result;
 use std::sync::atomic::Ordering;
@@ -17,9 +17,9 @@ pub struct ControlService {
     current_snapshot: arc_swap::ArcSwap<ConfigSnapshot>,
     /// Monotonically increasing; incremented on every mutation.
     resource_version: std::sync::atomic::AtomicU64,
-    watch_tx: watch::Sender<Arc<WatchEvent>>,
+    watch_tx: watch::Sender<u64>,
     /// Kept alive so the channel never closes while ControlService lives.
-    _watch_rx: watch::Receiver<Arc<WatchEvent>>,
+    _watch_rx: watch::Receiver<u64>,
     /// Signal channel: any mutation sends a () here; the debounce task does the actual rebuild.
     publish_tx: mpsc::Sender<()>,
 }
@@ -32,8 +32,7 @@ impl ControlService {
         token_cache: Arc<dyn TokenCacheProvider>,
     ) -> Result<Arc<Self>> {
         let initial = Self::build_snapshot(&*rule_store, &*token_cache, 1).await?;
-        let event = Arc::new(WatchEvent::Snapshot(initial.clone()));
-        let (watch_tx, _watch_rx) = watch::channel(event);
+        let (watch_tx, _watch_rx) = watch::channel(initial.resource_version);
         // Channel capacity 1: multiple senders collapse into a single pending signal.
         let (publish_tx, publish_rx) = mpsc::channel::<()>(1);
         let svc = Arc::new(Self {
@@ -62,9 +61,8 @@ impl ControlService {
         self.token_cache.load_token_cache().await
     }
 
-    /// Subscribe to the watch stream. New subscribers immediately get the
-    /// current snapshot via `borrow()`, then block on `changed()` for updates.
-    pub fn subscribe(&self) -> watch::Receiver<Arc<WatchEvent>> {
+    /// Subscribe to snapshot-version changes.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.watch_tx.subscribe()
     }
 
@@ -93,20 +91,18 @@ impl ControlService {
         })
     }
 
-    /// Rebuilds snapshot from DB and broadcasts Patch event to all watchers.
+    /// Rebuilds the snapshot from DB and signals all watchers.
     /// Called only from the debounce task — not directly from mutation methods.
     pub(crate) async fn do_publish(&self) -> Result<()> {
         let next = self.resource_version.load(Ordering::Acquire) + 1;
         let snapshot = Self::build_snapshot(&*self.rule_store, &*self.token_cache, next).await?;
-        let current = self.current_snapshot.load();
-        let patch = build_patch(current.as_ref(), &snapshot);
         self.current_snapshot.store(Arc::new(snapshot));
         self.resource_version.fetch_add(1, Ordering::AcqRel);
         info!(
             resource_version = next,
-            "broadcasting config patch to watchers"
+            "signalling config snapshot change to watchers"
         );
-        let _ = self.watch_tx.send(Arc::new(WatchEvent::Patch(patch)));
+        let _ = self.watch_tx.send(next);
         Ok(())
     }
 
@@ -158,5 +154,57 @@ impl ControlService {
     #[allow(dead_code)]
     pub async fn load_routing(&self) -> Result<RoutingData> {
         self.rule_store.load_routing().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::token::cache::SqliteTokenCacheProvider;
+    use tunnel_store::sqlite::{open_sqlite_pool, SqliteAuthStore};
+    use tunnel_store::sqlite_rules::SqliteRuleStore;
+    use tunnel_store::TokenStatus;
+
+    #[tokio::test]
+    async fn coalesced_change_signal_exposes_latest_full_snapshot() {
+        let pool = open_sqlite_pool("sqlite::memory:", 1).await.unwrap();
+        let auth_store = Arc::new(SqliteAuthStore::from_pool(pool.clone()));
+        auth_store.migrate().await.unwrap();
+        let rule_store = Arc::new(SqliteRuleStore::new(pool.clone()));
+        rule_store.migrate().await.unwrap();
+        let token_cache = Arc::new(SqliteTokenCacheProvider::new(pool));
+
+        let svc = ControlService::new(auth_store.clone(), rule_store, token_cache)
+            .await
+            .unwrap();
+        let mut changes = svc.subscribe();
+
+        auth_store.create_client("client-a").await.unwrap();
+        svc.do_publish().await.unwrap();
+        auth_store.rotate_token("client-a").await.unwrap();
+        svc.do_publish().await.unwrap();
+
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow_and_update(), 3);
+
+        let snapshot = svc.snapshot();
+        assert_eq!(snapshot.resource_version, 3);
+        assert_eq!(snapshot.token_cache.len(), 2);
+        assert_eq!(
+            snapshot
+                .token_cache
+                .iter()
+                .filter(|entry| entry.token_status == TokenStatus::Active)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .token_cache
+                .iter()
+                .filter(|entry| entry.token_status == TokenStatus::Revoked)
+                .count(),
+            1
+        );
     }
 }

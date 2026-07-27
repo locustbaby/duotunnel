@@ -22,6 +22,7 @@ pub fn routing_data_to_proto(
     )
 }
 
+#[allow(dead_code)]
 pub fn build_patch(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> ConfigPatch {
     ConfigPatch {
         resource_version: next.resource_version,
@@ -47,6 +48,7 @@ pub fn build_patch(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> ConfigPa
     }
 }
 
+#[allow(dead_code)]
 fn diff_by_key<T, F>(previous: &[T], next: &[T], key_of: F) -> Vec<ResourceOp<T>>
 where
     T: Clone + PartialEq,
