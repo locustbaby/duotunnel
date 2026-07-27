@@ -27,15 +27,14 @@ fn take_buffer(buffer_size: usize) -> BytesMut {
         return buf;
     }
     let global = global_pool();
-    let scan_limit = global.len();
-    for _ in 0..scan_limit {
-        let Some(buf) = global.pop() else {
-            break;
-        };
-        if buf.capacity() >= buffer_size {
-            return buf;
+    for _ in 0..3 {
+        if let Some(buf) = global.pop() {
+            if buf.capacity() >= buffer_size {
+                return buf;
+            }
+            // Discard too-small buffers to avoid queue pollution and busy CAS loop
         } else {
-            let _ = global.push(buf);
+            break;
         }
     }
     BytesMut::with_capacity(buffer_size)
