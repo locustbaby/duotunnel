@@ -149,21 +149,32 @@ where
     let bytes = copy_buffered(reader, &mut writer, buffer_size).await?;
     let _ = writer.shutdown().await;
     Ok(bytes)
-}
-
-pub async fn copy_buffered_then_finish<R>(
-    reader: R,
+}pub async fn copy_buffered_then_finish<R>(
+    mut reader: R,
     mut writer: SendStream,
     buffer_size: usize,
 ) -> std::io::Result<u64>
 where
     R: AsyncRead + Unpin,
 {
-    let bytes = copy_buffered(reader, &mut writer, buffer_size).await?;
+    let mut buf = BytesMut::with_capacity(buffer_size);
+    let mut copied = 0u64;
+    loop {
+        if buf.capacity() < buffer_size {
+            buf.reserve(buffer_size);
+        }
+        let read = reader.read_buf(&mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        let chunk = buf.split().freeze();
+        writer.write_chunk(chunk).await.map_err(|e| std::io::Error::other(e))?;
+        copied += read as u64;
+    }
     if let Err(error) = writer.finish() {
         tracing::warn!(?error, "failed to finish quic send stream");
     }
-    Ok(bytes)
+    Ok(copied)
 }
 
 pub async fn copy_quic_to_shutdown<W>(mut recv: RecvStream, mut writer: W) -> std::io::Result<u64>
