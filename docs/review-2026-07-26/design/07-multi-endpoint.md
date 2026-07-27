@@ -1,10 +1,11 @@
 # D7 · Phase B：client 多 Endpoint —— 详细设计
 
-> 承接：02 §2.1（S1 收包单点）、02 §4 Phase B（修正后的第一优先）。
-> 目标：消除 **quinn endpoint driver 的收包单点**，让 client 的 QUIC 收包随核扩展。
-> **与运行时模型完全正交**——无论将来是否上 per-core runtime，这一步都要做。
+> 承接：02 §2.1（S1 候选收包串行点）、D10 §5（多 Endpoint 决策门槛）。
+> 目标：当 profile 证明 **quinn endpoint driver** 是主导热点时，通过多个 UDP endpoint
+> 实验验证收包扩展。机制上与 per-core runtime 可独立实施，但**不代表无条件必做**。
 >
-> **状态：已记录、待定，未排期。** 技术上无前置、可最先启动，但当前不实施。
+> **状态：已记录、待定，未排期；P2 / profile-gated。** 前置为 D9/M0、D10 的可信
+> benchmark 和 endpoint 热点证据。未满足门槛时不实施。
 > 重启时先复核 §1.1 的代码事实是否漂移（本设计基于 2026-07-26 的 HEAD）。
 
 ## 1. 背景与问题
@@ -38,11 +39,13 @@ client/runtime/app.rs:38   build_quic_endpoint()  ← 全进程唯一一次
 **结论：改动面比预想的小得多**——`supervisor` / `conn_pool` / 重连逻辑都不用动，
 只需把"一个 endpoint clone N 份"换成"建 N 个 endpoint 分给 N 个 slot"。
 
-### 1.2 为什么这解的是主串行点
+### 1.2 它能解什么，以及尚未证明什么
 
-见 02 §2.1：quinn 的 **Connection driver 已经并行**（每 Connection 独立 task，
-tokio 调度到不同核），**只有 endpoint driver 的收包是单点**——所有连接的所有 UDP 包
-都要先过那一个 task 才能按 CID 分发。多 Endpoint 的唯一目的就是让这一步并行。
+quinn 的 **Connection driver 已经并行**（每 Connection 独立 task，tokio 可调度到
+不同核），endpoint driver 则先接收 UDP 包再按 CID 分发。多 Endpoint 可以并行这一
+阶段，但静态结构不能证明它在当前负载中占主导，也不能证明收益大于新增 socket buffer、
+FD、调度、连接池和 lifecycle 成本。启动本设计前必须由 profiler 证明 endpoint UDP
+I/O/锁进入主要 CPU 或 p99 路径。
 
 ---
 
@@ -58,9 +61,10 @@ pub(crate) struct TunnelPoolService {
     // ... 其余不变
 }
 
-// client/tunnel/pool.rs —— 循环里各取一个，不再 clone 同一个
-for (i, endpoint) in endpoints.into_iter().enumerate() {
-    slots.spawn(run_supervisor(cfg.clone(), endpoint, /* … */));  // 签名不变，移动进去
+// client/tunnel/pool.rs —— coordinator 保留 owner；每个 connection slot 取稳定映射的 clone
+for slot_idx in 0..resolved_connections {
+    let endpoint = endpoints[slot_idx % endpoints.len()].clone();
+    slots.spawn(run_supervisor(cfg.clone(), endpoint, /* … */));
 }
 
 // client/runtime/app.rs —— 建 N 个而非 1 个
@@ -90,15 +94,15 @@ endpoint 是**传输层资源**（UDP socket），Connection 失败不代表 soc
 > v1 不做自愈重建——quinn endpoint 极少进入该状态，且重建涉及"该 slot 的所有连接
 > 需重新登录"。**列为 v2**，v1 只加日志与指标暴露该状态。
 
-#### D-B3：endpoint 数量 —— **默认 1:1 跟随 `connections`，可配置**
+#### D-B3：endpoint 数量 —— **默认保持 1，实验显式启用 N:M**
 
 ```yaml
 quic:
   connections: 0      # 0 = auto = min(核数, cgroup quota)  —— 现状不变
-  endpoints: 0        # 新增：0 = 跟随 connections（1:1）；N = 显式指定
+  endpoints: 1        # 新增：默认保持现状；N>1 = profile 证明后显式实验
 ```
 
-- **1:1 是默认**：`connections` 本就 = 核数（量级小），1:1 让收包完全并行，最简单；
+- **默认 1**：功能合入不改变现有多连接部署的 socket/资源拓扑；
 - **允许 N:M**：若 §2.3 的内存核算成为约束，可设 `endpoints < connections`，
   多个 connection 共享一个 endpoint（按 `slot_idx % endpoint_count` 分配）。
 
@@ -110,32 +114,40 @@ N 很小（=核数），临时端口耗尽不是现实风险。
 > **这正是 client 侧比 server 侧容易的根本原因**：不同源端口 ⇒ 四元组不同 ⇒
 > 内核天然把包分流到对应 socket，**不需要 SO_REUSEPORT，更不需要 eBPF CID 路由**。
 
-#### D-B5：创建失败处理 —— **降级 + 下限，不整体失败**
+#### D-B5：创建失败处理 —— **显式 strict/degraded 策略**
 
 第 k 个 endpoint 建失败（多为 FD 上限 `RLIMIT_NOFILE`）：
 
-```
-成功 ≥1 个 → warn（记录期望 N / 实际 k）+ 按实际 k 个运行，connections 相应收敛到 k
-成功 = 0 个 → 启动失败（无法工作）
+```yaml
+quic:
+  endpoint_startup_policy: strict   # strict | degraded
+  min_ready_endpoints: 1
 ```
 
-理由：FD 限制是运维环境问题，**不应让服务完全起不来**；但必须在启动日志和
-`/metrics` 里明确暴露"降级运行"，避免静默性能损失（对齐 TODO-140 的有效配置遥测）。
+- `strict`（推荐默认）：必须成功创建精确 N 个，否则清理已创建 endpoint 并启动失败；
+- `degraded`：成功数达到 `min_ready_endpoints` 才启动，并暴露 configured/active；
+- degraded 不得把 connection slots 静默缩成 k。全部 slots 按
+  `slot_idx % active_endpoints` 稳定映射到成功 endpoint；
+- 成功数为 0 或低于下限时清理已创建资源并失败。
+
+这样把可用性取舍交给显式策略，不让 FD/端口不足悄悄改变配置拓扑。
 
 #### D-B6：shutdown —— **顺带补 `close()` + `wait_idle()`**
 
-现状**没有任何 endpoint 关闭调用**（全 client 目录 grep 无）。1 个 endpoint 泄漏
-不明显，**N 个就明显了**。建议 Phase B 顺带：
+现状**没有任何 endpoint 关闭调用**（全 client 目录 grep 无）。coordinator 必须保留
+endpoint owners；slot 只持稳定映射后的 clone。shutdown 顺序固定为：
 
-```rust
-// shutdown 时对每个 endpoint
-endpoint.close(0u32.into(), b"client shutting down");
-// 带超时等待在途包发完
-tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
+```text
+停止本地 accept
+  → fence 新 work
+  → drain streams
+  → close QUIC connections
+  → endpoint.close
+  → 有界 wait_idle
 ```
 
-这同时改善 **CR-AUDIT-21** 的 drain 覆盖（当前 drain 只看 TCP + pending open_bi，
-不等 QUIC）。属顺带收益，不扩大 Phase B 的范围。
+不能把 endpoint `into_iter` 后完全移交 supervisor，否则中央无法统一 close/wait_idle。
+具体 drain owner 与 typed tracker 见 D9。
 
 ### 2.3 ⚠️ 资源开销核算（本设计最重要的约束）
 
@@ -144,38 +156,47 @@ tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
 | 资源 | 每 endpoint | N=4 | N=16 |
 | --- | --- | --- | --- |
 | UDP socket（FD） | 1 | 4 | 16 |
-| **UDP socket buffer** | **`udp_recv_buf_bytes` + `udp_send_buf_bytes` = 8 MiB + 8 MiB**（`transport/quic.rs:30-31` 默认） | **64 MiB** | **256 MiB** |
+| UDP socket buffer requested upper bound | `udp_recv_buf_bytes + udp_send_buf_bytes` 默认请求 8 MiB + 8 MiB | requested 64 MiB | requested 256 MiB |
 | endpoint driver task | 1 | 4 | 16 |
 
-**🔴 关键发现：UDP socket buffer 默认 8 MiB 收 + 8 MiB 发，多 endpoint 会线性放大。**
-16 核机器 1:1 就是 **256 MiB 仅 socket buffer**——这是不可接受的静默内存放大。
+`SO_RCVBUF/SO_SNDBUF` 是 requested 值/内核 accounting 上界，不等于启动时一次性提交的
+常驻 RSS；Linux `getsockopt` 还常显示 bookkeeping 加倍后的 effective 值。N=16 的
+256 MiB 只能写成 requested 合计，不能宣称“已常驻 256 MiB”。仍需治理线性资源上限，
+并同时记录 requested、OS effective/accounting、进程 RSS/内核 socket memory 实测值。
 
 **必须一并处理**，三选一：
 
 | 方案 | 做法 | 判定 |
 | --- | --- | --- |
-| **A 总量分摊** | `per_endpoint_buf = total_buf / endpoints`，设下限（如 1 MiB） | ✅ **推荐**——保持"总内存预算"语义不变，用户配的是总量 |
+| **A 总量分摊** | checked rounding 后按 endpoint 分配严格总预算；若低于单 endpoint 最小值则减少 endpoint 或启动失败 | ✅ **推荐**——保持"总内存预算"语义不变 |
 | B 保持每 endpoint 全额 | 文档化 N× 放大 | ❌ 静默放大，违反最小惊讶 |
 | C 降低默认值 | 把 8 MiB 默认调小 | ⚠️ 会影响单 endpoint 场景的吞吐，不应因多 endpoint 而改单 endpoint 默认 |
 
-**推荐 A**，并在启动日志打印：`endpoints=4 udp_recv_buf=2MiB/ep (total 8MiB)`。
-注意内核会对 `SO_RCVBUF` 加倍并受 `net.core.rmem_max` 限制（`tune-os.sh` 已设 16 MiB），
-分摊后更容易落在内核允许范围内，**反而减少"设了但没生效"的静默失败**。
+**推荐 A 作为实验预算**，并在启动日志打印：
+`endpoints=4 udp_recv_requested=2MiB/ep (requested total 8MiB)`。
+不能在总量分摊后再无条件给每个 endpoint 设置 1 MiB 下限，否则高 N 时总量会再次突破
+预算。所有乘法/取整使用 checked arithmetic，并读取/记录 OS 最终实际 buffer 值。
+注意内核可能对 `SO_RCVBUF` 的报告值加倍并受系统上限限制；必须以该平台实际
+`getsockopt` 与内核 accounting 为准，不能由配置值反推 RSS。
+
+QUIC connection/stream flow-control window 是逻辑信用上限，通常也不是 upfront
+allocation；预算表需另列 connection/crypto/CID 状态和实测 resident，避免重复同一误判。
 
 ### 2.4 场景覆盖 & Corner Cases
 
 | 场景/边界 | 行为 |
 | --- | --- |
 | `connections: 1`（单连接调试） | endpoints=1，**行为与现状完全一致**，零回归 |
+| `connections > 1, endpoints: 1` | 默认路径与现有单 Endpoint 多连接语义等价 |
 | `endpoints < connections` | 按 `slot_idx % endpoint_count` 分配，多个 connection 共享一个 endpoint（退化到现状的部分共享） |
 | 单核 / cgroup 限 1 核 | `connections` auto=1 → endpoints=1 → 与现状一致 |
-| FD 上限不足 | D-B5 降级 + warn + 指标；不整体失败 |
+| FD 上限不足 | strict 失败并清理；degraded 达到显式下限才运行，均有指标 |
 | 重连风暴 | endpoint 不参与重连（D-B2），socket 不反复创建/销毁——**优于每 slot 懒建方案** |
 | NAT 场景 | N 个源端口 ⇒ NAT 表项从 1 条变 N 条。N=核数量级，对企业 NAT 无压力；但需在文档注明 |
 | 服务端看到的连接 | 从"1 个源端口的 N 条连接"变成"N 个源端口各 1 条"。server 侧按 CID 认连接，**无影响**；但 server 的连接级日志/指标会显示不同源端口 |
 | QUIC 连接迁移 | client 主动迁移不受影响（各 endpoint 独立）；**注意**：多 endpoint 下"迁移"不会跨 endpoint 发生 |
 | 与 UDP 代理（`udp_entries`）共存 | UDP entry 走的是**已建立的 QUIC 连接的 datagram**（`conn.send_datagram`），不新建 endpoint——**不受影响** |
-| shutdown | D-B6 逐个 close + wait_idle（带超时） |
+| shutdown | coordinator 按 D-B6 顺序统一 close + wait_idle（带总超时） |
 | 指标 | 需新增 `endpoint_count`（配置 vs 实际）；建议每 endpoint 的收包量可观测，用于验证分流是否均匀 |
 
 ### 2.5 论证 / 备选
@@ -205,16 +226,17 @@ tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| P1 | `Vec<Endpoint>` + 分发（buffer 暂不分摊，仅 `connections=1` 与小 N 验证） | `connections=1` 逐字节等价；N>1 能正常建连转发 |
-| P2 | **UDP buffer 总量分摊**（§2.3 A）+ 启动日志打印生效值 | 内存不随 N 线性放大；日志可见 per-endpoint 值 |
-| P3 | 失败降级（D-B5）+ endpoint 指标 + shutdown close/wait_idle（D-B6） | FD 不足时降级运行且可观测；shutdown 无 socket 泄漏 |
-| P4 | 扩展曲线验证（1/2/4 核） | 收包不再是瓶颈；`QPS(N)/(N×QPS(1))` 相对改造前提升 |
+| Step 1 | coordinator 持 `Vec<Endpoint>` + slots 稳定 N:M 映射 | `connections=1` 与 `connections>1,endpoints=1` 语义等价 |
+| Step 2 | requested/effective/accounting/RSS 观测 + 总预算 | 不把 socket window 误报为常驻 RSS |
+| Step 3 | strict/degraded（D-B5）+ endpoint 指标 + D9 shutdown | strict 失败；degraded 仅在达到下限时运行；shutdown 无泄漏 |
+| Step 4 | 显式 opt-in 扩展曲线验证（1/2/4 核） | 收包热点改善且 RSS/FD/drop 未显著恶化 |
 
 ---
 
 ## 3. Phase B 需要自定义 Runtime 吗？——**不需要**
 
-**明确结论：Phase B 与运行时模型完全正交，不需要也不应该捆绑自定义 runtime。**
+**修订结论：Phase B 与运行时模型在机制上可独立，但二者都必须由 D10 的数据门槛触发；
+不能把“可独立”写成“必做”或“无前置”。**
 
 | 理由 | 说明 |
 | --- | --- |
@@ -223,7 +245,8 @@ tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
 | 风险与可回滚性 | Phase B ~1 天、可独立回滚；自定义 runtime 3-5 天且改变调度语义 |
 | 顺序上 B 是 C 的前置 | 若将来做 C，需要"每个 runtime 拥有自己的 endpoint"——**B 先做正好为 C 铺路** |
 
-**所以：先做 B。它在两种运行时模型下都需要，且做完就能拿到收益。**
+**所以：先由 D10 的 profile 决定是否做 B；一旦决定实施，它不要求同时引入自定义
+runtime，但必须遵守 D9 的 ownership/readiness/shutdown 模型。**
 
 ---
 
@@ -248,17 +271,15 @@ tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
 
 | 收益来源 | 量级（估计） | **换 runtime 才能拿到？** |
 | --- | --- | --- |
-| **① 调度本身**（免窃取 CAS、免任务迁移、独立 epoll） | **约 5–15%**，任务越短越碎差异越大 | ✅ 是 |
-| **② 资源本地化**（per-core hyper 池、计数器、缓冲） | **可能大于 ①**（消除 S2 锁竞争 + K1 缓存行颠簸） | ❌ **否——分片即可**（Phase B′） |
+| **① 调度本身**（免窃取 CAS、免任务迁移、独立 epoll） | 未测；只在 scheduler profile 显著时评估 | ✅ 是 |
+| **② 资源本地化**（pool、计数器、缓冲） | 未测；需分别证明共享状态是热点 | ❌ **否——分片即可**（Phase B′） |
 
 对 DuoTunnel 的具体判断：
 
 - **任务粒度偏大**：每个 task 是"一个请求 / 一条 stream，中间多次 await I/O"，
   不是"百万个纳秒级任务"。work-stealing 成为瓶颈的典型场景是后者，
   **所以 ① 对本项目偏向 5% 一侧而非 15%**。
-- **② 才是本项目的大头**：S2（进程级共享 hyper 池的 per-host idle 锁）和
-  K1（每连接/每 stream 的全局原子计数）在 8k QPS + 多核下是实打实的竞争，
-  **而这两个用分片就能解，不必换 runtime**。
+- S2/K1 的共享结构客观存在，但是否为“大头”尚无 profile 证明；只有热点成立时才分片。
 
 > **可引用的外部依据**：pingora 自陈 NoSteal 的动机是"效率等同单线程 runtime 又能
 > 吃满多核"（`pingora-runtime/src/lib.rs:15-24`），但**未给出公开的 A/B 数字**。
@@ -268,14 +289,14 @@ tokio::time::timeout(drain_timeout, endpoint.wait_idle()).await;
 ### 4.3 由此得出的建议顺序
 
 ```
-Phase B  (多 Endpoint,解 S1 收包单点)        ← 主串行点,与 runtime 正交
+Phase B  (多 Endpoint实验)                  ← 仅 profile 指向 S1 时启动
    ↓
 Phase A  (绑核,消除迁移抖动)                  ← 1 天,代码可被 C 复用
 Phase B′ (hyper 池分片 + per-core 计数,解 S2/K1) ← 拿到收益 ②,不换 runtime
    ↓
 压测扩展曲线 (1/2/4 核)
    ↓
-仍不线性?  → Phase C 自定义 runtime (仅剩收益 ①,约 5-15%)
+仍不线性?  → Phase C 自定义 runtime (仅在 scheduler profile 指向它时)
 线性了?    → 不做 C,保住 work-stealing 的鲁棒性
 ```
 
@@ -303,10 +324,10 @@ Phase B′ (hyper 池分片 + per-core 计数,解 S2/K1) ← 拿到收益 ②,�
 ## 5. 验收
 
 **Phase B**：
-- [ ] `connections=1` 时行为与改造前逐字节一致；
+- [ ] `connections=1` 与 `connections>1,endpoints=1` 时选择/连接语义等价；
 - [ ] N>1 时 N 个 endpoint 各自收包，分流大致均匀（每 endpoint 收包量指标可见）；
-- [ ] **UDP buffer 总量不随 N 线性放大**（§2.3 分摊生效，启动日志可见 per-endpoint 值）；
-- [ ] FD 不足时降级运行 + warn + 指标，而非启动失败；
+- [ ] requested/effective/accounting/RSS 分开记录；总预算不随 N 静默突破；
+- [ ] FD 不足时 strict 清理并失败；degraded 仅在达到显式下限时运行并告警；
 - [ ] shutdown 时 endpoint 正确 close/wait_idle，无 socket 泄漏；
 - [ ] 扩展曲线相对改造前提升（收包不再是瓶颈）。
 

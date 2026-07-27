@@ -31,6 +31,7 @@
 | 11 | [透传模式进度（TCP/L7/UDP）](./11-passthrough-modes.md) | 三类透传实现到什么程度、还差多少、怎么补？ |
 | 12 | [商业产品对比与缺口](./12-commercial-landscape-gap.md) | cloudflared/ngrok/frp 等对比，DuoTunnel 缺哪些能力、哪些该补 |
 | 13 | [协议版本化与运维补遗](./13-protocol-versioning-and-ops-addendum.md) | 完整性补遗：线协议无版本协商（阻碍滚动升级）+ 供应链/日志隐私 |
+| 14 | [性能、健壮性与长期稳定性补遗](./14-performance-robustness-stability-addendum.md) | 三轮静态复核：控制面一致性、生命周期/readiness/drain、确定性能热点与证据门槛 |
 
 ---
 
@@ -42,14 +43,11 @@
 决定了**当前不宜直接承载生产不可信流量**。补齐后可稳定到 3.5-4。
 
 **关于线性扩展（用户核心关切）**：目标是 `QPS(N) ≈ N×QPS(1)` 且 p99 平稳。
-**二轮修正后的结论**：主障碍是 **quinn 单 Endpoint 的收包（S1）——不是 tokio 调度器**。
-核对 quinn 分工可知：**Connection 的处理本来就已并行**（每 Connection 独立 task），
-单点只在 **endpoint driver 的收包**那一步；因此多 Endpoint 的意义是"并行收包"，
-而非"让 Connection 上不同核"（02 §2.1）。tokio work-stealing 的争抢真实但量级
-**小于** S1/S2/K1（02 §3.5）。
-**推论**：先解 S1（Phase B 多 Endpoint）+ S2（hyper 池分片）+ K1（per-core 计数），
-**三者都不需要更换运行时模型**；per-core runtime（Phase C）降为**最后手段**，
-仅在上述落地后压测仍不线性时启动。
+quinn 单 Endpoint 的收包是**结构性候选串行点**，但仅凭静态代码不能证明它是当前
+主瓶颈，也不能证明其成本必然大于 UDP HOL、分配、内存预算、hyper pool 或调度开销。
+第三轮复核据此把多 Endpoint 从“性能线第一优先”降为
+**profile-gated P2 实验**：先闭合 M0、建立 cpuset 可信基线并完成确定热点治理，只有
+profiler 明确指向 endpoint UDP I/O/锁时才启动 Phase B。per-core runtime 仍是最后手段。
 **actor mode 的判断不变**：管"写"是对的（registry/conn_pool 已用），不应推广到数据面。
 
 **关于 4c 测不了 8k**：根因是**物理超订**（k6≥2核 + server1 + client1 + echo +
@@ -59,9 +57,10 @@ collector > 4 核）叠加 **CPUQuota 的 100ms 周期性冻结**。
 （`AllowedCPUs` 替代 `CPUQuota`），并接受"4c 上测得的上限 ≠ 系统上限"，
 真实容量数字迁到更大 runner。
 
-**关于 io_uring**：不切。pingora 没用；Rust 生态（tokio/quinn/hyper 全 readiness
-模型）使其"无法完全替换"的判断正确；QUIC 的 UDP 已被 quinn 的 GSO/GRO 批量化，
-收益 5-15% 却需重写 I/O 层 + 部署受限（seccomp）。同等预算应投给绑核/per-core 化。
+**关于 io_uring**：当前不切。pingora 没用；Rust 生态（tokio/quinn/hyper 全 readiness
+模型）使其无法低风险整体替换，QUIC UDP 又已由 quinn 使用 GSO/GRO 批量化。此前
+“收益 5–15%”没有本项目实测依据，撤回且不作为判据。同等预算应先投给 D9/M0、确定
+热点治理和可信 profile；绑核/per-core 同样需要证据触发。
 
 **关于 server 一对多（08）**：多 client 能注册、能故障切换，但**负载均衡在多核
 （shard_count>1）下是坏的**——注册按全局轮询把一个 group 的 client 撒到各 shard，
@@ -81,7 +80,7 @@ collector > 4 核）叠加 **CPUQuota 的 100ms 周期性冻结**。
 抽象充分（加 impl 即可）；但**缺一层每请求 HTTP 过滤（HttpFilter）**——它参照
 Pingora 却只做到连接级 `ConnectionModule`，没有 Pingora `ProxyHttp` 的请求/响应
 hook。结果是客户端 IP 透传/header 改写/镜像/重定向/请求级限流**都无处插入**。
-建议**把引入 `HttpFilter` 层作为一切 L7-LB 能力的公共地基优先做**，而非逐个打补丁；
+建议在 **D9/M0 闭合后**，把 `HttpFilter` 作为 L7-LB 能力线的公共地基，而非逐个打补丁；
 同时把三处各写各的选择（server RR / client P2C / 本地 upstream）统一到 `LoadBalancer`
 seam（08 的修复即落在这里）。
 
@@ -104,7 +103,12 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 ### P0 — 正确性/安全，上线前必须闭合（不依赖压测/架构改造）
 
-> **✅ 本批已全部实施并合入 main（2026-07-26，PR #58）。** 实施过程中经三轮对抗式
+> **历史说明**：下表是 PR #58 当批识别出的 11 项，已全部实施并合入 main。它不再代表
+> “当前 HEAD 的全部 P0 已闭合”。2026-07-27 第三轮复核又发现控制面 Patch 丢失、
+> token 撤销未闭环、非幂等重放和 listener/slot 生命周期等新阻断项，见
+> [14](./14-performance-robustness-stability-addendum.md)；当前状态回到 **M0 待闭合**。
+>
+> PR #58 实施过程中经三轮对抗式
 > review（并发/内存、HTTP 协议合规、安全/协商），又查出 8 项后续问题一并修复——其中
 > 两项是本批自己引入的回归：未认证配额一度可被 64 个伪造源 IP 包确定性锁死；
 > Content-Length 修复因 `MapFrame` 不转发 `size_hint` 而**完全没生效**。
@@ -127,13 +131,32 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | ✅ 面向公网 H2 未设显式防滥用上界（rapid-reset） | 09 §4.4 | `h2.rs:81`+`tls/mod.rs:230` | **已闭合**；顺带修 TLS 侧 ALPN 分派缺失 |
 | ✅ 线协议无版本协商 → 无法滚动升级/灰度（新旧混跑批量断连） | 13 §4 | `msg.rs:41,56,119`+`quic.rs:83` | **已闭合**（ALPN 世代化为 `tunnel-quic/v1`） |
 
+#### 第三轮新增 M0 阻断项（2026-07-27，尚未实施）
+
+| 项 | 证据 | 方案 |
+| --- | --- | --- |
+| control `watch` 可跳过相对 Patch，server 无 gap/hash 校验 | `service.rs:98-109`、`watch.rs:96-126`、`control_client.rs:195-220` | D9：旧 wire 全量止血；V2 双栈后再启 revision/hash/ACK |
+| revoke/rotate 不关闭已认证连接 | `quic.rs:346,398-421`；全库无 `revocation_tx.send` | D9：session 保存 token identity，新代 commit 后精确撤销 |
+| 空 body 非幂等请求可在 ambiguous failure 后重放 | `tls/mod.rs:130-226`、`h2c/mod.rs:270-361` | D2：method + dispatch phase + budget |
+| inflight slot 提前复用，旧 guard 可修改新连接计数 | `registry.rs:199-247`、`inflight.rs:60-122` | D9/D10：owned `ConnectionState` |
+| listener apply 非事务且存在 stale generation/orphan worker | `listener_mgr.rs:55-70,201-264` | D9：ConfigApplier + prepare/commit/fencing |
+| 配置转换/证书加载可 panic，容量乘法与固定 4096 slot 无预算 | `quic.rs:49-56`、`http.rs:59-60`、`conn_pool.rs:86`、`registry.rs:100` | D9/D10：checked validation + 统一资源预算 |
+| UDP listener 重名会静默覆盖 reply socket | `udp_listener.rs:19-21,54-57` | D9：配置代内唯一 identity，重复整代拒绝 |
+
+### M0 — 共享正确性/稳定性（上线阻断）
+
+| 项 | 文档 | 原因 |
+| --- | --- | --- |
+| owned ConnectionState + reliable unregister | 14 §4.1/§6.1, D9 §5 | 消除 slot ABA 与容量/生命周期混用 |
+| client/server 聚合 readiness | 14 §4.3, D9 §6 | 避免 last-writer-wins 与关键组件假 ready |
+| UDP/stream 解耦 + session/task/queue 上限 | 14 §6.2, D9 §8, D10 §2.3 | 同时是稳定性与性能 P0 |
+
 ### P1 — 性能/测量，达成可信基线与确定性优化
 
 | 项 | 文档 | todo 关系 |
 | --- | --- | --- |
 | CI cpuset 隔离 + 度量口径修正（offset/分位/配置快照） | 06 §2, 02 §6 | 关联 TODO-140 |
-| worker 绑核 + per-core 计数 | 02 §5 Phase A | **新设计** |
-| client 每连接独立 Endpoint | 02 Phase B | 关联 TODO-24（client 侧可先行） |
+| buffer 配置真实接入运行对象 | 14 §6.5, D10 §3.2 | **确定问题** |
 | L7 三重 BoxBody 去重 + body read_chunk 零拷贝 | 01 §4.1/§3.4 | **新发现** |
 | TcpParams 默认 None（启用 autotuning） | 01 §4.4 | TODO-105 |
 | 死代码删除（forward_http 175行）+ 重复 helper | 04 §2.1 | 修正 TODO-137 对象 |
@@ -150,6 +173,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | 配置去重下沉 + 统一参数校验 | 04 §2.2-2.3 | CR-AUDIT-6 |
 | tunnel-lib 拆分（先 tunnel-proto，利于 fuzz） | 04 §3.2 A6 | TODO-83 |
 | sniff/codec/udp fuzz 靶 | 07 §4.5 | CR-AUDIT-20（建议升优先级） |
+| client 多 Endpoint | 02 Phase B / D7 / D10 §5 | **降为 profile-gated P2** |
 | server 多 endpoint（eBPF CID steering） | 02 Phase D | TODO-24（维持研究门槛） |
 
 ### 一对多 & LB 能力缺口（对标顶级 LB，详见 08 / 09）
@@ -180,31 +204,29 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 ---
 
-## 里程碑路线（详见 05 · 到达生产级的路径）
+## 里程碑路线（2026-07-27 第三轮修订）
 
 ```
-M1 正确性/安全闭合 ──▶ M2 可信测量+线性扩展 ──▶ M3 抽象收敛
-   ✅ 已完成 2026-07-26   ◀── 当前所在          (可长期演进)
-   (PR #58)              (性能可证明 ≥0.8 线性)     成熟度 ~4.0
-   成熟度 ~3.5            成熟度 ~3.8
+M0 运行时一致性/生命周期 ──▶ M1 可信测量+确定热点 ──▶ M2 Profile-gated扩展 ──▶ M3 抽象
+   ◀── 当前所在              cpuset/协议分层           多Endpoint/runtime       HttpFilter/LB
 ```
 
-**M1 完成情况（2026-07-26，PR #58）**：P0 清单 11 项全部闭合，另修 8 项 review 追加问题。
-遗留的已知缺口都已显式记录而非默认解决：无应用层 GOAWAY、反向 stream 无 drain 计数、
-chunked 请求体被 411 拒绝（TODO-147）、metrics/healthz 端口仍无认证。
+**PR #58 完成情况**：当批 P0 清单 11 项已闭合，另修 8 项追加问题；但第三轮复核证明
+旧清单没有覆盖 control delivery、撤销传播、slot ownership、listener transaction、
+聚合 readiness 与协议级 drain。它们统一进入 M0，不再把“已修完旧清单”等同于
+“生产正确性闭合”。
 
-**M2 的第一步已被 M1 意外推进**：S0（listener runtime 归属）修复后公网 ingress 才真正
-跑在多线程 runtime 上——但**这也意味着此前所有多核压测数字都不足以支撑扩展性结论**。
-M2 的顺序因此不变且更紧迫：先做 [06](./06-bench-methodology.md) / [02 §6](./02-scalability-and-cpu-affinity.md#6-ci-4c-runner-的绑核配比立即可做解决争抢)
-的 cpuset 隔离建立可信基线，再谈 Phase B（多 Endpoint）。
+M0 之后先做 [06](./06-bench-methodology.md) 与
+[D10](./design/10-performance-hardening.md) 的可信基线、UDP HOL、指标基数、buffer
+接线和确定分配项。多 Endpoint 只有 profiler 指向 endpoint driver 时再谈。
 
-**顺序铁律**：M1 未闭合前，任何 benchmark-gated 微优化都不应启动（与 todo.md 的
-evidence-driven 原则一致）；CI 可信基线（M2 首步）建立前，所有 CI 数字不可作为
+**顺序铁律**：M0 未闭合前，不启动会放大生命周期复杂度的架构优化；CI 可信基线
+（M1 首步）建立前，所有 CI 数字不可作为
 优化判据。
 
 ---
 
-## 决策记录（2026-07-26 二轮复审，已确认）
+## 决策记录（含 2026-07-27 第三轮修订）
 
 以下决策由作者拍板，**已回写进各文档**；本节是唯一权威索引。
 
@@ -212,8 +234,8 @@ evidence-driven 原则一致）；CI 可信基线（M2 首步）建立前，所�
 | --- | --- | --- | --- |
 | D-1 | **产品定位** | **企业内部服务，不暴露公网**。据此"安全暴露四件套"整体降级，全球边缘/DDoS 明确不做 | 09 / 10 / 12 / design/ |
 | D-2 | **最终用户认证** | **默认不启用**，作为**可选插件**按需接入；只要求抽象层能插进去，不要求现在实现 | 09 / 12 / design/03 / design/README |
-| D-3 | **主串行点判定** | **是 quinn 单 Endpoint 收包（S1），不是 tokio 调度器**；work-stealing 争抢量级小于 S1/S2/K1 | **02 §2.1 / §3.5** |
-| D-4 | **Phase 顺序** | 由 A→B→C 改为 **B（多 Endpoint）优先 → A + B′ → 压测 → C（最后手段、条件触发）** | **02 §4 / §10** |
+| D-3 | **主串行点判定（第三轮修订）** | 单 Endpoint 是候选串行点，**静态代码不足以证明是主瓶颈**；必须由 cpuset 后 profile 判定 | **02 / 14 §7 / D10 §5** |
+| D-4 | **Phase 顺序（第三轮修订）** | **M0 → 可信基线+确定热点 → profile → 条件触发多 Endpoint → 最后才评估自定义 runtime** | **14 §8 / D9 / D10** |
 | D-5 | **自定义 runtime** | 可行且 **quinn/hyper 零改动**（~500-800 行）；A 与 C 重合、B 与 C 正交。若走 C，路径简化为 **B → C（吸收 A+S2+K1）** | **02 §3.5.1** |
 | D-6 | **8k 压测用例** | **目的不变**（测最高 QPS），**不**改为过载行为测试；只做 cpuset 隔离让数字可信，并接受"4c 上限 ≠ 系统上限" | **06 §2.2** |
 | D-7 | **L4/L7 开关** | **搁置**，仅记录需求。设计上开关应放在 **upstream(proxy) 定义**上（`mode: l4\|l7`），非 vhost 级 | **01 §4.2 / 11 §4.1.1** |

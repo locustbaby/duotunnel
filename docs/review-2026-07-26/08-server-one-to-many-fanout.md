@@ -288,7 +288,7 @@ flowchart TD
   （变异系数 < 20%），而非集中在其中一个；
 - [ ] 故障切换回归：kill 掉承载流量的 client 后，流量切到同 group 其余 client
   （改动前后一致——fallback 语义不得退化）；
-- [ ] `shard_count=1` 回归：行为与改动前逐字节一致；
+- [ ] `shard_count=1` 回归：选择与故障切换语义等价，不要求随机序列逐字节一致；
 - [ ] 单 client group、全不健康、并发注册下选择正确、不 panic；
 - [ ] 启动日志打印 slot 表生效容量，/metrics 暴露 allocated/high-water/exhaustion，
   耗尽时计数可见（F2，不含可增长表）；
