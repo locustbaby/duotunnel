@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_entry_connection_http_reject() {
-        let pool = EntryConnPool::new(100, 25, 1, 1);
+        let pool = EntryConnPool::new(100, 25, 1, 1).unwrap();
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "allowed.com".to_string(),
             action_upstream: "backend".to_string(),
@@ -333,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_entry_connection_tls_reject() {
-        let pool = EntryConnPool::new(100, 25, 1, 1);
+        let pool = EntryConnPool::new(100, 25, 1, 1).unwrap();
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "allowed.com".to_string(),
             action_upstream: "backend".to_string(),

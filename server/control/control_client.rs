@@ -106,10 +106,16 @@ async fn watch_loop(
                         resource_version = snap.resource_version,
                         "loaded local snapshot fallback"
                     );
-                    apply_snapshot(&snap, &state).await;
-                    ready.store(true, Ordering::Release);
-                    last_version = snap.resource_version;
-                    current_snapshot = Some(snap);
+                    match apply_snapshot(&snap, &state).await {
+                        Ok(()) => {
+                            ready.store(true, Ordering::Release);
+                            last_version = snap.resource_version;
+                            current_snapshot = Some(snap);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to apply local snapshot fallback");
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(error = %e, "failed to parse local snapshot fallback");
@@ -196,7 +202,7 @@ async fn connect_and_watch(
             WatchEvent::Snapshot(snap) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
-                apply_snapshot(&snap, state).await;
+                apply_snapshot(&snap, state).await?;
                 ready.store(true, Ordering::Release);
                 *last_version = v;
                 *current_snapshot = Some(snap);
@@ -207,7 +213,7 @@ async fn connect_and_watch(
                 info!(resource_version = v, "received Patch from ctld");
                 if let Some(snapshot) = current_snapshot.as_mut() {
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
-                    apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await;
+                    apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await?;
                     *last_version = v;
                     save_snapshot_to_disk(snapshot_path, snapshot).await;
                 } else {
@@ -226,11 +232,12 @@ async fn connect_and_watch(
 }
 
 /// Apply a ConfigSnapshot to both the routing ArcSwap and the token cache.
-async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) {
+async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) -> anyhow::Result<()> {
+    let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state)?;
     update_token_cache(&snap.token_cache, state);
-    let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state);
     state.replace_routing(routing_snapshot);
     crate::ingress::sync_all_listeners(state, &listeners).await;
+    Ok(())
 }
 
 fn update_token_cache(
@@ -267,13 +274,13 @@ fn update_token_cache(
 fn build_runtime_snapshot(
     snap: &ConfigSnapshot,
     state: &Arc<ServerState>,
-) -> (Vec<IngressListener>, crate::RoutingSnapshot) {
+) -> anyhow::Result<(Vec<IngressListener>, crate::RoutingSnapshot)> {
     let tm = proto_to_tunnel_management(&snap.ingress_listeners, &snap.client_groups);
     let egress = proto_to_server_egress(&snap.egress_upstreams, &snap.egress_vhost_rules);
     let http_params = state.http_client_params();
-    let routing_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
+    let routing_snapshot = build_routing_snapshot(&tm, &egress, &http_params)?;
     let listeners = tm.server_ingress_routing.listeners.clone();
-    (listeners, routing_snapshot)
+    Ok((listeners, routing_snapshot))
 }
 
 async fn apply_patch_to_runtime(
@@ -281,20 +288,22 @@ async fn apply_patch_to_runtime(
     patch: &ConfigPatch,
     affected_ports: &HashSet<u16>,
     state: &Arc<ServerState>,
-) {
-    update_token_cache(&snapshot.token_cache, state);
+) -> anyhow::Result<()> {
     let touches_routing = !patch.ingress_listeners.is_empty()
         || !patch.client_groups.is_empty()
         || !patch.egress_upstreams.is_empty()
         || !patch.egress_vhost_rules.is_empty();
     if !touches_routing {
-        return;
+        update_token_cache(&snapshot.token_cache, state);
+        return Ok(());
     }
-    let (listeners, routing_snapshot) = build_runtime_snapshot(snapshot, state);
+    let (listeners, routing_snapshot) = build_runtime_snapshot(snapshot, state)?;
+    update_token_cache(&snapshot.token_cache, state);
     state.replace_routing(routing_snapshot);
     if !patch.ingress_listeners.is_empty() {
         crate::ingress::sync_listener_subset(state, &listeners, affected_ports).await;
     }
+    Ok(())
 }
 
 fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {

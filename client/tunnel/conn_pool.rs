@@ -1,3 +1,4 @@
+use anyhow::{anyhow, ensure, Result};
 use arc_swap::ArcSwap;
 use quinn::Connection;
 use std::collections::HashMap;
@@ -9,6 +10,9 @@ use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
     stable_shard_index, ConnectionHandle, NegotiatedProtocol, VhostRouter,
 };
+
+const MIN_CLIENT_INFLIGHT_SLOTS: usize = 1024;
+const MAX_CLIENT_INFLIGHT_SLOTS: usize = 262_144;
 
 pub struct PooledConnection {
     pub handle: Arc<ConnectionHandle>,
@@ -82,8 +86,8 @@ impl EntryConnPool {
         max_pending_streams: usize,
         connections: u32,
         shard_count: usize,
-    ) -> Arc<Self> {
-        let capacity = ((max_concurrent_streams as usize) * (connections as usize) * 2).max(1024);
+    ) -> Result<Arc<Self>> {
+        let capacity = checked_inflight_capacity(max_concurrent_streams, connections)?;
         let inflight_table = new_inflight_table(capacity);
         let shard_count = shard_count.max(1);
         let (tx, mut rx) = mpsc::channel(1024);
@@ -156,13 +160,13 @@ impl EntryConnPool {
             }
         });
 
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             tx,
             shard_count,
             shards: snapshots,
             total_size,
             egress_rules: ArcSwap::from_pointee(AllowedHostIndex::default()),
-        })
+        }))
     }
 
     pub fn shard_for_hash<T: Hash>(&self, value: &T) -> usize {
@@ -235,9 +239,36 @@ impl EntryConnPool {
     }
 }
 
+fn checked_inflight_capacity(max_concurrent_streams: u32, connections: u32) -> Result<usize> {
+    let streams = usize::try_from(max_concurrent_streams)
+        .map_err(|_| anyhow!("max_concurrent_streams does not fit this platform"))?;
+    let connections = usize::try_from(connections)
+        .map_err(|_| anyhow!("connection count does not fit this platform"))?;
+    let capacity = streams
+        .checked_mul(connections)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(|| {
+            anyhow!(
+                "client inflight capacity overflow: max_concurrent_streams={} connections={}",
+                max_concurrent_streams,
+                connections
+            )
+        })?
+        .max(MIN_CLIENT_INFLIGHT_SLOTS);
+    ensure!(
+        capacity <= MAX_CLIENT_INFLIGHT_SLOTS,
+        "client inflight capacity {} exceeds hard limit {} (max_concurrent_streams={}, connections={})",
+        capacity,
+        MAX_CLIENT_INFLIGHT_SLOTS,
+        max_concurrent_streams,
+        connections
+    );
+    Ok(capacity)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AllowedHostIndex;
+    use super::{checked_inflight_capacity, AllowedHostIndex, MIN_CLIENT_INFLIGHT_SLOTS};
     use tunnel_lib::EgressVhostRuleDef;
 
     fn rule(host: &str, action: &str) -> EgressVhostRuleDef {
@@ -269,5 +300,27 @@ mod tests {
 
         assert!(!index.is_rejected_host("api.example.com"));
         assert!(index.is_rejected_host("example.com"));
+    }
+
+    #[test]
+    fn inflight_capacity_rejects_arithmetic_overflow() {
+        let error = checked_inflight_capacity(u32::MAX, u32::MAX)
+            .expect_err("overflowing inflight capacity must fail");
+        assert!(error.to_string().contains("inflight capacity"));
+    }
+
+    #[test]
+    fn inflight_capacity_rejects_values_above_hard_limit() {
+        let error = checked_inflight_capacity(1000, 132)
+            .expect_err("oversized inflight capacity must fail");
+        assert!(error.to_string().contains("exceeds hard limit"));
+    }
+
+    #[test]
+    fn inflight_capacity_keeps_minimum_headroom() {
+        assert_eq!(
+            checked_inflight_capacity(1, 1).expect("small capacity should be valid"),
+            MIN_CLIENT_INFLIGHT_SLOTS
+        );
     }
 }

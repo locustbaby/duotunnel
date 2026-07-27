@@ -315,7 +315,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
 
     let http_params = HttpClientParams::from(&bootstrap.config.server.http_pool);
     let (tm, egress) = config_source.load().await?;
-    let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params);
+    let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params)?;
     let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
     let proxy_buffer_params =
         tunnel_lib::ProxyBufferParams::from(&bootstrap.config.server.proxy_buffers);
@@ -341,8 +341,11 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         effective_parallelism = tunnel_lib::effective_runtime_parallelism(),
         "server QUIC ownership topology resolved"
     );
-    let shared_registry =
-        new_shared_registry(shard_count, max_streams, overload_limits.max_pending_streams);
+    let shared_registry = new_shared_registry(
+        shard_count,
+        max_streams,
+        overload_limits.max_pending_streams,
+    );
     let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
@@ -401,7 +404,7 @@ pub(crate) fn build_routing_snapshot(
     tm: &TunnelManagement,
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
-) -> RoutingSnapshot {
+) -> Result<RoutingSnapshot> {
     let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
         if let IngressMode::Http(cfg) = &listener.mode {
@@ -423,7 +426,7 @@ pub(crate) fn build_routing_snapshot(
             http_routers.insert(listener.port, Arc::new(router));
         }
     }
-    let egress_map = egress::ServerEgressMap::from_config(egress, http_params);
+    let egress_map = egress::ServerEgressMap::from_config(egress, http_params)?;
     let egress_rules = egress
         .rules
         .vhost
@@ -433,12 +436,12 @@ pub(crate) fn build_routing_snapshot(
             action_upstream: r.action_upstream.clone(),
         })
         .collect();
-    RoutingSnapshot {
+    Ok(RoutingSnapshot {
         http_routers: Arc::new(http_routers),
         tunnel_management: Arc::new(tm.clone()),
         egress_map: Arc::new(egress_map),
         egress_rules,
-    }
+    })
 }
 
 async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {

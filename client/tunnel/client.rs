@@ -46,12 +46,15 @@ pub(crate) async fn run_client(
     entry_pool.set_egress_rules(resp.config.egress_rules.clone());
     let lb = Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
     let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
-    let proxy_map = Arc::new(LocalProxyMap::from_config(
-        &resp.config,
-        &tunnel_lib::HttpClientParams::from(&config.http_pool),
-        lb,
-        resolver,
-    ));
+    let proxy_map = Arc::new(
+        LocalProxyMap::from_config(
+            &resp.config,
+            &tunnel_lib::HttpClientParams::from(&config.http_pool),
+            lb,
+            resolver,
+        )
+        .map_err(ConnectError::fatal)?,
+    );
     let session_cancel = CancellationToken::new();
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
@@ -175,8 +178,7 @@ async fn establish_session(
     // The server negotiates min(its max, our reported version), so anything
     // outside our own supported range means a broken or hostile server —
     // retrying cannot help.
-    if resp.negotiated_version < MIN_SUPPORTED_VERSION
-        || resp.negotiated_version > PROTOCOL_VERSION
+    if resp.negotiated_version < MIN_SUPPORTED_VERSION || resp.negotiated_version > PROTOCOL_VERSION
     {
         return Err(ConnectError::fatal(anyhow!(
             "protocol version negotiation failed: server negotiated v{}, client supports v{}..=v{}",

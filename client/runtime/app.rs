@@ -79,7 +79,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         overload_limits.max_pending_streams,
         resolved_connections,
         shard_count,
-    );
+    )?;
     let udp_registry = Arc::new(UdpListenerRegistry::default());
     let mut engine = RuntimeEngine::new(cancel.clone());
 

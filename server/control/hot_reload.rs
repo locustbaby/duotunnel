@@ -109,7 +109,7 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
             state.config_source().load().await?
         }
     };
-    let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
+    let snapshot = build_routing_snapshot(&tm, &egress, &http_params)?;
     state.replace_routing(snapshot);
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
     sync_listeners(state, &listeners).await;

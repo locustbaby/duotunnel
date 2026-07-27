@@ -14,7 +14,10 @@ pub struct ServerEgressMap {
     dns_cache: tunnel_lib::EgressDnsCache,
 }
 impl ServerEgressMap {
-    pub fn from_config(egress: &ServerEgressUpstream, http_params: &HttpClientParams) -> Self {
+    pub fn from_config(
+        egress: &ServerEgressUpstream,
+        http_params: &HttpClientParams,
+    ) -> anyhow::Result<Self> {
         let mut upstreams = HashMap::new();
         let http_rules = VhostRouter::new();
         for (name, upstream_def) in &egress.upstreams {
@@ -28,16 +31,16 @@ impl ServerEgressMap {
         for rule in &egress.rules.vhost {
             http_rules.add_route(&rule.match_host, rule.action_upstream.clone());
         }
-        let https_client = tunnel_lib::create_https_client_with(http_params);
+        let https_client = tunnel_lib::create_https_client_with(http_params)?;
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
         let http_connector =
             tunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
-        Self {
+        Ok(Self {
             upstreams,
             http_rules,
             http_connector,
             dns_cache: tunnel_lib::EgressDnsCache::new(std::time::Duration::from_secs(30)),
-        }
+        })
     }
 
     pub async fn resolve_udp_target(
