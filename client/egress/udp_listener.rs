@@ -42,7 +42,7 @@ impl UdpListenerRegistry {
             .ok_or_else(|| {
                 anyhow::anyhow!("no udp listener for {}", envelope.session.proxy_name)
             })?;
-        let addr: std::net::IpAddr = envelope.session.client_addr.parse()?;
+        let addr = envelope.session.client_addr;
         socket
             .send_to(
                 &envelope.payload,
@@ -84,7 +84,7 @@ async fn start_udp_listener(
                 let envelope = UdpDatagramEnvelope {
                     session: UdpSessionKey {
                         proxy_name: entry.proxy_name.clone().into(),
-                        client_addr: client_addr.ip().to_string(),
+                        client_addr: client_addr.ip(),
                         client_port: client_addr.port(),
                     },
                     payload: buf[..n].to_vec(),

@@ -433,7 +433,7 @@ mod tests {
     fn test_key() -> UdpSessionKey {
         UdpSessionKey {
             proxy_name: "dns".into(),
-            client_addr: "127.0.0.1".to_string(),
+            client_addr: "127.0.0.1".parse().unwrap(),
             client_port: 53000,
         }
     }

@@ -194,7 +194,7 @@ pub struct RoutingInfo {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UdpSessionKey {
     pub proxy_name: ProxyName,
-    pub client_addr: String,
+    pub client_addr: std::net::IpAddr,
     pub client_port: u16,
 }
 
@@ -601,7 +601,7 @@ mod tests {
         let envelope = UdpDatagramEnvelope {
             session: UdpSessionKey {
                 proxy_name: "dns".into(),
-                client_addr: "127.0.0.1".to_string(),
+                client_addr: "127.0.0.1".parse().unwrap(),
                 client_port: 5353,
             },
             payload: vec![1, 2, 3, 4, 5],
