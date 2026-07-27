@@ -124,6 +124,12 @@ Owns:
 
 `EntryConnPool` is the client-side mirror of server `ClientRegistry`: pool mutations go through an actor task; hot-path reads use `Arc` snapshots per shard.
 
+Readiness is derived from the pool actor's committed active-connection count. A session removes
+itself from the pool before cleanup, so the count does not include a connection once new selection
+has been fenced. `quic.min_ready_tunnels` is an explicit lower bound and must not exceed the
+resolved `quic.connections` value. Falling below desired capacity is degraded; readiness becomes
+false only below the configured minimum.
+
 Boundary rule: `endpoint.rs` is startup-time only; `client.rs` is request-time only. These modules are for process-lifetime tunnel work, not CLI/bootstrap concerns.
 
 ### Session Establishment
@@ -161,10 +167,14 @@ Waiting streams are admitted against that per-connection `pending_semaphore` (`t
 On SIGINT/SIGTERM, `ClientApp` cancels the shared token (`client/runtime/app.rs:41`-`45`). The sequence mirrors the server's — stop accepting, drain, then close:
 
 1. entry listeners stop accepting: every `ClientService` gets the same token, so the TCP entry accept loop and the UDP listeners return on cancellation
-2. `run_client` breaks out of the stream-accept loop, removes the connection from `EntryConnPool` (`client/tunnel/client.rs:108`) so no new stream can be routed onto it, and clears `ready`
-3. in-flight local relays drain for up to the connection-level `SHUTDOWN_DRAIN_TIMEOUT` (15s, `client/tunnel/client.rs:24`), and only then `conn.close` (`client/tunnel/client.rs:114`-`116`) — `CONNECTION_CLOSE` aborts every open stream, so the close must follow the drain
-4. `run_supervisor` returns instead of reconnecting once the token is cancelled (`client/tunnel/supervisor.rs:90`)
-5. `ClientApp` backstops with `wait_for_resource_drain` for the app-level `SHUTDOWN_DRAIN_TIMEOUT` (30s, `client/runtime/app.rs:16`), then logs `active_connections` / `pending_streams`
+2. `run_client` removes the connection from `EntryConnPool` immediately after its main session
+   loop exits, before waiting for UDP cleanup; readiness therefore cannot remain true during the
+   cleanup window
+3. UDP reply workers are cancelled and joined with a bounded wait
+4. in-flight local relays drain for up to the connection-level
+   `SHUTDOWN_DRAIN_TIMEOUT` (15s), and only then `conn.close`
+5. `run_supervisor` returns instead of reconnecting once the token is cancelled
+6. `ClientApp` backstops with the app-level 30s drain deadline
 
 The two constants share a name but not a scope: the connection-level window is deliberately shorter than the app-level backstop so the outer wait still fires after connections have closed. The server nests its windows the same way.
 
@@ -190,6 +200,10 @@ See [architecture.md](./architecture.md) for full diagrams. Client-side summary:
 | **Forward** (server → local) | `tunnel/client.rs` `accept_bi` | `ingress/handler.rs` → `ProxyEngine` → `LocalProxyMap` → upstream TCP/HTTP |
 | **Reverse** (local → internet) | `egress/listener.rs` | sniff → `EntryConnPool` pick → `ConnectionHandle::open_stream` → `RoutingInfo` → server `tunnel_handler` → `ServerEgressMap` |
 | **UDP reverse** | `egress/udp_listener.rs` | QUIC datagram ↔ local UDP socket |
+
+UDP reverse traffic keeps bounded sticky session affinity to a selected tunnel connection. Closed
+connections are excluded in O(1) by connection id; the affinity table has a hard cap and failed
+selection never retries the same connection indefinitely.
 
 Login path: `establish_session` → `connect_to_server` → `open_bi` → `Login`/`LoginResp` → `NegotiatedProtocol` + `LocalProxyMap` built from `resp.config`, then `EntryConnPool::push`.
 

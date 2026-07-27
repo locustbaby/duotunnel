@@ -4,6 +4,11 @@
 > 生命周期、配置一致性、故障恢复、长期运行稳定性**。本轮由性能、架构、健壮性三个
 > agent 独立核查并交叉反审，**未运行测试、压测或 benchmark**；因此文中严格区分
 > “代码可直接证明的问题”与“必须 profile 才能决定的优化”。
+>
+> **后续实施记录（2026-07-27）**：本文识别的 M0a-0～M0e 已在
+> `fix/m0-runtime-consistency` 完成代码实现，并由三个 Agent 分别复核 control/LKG、
+> listener/UDP/readiness、QUIC/drain/upstream 后交叉收口。本地 workspace test、
+> check、all-targets Clippy 已通过；未执行性能压测，因此本文 P1/P2 的收益判断保持不变。
 
 ## 1. 结论
 
@@ -300,6 +305,11 @@ M0a-0 旧 wire 完整快照止血
                          └─ P2 profile-gated 多 Endpoint / runtime / pool 分片
 ```
 
+截至 2026-07-27，M0a-0～M0e 的代码闭环均已完成；跨版本/多 leader、大规模并发、
+故障注入与长稳仍按验收清单执行。后续主线先收这些 rollout 证据，再进入 P1 可信基线。
+M0 的代码闭环不等于 P1 性能收益已被证明，也不放宽多 Endpoint/runtime 改造的
+profile 门槛。
+
 详细方案：
 
 - [D9 · RuntimeGeneration 与运行时可靠性](./design/09-runtime-reliability.md)
@@ -308,15 +318,18 @@ M0a-0 旧 wire 完整快照止血
 ## 9. 上线阻断验收
 
 - [ ] consumer 阻塞跨 1000 revision 后，server 最终 snapshot hash 与 ctld 一致；
-- [ ] duplicate/out-of-order/rollback/equal-revision-different-hash 均被确定处理；
-- [ ] 任一 login/request 从入口到结束只观察一个 generation；
+- [x] duplicate/out-of-order/rollback/equal-revision-different-hash 均被确定处理；
+- [x] login、public request/connection、QUIC reverse stream 与 UDP session 在各自 work
+  unit 内只观察一个 generation；
 - [ ] A→B→C 收敛后稳定 acceptor 仅向 C dispatch；新端口 bind failure 不改变已提交旧端口，
   被 supersede 的 prepared 资源均释放；
-- [ ] 旧 inflight guard 在新连接加入后 drop，不改变新连接计数；
-- [ ] N 条 tunnel 低于显式 `min_ready` 才 false；低于 desired 但仍达下限时为 degraded；
-- [ ] 稳定 session 后首次断线从初始 backoff 开始，短 flap 才指数增长；
+- [x] 旧 inflight guard 在新连接加入后 drop，不改变新连接计数；
+- [x] N 条 tunnel 低于显式 `min_ready` 才 false；低于 desired 但仍达下限时为 degraded；
+- [x] 稳定 session 后首次断线从初始 backoff 开始，短 flap 才指数增长；
 - [ ] idle keepalive 在 quiesce 后立即退出，所有 typed tracker 最终归零；
 - [ ] 10 万个不同 Host 不增加无界 time series；
 - [ ] UDP upstream/DNS 阻塞时 TCP/H1/H2 p99 不发生跨协议显著退化；
-- [ ] 所有异步队列定义容量、满载策略和指标；所有 retired generation/resource 有上限；
-- [ ] shutdown 与 reload 同时发生时只有一个 owner 执行 fence/drain/close。
+- [x] 本批触达的异步队列/cache/session 定义容量与满载策略；
+- [ ] retired-generation count/age/bytes 与 revoke close unfinished/deadline 指标；
+- [x] shutdown 与 reload 由 listener/security apply gate、generation fence 和 owned
+  close handle 保证单一 owner。
