@@ -1,12 +1,15 @@
 use crate::bootstrap::config::ServerEgressUpstream;
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{info, warn};
 use tunnel_lib::proxy::core::{Context, Protocol, UpstreamResolver};
 use tunnel_lib::proxy::http_connector::SharedHttpConnector;
 use tunnel_lib::proxy::peers::{BasicPeerSpec, HttpPeerSpec, PeerSpec, TlsPeerSpec};
 use tunnel_lib::proxy::tcp::UpstreamScheme;
+use tunnel_lib::proxy::upstream::UpstreamHealthRegistry;
 use tunnel_lib::{HttpClientParams, ProxyError, UpstreamGroup, VhostRouter};
+
 pub struct ServerEgressMap {
     upstreams: HashMap<String, UpstreamGroup>,
     http_rules: VhostRouter<String>,
@@ -14,9 +17,10 @@ pub struct ServerEgressMap {
     dns_cache: tunnel_lib::EgressDnsCache,
 }
 impl ServerEgressMap {
-    pub fn from_config(
+    pub fn from_config_with_health(
         egress: &ServerEgressUpstream,
         http_params: &HttpClientParams,
+        health: Arc<UpstreamHealthRegistry>,
     ) -> anyhow::Result<Self> {
         let mut upstreams = HashMap::new();
         let http_rules = VhostRouter::new();
@@ -26,15 +30,25 @@ impl ServerEgressMap {
                 .iter()
                 .map(|s| s.address.clone())
                 .collect();
-            upstreams.insert(name.clone(), UpstreamGroup::new(servers));
+            upstreams.insert(
+                name.clone(),
+                UpstreamGroup::with_scoped_health_registry(
+                    servers,
+                    Arc::<str>::from(name.as_str()),
+                    health.clone(),
+                ),
+            );
         }
         for rule in &egress.rules.vhost {
             http_rules.add_route(&rule.match_host, rule.action_upstream.clone());
         }
         let https_client = tunnel_lib::create_https_client_with(http_params)?;
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
-        let http_connector =
-            tunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
+        let http_connector = tunnel_lib::proxy::http_connector::HttpConnector::new_with_health(
+            https_client,
+            h2c_client,
+            Some(health),
+        );
         Ok(Self {
             upstreams,
             http_rules,
@@ -50,11 +64,33 @@ impl ServerEgressMap {
         let group = self.upstreams.get(upstream_name).ok_or_else(|| {
             ProxyError::route_not_found(format!("upstream_group={upstream_name}"))
         })?;
-        let upstream_addr = group.next_healthy().ok_or_else(|| {
+        self.resolve_healthy_target(upstream_name, group)
+            .await
+            .map(|(_, target)| target)
+    }
+
+    async fn resolve_healthy_target(
+        &self,
+        upstream_name: &str,
+        group: &UpstreamGroup,
+    ) -> Result<(String, std::net::SocketAddr), ProxyError> {
+        let mut last_error = None;
+        for _ in 0..group.servers.len() {
+            let Some(upstream_addr) = group.next_healthy().cloned() else {
+                break;
+            };
+            let parsed = tunnel_lib::transport::addr::parse_upstream(&upstream_addr);
+            match self.resolve_target_addr(&parsed.connect_addr).await {
+                Ok(target) => return Ok((upstream_addr, target)),
+                Err(error) => {
+                    group.mark_unhealthy(&upstream_addr);
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
             ProxyError::route_not_found(format!("no healthy backends for upstream={upstream_name}"))
-        })?;
-        let parsed = tunnel_lib::transport::addr::parse_upstream(upstream_addr);
-        self.resolve_target_addr(&parsed.connect_addr).await
+        }))
     }
 
     async fn resolve_target_addr(
@@ -107,12 +143,15 @@ impl UpstreamResolver for ServerEgressMap {
             })?
             .clone();
 
-        let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
+        let (scheme, connect_addr_str, _) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
         match context.protocol {
             Protocol::WebSocket => {
                 info!("WebSocket egress, using TCP forwarding");
-                let target_addr = self.resolve_target_addr(&connect_addr_str).await?;
+                let (upstream_addr, target_addr) =
+                    self.resolve_healthy_target(&upstream_name, group).await?;
+                let (scheme, _, tls_host) = UpstreamScheme::from_address(&upstream_addr);
+                let is_https = scheme.requires_tls();
                 let spec = BasicPeerSpec {
                     target_addr,
                     tls: is_https.then(|| TlsPeerSpec {
@@ -133,6 +172,8 @@ impl UpstreamResolver for ServerEgressMap {
                     } else {
                         Protocol::H1
                     },
+                    upstream_name: Some(upstream_name),
+                    upstream_addr_str: Some(upstream_addr),
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -145,6 +186,8 @@ impl UpstreamResolver for ServerEgressMap {
                     } else {
                         Protocol::H2
                     },
+                    upstream_name: Some(upstream_name),
+                    upstream_addr_str: Some(upstream_addr),
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -164,6 +207,10 @@ impl UpstreamResolver for ServerEgressMap {
     ) -> Result<(), ProxyError> {
         match peer {
             PeerSpec::Tcp(spec) => {
+                let mut final_health_identity = spec
+                    .upstream_name
+                    .clone()
+                    .zip(spec.upstream_addr_str.clone());
                 let (tcp_stream, final_tls) = if let (Some(upstream_name), Some(failed_addr)) =
                     (&spec.upstream_name, &spec.upstream_addr_str)
                 {
@@ -185,7 +232,8 @@ impl UpstreamResolver for ServerEgressMap {
 
                         match stream_res {
                             Ok(stream) => {
-                                group.mark_healthy(&current_failed);
+                                final_health_identity =
+                                    Some((upstream_name.clone(), current_failed.clone()));
                                 connected = Some((stream, tcp_peer.tls));
                                 break;
                             }
@@ -194,14 +242,15 @@ impl UpstreamResolver for ServerEgressMap {
                                 group.mark_unhealthy(&current_failed);
                                 last_err = Some(e);
 
-                                if let Some(next_addr) = group.next_healthy() {
-                                    current_failed = next_addr.clone();
+                                let mut replacement_found = false;
+                                while let Some(next_addr) = group.next_healthy().cloned() {
                                     let (scheme, connect_addr_str, tls_host) =
-                                        UpstreamScheme::from_address(&current_failed);
+                                        UpstreamScheme::from_address(&next_addr);
                                     let is_https = scheme.requires_tls();
 
                                     match self.resolve_target_addr(&connect_addr_str).await {
                                         Ok(addr) => {
+                                            current_failed = next_addr;
                                             current_spec.target_addr = addr;
                                             current_spec.tls = is_https.then(|| TlsPeerSpec {
                                                 host: tls_host.unwrap_or_default(),
@@ -209,14 +258,18 @@ impl UpstreamResolver for ServerEgressMap {
                                             });
                                             current_spec.upstream_addr_str =
                                                 Some(current_failed.clone());
+                                            replacement_found = true;
+                                            break;
                                         }
                                         Err(resolve_err) => {
+                                            group.mark_unhealthy(&next_addr);
                                             last_err = Some(std::io::Error::other(
                                                 resolve_err.to_string(),
                                             ));
                                         }
                                     }
-                                } else {
+                                }
+                                if !replacement_found {
                                     break;
                                 }
                             }
@@ -246,6 +299,11 @@ impl UpstreamResolver for ServerEgressMap {
 
                 match final_tls {
                     None => {
+                        if let Some((upstream_name, upstream_addr)) = &final_health_identity {
+                            if let Some(group) = self.upstreams.get(upstream_name) {
+                                group.mark_healthy(upstream_addr);
+                            }
+                        }
                         tunnel_lib::engine::bridge::relay_with_first_data(
                             recv,
                             send,
@@ -263,11 +321,24 @@ impl UpstreamResolver for ServerEgressMap {
                                     e
                                 ))
                             })?;
-                        let tls_stream = tls
-                            .connector
-                            .connect(server_name, tcp_stream)
-                            .await
-                            .map_err(|e| ProxyError::tls_handshake(e.to_string()))?;
+                        let tls_stream = match tls.connector.connect(server_name, tcp_stream).await
+                        {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                if let Some((upstream_name, upstream_addr)) = &final_health_identity
+                                {
+                                    if let Some(group) = self.upstreams.get(upstream_name) {
+                                        group.mark_unhealthy(upstream_addr);
+                                    }
+                                }
+                                return Err(ProxyError::tls_handshake(error.to_string()));
+                            }
+                        };
+                        if let Some((upstream_name, upstream_addr)) = &final_health_identity {
+                            if let Some(group) = self.upstreams.get(upstream_name) {
+                                group.mark_healthy(upstream_addr);
+                            }
+                        }
 
                         tunnel_lib::engine::relay::relay_with_initial(
                             recv,

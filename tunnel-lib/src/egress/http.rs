@@ -89,16 +89,6 @@ pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
     builder.build(http)
 }
 
-#[cfg(test)]
-mod client_construction_tests {
-    use super::*;
-
-    #[test]
-    fn https_client_construction_returns_result() {
-        create_https_client_with(&HttpClientParams::default())
-            .expect("native roots should construct an HTTPS client");
-    }
-}
 pub async fn forward_http(
     mut recv: RecvStream,
     mut send: SendStream,
@@ -274,4 +264,15 @@ pub async fn forward_http(
     debug!(bytes = total_bytes, "response complete");
     send.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod client_construction_tests {
+    use super::*;
+
+    #[test]
+    fn https_client_construction_returns_result() {
+        create_https_client_with(&HttpClientParams::default())
+            .expect("native roots should construct an HTTPS client");
+    }
 }

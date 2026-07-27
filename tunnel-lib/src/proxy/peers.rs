@@ -44,6 +44,8 @@ pub struct HttpPeerSpec {
     pub target_host: String,
     pub scheme: String,
     pub upstream_protocol: Protocol,
+    pub upstream_name: Option<String>,
+    pub upstream_addr_str: Option<String>,
 }
 
 #[derive(Debug, Clone)]
