@@ -7,7 +7,7 @@ use quinn::Connection;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub type OpenWaitObserver = Box<dyn Fn(Duration, OpenBiOutcome) + Send + 'static>;
+pub type OpenWaitObserver = fn(Duration, OpenBiOutcome);
 
 pub struct OpenStreamRequest {
     pub routing_info: RoutingInfo,
@@ -88,7 +88,7 @@ impl ConnectionHandle {
                 ProxyError::quic_open_rejected_overloaded("stream concurrency limit reached")
             })?;
 
-        let mut wait_observer = request.on_wait_done;
+        let wait_observer = request.on_wait_done;
         let mut opened = open_bi_guarded(
             &self.conn,
             &self.connection_state,
@@ -99,7 +99,7 @@ impl ConnectionHandle {
                 limit: self.pending_limit,
             },
             move |elapsed, outcome| {
-                if let Some(observer) = wait_observer.take() {
+                if let Some(observer) = wait_observer {
                     observer(elapsed, outcome);
                 }
             },

@@ -53,6 +53,15 @@ pub async fn run_tcp_accept_loop(
     .await;
     Ok(())
 }
+fn observe_wait_metrics(elapsed: std::time::Duration, outcome: OpenBiOutcome) {
+    metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
+    if matches!(outcome, OpenBiOutcome::TimedOut) {
+        metrics::open_bi_timed_out();
+    } else if matches!(outcome, OpenBiOutcome::RejectedOverloaded) {
+        metrics::open_bi_rejected_overloaded();
+    }
+}
+
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
     mut stream: TcpStream,
@@ -111,14 +120,7 @@ async fn handle_tcp_connection(
                 initial_bytes: None,
                 overload_limits: state.overload_limits().clone(),
                 stream_timeout: open_timeout,
-                on_wait_done: Some(Box::new(|elapsed, outcome| {
-                    metrics::open_bi_observe_wait_ms(elapsed.as_secs_f64() * 1000.0);
-                    if matches!(outcome, OpenBiOutcome::TimedOut) {
-                        metrics::open_bi_timed_out();
-                    } else if matches!(outcome, OpenBiOutcome::RejectedOverloaded) {
-                        metrics::open_bi_rejected_overloaded();
-                    }
-                })),
+                on_wait_done: Some(observe_wait_metrics),
             })
             .await
         {
