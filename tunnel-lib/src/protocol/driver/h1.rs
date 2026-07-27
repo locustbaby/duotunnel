@@ -18,8 +18,8 @@ struct Reclaim {
 pub struct Http1Driver {
     send: SendStream,
     recv: Option<RecvStream>,
-    scheme: String,
-    authority: String,
+    scheme: http::uri::Scheme,
+    authority: http::uri::Authority,
     read_buf: BytesMut,
     inflight_reclaim: Option<oneshot::Receiver<Reclaim>>,
     pub should_close: bool,
@@ -38,11 +38,13 @@ impl Http1Driver {
         if let Some(data) = initial_bytes {
             read_buf.extend_from_slice(&data);
         }
+        let parsed_scheme = scheme.parse::<http::uri::Scheme>().unwrap_or(http::uri::Scheme::HTTP);
+        let parsed_authority = authority.parse::<http::uri::Authority>().unwrap_or_else(|_| http::uri::Authority::from_static("127.0.0.1"));
         Self {
             send,
             recv: Some(recv),
-            scheme,
-            authority,
+            scheme: parsed_scheme,
+            authority: parsed_authority,
             read_buf,
             inflight_reclaim: None,
             should_close: false,
@@ -213,8 +215,14 @@ impl ProtocolDriver for Http1Driver {
                             "request line without method or target".to_string(),
                         ));
                     };
-                    let uri_str = format!("{}://{}{}", self.scheme, self.authority, path);
-                    let Ok(uri) = uri_str.parse::<Uri>() else {
+                    let mut parts = http::uri::Parts::default();
+                    parts.scheme = Some(self.scheme.clone());
+                    parts.authority = Some(self.authority.clone());
+                    let Ok(pq) = path.parse::<http::uri::PathAndQuery>() else {
+                        break Err((RESP_400, format!("unparsable request target: {path}")));
+                    };
+                    parts.path_and_query = Some(pq);
+                    let Ok(uri) = Uri::from_parts(parts) else {
                         break Err((RESP_400, format!("unparsable request target: {path}")));
                     };
                     let Ok(method) = Method::from_bytes(method_str.as_bytes()) else {
