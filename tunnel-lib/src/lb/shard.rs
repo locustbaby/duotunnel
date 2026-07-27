@@ -5,37 +5,13 @@ use crate::lb::inflight::pick_p2c_inflight;
 pub const DEFAULT_P2C_THRESHOLD: usize = 32;
 pub const DEFAULT_P2C_MAX_RETRIES: usize = 3;
 
-struct FnvHasher(u64);
-
-impl Default for FnvHasher {
-    #[inline]
-    fn default() -> Self {
-        FnvHasher(14695981039346656037)
-    }
-}
-
-impl Hasher for FnvHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.0 ^= byte as u64;
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-}
-
 pub fn stable_shard_index<T: Hash + ?Sized>(value: &T, shard_count: usize) -> usize {
     let shard_count = shard_count.max(1);
     if shard_count == 1 {
         return 0;
     }
 
-    let mut hasher = FnvHasher::default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     (hasher.finish() as usize) % shard_count
 }

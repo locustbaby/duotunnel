@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use crossbeam_queue::ArrayQueue;
 use quinn::{RecvStream, SendStream};
 use std::cell::RefCell;
@@ -159,6 +159,7 @@ where
 {
     let mut buf = BytesMut::with_capacity(buffer_size);
     let mut copied = 0u64;
+    let copy_threshold = buffer_size / 4;
     loop {
         if buf.capacity() < buffer_size {
             buf.reserve(buffer_size);
@@ -167,7 +168,15 @@ where
         if read == 0 {
             break;
         }
-        let chunk = buf.split().freeze();
+        
+        let chunk = if buf.len() < copy_threshold {
+            let chunk_bytes = Bytes::copy_from_slice(&buf[..]);
+            buf.clear();
+            chunk_bytes
+        } else {
+            buf.split().freeze()
+        };
+
         writer.write_chunk(chunk).await.map_err(|e| std::io::Error::other(e))?;
         copied += read as u64;
     }
