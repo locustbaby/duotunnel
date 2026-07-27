@@ -1,9 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Body as _;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode, Uri, Version};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -16,7 +15,7 @@ use tunnel_lib::plugin::{
     RouteResolver, ServerCtx,
 };
 use tunnel_lib::transport::listener::RouteTarget;
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{EmptyBodyRetryTemplate, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection, SharedRegistry};
 
@@ -24,14 +23,6 @@ use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection
 struct CachedSender {
     selected: Arc<SelectedConnection>,
     sender: tunnel_lib::H2Sender,
-}
-
-#[derive(Clone)]
-struct RetryableRequest {
-    method: Method,
-    uri: Uri,
-    version: Version,
-    headers: hyper::HeaderMap,
 }
 
 fn error_response(err: &ProxyError) -> Response<tunnel_lib::proxy::h2_proxy::BoxBody> {
@@ -126,23 +117,6 @@ fn invalidate_sender_if_matches(
     {
         guard.remove(route_target);
     }
-}
-
-fn build_retry_request(
-    template: &RetryableRequest,
-) -> Request<tunnel_lib::proxy::h2_proxy::BoxBody> {
-    let mut req = Request::builder()
-        .method(template.method.clone())
-        .uri(template.uri.clone())
-        .version(template.version)
-        .body(
-            http_body_util::Empty::<bytes::Bytes>::new()
-                .map_err(|never| match never {})
-                .boxed(),
-        )
-        .expect("Failed to build retry request");
-    *req.headers_mut() = template.headers.clone();
-    req
 }
 
 #[async_trait]
@@ -267,13 +241,6 @@ impl IngressProtocolHandler for H2cHandler {
                         }
                     };
 
-                let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
-                    method: req.method().clone(),
-                    uri: req.uri().clone(),
-                    version: req.version(),
-                    headers: req.headers().clone(),
-                });
-
                 let (parts, body) = req.into_parts();
                 debug!(
                     "L7 Proxy (plaintext H2): {} {} -> {}",
@@ -288,6 +255,7 @@ impl IngressProtocolHandler for H2cHandler {
                 };
                 let boxed_body = body.map_err(std::io::Error::other).boxed();
                 let upstream_req = Request::from_parts(parts, boxed_body);
+                let retryable_request = EmptyBodyRetryTemplate::from_request(&upstream_req);
                 match tunnel_lib::forward_h2_request(
                     sender_entry.selected.handle.as_ref(),
                     &sender_entry.sender,
@@ -320,7 +288,7 @@ impl IngressProtocolHandler for H2cHandler {
                                 get_or_create_sender(&sender_cache, &registry, &route_target)
                             {
                                 metrics.incr("duotunnel_h2c_retry_total", &[("result", "attempt")]);
-                                let retry_req = build_retry_request(template);
+                                let retry_req = template.build();
                                 match tunnel_lib::forward_h2_request(
                                     retry_entry.selected.handle.as_ref(),
                                     &retry_entry.sender,

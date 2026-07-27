@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Body;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -10,7 +9,7 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError, RouteTarget};
+use tunnel_lib::{EmptyBodyRetryTemplate, OpenStreamRequest, ProxyError, RouteTarget};
 
 use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection, SharedRegistry};
 
@@ -127,13 +126,6 @@ impl IngressProtocolHandler for TlsHandler {
             let src_addr = src_addr.clone();
             let overload = overload.clone();
             async move {
-                let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
-                    method: req.method().clone(),
-                    uri: req.uri().clone(),
-                    version: req.version(),
-                    headers: req.headers().clone(),
-                });
-
                 let (mut parts, body) = req.into_parts();
                 let mut uri_parts = parts.uri.clone().into_parts();
                 if let Ok(authority) = target_host.parse() {
@@ -161,6 +153,7 @@ impl IngressProtocolHandler for TlsHandler {
 
                 let boxed_body = body.map_err(std::io::Error::other).boxed();
                 let upstream_req = Request::from_parts(parts, boxed_body);
+                let retryable_request = EmptyBodyRetryTemplate::from_request(&upstream_req);
 
                 let mut attempts = 0;
                 let max_attempts = 3;
@@ -189,10 +182,10 @@ impl IngressProtocolHandler for TlsHandler {
                             .take()
                             .expect("current_req should be available on attempt 1")
                     } else if let Some(template) = &retryable_request {
-                        build_retry_request(template)
+                        template.build()
                     } else {
                         let err = ProxyError::upstream_forward(
-                            "cannot retry request with body".to_string(),
+                            "request is not eligible for automatic retry".to_string(),
                         );
                         return Ok(error_response(&err));
                     };
@@ -262,30 +255,6 @@ impl IngressProtocolHandler for TlsHandler {
         }
         Ok(())
     }
-}
-
-struct RetryableRequest {
-    method: hyper::Method,
-    uri: hyper::Uri,
-    version: hyper::Version,
-    headers: hyper::HeaderMap,
-}
-
-fn build_retry_request(
-    template: &RetryableRequest,
-) -> Request<tunnel_lib::proxy::h2_proxy::BoxBody> {
-    let mut req = Request::builder()
-        .method(template.method.clone())
-        .uri(template.uri.clone())
-        .version(template.version)
-        .body(
-            http_body_util::Empty::<bytes::Bytes>::new()
-                .map_err(|never| match never {})
-                .boxed(),
-        )
-        .expect("Failed to build retry request");
-    *req.headers_mut() = template.headers.clone();
-    req
 }
 
 fn error_response(err: &ProxyError) -> Response<tunnel_lib::proxy::h2_proxy::BoxBody> {

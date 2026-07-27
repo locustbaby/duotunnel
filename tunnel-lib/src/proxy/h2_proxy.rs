@@ -2,9 +2,9 @@ use crate::{ConnectionHandle, OpenStreamRequest, QuinnStream};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use hyper::client::conn::http2::{Builder as H2ClientBuilder, SendRequest};
-use hyper::{Request, Response};
+use hyper::{Method, Request, Response, Uri, Version};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -12,6 +12,52 @@ use tracing::debug;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
 type CachedSendRequest = Arc<Option<SendRequest<BoxBody>>>;
+
+#[derive(Clone)]
+pub struct EmptyBodyRetryTemplate {
+    method: Method,
+    uri: Uri,
+    version: Version,
+    headers: hyper::HeaderMap,
+}
+
+impl EmptyBodyRetryTemplate {
+    pub fn from_request<B>(request: &Request<B>) -> Option<Self>
+    where
+        B: hyper::body::Body,
+    {
+        (is_automatic_retry_safe_method(request.method()) && request.body().is_end_stream()).then(
+            || Self {
+                method: request.method().clone(),
+                uri: request.uri().clone(),
+                version: request.version(),
+                headers: request.headers().clone(),
+            },
+        )
+    }
+
+    pub fn build(&self) -> Request<BoxBody> {
+        let mut request = Request::builder()
+            .method(self.method.clone())
+            .uri(self.uri.clone())
+            .version(self.version)
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .expect("failed to rebuild validated retry request");
+        *request.headers_mut() = self.headers.clone();
+        request
+    }
+}
+
+fn is_automatic_retry_safe_method(method: &Method) -> bool {
+    // TRACE is safe per HTTP semantics, but automatic replay is intentionally
+    // opt-in only because it reflects request metadata and this proxy has no
+    // explicit TRACE security policy.
+    matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
+}
 
 pub struct H2SenderCache {
     sender: ArcSwap<Option<SendRequest<BoxBody>>>,
@@ -135,4 +181,74 @@ where
         parts,
         body.map_err(std::io::Error::other).boxed(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::{Empty, Full};
+    use hyper::body::Body;
+
+    fn empty_request(method: Method) -> Request<Empty<Bytes>> {
+        Request::builder()
+            .method(method)
+            .uri("https://example.test/resource")
+            .header("x-retry-test", "preserved")
+            .body(Empty::new())
+            .unwrap()
+    }
+
+    #[test]
+    fn retry_template_accepts_only_allowlisted_safe_methods() {
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(
+                EmptyBodyRetryTemplate::from_request(&empty_request(method.clone())).is_some(),
+                "{method} should be eligible for automatic replay"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_template_rejects_unsafe_or_non_allowlisted_methods_even_with_empty_body() {
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::CONNECT,
+            Method::TRACE,
+        ] {
+            assert!(
+                EmptyBodyRetryTemplate::from_request(&empty_request(method.clone())).is_none(),
+                "{method} should not be eligible for automatic replay"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_template_rejects_non_empty_safe_request() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://example.test/resource")
+            .body(Full::new(Bytes::from_static(b"body")))
+            .unwrap();
+
+        assert!(EmptyBodyRetryTemplate::from_request(&request).is_none());
+    }
+
+    #[test]
+    fn retry_template_rebuilds_request_metadata_with_empty_body() {
+        let request = empty_request(Method::GET);
+        let template = EmptyBodyRetryTemplate::from_request(&request).unwrap();
+        let rebuilt = template.build();
+
+        assert_eq!(rebuilt.method(), request.method());
+        assert_eq!(rebuilt.uri(), request.uri());
+        assert_eq!(rebuilt.version(), request.version());
+        assert_eq!(
+            rebuilt.headers().get("x-retry-test"),
+            request.headers().get("x-retry-test")
+        );
+        assert!(rebuilt.body().is_end_stream());
+    }
 }

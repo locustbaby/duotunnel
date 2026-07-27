@@ -1,5 +1,6 @@
 use super::core::Protocol;
 use super::h2::serve_h2_forward;
+use super::h2_proxy::EmptyBodyRetryTemplate;
 use super::http::HttpPeer;
 use super::peers::HttpPeerSpec;
 use crate::egress::http::{H2cClient, HttpsClient};
@@ -8,7 +9,7 @@ use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::BodyExt;
 use quinn::{RecvStream, SendStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,14 +19,6 @@ use tracing::debug;
 const PREFER_H1_TTL: Duration = Duration::from_secs(300);
 
 pub type SharedHttpConnector = Arc<HttpConnector>;
-
-#[derive(Clone)]
-struct RetryableRequest {
-    method: hyper::Method,
-    uri: hyper::Uri,
-    version: hyper::Version,
-    headers: hyper::HeaderMap,
-}
 
 pub struct HttpConnector {
     https_client: HttpsClient,
@@ -60,23 +53,6 @@ impl HttpConnector {
     fn mark_prefer_h1(&self, spec: &HttpPeerSpec) {
         let key = Self::cache_key(spec);
         self.prefer_h1.insert(key, Instant::now());
-    }
-
-    fn build_retry_request(
-        template: &RetryableRequest,
-    ) -> hyper::Request<super::h2_proxy::BoxBody> {
-        let mut req = hyper::Request::builder()
-            .method(template.method.clone())
-            .uri(template.uri.clone())
-            .version(template.version)
-            .body(
-                Empty::<Bytes>::new()
-                    .map_err(|never| match never {})
-                    .boxed(),
-            )
-            .expect("Failed to build retry request");
-        *req.headers_mut() = template.headers.clone();
-        req
     }
 
     fn box_response<RespBody>(
@@ -161,15 +137,9 @@ impl HttpConnector {
     {
         let can_try_h2c = spec.scheme == "http" && matches!(spec.upstream_protocol, Protocol::H2);
         let prefer_h1 = can_try_h2c && self.gc_prefer_h1(&Self::cache_key(spec));
-        let retryable_request =
-            (can_try_h2c && !prefer_h1 && request.body().is_end_stream()).then(|| {
-                RetryableRequest {
-                    method: request.method().clone(),
-                    uri: request.uri().clone(),
-                    version: request.version(),
-                    headers: request.headers().clone(),
-                }
-            });
+        let retryable_request = (can_try_h2c && !prefer_h1)
+            .then(|| EmptyBodyRetryTemplate::from_request(&request))
+            .flatten();
         let (parts, body) = request.into_parts();
         let boxed_body = body
             .map_frame(|f| f.map_data(Into::into))
@@ -191,11 +161,7 @@ impl HttpConnector {
                     self.mark_prefer_h1(spec);
                     if let Some(template) = retryable_request.as_ref() {
                         debug!(target = %spec.target_host, "cleartext h2c request failed; retrying once with H1");
-                        match self
-                            .https_client
-                            .request(Self::build_retry_request(template))
-                            .await
-                        {
+                        match self.https_client.request(template.build()).await {
                             Ok(resp) => return Ok(Self::box_response(resp)),
                             Err(retry_err) => {
                                 return Err(ProxyError::http_upstream_request(

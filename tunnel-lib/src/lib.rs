@@ -59,7 +59,7 @@ pub use protocol::sniff::{
     H2cDetector, Http1Detector, ProtocolDetector, SniffOutcome, SniffPolicy, SniffPrefix,
     SniffResult, SniffRuntime, SniffStream, TlsClientHelloDetector,
 };
-pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
+pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, EmptyBodyRetryTemplate, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::accept::{run_accept_worker, AcceptedConn};
