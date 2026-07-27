@@ -77,9 +77,12 @@ where T: Clone, H: Fn(&T)->bool, I: Fn(&T)->usize {
 }
 ```
 
-`ClientGroup::select_healthy` 改为调 `pick_p2c_across_shards`(读全部 shard 的
-`ArcSwap::load`,N=核数,量级小);`EntryConnPool` 同改。**`shard_count=1` 时行为与现状
-逐字节一致**(08 §2.7 已论证)。
+`ClientGroup::select_healthy` 改为调 `pick_p2c_across_shards`（读全部 shard 的
+`ArcSwap::load`，N=核数）；clone 出最终 `Arc<ConnectionHandle>` 后立即释放所有 snapshot
+guard，禁止跨 await 持有。随机样本均 unhealthy 时执行有界 fallback scan，避免其他
+shard 明明有健康连接却返回 None。`shard_count=1` 时要求**选择语义等价**，不承诺实现
+或随机序列“逐字节相同”。跨 shard 前必须先完成 D9 的 owned ConnectionState，避免
+旧快照延长 slot ABA。
 
 ### 3.3 egress upstream 接入统一 LB
 
@@ -93,13 +96,22 @@ where T: Clone, H: Fn(&T)->bool, I: Fn(&T)->usize {
 
 ```rust
 pub enum RequestOutcome { Success, ServerError(u16), Timeout, ConnectError, Cancelled }
-pub enum BackendHealth { Healthy { weight: u32 }, Ejected { until: Instant } }
+pub struct BackendId {
+    pub upstream_id: Arc<str>,
+    pub address: SocketAddr,
+    pub config_fingerprint: [u8; 32],
+}
+pub enum BackendHealth {
+    Healthy { weight: u32 },
+    Ejected { until: Instant, epoch: u64 },
+    HalfOpen { epoch: u64, remaining_probes: u32, weight: u32 },
+}
 
 pub trait OutlierDetector: Send + Sync + 'static {
     /// 每请求结果回传(按后端聚合)。
-    fn record(&self, backend: &str, outcome: RequestOutcome);
+    fn record(&self, backend: &BackendId, outcome: RequestOutcome);
     /// 供选择读取:健康(含慢启动权重)或被剔除。
-    fn health(&self, backend: &str) -> BackendHealth;
+    fn health(&self, backend: &BackendId) -> BackendHealth;
 }
 ```
 
@@ -108,8 +120,12 @@ pub trait OutlierDetector: Send + Sync + 'static {
   超阈值——**不再只看 connect**;
 - **退避**:剔除时长随连续失败**指数增长**(base→max),而非固定 10s;
 - **恢复**:剔除到期后进入**半开探测**(主动探 or 首个试探请求成功才转健康),
-  **不到期即自动恢复**(修 09 §4.2 的 flapping);
+  **到期不自动恢复**(修 09 §4.2 的 flapping);
 - **慢启动**:恢复后 `weight` 在窗口内线性爬升(避免 thundering)。
+
+record 路径必须为常数时间的分片原子/有界状态更新，禁止每次失败获取全局锁或 spawn
+task。状态变更携带单调 epoch；探测完成以 CAS 校验 epoch，旧 probe、取消或超时不得
+覆盖新一轮剔除。`Cancelled` exactly-once 记为取消，不计后端失败。
 
 ### 4.2 outcome 回传通道(依赖 D1)
 
@@ -117,8 +133,11 @@ pub trait OutlierDetector: Send + Sync + 'static {
 - L7:D1 的 `on_response`(拿到 status)+ 终态(上游错误/超时)→ 映射 `RequestOutcome`;
 - relay/连接:`open_stream`/relay 的 Err 分类(已有 `ProxyError.kind`)→ `ConnectError`
   等。
-统一经一个 `record(backend, outcome)` 汇入 OutlierDetector。**backend 粒度按上游地址,
-非按 QUIC 连接**(H2 一连多请求要按后端归因)。
+统一经一个 `record(backend, outcome)` 汇入 OutlierDetector。backend identity 使用稳定
+`BackendId(upstream_id, resolved SocketAddr, config_fingerprint)`，不能只用 hostname、
+瞬时 generation 或 QUIC 连接。同 fingerprint 热更新必须迁移健康状态；地址、TLS、
+权重语义等 fingerprint 变化以及删除时必须清理，状态表有总容量和 retire TTL。
+H2 multiplex error、客户端取消和 backend failure 必须分别归因。
 
 ### 4.3 与连接选择健康的关系
 
@@ -135,7 +154,7 @@ pub trait RetryPolicy: Send + Sync + 'static {
     fn is_retryable(&self, outcome: &RequestOutcome, idempotent: bool) -> bool;
     fn per_try_timeout(&self) -> Duration;
 }
-pub struct RetryBudget { /* 滑窗: retries / requests, per-core 聚合 */ }
+pub struct RetryBudget { /* per cluster/route 的滑窗或 token bucket，striped atomic */ }
 impl RetryBudget {
     pub fn on_request(&self);            // 每请求计数
     pub fn try_acquire_retry(&self) -> bool; // 重试前查:retries/requests ≤ ratio?
@@ -147,9 +166,21 @@ impl RetryBudget {
 - handler 重试循环(`h1/mod.rs`、`tls/mod.rs`、`proxy/http.rs` HttpPeer)改为:
   首次请求照发;失败后**先 `budget.try_acquire_retry()`**,超预算(默认 20%)则**停止
   重试、快速失败**(而非固定 3 次)。
-- `is_retryable`:仅 connect/timeout/幂等的 5xx 可重试;带 body 的非幂等请求不重试
-  (现有 `tls/mod.rs:173-180` 已有此约束,纳入 RetryPolicy)。
-- `RetryBudget` 计数是热路径原子 → **per-core 近似聚合**(同 02 K1),scrape 求和。
+- `is_retryable` 同时检查 method、错误阶段和 replay policy：默认只自动重试安全/幂等
+  method 的 pre-dispatch 或明确可重放错误。**现有 `body.is_end_stream()` 约束不足**：
+  空 body POST/PATCH/DELETE 仍可能已在上游执行；post-dispatch/ambiguous failure 默认
+  不重试，除非业务显式 opt-in/Idempotency-Key。
+- `RetryBudget` 至少按 cluster/route 分 scope，避免一个 noisy route 吃光全局预算；
+  admission 使用原子 token/striped atomic，不能 check-then-increment 超卖。Tokio task
+  会迁移，禁止把“当前 worker”直接当稳定 per-core identity。低流量/启动期还需定义
+  minimum retry floor 与窗口老化。
+- protocol fallback 同样计入一个 overall retry budget；每次尝试有 per-try timeout，
+  所有尝试共享 overall deadline，取消向上传播。
+- 重试优先选择另一个 eligible backend；只有唯一后端且持有受限 half-open probe lease
+  时才允许重试同一目标。收到可重试 5xx 后必须 drain 或显式 dispose response body，
+  再发下一次尝试，避免泄漏连接/flow-control credit。
+- `request_total` 与 `attempt_total` 分开；ratio、minimum floor、window、token 上限均有
+  checked bounds，配置不能制造无限启动 token 或除零/溢出。
 
 ### 5.3 与熔断的关系
 
@@ -160,15 +191,16 @@ impl RetryBudget {
 
 | 场景 | 处理 |
 | --- | --- |
-| `shard_count=1`(CI/单核) | 跨 shard P2C 退化为单快照 P2C,**与现状逐字节一致** |
-| 全部候选不健康 | fail-open:选最不坏者(或按现有 `next()` 兜底),记指标,不返回 None 断服 |
-| 单后端 group | outlier 不把唯一后端剔到零(保留 fail-open) |
+| `shard_count=1`(CI/单核) | 跨 shard P2C 退化为单快照 P2C，保持选择语义等价 |
+| 全部候选不健康 | 全部保持 `Ejected`；仅以 deterministic least-bad 选择一个受低并发/单 probe lease 限制的候选，不能改回 Healthy 或恢复满流量 |
+| 单后端 group | 仍保持 `Ejected`；只允许受限 probe/fail-open，不伪造健康 |
 | H2 一连多请求的 outcome 归因 | 按**上游后端地址**记录,非按 QUIC 连接 |
 | 健康状态跨路由热重载丢失 | `ServerEgressMap` 重建 `UpstreamGroup` 会清空 unhealthy(09 §4.2 corner);设计:重建时迁移健康态,或接受一次探测窗口 |
 | 慢启动与突发 | 恢复后 weight 线性爬升;爬升期遇新故障立即重新剔除 |
 | 重试与 unregister 叠加 | h1 失败即 unregister 换连接(`h1/mod.rs:97`),重试换连接正确;预算限制"换后继续重试"的总量 |
-| 非幂等请求 | RetryPolicy 拒绝重试(保留现有 body 约束) |
-| 预算计数竞争 | per-core 聚合,避免热路径共享缓存行 |
+| 非幂等请求 | 空 body 也不自动重试；仅显式业务策略/Idempotency-Key 可 opt-in |
+| ambiguous failure | 无法证明请求未发送时默认不重试；不能只依据 body 或错误字符串 |
+| 预算计数竞争 | striped atomic/token bucket；量化最大超卖，不依赖当前 worker identity |
 | affinity_key 冲突/倾斜 | 一致性哈希用有界虚节点;倾斜时回退 P2C |
 
 ## 7. 论证 / 备选
@@ -201,17 +233,21 @@ impl RetryBudget {
 | 阶段 | 内容 | 依赖 | 测试 |
 | --- | --- | --- | --- |
 | P1 | 统一算法核心 + Candidate/LoadBalancer;local/egress upstream 走它(配置=现状 RR) | — | 与现状等价回归 |
-| P2 | **08 修复**:跨 shard P2C;registry/pool 接入 | — | 跨 shard 均衡(变异系数<20%)、shard_count=1 逐字节回归 |
+| P2 | **08 修复**:跨 shard P2C;registry/pool 接入 | **D9 owned ConnectionState** | 跨 shard 均衡、churn/关闭重选、shard_count=1 语义回归 |
 | P3 | OutlierDetector + outcome 回传(经 D1) | **D1** | brownout 剔除、指数退避、半开恢复、慢启动、单后端 fail-open |
-| P4 | RetryBudget 接入重试循环 | — | 预算封顶重试放大、非幂等不重试 |
+| P4 | RetryPolicy + RetryBudget 接入重试循环 | — | method/dispatch phase 正确；预算封顶重试放大 |
 | P5(可选) | 加权/一致性哈希/sticky + 连接级 outlier | P1-P4 | 权重分配、亲和命中、倾斜回退 |
 
 ## 10. 验收
 
 - [ ] `shard_count>1` 下一 group 的多 client 流量近似均衡(08 修复,变异系数<20%);
-- [ ] `shard_count=1` 回归逐字节一致;
+- [ ] `shard_count=1` 选择语义一致，不要求随机序列或实现逐字节一致;
 - [ ] 后端 brownout(持续 5xx/超时)被 outlier 剔除、指数退避、探测确认恢复、慢启动;
 - [ ] 后端集体 brownout 时对后端重试放大 ≤ 预算(默认 20%,当前 3×);
+- [ ] 空 body POST/PATCH/DELETE 在 ambiguous failure 后不会被默认重放;
 - [ ] 选择策略可配(RR/P2C/加权/一致性哈希),四处走同一套算法;
 - [ ] outcome 按后端归因(非按 QUIC 连接)。
+- [ ] P2C 对 total length 使用 checked arithmetic、两个样本互异且无模偏；关闭候选只做
+  有界重选，最终 fallback 可终止；
+- [ ] 同 fingerprint 热更新迁移健康态；变化/删除清理，长期 reload 后状态表仍有界。
 ```

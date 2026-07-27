@@ -478,7 +478,8 @@ buffer 的场景仍可显式配置。相比"下调固定值"，`None` 恢复自�
 - **UDP 收发批量化**：quinn 的 GSO/GRO 已覆盖，见 [03](./03-io-uring-assessment.md)。
 - **io_uring**：**已否决**（决策 D-12）。否决理由不是忽视批处理收益，而是生态契约：
   tokio/quinn/hyper 全为 readiness 模型、pingora 亦未采用、QUIC 的 UDP 已批量化，
-  5–15% 收益需重写 I/O 层并牺牲 seccomp 部署自由度。
+  且需重写 I/O 层并牺牲 seccomp 部署自由度。此前引用的 5–15% 是外部理论区间，
+  没有 DuoTunnel 实测依据，已由 14/D10 撤回，不参与优先级排序。
 
 **量级校准（决定该不该做的关键）**：1 核 8k QPS 的预算是 125 µs/req，L7 侧实测估算
 25–55 µs/req（§2）。合并几次流写量级在 **1–3 µs/req**。相比之下同一份分析里的

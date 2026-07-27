@@ -170,8 +170,11 @@ metrics label 扩展，~1-2 天；影响所有 HTTP 转发路径，需回归 hea
 - **全部后端不健康**：`next_healthy` 兜底 `self.next()`（:108）返回一个"明知不健康"
   的后端硬试——保留（fail-open 比无处可去好），但应记指标。
 - **单后端 group**：剔除=无处可去，outlier 阈值需避免把唯一后端剔没（保留 fail-open）。
-- **探测任务泄漏**：`mark_unhealthy` 每次 spawn 一个 detached 探测（:32）——并入
-  TODO-96 结构化任务；重复 `mark_unhealthy` 已用 `contains_key`(:25) 去重，OK。
+- **探测任务与过期状态**：`mark_unhealthy` 每次 spawn 一个 detached 探测（:32）——
+  并入 TODO-96 结构化任务。`contains_key`(:25) 并不是正确去重：`is_healthy` 在 TTL
+  到期后仅返回 true、不删除 entry；若主动探测持续失败，后续 `mark_unhealthy` 会因
+  旧 key 仍存在而永久跳过，无法刷新剔除时间。应改为带 generation 的
+  `Healthy/Ejected/HalfOpen` 状态机与 single-flight probe，详见 14 §5.2 / D2。
 - **DNS 变化**：探测用的地址在 DNS 轮换后可能过期；恢复探测应重解析（现 :51-52 有
   lookup 分支）。
 - **健康状态跨 snapshot 重建丢失**：`ServerEgressMap` 在路由热重载时重建
@@ -209,8 +212,9 @@ h2c→h1 一次回退。**没有任何全局/时间窗口的重试预算**（ret
 互补手段（按后端短路）；两者可先做预算（全局、简单）再做熔断（每后端、状态更多）。
 
 **场景覆盖 & Corner Cases**：
-- **幂等性**：当前重试对带 body 的请求已有约束（`tls/mod.rs:173-180` 不可重试有 body
-  的请求）——预算不改变幂等语义，只限重试**总量**。
+- **幂等性**：当前仅以 body 是否为空决定能否重放，并不等价于幂等；空 body
+  POST/PATCH/DELETE 仍可能在上游已执行后重试。预算之外还必须按 method、失败发生在
+  pre/post-dispatch 的位置和显式 Idempotency-Key/策略决定，详见 14 §5.1 / D2。
 - **重试与 unregister 叠加**：`h1` 失败即 `unregister` 连接（:97），重试换连接是对的；
   预算限制的是"换后还继续重试"的次数总量。
 - **预算计数的一致性开销**：全局比值计数是热路径原子——用 per-core 近似聚合（同 02 K1）。

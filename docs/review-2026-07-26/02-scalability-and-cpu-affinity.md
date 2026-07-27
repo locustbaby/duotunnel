@@ -17,14 +17,20 @@
 
 | 问题 | 一句话答案 |
 | --- | --- |
-| 线性扩展差什么？ | **主串行点是 quinn 单 Endpoint 的收包（S1），不是 tokio 调度器**；其次是共享 hyper 池（S2）与全局计数（K1）。解掉这三个即可，**不必先换运行时模型**。 |
+| 线性扩展差什么？ | 单 Endpoint、共享 hyper 池、全局计数都是候选点；**静态代码不能判定谁是主瓶颈**。先闭合 D9/M0、建立可信基线和协议分层 profile，再选择扩展方案。 |
 | Actor mode 是否正确手段？ | **管写对、推广到数据面错**：actor 管控制面状态突变（registry/conn pool）是对的，把 actor 铺到数据面（per-request、channel 传数据块）不能带来线性扩展，正确抓手是 per-core 分片所有权。 |
 | 绑核如何设计？ | **cpuset 隔离 + 进程内 pin**：CI 用 `AllowedCPUs`（cpuset）替代 `CPUQuota` 消除节流毛刺，进程内用 `on_thread_start` + `sched_setaffinity` 让 worker 1:1 定核（tokio **不默认**绑核）。 |
 
 > **2026-07-26 二轮修正**：初版把 per-core 运行模式（Phase C）列为线性扩展的主要
 > 抓手。经 §3.5 的 tokio 争抢分析与 §2 的 quinn 内部分工核对后修正为：
-> **tokio work-stealing 不是主因，单 Endpoint 收包才是**。因此
-> **Phase B（多 Endpoint）优先级提到最前，Phase C 降为最后手段**（见 §4）。
+> 静态代码只能证明两者都是候选，不能判断谁是主因。因此
+> **Phase B（多 Endpoint）与 Phase C 均降为 profile-gated 实验**（见 §4）。
+>
+> **2026-07-27 三轮修正（覆盖上段的优先级结论）**：quinn 分工只能证明单 Endpoint
+> 是候选串行段，不能证明它在当前负载中占主导。新增复核还确认了 UDP 慢路径阻塞
+> stream accept、inflight slot/内存、readiness 和 buffer 配置等更直接的问题。因此
+> 路线改为 **D9/M0 → cpuset 可信基线 + D10 确定热点 → profile → 条件触发 Phase B →
+> 最后才评估 Phase C**。详见 14、D9、D10。
 
 ---
 
@@ -53,7 +59,7 @@ nginx worker、envoy worker thread、pingora `NoSteal` runtime 都是这个形�
 | # | 共享/串行点 | 位置 | 影响等级 |
 | --- | --- | --- | --- |
 | **S0** | **ctld 模式下整条公网 ingress 数据面跑在单线程 runtime 上**（2026-07-26 实测新增，见下方补录） | `listener_mgr.rs` 的 `tokio::spawn` + `control_client.rs:233` `apply_snapshot` 调用链 | **最高·已修复**——比 S1 更靠前的硬串行点 |
-| S1 | **每进程单 quinn Endpoint（单 UDP socket）**：所有 QUIC 包**收包**经一个 endpoint driver task（详见 §2.1） | server `handlers/quic.rs:23-28`；client `endpoint.rs:24-31`（`pool.rs:23` 全部 supervisor 共享同一 clone） | **最高**——不可分割的串行段，决定扩展上限 |
+| S1 | **每进程单 quinn Endpoint（单 UDP socket）**：所有 QUIC 包**收包**经一个 endpoint driver task（详见 §2.1） | server `handlers/quic.rs:23-28`；client `endpoint.rs:24-31`（`pool.rs:23` 全部 supervisor 共享同一 clone） | **候选高影响**——是否决定当前上限必须 profile |
 | S2 | hyper 共享连接池：`HttpsClient`/`H2cClient` 各一个进程级实例，per-host idle 列表内部有锁；8k rps 全打同一 host 时 checkout/checkin 全核过同一把锁 | `egress/http.rs:51-89`（进程级构建）、`LocalProxyMap`/`ServerEgressMap` 各持一份 | 中-高（QPS 越高越陡） |
 | K1 | 全局原子计数在热路径写共享缓存行：`accepted_connections_active`（每连接 ±1）、`stream_pending_queue_depth`（每排队 stream ±1） | `infra/metrics.rs:5-39`、`accept.rs:37`、`open_bi.rs:65-73` | 中（核数↑线性放大一致性流量） |
 | K2 | relay buffer 全局回退池 `ArrayQueue(1024)`（thread-local 满 8 个后跨核 push/pop） | `copy.rs:11-14,46-68` | 低-中 |
@@ -61,9 +67,9 @@ nginx worker、envoy worker thread、pingora `NoSteal` runtime 都是这个形�
 | — | ArcSwap 路由快照、DashMap registry/dns/prefer_h1、每 worker 独立 SO_REUSEPORT listener、thread-local PeekBufPool | 多处 | ✅ 已是无锁/分片正确形态 |
 | — | actor（registry/EntryConnPool 突变） | `registry.rs:93`、`conn_pool.rs:87` | ✅ 仅冷路径，不在 σ 里 |
 
-**结论**：数据面读路径的无锁化（ArcSwap/DashMap/P2C/thread-local pool）已经做得
-相当好；剩下的线性扩展障碍集中在 **S1（单 endpoint）、S2（共享 hyper 池）、
-K1（全局计数）**——注意 tokio work-stealing 的迁移抖动影响**小于**这三项（§3.5）。
+**修订结论**：S1/S2/K1 都有结构性成本，但相对量级不能从静态代码推出。14 还补充了
+UDP HOL、buffer 配置未接线和内存预分配等确定问题。tokio work-stealing 是否小于
+S1/S2/K1 同样应由可信 profile 判定。
 
 ### 2.0 补录（2026-07-26 实测）：S0 —— 本文原分析遗漏的、比 S1 更靠前的串行点
 
@@ -107,9 +113,8 @@ IO driver**，公网 listener 的**就绪事件仍由 bg 单线程 driver 驱动
 仍是单线程。该层 spawn 已一并改为 proxy runtime；判断此类问题的通用规则是
 **看 fd 在哪个 runtime 上被创建，而不只是看任务在哪个 runtime 上跑**。
 
-**对本文路线的影响**：S0 已闭合，**Phase B（多 Endpoint）仍是性能线第一优先**不变；
-但结论"主串行点是 S1"需附加前提——**那是在 S0 修复之后才成立**。此前 ctld 模式下真正
-的瓶颈是 S0，不是 S1。
+**对本文路线的影响（三轮修订）**：S0 已闭合，但不能据此直接把 S1 提升为主瓶颈。
+Phase B 进入 D10 的 profile-gated 队列；此前 ctld 模式下真正的瓶颈仍是 S0。
 
 ### 2.1 S1 展开：quinn 内部哪部分并行、哪部分串行（关键区分）
 
@@ -137,10 +142,9 @@ client（4 核 → 4 个 Connection）
       └─ Connection 4 ┘
 ```
 
-**量级估算**：8k QPS × 约 4-8 个 UDP 包/请求（请求/响应/ACK），双向 ≈ 50k-100k pps
-全部过这一个 task。GRO 批量化后每包分发成本约 1-2 µs → **约占 0.1-0.2 核**。
-不算立即饱和，**但它是不可分割的串行段**——按 Amdahl 定律，占 20% 就把最大加速比
-压到 5×。这就是它排在 S1 的原因。
+静态结构能证明所有 UDP 包经过这个 endpoint driver，但包数/request、批处理效果和
+每包成本都依赖负载与平台；此前的 4–8 包、1–2 µs、0.1–0.2 核估算无本项目实测依据，
+撤回且不用于排序。只有 profiler 显示该 driver 主导 CPU/p99 时才启动多 Endpoint。
 
 ## 3. Actor mode 评估：适合什么，不适合什么
 
@@ -186,18 +190,17 @@ runtime）+ 每 runtime 自己的资源 —— 正是 shared-nothing。它连绑
 | global inject queue | Mutex，仅跨线程 spawn / 每 61 次 poll 检查一次 | 轻微 |
 | **I/O driver（单 epoll fd）** | worker 争抢 driver 所有权 | **存在**，但 tokio 有批量 poll + 所有权轮转优化 |
 
-**结论：tokio 调度器的争抢真实存在，但不是 DuoTunnel 的主因。**work-stealing 成为
-瓶颈的典型场景是"百万个纳秒级任务"；而这里每个 task 都是"一个请求/一条 stream，
-中间多次 await I/O"，粒度大得多。
+**结论：tokio 调度器的争抢真实存在，但静态审查不能证明它是否为 DuoTunnel 主因。**
+任务粒度看似较大只是待验证假设，必须由 scheduler/queue profile 判定。
 
 **与 S1/S2/K1 的量级对比**（这是重排 Phase 顺序的依据）：
 
 | 障碍 | 性质 | 相对影响 |
 | --- | --- | --- |
-| **S1 单 Endpoint 收包** | **不可分割的串行段**（Amdahl 分母） | **最大** |
-| S2 共享 hyper 池 | 锁竞争，QPS 越高越陡 | 中-高 |
-| K1 全局计数 | 缓存行一致性流量，核数↑线性放大 | 中 |
-| tokio work-stealing/调度 | 迁移抖动 + 轻度 CAS 竞争 | **小** |
+| S1 单 Endpoint 收包 | 不可分割的串行候选 | 未测 |
+| S2 共享 hyper 池 | 可能有锁/共享状态成本 | 未测 |
+| K1 全局计数 | 可能有缓存行一致性成本 | 未测 |
+| tokio work-stealing/调度 | 迁移、窃取与 driver 协调 | 未测 |
 
 **推论（重要）**：**先解 S1 + S2 + K1，这三个都不需要更换运行时模型**——解完之后
 仍保留 work-stealing 的自动负载均衡与动态性。只有在这三个解完、压测**仍然**显示
@@ -236,22 +239,27 @@ trait，**不关心自己跑在哪个 runtime 实例上**——在哪个 runtime
 | | 与自定义 runtime 的关系 | 结论 |
 | --- | --- | --- |
 | **A 绑核** | **重合**——`sched_setaffinity` 封装可复用，只是接线位置从 tokio `on_thread_start` 挪到自建线程 | 若确定做 C，**A 不必单独做** |
-| **B 多 Endpoint** | **完全正交**——两种运行时模型下收包单点都存在 | **无论如何都要做，且最先做** |
+| **B 多 Endpoint** | 机制上可独立于自定义 runtime | **仅 profile 指向 Endpoint 时做** |
 | **C runtime 池** | 即其本身，会吸收 A；**S2/K1 在 C 里自然解决**（per-runtime client / 计数） | 最后手段 |
 
-若确定要走自定义 runtime，路径可简化为两步：**B（多 Endpoint）→ C（吸收 A + S2 + K1）**。
+若 profile 同时指向 Endpoint 与调度/runtime，路径才可能是
+**B（多 Endpoint 实验）→ C（吸收 A + S2 + K1）**。
 
 ## 4. 通往线性扩展的分阶段路线
 
 > **2026-07-26 二轮修正**：依据 §2.1（quinn 分工）与 §3.5（tokio 争抢量级），
 > **顺序由 A→B→C 改为 B 优先、C 降为最后手段**。理由：主串行点是收包而非调度，
 > 解 S1/S2/K1 都不必更换运行时模型。
+>
+> **2026-07-27 三轮修正**：本节以下阶段保留为候选方案，但执行顺序由
+> [14 §8](./14-performance-robustness-stability-addendum.md#8-推荐实施顺序) 和
+> [D10](./design/10-performance-hardening.md) 覆盖。
 
 按修正后的优先级排序，每阶段可独立验收：
 
-### Phase B（0.5 天）【**优先级最高**】：client 每连接独立 Endpoint（解 S1 的 client 侧）
-**解的是主串行点**（§2.1：收包单点），且**与运行时模型完全正交**——无论将来是否
-换 per-core runtime，这一步都要做。
+### Phase B（0.5 天）【**P2 / profile-gated**】：client 每连接独立 Endpoint
+它能并行 S1 收包阶段，机制上与运行时可独立；但只有 profiler 证明该阶段主导 CPU/p99
+时才启动，不再视为无条件必做。
 client 是发起方——每条 QUIC 连接用独立 UDP socket（独立源端口），内核按四元组
 分流到不同 socket，**没有** server 侧 SO_REUSEPORT+CID 迁移的路由问题。
 改动点：`client/runtime/app.rs:38` 的单 endpoint 构建改为 per-supervisor-slot
@@ -260,7 +268,7 @@ client 是发起方——每条 QUIC 连接用独立 UDP socket（独立源端�
 
 ### Phase A（1 天）：worker 绑核 + 消除 K1（详见 §5）
 multi-thread runtime 保留，worker 1:1 绑核消除迁移抖动；全局计数改 per-core
-聚合。**预期：p99 波动显著收窄，QPS 小幅提升（5-15%）。**
+聚合。收益幅度未知；只有 scheduler/atomic profile 显著且 before 数据已留存时实施。
 > 注意：tokio **不默认**绑核——multi_thread 的 worker 线程可被 OS 在核间迁移，
 > 需自行在 `on_thread_start` 调 `sched_setaffinity`（§5.2）。worker 线程数本来
 > 就是 `build()` 时固定、运行期不可变，**故绑核不损失任何现有动态性**；真正动态的
@@ -303,7 +311,10 @@ server 单 UDP socket 的 CID 路由问题需要 eBPF `SO_REUSEPORT` steering，
 `min(TOKIO_WORKER_THREADS || available_parallelism, cgroup quota)`。
 `std::thread::available_parallelism()` 在 Linux 上**已同时考虑
 `sched_getaffinity`（cpuset）与 cgroup 配额**，所以 CI 改用 `AllowedCPUs`
-后锚点无需改动即可正确收敛。需要新增的是**具体核的枚举**：
+后 auto 值可正确收敛；但显式 `TOKIO_WORKER_THREADS` 会绕过
+`available_parallelism/cpuset`，`accept_workers` 和显式 connections 也可能超配。
+统一规则应为 `resolved=min(explicit_or_auto, affinity/available, quota)`；若业务确需
+oversubscribe，使用独立显式开关并告警。另需新增**具体核的枚举**：
 
 ```rust
 // tunnel-lib/src/infra/affinity.rs (新文件, Linux-only, 其它平台 no-op)
@@ -373,9 +384,10 @@ runtime:
 
 ### 5.4 per-core 计数（消 K1，随 Phase A 一起做）
 
-`METRICS` 三个全局原子改为 `CachePadded<[AtomicU64; MAX_CORES]>` 或
-`thread_local` 计数 + scrape 时求和；`wait_for_resource_drain` 读求和值。
-每连接/每 stream 的 `fetch_add` 从跨核共享行变成本地行。
+若 profile 证明该项显著，使用可枚举的稳定 stripe（例如
+`[CachePadded<AtomicU64>]`），不是只 pad 整个数组。stripe 有注册/回收与 scrape 聚合
+协议；不能假设 scrape 线程可遍历普通 `thread_local`，也不能用会迁移的 Tokio task
+作为稳定 per-core identity。
 
 ## 6. CI 4c runner 的绑核配比（立即可做，解决“争抢”）
 
@@ -425,9 +437,8 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 1. **`AllowedCPUs` 之后不再叠加 `CPUQuota`**（消除 100ms 冻结毛刺）。需要模拟
    "半个核"场景时才单独加 quota，且要在报告里注明 throttle 次数
    （`/sys/fs/cgroup/<scope>/cpu.stat` 的 `nr_throttled`）。
-2. 进程内并行度自动对齐：`available_parallelism()` 感知 cpuset ⇒ workers /
-   accept_workers / shards / connections 全部自动=cpuset 大小，无需再传
-   `TOKIO_WORKER_THREADS`。
+2. auto 并行度由 `available_parallelism()` 感知 cpuset；所有显式 workers /
+   accept_workers / shards / connections 也必须走同一个 resolved clamp，不能只修 Tokio。
 3. 配合 §5 的 `pin_workers: auto`，worker 在 cpuset 内 1:1 定核。
 4. loopback 流量的 softirq 在发送核就地处理，无 NIC IRQ 需要引导；
    真机/分布式压测时再扩展 `tune-os.sh` 做 IRQ affinity（绑到 LOAD_CPUS）。
@@ -477,7 +488,7 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 | 场景/边界 | 行为与对策 |
 | --- | --- |
 | 非 Linux（macOS 开发机） | `affinity` 模块编译为 no-op + debug 日志；`pin_workers: auto` 静默降级 |
-| cpuset 核数 < 配置 workers | 锚点=min 已保证 workers≤cpuset；显式 `TOKIO_WORKER_THREADS>cpuset` 时 pin 取模复用核并 warn |
+| cpuset 核数 < 配置 workers | resolved 默认取 `min(explicit, affinity/available, quota)`；若保留显式 oversubscribe，必须单独开关并启动 warn，不能暗中取模 |
 | 显式核列表含不允许的核 | `sched_setaffinity` 返回 EINVAL → warn + 不 pin 该线程（不 panic，服务可用性优先） |
 | 超线程 sibling（物理核共享） | 4c CI runner 即 2 物理核 ×2HT：server/client 各占一个 **物理核的两个 HT**（0-1 vs 2-3 按 `lscpu -e` 的 core id 分组）比按逻辑号 0/1 切分更优；`alloc_cpusets` 增加 `--by-physical-core` 选项，GitHub runner 上先用 `lscpu` 探测再分配 |
 | cgroup v1 runner | `AllowedCPUs` 由 systemd 落到 cpuset v1 控制器，`available_parallelism` 读 affinity 仍正确；已有 v1 quota 解析（runtime.rs:73-90）不受影响 |
@@ -491,9 +502,9 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 
 | 阶段 | 取舍（付出什么） | 预期收益 | 改动量 | 影响面/回滚 |
 | --- | --- | --- | --- | --- |
-| CI cpuset（§6） | 放弃"分数核"模拟能力（需要时单独加 quota）；8k 在 4c 上改为过载测试定位 | p99 变异系数从"不可用"降到 <10%；结果可归因 | 3 个 shell 脚本 + 1 个新 lib 脚本，~100 行 | 仅 CI；git revert 即回滚 |
-| Phase A pin + per-core 计数 | on_thread_start 顺序假设；每 worker 失去内核负载均衡的自由度（个别不均衡负载下单核先饱和——但 SO_REUSEPORT 已按连接分流，短请求场景近似均匀） | 消除迁移抖动：p99 收窄；QPS +5~15%；K1 一致性流量随核数不再增长 | `infra/affinity.rs` 新文件 ~60 行 + runtime.rs ~30 行 + 配置字段 ×2 + metrics 改造 ~80 行 | 默认 `off`，配置开关灰度；不改数据面语义 |
-| Phase B client per-conn endpoint | 每连接一个 UDP socket/FD（connections≤cores，可忽略）；失去"多连接共享一次 NAT 绑定"（NAT 场景多 socket = 多映射，穿透行为不变，仅条目数+） | client QUIC 收发随 connections 横向扩展，消除 client 侧 S1 | `client/runtime/app.rs`+`pool.rs` ~40 行 | 配置 `endpoint_per_connection`（默认 on 也安全）；回滚=共享 endpoint 旧路径保留 |
+| CI cpuset（§6） | 放弃"分数核"模拟能力（需要时单独加 quota）；8k 在 4c 上改为过载测试定位 | 降低环境噪声；具体幅度先测 | 3 个 shell 脚本 + 1 个新 lib 脚本，~100 行 | 仅 CI；git revert 即回滚 |
+| Phase A pin + striped 计数 | 失去部分内核负载均衡自由度；stripe 需稳定 identity/回收 | 收益未知，由 scheduler/atomic profile 决定 | `infra/affinity.rs` + runtime/config/metrics | 默认 `off`，配置开关灰度 |
+| Phase B client multi-endpoint | 增加 UDP socket/FD/NAT/QUIC 状态；socket window 非 upfront RSS，仍需总预算 | 收益未知，仅 endpoint driver 成热点时实验 | 见 D7 | 默认 endpoints=1，显式 opt-in |
 | Phase C per-core 模式 | 双运行模式的维护成本；跨核负载不均时无 work-stealing 兜底（缓解：连接级 rebalance 或仅在专用部署启用） | 扩展曲线 0.8→0.9+；延迟方差进一步收窄（pingora 实证方向） | runtime/engine + listener 归属 + per-runtime hyper client，~500-800 行 | 大；必须在 Phase A/B 基线与 TODO-140 指标齐备后启动 |
 
 ## 10. 步骤顺序与依赖关系
@@ -502,30 +513,30 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 flowchart TD
     UB[01§3.1 copy.rs UB 修复 TODO-97] --> C
     P80[01§3.3 pending permit TODO-80] --> C
-    CI[CI cpuset 布局 §6] --> BASE[可信基线: 3次跑 CoV&lt;10%]
-    B[Phase B client per-conn endpoint<br/>解 S1 主串行点·与 runtime 正交] --> BASE
+    CI[CI cpuset 布局 §6] --> BASE[可信基线: 至少5次交错运行+置信区间]
+    BASE --> PROF[协议分层 CPU/锁/分配 profile]
+    PROF -->|Endpoint UDP I/O/锁主导| B[Phase B client per-conn endpoint实验]
     A[Phase A worker pin + per-core 计数] --> BASE
     BP[Phase B′ hyper 池分片 解 S2 + K1] --> BASE
     BASE --> T140[TODO-140 阶段延迟遥测]
     BASE --> CURVE[扩展曲线 1/2/4 核实验]
     CURVE -->|仍不线性才启动| C[Phase C per-core 运行模式<br/>最后手段·吸收 A/S2/K1]
     T140 --> C
-    B -.Endpoint 归属前置.-> C
+    B -.若两类证据同时成立.-> C
     C --> D[Phase D server 多 endpoint eBPF 研究 TODO-24]
 ```
 
-**关键依赖（二轮修正后）**：
-- **Phase B 优先且无前置**——它解的是主串行点（S1 收包），且与运行时模型正交，
-  无论将来是否上 Phase C 都要做；
-- **Phase A / B′ 与 CI cpuset 同批**，均无前置、可立即做；
-- **Phase C 是条件触发**：必须 B + A + B′ 全部落地、且扩展曲线**仍不线性**才启动；
-  启动前还需两个 P0 正确性修复（UB、pending 竞态）+ 可信基线 + 阶段遥测，否则
-  收益无法归因。若确定要走 C，Phase A 可并入 C 实现（§3.5.1）。
+**关键依赖（三轮修正后）**：
+- D9/M0 是所有扩展实验前置；
+- CI cpuset、D10 确定热点和协议分层 profile 先完成；
+- **Phase B 仅在 Endpoint 成为主导热点时启动**；
+- Phase A/B′ 也需分别由调度、共享 pool/计数证据触发，不能仅凭结构推断收益；
+- **Phase C 是最后手段**：只有可信 profile 指向 runtime 调度且低风险优化无效时启动。
 
 ## 11. 验收清单
 
 - [ ] CI：server/client/load 三 cpuset 隔离，`cpu.stat` 无 throttle 记录；
-- [ ] 同一 commit 连续 3 次 3k 用例 p99 变异系数 < 10%（当前明显做不到）；
+- [ ] baseline/candidate 至少交错 5 次并报告 median、置信区间、错误率与环境噪声；
 - [ ] 启动日志输出 pin 映射与最终并行度（对齐 TODO-140）；
 - [ ] 扩展曲线：1→2→4 核 `QPS(N)/(N×QPS(1)) ≥ 0.8`，p99(4核) ≤ 1.3×p99(1核)@等效单核负载；
 - [ ] Phase C 后：同曲线 ≥ 0.9。
