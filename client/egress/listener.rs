@@ -303,6 +303,23 @@ async fn handle_entry_connection(
             },
         }
     }
+    if protocol == tunnel_lib::proxy::core::Protocol::H1 {
+        let body = format!("502 Bad Gateway - Egress stream failed: {}\n", last_err);
+        let resp = format!(
+            "HTTP/1.1 502 Bad Gateway\r\n\
+             Connection: close\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\
+             X-DuoTunnel-Reject: egress-stream-failed\r\n\
+             \r\n\
+             {}",
+            body.len(),
+            body
+        );
+        let _ = local_stream.write_all(resp.as_bytes()).await;
+        let _ = local_stream.shutdown().await;
+        return Ok(());
+    }
     Err(last_err)
 }
 

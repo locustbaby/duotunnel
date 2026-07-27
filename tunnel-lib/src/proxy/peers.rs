@@ -26,6 +26,7 @@ pub struct BasicPeerSpec {
     pub tls: Option<TlsPeerSpec>,
     pub upstream_name: Option<String>,
     pub upstream_addr_str: Option<String>,
+    pub backend_ref: Option<crate::proxy::upstream::BackendRef>,
 }
 
 impl BasicPeerSpec {
@@ -46,6 +47,7 @@ pub struct HttpPeerSpec {
     pub upstream_protocol: Protocol,
     pub upstream_name: Option<String>,
     pub upstream_addr_str: Option<String>,
+    pub backend_ref: Option<crate::proxy::upstream::BackendRef>,
 }
 
 #[derive(Debug, Clone)]

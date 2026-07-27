@@ -49,7 +49,9 @@ impl HttpConnector {
     }
 
     fn mark_upstream_healthy(&self, spec: &HttpPeerSpec) {
-        if let (Some(health), Some(namespace), Some(server)) = (
+        if let Some(ref b_ref) = spec.backend_ref {
+            b_ref.mark_success();
+        } else if let (Some(health), Some(namespace), Some(server)) = (
             &self.upstream_health,
             &spec.upstream_name,
             &spec.upstream_addr_str,
@@ -59,7 +61,13 @@ impl HttpConnector {
     }
 
     fn mark_upstream_unhealthy(&self, spec: &HttpPeerSpec) {
-        if let (Some(health), Some(namespace), Some(server)) = (
+        if let Some(ref b_ref) = spec.backend_ref {
+            if let Some(probe_token) = b_ref.mark_failure() {
+                if let Some(health) = &self.upstream_health {
+                    health.spawn_probe_by_token(b_ref.entry.clone(), probe_token);
+                }
+            }
+        } else if let (Some(health), Some(namespace), Some(server)) = (
             &self.upstream_health,
             &spec.upstream_name,
             &spec.upstream_addr_str,
@@ -216,6 +224,7 @@ impl HttpConnector {
                             }
                             Err(retry_err) => {
                                 if retry_err.is_connect() {
+                                    tracing::warn!(target = %spec.target_host, error = %retry_err, "HTTP connection to upstream failed on retry, marking unhealthy");
                                     self.mark_upstream_unhealthy(spec);
                                 }
                                 return Err(ProxyError::http_upstream_request(
@@ -228,6 +237,7 @@ impl HttpConnector {
                     return Err(ProxyError::http_upstream_request(e.to_string()).into());
                 }
                 if e.is_connect() {
+                    tracing::warn!(target = %spec.target_host, error = %e, "HTTP connection to upstream failed, marking unhealthy");
                     self.mark_upstream_unhealthy(spec);
                 }
                 Err(ProxyError::http_upstream_request(e.to_string()).into())

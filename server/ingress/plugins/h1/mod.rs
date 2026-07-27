@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
@@ -54,10 +55,26 @@ impl IngressProtocolHandler for H1Handler {
         let max_attempts = 3;
         let opened = loop {
             attempts += 1;
-            let selected = self
-                .registry
-                .select_client_for_group(&group_id)
-                .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
+            let selected = match self.registry.select_client_for_group(&group_id) {
+                Some(client) => client,
+                None => {
+                    let e = ProxyError::no_client_available(group_id.to_string());
+                    let error_msg = format!("ProxyError: {}", e);
+                    let response = format!(
+                        "HTTP/1.1 502 Bad Gateway\r\n\
+                         Content-Type: text/plain\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        error_msg.len(),
+                        error_msg
+                    );
+                    let mut stream = stream;
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return Err(e.into());
+                }
+            };
 
             tunnel_lib::maybe_slow_path(selected.handle.connection_state(), &ctx.overload).await;
 
@@ -91,6 +108,19 @@ impl IngressProtocolHandler for H1Handler {
                     );
                     self.registry.unregister(&selected.conn_id);
                     if attempts >= max_attempts {
+                        let error_msg = format!("ProxyError: failed to open QUIC stream: {}", e);
+                        let response = format!(
+                            "HTTP/1.1 502 Bad Gateway\r\n\
+                             Content-Type: text/plain\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\
+                             \r\n\
+                             {}",
+                            error_msg.len(),
+                            error_msg
+                        );
+                        let mut stream = stream;
+                        let _ = stream.write_all(response.as_bytes()).await;
                         return Err(e.into());
                     }
                 }

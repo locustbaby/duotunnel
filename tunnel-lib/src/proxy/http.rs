@@ -70,7 +70,7 @@ impl HttpPeer {
                         error = %proxy_err,
                         "H1 upstream request failed, sending 502"
                     );
-                    let _ = driver.write_502().await;
+                    let _ = driver.write_502(&proxy_err.to_string()).await;
                     break;
                 }
             };

@@ -128,6 +128,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     },
                     upstream_name: None,
                     upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -142,6 +143,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     },
                     upstream_name: None,
                     upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -167,6 +169,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     },
                     upstream_name: None,
                     upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Tcp(spec))
             }
@@ -189,6 +192,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                         tls: None,
                         upstream_name: None,
                         upstream_addr_str: None,
+                        backend_ref: None,
                     };
                     Ok(PeerSpec::Tcp(spec))
                 }
@@ -244,6 +248,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                             upstream_protocol: Protocol::H2,
                             upstream_name: None,
                             upstream_addr_str: None,
+                            backend_ref: None,
                         },
                     )
                     .await

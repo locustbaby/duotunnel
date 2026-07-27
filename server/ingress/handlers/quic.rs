@@ -21,7 +21,7 @@ use tunnel_lib::{
 // Drain window plus margin for handlers still inside the login handshake.
 const CONN_TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const CONN_STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_REVERSE_STREAMS_PER_CONNECTION: usize = 256;
+const MAX_REVERSE_STREAMS_PER_CONNECTION: usize = 1000;
 const MAX_REVERSE_STREAMS_GLOBAL: usize = 4096;
 // Refusals are driven by the peer, so they must not turn the accept loop into a
 // log amplifier; the counter metric carries the exact rate.

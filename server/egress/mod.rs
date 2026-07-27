@@ -136,12 +136,14 @@ impl UpstreamResolver for ServerEgressMap {
         let group = self.upstreams.get(&upstream_name).ok_or_else(|| {
             ProxyError::route_not_found(format!("upstream_group={upstream_name}"))
         })?;
-        let upstream_addr = group
-            .next_healthy()
+        let backend_ref = group.next_healthy_ref();
+        let upstream_addr = backend_ref
+            .as_ref()
+            .map(|r| r.address().to_string())
+            .or_else(|| group.next_healthy().cloned())
             .ok_or_else(|| {
                 ProxyError::route_not_found(format!("no healthy backends for host={host_raw}"))
-            })?
-            .clone();
+            })?;
 
         let (scheme, connect_addr_str, _) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
@@ -160,6 +162,7 @@ impl UpstreamResolver for ServerEgressMap {
                     }),
                     upstream_name: Some(upstream_name),
                     upstream_addr_str: Some(upstream_addr),
+                    backend_ref,
                 };
                 Ok(PeerSpec::Tcp(spec))
             }
@@ -174,6 +177,7 @@ impl UpstreamResolver for ServerEgressMap {
                     },
                     upstream_name: Some(upstream_name),
                     upstream_addr_str: Some(upstream_addr),
+                    backend_ref,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -188,6 +192,7 @@ impl UpstreamResolver for ServerEgressMap {
                     },
                     upstream_name: Some(upstream_name),
                     upstream_addr_str: Some(upstream_addr),
+                    backend_ref,
                 };
                 Ok(PeerSpec::Http(spec))
             }
