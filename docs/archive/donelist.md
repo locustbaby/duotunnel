@@ -1,5 +1,21 @@
 # Tunnel Done List
 
+## ⚡ DuoTunnel 热路径性能优化 (2026-07-27) ✅
+
+在 `perf/optimize-hotpaths` 分支中，我们对 Ingress、Tunnel 控制面及核心数据转发面进行了全方位的底层性能硬化与零分配重构：
+
+- **L7 零拷贝与混合策略**：重构 `copy_buffered_then_finish` 数据转发，实现 TCP → QUIC 转发的用户空间 100% 零拷贝（使用 `write_chunk`）。引入 **Hybrid (混合) 零拷贝/拷贝** 算法，对 `<16KB` 的小包拷贝后清空复用同一 Buffer，对 `>=16KB` 大包执行零拷贝拆分，兼顾吞吐并规避了慢速连接锁死大块内存（Memory Pinning）的隐患。
+- **IP 强类型化与零分配**：将控制面 `RoutingInfo` 的 `src_addr` 以及 UDP 会话键 `UdpSessionKey` 中的 `client_addr` 从 `String` 彻底重构为 `std::net::IpAddr`，消除了高并发下每包及每个控制流的 IP 格式化与反序列化解析开销。
+- **协程协商去 Box 堆分配**：将 QUIC 协商流时用的 `OpenWaitObserver` 回调从 Box 包装的 `Fn` 闭包重构为无分配的**静态函数指针（`fn` 指针）**，彻底切断了每条 Ingress 连接建连时的 Box 堆分配。
+- **HTTP/1.1 & HTTP/2 协议栈优化**：
+  - `Http1Driver` 构建时一次性预解析 `scheme` 与 `authority`，请求时使用 `http::uri::Parts` 直接构建 `Uri`，免除高频 `format!` 及二次解析的开销。
+  - `h2.rs` 伪头部匹配改在原始字节切片上匹配（`name == b":authority"`），避开了对所有常规请求头无意义的 `String::from_utf8_lossy` 扫描与堆分配。
+- **Server 注册中心 $O(1)$ 级别注销**：在 `select_client_for_group` 中获取 group 句柄后立即销毁 DashMap 读锁，并在 `ClientRegistry` 内部引入 `client_to_group` 对射表，将断线注销的遍历时间复杂度从 $O(N)$ 优化至 **$O(1)$**。
+- **底线性微优化**：
+  - **熔断时钟缓存**：后台线程每 50ms 自动刷新 Relaxed monotonic 缓存，使热路径熔断判断避开高频系统调用（`Instant::now()`）。
+  - **L1 局部性缓冲池**：实现 thread-local 的 L1 缓冲池大容量自愈置换，配合全局 `mimalloc` 分配器获得最佳局部性（LIFO）。
+  - **Metrics 全局锁规避**：将 `ResourceGuard` 释放时的 notify 条件修改为 `previous <= 1`（仅当计数降为 0 时才加锁通知），高并发下极大减少了 waiters 互斥锁争用。
+
 ## 🏗️ DuoTunnel 架构改造计划 (REFACTOR_PLAN.md) ✅
 
 > 按 Commit 拆分的架构升级全景已在 2026-04 完成，项目已从单一 Runtime 演进为三层隔离 Runtime 架构。

@@ -739,3 +739,19 @@ flowchart TD
 
 ### [TODO-15] egress_http_post phase boundary annotation
 * **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-148] Coarse-grained shared Tick Timer (Pingora Fast-Timeout style)
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+* **Fix**:
+  实现 10ms 或 50ms 粗粒度的定时器轮（Timer Wheel），支持多 Future Waker 的共享 tick 唤醒，避免在高并发连接下频繁增删 Tokio 计时堆的 CPU 锁争用。
+
+### [TODO-149] DDoS-Resistant Count-Min Sketch Ingress Rate Limiter
+* **Priority**: Medium | **Status**: TODO | **Track**: Ingress Security
+* **Fix**:
+  在 Ingress Listener 阶段引入内存有界的 Count-Min Sketch 限流矩阵。对 Peer IP 进行快速多重 Hash 映射，避免在大流量防刷时因维护海量 IP Session Map 导致 OOM（内存溢出）。
+
+### [TODO-150] In-depth TCP Autotuning & QUIC Buffer Tuning
+* **Priority**: Medium | **Status**: TODO | **Track**: Performance Tuning
+* **Fix**:
+  在 Linux 生产环境下，禁用显式的 4MB TCP 缓冲大小，启用 Linux 的自适应 Autotuning，同时调优 QUIC 发送/接收窗口上限与流控制门限。
+
