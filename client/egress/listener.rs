@@ -2,6 +2,7 @@ use crate::health::ClientHealth;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -177,7 +178,7 @@ async fn handle_entry_connection(
     if let Some(ref host_raw) = host {
         if pool.is_rejected_host(host_raw) {
             warn!(target: "client::egress", "Target '{}' rejected locally by egress allowlist", host_raw);
-            crate::metrics::egress_rejection("no_egress_route", host_raw);
+            crate::metrics::egress_rejection("no_egress_route");
 
             if protocol == tunnel_lib::proxy::core::Protocol::H1 {
                 let body = "502 Bad Gateway - No Egress Route\n";
@@ -203,14 +204,14 @@ async fn handle_entry_connection(
 
     let pool_size = pool.pool_size();
     let preferred_shard = pool.shard_for_hash(&(host.clone(), "entry"));
-    let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
+    let mut tried_conn_ids = HashSet::with_capacity(pool_size.min(8));
     let mut last_err = anyhow::anyhow!("no QUIC connections available in pool");
     for _ in 0..pool_size.max(1) {
         let conn = match pool.next_conn_for_shard_excluding(preferred_shard, &tried_conn_ids) {
             Some(c) => c,
             None => break,
         };
-        tried_conn_ids.push(conn.handle.stable_id());
+        tried_conn_ids.insert(conn.handle.stable_id());
         maybe_slow_path(conn.handle.connection_state(), overload).await;
         let routing_info = RoutingInfo {
             proxy_name: "entry".into(),

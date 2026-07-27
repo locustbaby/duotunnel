@@ -63,11 +63,10 @@ fn append_resource_metrics(body: &mut String, health: &ClientHealth) {
     ));
 }
 
-pub fn egress_rejection(reason: &str, host: &str) {
-    metrics::counter!(
-        "egress_rejections_total",
-        "reason" => reason.to_owned(),
-        "host" => host.to_owned()
-    )
-    .increment(1);
+pub fn egress_rejection(reason: &'static str) {
+    metrics::counter!("egress_rejections_total", "reason" => reason).increment(1);
+}
+
+pub fn udp_datagram_dropped(reason: &'static str) {
+    metrics::counter!("duotunnel_udp_datagram_dropped_total", "reason" => reason).increment(1);
 }

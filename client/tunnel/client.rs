@@ -11,7 +11,7 @@ use tunnel_lib::{
 };
 
 use crate::bootstrap::config::ClientConfigFile;
-use crate::egress::udp_listener::{forward_incoming_datagram, UdpListenerRegistry};
+use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::ingress::app::LocalProxyMap;
 use crate::ingress::handler::handle_work_stream;
 use crate::plugins;
@@ -21,6 +21,8 @@ use crate::tunnel::supervisor::ConnectError;
 // Kept shorter than the app-level 30s drain backstop in runtime::app so both
 // waits stay bounded even when the local drain times out.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+const UDP_REPLY_WORKERS: usize = 4;
+const UDP_REPLY_QUEUE_PER_WORKER: usize = 256;
 
 #[derive(Debug)]
 pub(crate) enum RunClientOutcome {
@@ -80,6 +82,34 @@ pub(crate) async fn run_client(
     );
     let session_started = Instant::now();
     let mut completed_business = false;
+    let udp_cancel = shutdown.child_token();
+    let mut udp_workers = tokio::task::JoinSet::new();
+    let mut udp_queues = Vec::with_capacity(UDP_REPLY_WORKERS);
+    for _ in 0..UDP_REPLY_WORKERS {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(UDP_REPLY_QUEUE_PER_WORKER);
+        let registry = udp_registry.clone();
+        let activity = activity.clone();
+        let cancel = udp_cancel.clone();
+        udp_workers.spawn(async move {
+            let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::UdpTask);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    envelope = rx.recv() => {
+                        let Some(envelope) = envelope else {
+                            break;
+                        };
+                        if let Err(error) = registry.forward_reply(envelope).await {
+                            debug!(error = %error, "udp datagram forward error");
+                        } else {
+                            activity.mark_business_completed();
+                        }
+                    }
+                }
+            }
+        });
+        udp_queues.push(tx);
+    }
     let session_error = loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -101,11 +131,10 @@ pub(crate) async fn run_client(
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
                         let activity = activity.clone();
-                        // Deliberately untracked: work-stream tasks end when
-                        // the connection closes (their QUIC streams error
-                        // out), and per-stream tracking would tax the hot
-                        // path.
                         crate::runtime::spawn_task(async move {
+                            let _tracked = tunnel_lib::track_resource(
+                                tunnel_lib::TrackedResource::ReverseStream,
+                            );
                             match handle_work_stream(send, recv, proxy_map, tcp_params).await {
                                 Ok(()) => {
                                     activity.mark_business_completed();
@@ -125,12 +154,17 @@ pub(crate) async fn run_client(
             datagram_result = conn.read_datagram() => {
                 match datagram_result {
                     Ok(payload) => {
-                        if let Err(e) = forward_incoming_datagram(&udp_registry, payload).await {
-                            debug!(error = %e, "udp datagram forward error");
-                        } else if !completed_business {
-                            activity.mark_business_completed();
-                            completed_business = true;
-                            info!("tunnel session completed business traffic");
+                        match tunnel_lib::decode_udp_datagram_envelope(payload.as_ref()) {
+                            Ok(envelope) => {
+                                let worker = udp_reply_worker(&envelope.session, udp_queues.len());
+                                if udp_queues[worker].try_send(envelope).is_err() {
+                                    crate::metrics::udp_datagram_dropped("queue_full");
+                                }
+                            }
+                            Err(error) => {
+                                crate::metrics::udp_datagram_dropped("decode");
+                                debug!(error = %error, "invalid udp datagram");
+                            }
                         }
                     }
                     Err(e) => {
@@ -141,12 +175,20 @@ pub(crate) async fn run_client(
             }
         }
     };
+    let removal = entry_pool.remove(&conn).await;
+    udp_cancel.cancel();
+    drop(udp_queues);
+    if tokio::time::timeout(Duration::from_secs(2), async {
+        while udp_workers.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        udp_workers.abort_all();
+    }
     completed_business |= activity.business_completed();
     let lifetime = session_started.elapsed();
-    let commit = entry_pool
-        .remove(&conn)
-        .await
-        .map_err(ConnectError::fatal)?;
+    let commit = removal.map_err(ConnectError::fatal)?;
     info!(
         active_tunnels = commit.active_tunnels,
         changed = commit.changed,
@@ -175,6 +217,14 @@ pub(crate) async fn run_client(
         })),
         None => Ok(RunClientOutcome::Shutdown),
     }
+}
+
+fn udp_reply_worker(session: &tunnel_lib::UdpSessionKey, workers: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session.hash(&mut hasher);
+    (hasher.finish() as usize) % workers.max(1)
 }
 
 /// Connects and completes the login handshake. Split out of `run_client` so the

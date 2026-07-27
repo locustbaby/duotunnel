@@ -14,7 +14,6 @@ use crate::runtime::spawn_task;
 use crate::tunnel::conn_pool::EntryConnPool;
 
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-const MIN_READY_TUNNELS: usize = 1;
 const HEALTH_MAX_CONNECTIONS: usize = 64;
 const HEALTH_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -47,6 +46,12 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         cancel_clone.cancel();
     });
     let resolved_connections = tunnel_lib::resolve_connection_count(config.quic.connections);
+    if config.quic.min_ready_tunnels > resolved_connections {
+        anyhow::bail!(
+            "quic.min_ready_tunnels ({}) exceeds resolved connection count ({resolved_connections})",
+            config.quic.min_ready_tunnels
+        );
+    }
     let shard_count =
         tunnel_lib::resolve_shard_count(config.quic.shards, Some(resolved_connections as usize));
     let accept_workers = tunnel_lib::resolve_accept_workers(config.entry.accept_workers);
@@ -72,7 +77,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     let health = Arc::new(ClientHealth::new(
         config.entry.port.is_some(),
         resolved_connections as usize,
-        MIN_READY_TUNNELS,
+        config.quic.min_ready_tunnels as usize,
     ));
     let entry_pool = EntryConnPool::new(
         config.quic.max_concurrent_streams,
@@ -84,7 +89,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     info!(
         active_tunnels = 0,
         desired_tunnels = resolved_connections,
-        min_ready_tunnels = MIN_READY_TUNNELS,
+        min_ready_tunnels = config.quic.min_ready_tunnels,
         degraded = true,
         "client readiness initialized"
     );

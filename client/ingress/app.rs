@@ -126,6 +126,8 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     } else {
                         Protocol::H1
                     },
+                    upstream_name: None,
+                    upstream_addr_str: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -138,6 +140,8 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     } else {
                         Protocol::H2
                     },
+                    upstream_name: None,
+                    upstream_addr_str: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -238,6 +242,8 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                             target_host: spec.tls_host,
                             scheme: "https".to_string(),
                             upstream_protocol: Protocol::H2,
+                            upstream_name: None,
+                            upstream_addr_str: None,
                         },
                     )
                     .await

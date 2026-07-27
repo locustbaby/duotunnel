@@ -1,8 +1,9 @@
 use crate::health::ClientHealth;
 use anyhow::{anyhow, ensure, Result};
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use quinn::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -104,6 +105,7 @@ pub(crate) struct PoolCommit {
 struct ActorAliveGuard {
     health: Arc<ClientHealth>,
     handles: HashMap<usize, Arc<ConnectionHandle>>,
+    by_id: Arc<DashMap<usize, Arc<PooledConnection>>>,
 }
 
 impl Drop for ActorAliveGuard {
@@ -111,6 +113,7 @@ impl Drop for ActorAliveGuard {
         for handle in self.handles.values() {
             handle.retire();
         }
+        self.by_id.clear();
         self.health.set_active_tunnels(0);
         self.health.set_pool_actor_alive(false);
     }
@@ -139,6 +142,7 @@ pub struct EntryConnPool {
     tx: mpsc::Sender<PoolMsg>,
     shard_count: usize,
     shards: Vec<Arc<ArcSwap<Vec<Arc<PooledConnection>>>>>,
+    by_id: Arc<DashMap<usize, Arc<PooledConnection>>>,
     health: Arc<ClientHealth>,
     egress_rules: ArcSwap<AllowedHostIndex>,
     #[cfg(test)]
@@ -161,6 +165,8 @@ impl EntryConnPool {
             .map(|_| Arc::new(ArcSwap::from_pointee(Vec::new())))
             .collect::<Vec<_>>();
         let snapshots_for_actor = snapshots.clone();
+        let by_id = Arc::new(DashMap::new());
+        let by_id_for_actor = by_id.clone();
         let health_for_actor = health.clone();
 
         let actor = tokio::spawn(async move {
@@ -168,6 +174,7 @@ impl EntryConnPool {
             let mut alive_guard = ActorAliveGuard {
                 health: health_for_actor.clone(),
                 handles: HashMap::new(),
+                by_id: by_id_for_actor.clone(),
             };
             let mut shards = (0..shard_count)
                 .map(|_| PoolShard::new())
@@ -208,11 +215,13 @@ impl EntryConnPool {
                             max_pending_streams,
                         );
                         alive_guard.handles.insert(stable_id, handle.clone());
-                        shard.conns.push(Arc::new(PooledConnection {
+                        let pooled = Arc::new(PooledConnection {
                             handle,
                             activity,
                             negotiated,
-                        }));
+                        });
+                        by_id_for_actor.insert(stable_id, pooled.clone());
+                        shard.conns.push(pooled);
                         snapshots_for_actor[shard_id].store(shard.snapshot());
                         active_tunnels += 1;
                         health_for_actor.set_active_tunnels(active_tunnels);
@@ -235,6 +244,7 @@ impl EntryConnPool {
                                 let existing = &shard.conns[index];
                                 existing.handle.retire();
                                 alive_guard.handles.remove(&stable_id);
+                                by_id_for_actor.remove(&stable_id);
                                 shard.conns.swap_remove(index);
                                 if index < shard.conns.len() {
                                     let swapped_id = shard.conns[index].handle.stable_id();
@@ -270,6 +280,7 @@ impl EntryConnPool {
             tx,
             shard_count,
             shards: snapshots,
+            by_id,
             health,
             egress_rules: ArcSwap::from_pointee(AllowedHostIndex::default()),
             #[cfg(test)]
@@ -334,7 +345,7 @@ impl EntryConnPool {
     pub fn next_conn_for_shard_excluding(
         &self,
         preferred_shard: usize,
-        excluded: &[usize],
+        excluded: &HashSet<usize>,
     ) -> Option<Arc<PooledConnection>> {
         pick_from_preferred_shards(&self.shards, preferred_shard, |shard| {
             let snapshot = shard.load();
@@ -348,6 +359,13 @@ impl EntryConnPool {
                 |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
             )
         })
+    }
+
+    pub fn connection_by_stable_id(&self, stable_id: usize) -> Option<Arc<PooledConnection>> {
+        let connection = self.by_id.get(&stable_id)?.clone();
+        (connection.handle.connection_state().is_selectable()
+            && connection.handle.close_reason().is_none())
+        .then_some(connection)
     }
 
     pub fn pool_size(&self) -> usize {
