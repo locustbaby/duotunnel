@@ -157,7 +157,7 @@ impl IngressProtocolHandler for H2cHandler {
         ctx: &ServerCtx,
     ) -> Result<()> {
         debug!("plaintext H2 detected, using L7 proxy");
-        let src_addr = ctx.peer_addr.ip().to_string();
+        let src_addr = ctx.peer_addr.ip();
         let src_port = ctx.peer_addr.port();
         let listener_port = ctx.listener_port;
         let single_authority = self.single_authority;

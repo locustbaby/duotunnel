@@ -18,13 +18,7 @@ pub async fn handle_tunnel_stream<A: UpstreamResolver>(
         target_host = ?routing_info.host, protocol = ?routing_info.protocol,
         "handling egress request from client"
     );
-    let ip = match routing_info.src_addr.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip,
-        Err(e) => {
-            warn!(src_addr = %routing_info.src_addr, src_port = routing_info.src_port, error = %e, "failed to parse client IP");
-            return Err(anyhow::anyhow!("invalid client IP: {}", e));
-        }
-    };
+    let ip = routing_info.src_addr;
     let client_addr = std::net::SocketAddr::new(ip, routing_info.src_port);
     ProxyEngine::new(app)
         .run_stream(send, recv, client_addr, Some(routing_info))

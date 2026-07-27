@@ -94,7 +94,7 @@ async fn handle_tcp_connection(
 
     let routing_info = tunnel_lib::RoutingInfo {
         proxy_name,
-        src_addr: peer_addr.ip().to_string(),
+        src_addr: peer_addr.ip(),
         src_port: peer_addr.port(),
         protocol,
         host,

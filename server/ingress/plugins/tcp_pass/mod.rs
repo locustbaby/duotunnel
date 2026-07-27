@@ -42,7 +42,7 @@ impl IngressProtocolHandler for TcpPassHandler {
 
         let routing_info = tunnel_lib::RoutingInfo {
             proxy_name: proxy_name.clone(),
-            src_addr: ctx.peer_addr.ip().to_string(),
+            src_addr: ctx.peer_addr.ip(),
             src_port: ctx.peer_addr.port(),
             protocol: tunnel_lib::proxy::core::Protocol::Tcp,
             host,

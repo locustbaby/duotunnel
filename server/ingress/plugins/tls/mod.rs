@@ -134,7 +134,7 @@ impl IngressProtocolHandler for TlsHandler {
         };
         let pinned_generation = ctx.runtime_generation;
         let peer_addr = ctx.peer_addr;
-        let src_addr = peer_addr.ip().to_string();
+        let src_addr = peer_addr.ip();
         let src_port = peer_addr.port();
         let target_host = host.clone();
         let overload = ctx.overload.clone();
