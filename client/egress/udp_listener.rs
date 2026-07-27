@@ -103,13 +103,21 @@ async fn start_udp_listener(
                         .await
                     {
                         Ok(()) => {
+                            conn.mark_business_completed();
                             delivered = true;
                             break;
                         }
                         Err(e) => {
                             warn!(conn_id = conn.handle.stable_id(), error = %e, "udp datagram send failed");
                             if conn.handle.close_reason().is_some() {
-                                pool.remove_stable_id(conn.handle.stable_id()).await;
+                                pool.remove_stable_id(conn.handle.stable_id())
+                                    .await
+                                    .map_err(|actor_error| {
+                                        anyhow::anyhow!(
+                                            "failed to evict closed UDP connection {}: {actor_error}",
+                                            conn.handle.stable_id()
+                                        )
+                                    })?;
                             }
                         }
                     }

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 mod app;
+pub(crate) mod health;
 pub(crate) mod metrics;
 pub(crate) mod supervisor;
 

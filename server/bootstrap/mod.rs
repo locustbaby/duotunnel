@@ -157,6 +157,7 @@ pub(crate) struct ServerState {
     ingress: IngressRuntime,
     connection: ConnectionRuntime,
     control: ControlRuntime,
+    health: Arc<crate::runtime::health::ServerHealthFacts>,
 }
 
 impl ServerState {
@@ -268,6 +269,10 @@ impl ServerState {
 
     pub(crate) fn listeners(&self) -> &listener_mgr::ListenerManager {
         &self.ingress.listeners
+    }
+
+    pub(crate) fn health(&self) -> &Arc<crate::runtime::health::ServerHealthFacts> {
+        &self.health
     }
 }
 
@@ -397,6 +402,9 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             revocation_tx,
             local_token_cache,
         },
+        health: Arc::new(crate::runtime::health::ServerHealthFacts::new(
+            bootstrap.is_ctld_managed(),
+        )),
     }))
 }
 

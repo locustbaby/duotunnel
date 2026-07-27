@@ -1,12 +1,15 @@
 use crate::bootstrap::config::ClientConfigFile;
 use crate::egress::udp_listener::UdpListenerRegistry;
-use crate::tunnel::client::run_client;
+use crate::tunnel::client::{run_client, RunClientOutcome};
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::{anyhow, Result};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+const STABLE_SESSION_WINDOW: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum FailureClass {
     Fatal,
@@ -51,7 +54,6 @@ pub async fn run_supervisor(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
-    ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
     udp_registry: Arc<UdpListenerRegistry>,
 ) -> Result<()> {
@@ -82,7 +84,6 @@ pub async fn run_supervisor(
             &config,
             &endpoint,
             cancel.clone(),
-            ready.clone(),
             entry_pool.clone(),
             udp_registry.clone(),
         )
@@ -91,28 +92,39 @@ pub async fn run_supervisor(
             info!(server = % config.server_address(), "shutdown signal received");
             return Ok(());
         }
-        match result {
-            Ok(_) => {
-                backoff.reset();
-                info!(server = % config.server_address(), "connection ended, restarting loop");
-            }
-            Err(e) => {
-                if e.class() == FailureClass::Fatal {
-                    error!(server = % config.server_address(), error = % e, "fatal connect error");
-                    return Err(e.into_anyhow());
-                }
-                let retry_delay = backoff.next_delay();
-                warn!(
-                    server = % config.server_address(),
-                    error = % e,
-                    retry_in_ms = retry_delay.as_millis(),
-                    "transient connect error, scheduling retry"
+        let error = match result {
+            Ok(RunClientOutcome::Shutdown) => return Ok(()),
+            Ok(RunClientOutcome::SessionEnded(report)) => {
+                let reset = backoff.observe_session(
+                    report.lifetime,
+                    report.completed_business,
+                    STABLE_SESSION_WINDOW,
                 );
-                tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(retry_delay) => {}
-                }
+                info!(
+                    server = %config.server_address(),
+                    session_lifetime_ms = report.lifetime.as_millis(),
+                    completed_business = report.completed_business,
+                    backoff_reset = reset,
+                    "tunnel session ended"
+                );
+                report.error
             }
+            Err(error) => error,
+        };
+        if error.class() == FailureClass::Fatal {
+            error!(server = % config.server_address(), error = % error, "fatal connect error");
+            return Err(error.into_anyhow());
+        }
+        let retry_delay = backoff.next_delay();
+        warn!(
+            server = % config.server_address(),
+            error = % error,
+            retry_in_ms = retry_delay.as_millis(),
+            "transient connect error, scheduling retry"
+        );
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(retry_delay) => {}
         }
     }
 }
@@ -137,6 +149,19 @@ impl JitterBackoff {
     }
     fn reset(&mut self) {
         self.current = self.initial;
+    }
+    fn observe_session(
+        &mut self,
+        lifetime: Duration,
+        completed_business: bool,
+        stable_window: Duration,
+    ) -> bool {
+        if completed_business || lifetime >= stable_window {
+            self.reset();
+            true
+        } else {
+            false
+        }
     }
     fn next_delay(&mut self) -> Duration {
         let cap = self.current;
@@ -168,5 +193,38 @@ pub fn classify_login_failure(retryable: bool, resp_error: Option<&str>) -> Conn
         ConnectError::transient(anyhow!("login rejected by server: {}", msg))
     } else {
         ConnectError::fatal(anyhow!("login rejected by server: {}", msg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_session_preserves_exponential_backoff() {
+        let mut backoff = JitterBackoff::new(Duration::from_millis(10), Duration::from_millis(80));
+        let _ = backoff.next_delay();
+        assert_eq!(backoff.current, Duration::from_millis(20));
+
+        assert!(!backoff.observe_session(Duration::from_secs(5), false, Duration::from_secs(30)));
+        assert_eq!(backoff.current, Duration::from_millis(20));
+    }
+
+    #[test]
+    fn stable_session_resets_backoff() {
+        let mut backoff = JitterBackoff::new(Duration::from_millis(10), Duration::from_millis(80));
+        let _ = backoff.next_delay();
+
+        assert!(backoff.observe_session(Duration::from_secs(30), false, Duration::from_secs(30)));
+        assert_eq!(backoff.current, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn completed_business_resets_backoff_even_for_short_session() {
+        let mut backoff = JitterBackoff::new(Duration::from_millis(10), Duration::from_millis(80));
+        let _ = backoff.next_delay();
+
+        assert!(backoff.observe_session(Duration::from_secs(1), true, Duration::from_secs(30)));
+        assert_eq!(backoff.current, Duration::from_millis(10));
     }
 }

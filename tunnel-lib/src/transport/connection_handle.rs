@@ -1,5 +1,5 @@
 use crate::{
-    open_bi_guarded, send_routing_info, InflightSlotId, InflightTable, OpenBiOutcome, OpenedStream,
+    open_bi_guarded, send_routing_info, ConnectionState, OpenBiOutcome, OpenedStream,
     OverloadLimits, ProxyError, RoutingInfo,
 };
 use bytes::Bytes;
@@ -19,8 +19,7 @@ pub struct OpenStreamRequest {
 
 pub struct ConnectionHandle {
     conn: Connection,
-    inflight_table: Arc<InflightTable>,
-    slot_id: InflightSlotId,
+    connection_state: Arc<ConnectionState>,
     shard_id: usize,
     stream_semaphore: Arc<tokio::sync::Semaphore>,
     pending_semaphore: Arc<tokio::sync::Semaphore>,
@@ -30,8 +29,7 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     pub fn spawn(
         conn: Connection,
-        inflight_table: Arc<InflightTable>,
-        slot_id: InflightSlotId,
+        connection_state: Arc<ConnectionState>,
         shard_id: usize,
         max_concurrent_streams: u32,
         max_pending_streams: usize,
@@ -43,8 +41,7 @@ impl ConnectionHandle {
 
         Arc::new(Self {
             conn,
-            inflight_table,
-            slot_id,
+            connection_state,
             shard_id,
             stream_semaphore,
             pending_semaphore,
@@ -64,18 +61,21 @@ impl ConnectionHandle {
         self.conn.close_reason()
     }
 
-    pub fn inflight_table(&self) -> &Arc<InflightTable> {
-        &self.inflight_table
+    pub fn connection_state(&self) -> &Arc<ConnectionState> {
+        &self.connection_state
     }
 
-    pub fn slot_id(&self) -> InflightSlotId {
-        self.slot_id
+    pub fn retire(&self) -> bool {
+        self.connection_state.retire()
     }
 
     pub async fn open_stream(
         &self,
         request: OpenStreamRequest,
     ) -> Result<OpenedStream, ProxyError> {
+        if !self.connection_state.is_selectable() {
+            return Err(ProxyError::quic_connection_lost("connection retired"));
+        }
         let permit = self
             .stream_semaphore
             .clone()
@@ -87,8 +87,7 @@ impl ConnectionHandle {
         let mut wait_observer = request.on_wait_done;
         let mut opened = open_bi_guarded(
             &self.conn,
-            &self.inflight_table,
-            self.slot_id,
+            &self.connection_state,
             request.stream_timeout,
             Some(permit),
             crate::transport::open_bi::PendingAdmission {
@@ -117,6 +116,8 @@ impl ConnectionHandle {
     }
 
     pub async fn send_datagram(&self, payload: Bytes) -> anyhow::Result<()> {
+        let _inflight = crate::begin_inflight(&self.connection_state)
+            .ok_or_else(|| anyhow::anyhow!("connection retired"))?;
         self.conn
             .send_datagram(payload)
             .map_err(|error| anyhow::anyhow!(error.to_string()))

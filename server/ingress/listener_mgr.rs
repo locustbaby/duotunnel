@@ -1,7 +1,7 @@
 use crate::bootstrap::config::{IngressListener, IngressMode};
 use crate::ServerState;
 use parking_lot::Mutex as ParkingMutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -287,10 +287,10 @@ impl ListenerManager {
             .remove_if_current(port, generation, ListenerState::Draining);
     }
 
-    fn worker_set_exited(&self, port: u16, generation: u64) {
+    fn worker_set_exited(&self, port: u16, generation: u64) -> bool {
         self.table
             .lock()
-            .remove_if_current(port, generation, ListenerState::Active);
+            .remove_if_current(port, generation, ListenerState::Active)
     }
 
     fn fail_operation(&self, fence: OperationFence) {
@@ -303,6 +303,38 @@ impl ListenerManager {
 
     fn begin_shutdown(&self) -> Vec<(u16, CancellationToken)> {
         self.table.lock().begin_shutdown()
+    }
+
+    fn health_snapshot(
+        &self,
+        desired: &[IngressListener],
+        affected_ports: Option<&HashSet<u16>>,
+        failures: &BTreeMap<u16, (u64, String)>,
+    ) -> BTreeMap<u16, crate::runtime::health::ListenerHealth> {
+        let table = self.table.lock();
+        desired
+            .iter()
+            .filter(|listener| affected_ports.is_none_or(|ports| ports.contains(&listener.port)))
+            .map(|listener| {
+                let entry = table.entries.get(&listener.port);
+                let failed = failures.get(&listener.port);
+                let desired_generation = entry
+                    .map(|entry| entry.generation)
+                    .or_else(|| failed.map(|(generation, _)| *generation))
+                    .unwrap_or(0);
+                let active_generation = entry
+                    .filter(|entry| entry.state == ListenerState::Active)
+                    .map(|entry| entry.generation);
+                (
+                    listener.port,
+                    crate::runtime::health::ListenerHealth {
+                        desired_generation,
+                        active_generation,
+                        error: failed.map(|(_, error)| error.clone()),
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -338,9 +370,21 @@ fn bind_listener_workers(
     accept_workers: usize,
 ) -> anyhow::Result<Vec<Arc<TcpListener>>> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    bind_listener_workers_with(accept_workers, || {
+        tunnel_lib::build_reuseport_listener(addr)
+    })
+}
+
+fn bind_listener_workers_with<F>(
+    accept_workers: usize,
+    mut bind: F,
+) -> anyhow::Result<Vec<Arc<TcpListener>>>
+where
+    F: FnMut() -> anyhow::Result<TcpListener>,
+{
     let mut sockets = Vec::with_capacity(accept_workers);
     for _ in 0..accept_workers {
-        sockets.push(Arc::new(tunnel_lib::build_reuseport_listener(addr)?));
+        sockets.push(Arc::new(bind()?));
     }
     Ok(sockets)
 }
@@ -349,7 +393,7 @@ async fn run_start_operation(
     state: Arc<ServerState>,
     reservation: StartReservation,
     listener: IngressListener,
-) {
+) -> anyhow::Result<()> {
     let StartReservation {
         port,
         generation,
@@ -363,7 +407,7 @@ async fn run_start_operation(
     }
     if cancel.is_cancelled() || !state.listeners().is_current_start(port, generation) {
         drained.cancel();
-        return;
+        return Ok(());
     }
 
     let sockets = match bind_listener_workers(port, state.accept_workers()) {
@@ -372,20 +416,22 @@ async fn run_start_operation(
             error!(port = %port, generation, "listener has no accept workers");
             state.listeners().fail_start(port, generation);
             drained.cancel();
-            return;
+            anyhow::bail!("listener {port} has no accept workers");
         }
         Err(e) => {
             error!(port = %port, generation, error = %e, "failed to bind listener worker set");
             state.listeners().fail_start(port, generation);
             drained.cancel();
-            return;
+            return Err(e.context(format!(
+                "failed to bind listener {port} generation {generation}"
+            )));
         }
     };
 
     if cancel.is_cancelled() || !state.listeners().complete_start(port, generation) {
         drop(sockets);
         drained.cancel();
-        return;
+        return Ok(());
     }
 
     let remaining = Arc::new(AtomicUsize::new(sockets.len()));
@@ -409,7 +455,11 @@ async fn run_start_operation(
                     }
                     if worker_remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
                         worker_drained.cancel();
-                        worker_state.listeners().worker_set_exited(port, generation);
+                        if worker_state.listeners().worker_set_exited(port, generation) {
+                            worker_state
+                                .health()
+                                .listener_worker_exited(port, generation);
+                        }
                     }
                 });
             }
@@ -437,7 +487,11 @@ async fn run_start_operation(
                     }
                     if worker_remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
                         worker_drained.cancel();
-                        worker_state.listeners().worker_set_exited(port, generation);
+                        if worker_state.listeners().worker_set_exited(port, generation) {
+                            worker_state
+                                .health()
+                                .listener_worker_exited(port, generation);
+                        }
                     }
                 });
             }
@@ -445,9 +499,13 @@ async fn run_start_operation(
     }
 
     info!(port = %port, generation, "listener active");
+    Ok(())
 }
 
-async fn run_listener_operation(state: Arc<ServerState>, operation: ListenerOperation) {
+async fn run_listener_operation(
+    state: Arc<ServerState>,
+    operation: ListenerOperation,
+) -> anyhow::Result<()> {
     match operation {
         ListenerOperation::Start {
             reservation,
@@ -458,6 +516,7 @@ async fn run_listener_operation(state: Arc<ServerState>, operation: ListenerOper
             state
                 .listeners()
                 .complete_drain(reservation.port, reservation.generation);
+            Ok(())
         }
     }
 }
@@ -466,7 +525,7 @@ async fn sync_listeners_inner(
     state: &Arc<ServerState>,
     desired: &[IngressListener],
     affected_ports: Option<&HashSet<u16>>,
-) {
+) -> anyhow::Result<()> {
     let operations = state.listeners().plan_sync(desired, affected_ports);
     let mut handles = Vec::with_capacity(operations.len());
     for operation in operations {
@@ -479,31 +538,63 @@ async fn sync_listeners_inner(
                 .spawn(run_listener_operation(operation_state, operation)),
         ));
     }
+    let mut failures = BTreeMap::new();
     for (fence, handle) in handles {
-        if let Err(e) = handle.await {
-            state.listeners().fail_operation(fence);
-            error!(error = %e, "listener lifecycle operation task failed");
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                failures.insert(fence.port, (fence.generation, e.to_string()));
+            }
+            Err(e) => {
+                let error = format!("listener lifecycle operation task failed: {e}");
+                let port = fence.port;
+                let generation = fence.generation;
+                state.listeners().fail_operation(fence);
+                failures.insert(port, (generation, error));
+            }
         }
+    }
+    let facts = state
+        .listeners()
+        .health_snapshot(desired, affected_ports, &failures);
+    state.health().replace_listener_facts(facts, affected_ports);
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "listener apply failed: {}",
+            failures
+                .into_iter()
+                .map(|(port, (_, error))| format!("{port}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     }
 }
 
-pub(crate) async fn sync_all_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
-    sync_listeners_inner(state, desired, None).await;
+pub(crate) async fn sync_all_listeners(
+    state: &Arc<ServerState>,
+    desired: &[IngressListener],
+) -> anyhow::Result<()> {
+    sync_listeners_inner(state, desired, None).await
 }
 
 pub(crate) async fn sync_listener_subset(
     state: &Arc<ServerState>,
     desired: &[IngressListener],
     affected_ports: &HashSet<u16>,
-) {
+) -> anyhow::Result<()> {
     if affected_ports.is_empty() {
-        return;
+        return Ok(());
     }
-    sync_listeners_inner(state, desired, Some(affected_ports)).await;
+    sync_listeners_inner(state, desired, Some(affected_ports)).await
 }
 
-pub(crate) async fn sync_listeners(state: &Arc<ServerState>, desired: &[IngressListener]) {
-    sync_all_listeners(state, desired).await;
+pub(crate) async fn sync_listeners(
+    state: &Arc<ServerState>,
+    desired: &[IngressListener],
+) -> anyhow::Result<()> {
+    sync_all_listeners(state, desired).await
 }
 
 pub(crate) async fn shutdown_all_listeners(state: &Arc<ServerState>) {
@@ -598,5 +689,20 @@ mod tests {
         assert!(!table.complete_start(8082, reservation.generation));
         assert!(table.begin_start(8082, ListenerKind::Http).is_none());
         assert!(table.entries.is_empty());
+    }
+
+    #[test]
+    fn bind_failure_is_propagated_to_listener_apply() {
+        let error = bind_listener_workers_with(1, || {
+            Err(std::io::Error::from(std::io::ErrorKind::AddrInUse).into())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::AddrInUse),
+            "unexpected bind error: {error}"
+        );
     }
 }

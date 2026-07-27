@@ -4,7 +4,6 @@ use http_body_util::Full;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -12,7 +11,7 @@ use tracing::info;
 
 pub async fn run_metrics_server(
     port: u16,
-    ready: Arc<AtomicBool>,
+    health: Arc<crate::runtime::health::ServerHealthFacts>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -22,7 +21,7 @@ pub async fn run_metrics_server(
             _ = shutdown.cancelled() => break,
             result = listener.accept() => {
                 let (stream, _) = result?;
-                let ready = ready.clone();
+                let health = health.clone();
                 tokio::task::spawn(async move {
                     let io = TokioIo::new(stream);
                     let _ = http1::Builder::new()
@@ -30,8 +29,8 @@ pub async fn run_metrics_server(
                         .serve_connection(
                             io,
                             service_fn(move |req| {
-                                let ready = ready.clone();
-                                async move { handle_request(req, &ready).await }
+                                let health = health.clone();
+                                async move { handle_request(req, &health).await }
                             }),
                         )
                         .await;
@@ -44,11 +43,14 @@ pub async fn run_metrics_server(
 
 async fn handle_request(
     req: hyper::Request<hyper::body::Incoming>,
-    ready: &Arc<AtomicBool>,
+    health: &Arc<crate::runtime::health::ServerHealthFacts>,
 ) -> Result<hyper::Response<Full<bytes::Bytes>>, std::convert::Infallible> {
     if req.uri().path() == "/healthz" {
-        let (status, body) = if ready.load(Ordering::Acquire) {
-            (200u16, "ok\n")
+        let (status, body) = if health.is_ready() {
+            match health.control_freshness() {
+                crate::runtime::health::ControlFreshness::Degraded => (200u16, "degraded\n"),
+                _ => (200u16, "ok\n"),
+            }
         } else {
             (503u16, "not ready\n")
         };

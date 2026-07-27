@@ -1,3 +1,4 @@
+use crate::health::ClientHealth;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
@@ -35,10 +36,21 @@ pub struct EntryListenerConfig {
     pub sniff_timeout: Duration,
 }
 
+struct EntryListenerHealthGuard {
+    health: Arc<ClientHealth>,
+}
+
+impl Drop for EntryListenerHealthGuard {
+    fn drop(&mut self) {
+        self.health.set_entry_listener_up(false);
+    }
+}
+
 pub async fn start_entry_listener(
     pool: Arc<EntryConnPool>,
     cancel_token: CancellationToken,
     cfg: EntryListenerConfig,
+    health: Arc<ClientHealth>,
 ) -> Result<()> {
     let peek_buf_size = cfg.peek_buf_size;
     let open_stream_timeout = cfg.open_stream_timeout;
@@ -47,19 +59,31 @@ pub async fn start_entry_listener(
     let tcp_params = Arc::new(cfg.tcp_params);
     let overload = cfg.overload;
     let sniff_timeout = cfg.sniff_timeout;
+    anyhow::ensure!(
+        accept_workers > 0,
+        "entry accept_workers must be at least 1"
+    );
+    let mut listeners = Vec::with_capacity(accept_workers);
+    for _ in 0..accept_workers {
+        listeners.push(Arc::new(tunnel_lib::build_reuseport_listener(addr)?));
+    }
+    health.set_entry_listener_up(true);
+    let _health_guard = EntryListenerHealthGuard {
+        health: health.clone(),
+    };
     info!(addr = %addr, accept_workers = %accept_workers, "client entry listener started");
+    let worker_cancel = cancel_token.child_token();
 
     let mut handles = Vec::with_capacity(accept_workers);
-    for _ in 0..accept_workers {
-        let listener = Arc::new(tunnel_lib::build_reuseport_listener(addr)?);
+    for listener in listeners {
         let pool = pool.clone();
         let tcp_params = tcp_params.clone();
-        let cancel_token = cancel_token.clone();
+        let worker_cancel = worker_cancel.clone();
         let overload = overload.clone();
         handles.push(crate::runtime::spawn_task(async move {
             run_accept_worker(
                 listener,
-                cancel_token,
+                worker_cancel,
                 EMFILE_BACKOFF,
                 "entry",
                 move |accepted| {
@@ -88,8 +112,27 @@ pub async fn start_entry_listener(
         }));
     }
 
-    futures_util::future::join_all(handles).await;
-    Ok(())
+    let (first_result, _, remaining) = futures_util::future::select_all(handles).await;
+    health.set_entry_listener_up(false);
+    worker_cancel.cancel();
+    for handle in &remaining {
+        handle.abort();
+    }
+    let _ = futures_util::future::join_all(remaining).await;
+    classify_accept_worker_exit(cancel_token.is_cancelled(), first_result.err())
+}
+
+fn classify_accept_worker_exit(
+    shutdown_requested: bool,
+    task_error: Option<tokio::task::JoinError>,
+) -> Result<()> {
+    match (shutdown_requested, task_error) {
+        (true, None) => Ok(()),
+        (_, Some(error)) => Err(anyhow::anyhow!("entry accept worker task failed: {error}")),
+        (false, None) => Err(anyhow::anyhow!(
+            "UnexpectedExit: entry accept worker stopped before shutdown"
+        )),
+    }
 }
 
 async fn handle_entry_connection(
@@ -168,12 +211,7 @@ async fn handle_entry_connection(
             None => break,
         };
         tried_conn_ids.push(conn.handle.stable_id());
-        maybe_slow_path(
-            conn.handle.inflight_table(),
-            conn.handle.slot_id(),
-            overload,
-        )
-        .await;
+        maybe_slow_path(conn.handle.connection_state(), overload).await;
         let routing_info = RoutingInfo {
             proxy_name: "entry".into(),
             src_addr: peer_addr.ip().to_string(),
@@ -197,6 +235,7 @@ async fn handle_entry_connection(
                 let recv = opened.recv;
                 let _inflight_guard = opened.inflight;
                 let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
+                conn.mark_business_completed();
                 let extra = initial_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                 debug!(
                     sent = sent + extra, received = received, protocol = ? protocol,
@@ -234,12 +273,26 @@ async fn handle_entry_connection(
                 }
                 ErrorKind::QuicConnectionLost => {
                     warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi hit stale connection, evicting pool entry");
-                    pool.remove_stable_id(conn.handle.stable_id()).await;
+                    pool.remove_stable_id(conn.handle.stable_id())
+                        .await
+                        .map_err(|actor_error| {
+                            anyhow::anyhow!(
+                                "failed to evict stale connection {}: {actor_error}",
+                                conn.handle.stable_id()
+                            )
+                        })?;
                     last_err = with_conn_detail(conn.handle.stable_id(), e).into();
                 }
                 ErrorKind::QuicConnectionFatal => {
                     warn!(error = %e, conn_id = conn.handle.stable_id(), "open_bi hit fatal connection error");
-                    pool.remove_stable_id(conn.handle.stable_id()).await;
+                    pool.remove_stable_id(conn.handle.stable_id())
+                        .await
+                        .map_err(|actor_error| {
+                            anyhow::anyhow!(
+                                "failed to evict fatal connection {}: {actor_error}",
+                                conn.handle.stable_id()
+                            )
+                        })?;
                     return Err(with_conn_detail(conn.handle.stable_id(), e).into());
                 }
                 _ => {
@@ -255,6 +308,7 @@ async fn handle_entry_connection(
 pub struct EgressListenerService {
     pub entry_cfg: EntryListenerConfig,
     pub pool: Arc<EntryConnPool>,
+    pub health: Arc<ClientHealth>,
 }
 
 #[async_trait::async_trait]
@@ -263,9 +317,14 @@ impl ClientService for EgressListenerService {
         "egress-tcp-listener"
     }
     async fn start(&self, shutdown: CancellationToken) -> anyhow::Result<()> {
-        start_entry_listener(self.pool.clone(), shutdown, self.entry_cfg.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("entry listener failed: {}", e))
+        start_entry_listener(
+            self.pool.clone(),
+            shutdown,
+            self.entry_cfg.clone(),
+            self.health.clone(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("entry listener failed: {}", e))
     }
 }
 
@@ -276,9 +335,17 @@ mod tests {
     use tokio::net::TcpListener;
     use tunnel_lib::EgressVhostRuleDef;
 
+    #[test]
+    fn accept_worker_exit_is_only_normal_during_shutdown() {
+        assert!(classify_accept_worker_exit(true, None).is_ok());
+        let error = classify_accept_worker_exit(false, None).unwrap_err();
+        assert!(error.to_string().contains("UnexpectedExit"));
+    }
+
     #[tokio::test]
     async fn test_handle_entry_connection_http_reject() {
-        let pool = EntryConnPool::new(100, 25, 1, 1).unwrap();
+        let pool =
+            EntryConnPool::new(100, 25, 1, 1, Arc::new(ClientHealth::new(false, 1, 1))).unwrap();
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "allowed.com".to_string(),
             action_upstream: "backend".to_string(),
@@ -333,7 +400,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_entry_connection_tls_reject() {
-        let pool = EntryConnPool::new(100, 25, 1, 1).unwrap();
+        let pool =
+            EntryConnPool::new(100, 25, 1, 1, Arc::new(ClientHealth::new(false, 1, 1))).unwrap();
         pool.set_egress_rules(vec![EgressVhostRuleDef {
             match_host: "allowed.com".to_string(),
             action_upstream: "backend".to_string(),

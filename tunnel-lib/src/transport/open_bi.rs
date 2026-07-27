@@ -1,5 +1,5 @@
 use crate::error::ProxyError;
-use crate::lb::inflight::{begin_inflight, InflightGuard, InflightSlotId, InflightTable};
+use crate::lb::inflight::{begin_inflight, ConnectionState, InflightGuard};
 use crate::timeout;
 use futures_util::FutureExt;
 use quinn::{Connection, RecvStream, SendStream};
@@ -56,8 +56,7 @@ pub struct PendingAdmission<'a> {
 
 pub async fn open_bi_guarded<F>(
     conn: &Connection,
-    inflight_table: &Arc<InflightTable>,
-    slot_id: InflightSlotId,
+    connection_state: &Arc<ConnectionState>,
     stream_timeout: Duration,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     admission: PendingAdmission<'_>,
@@ -66,7 +65,8 @@ pub async fn open_bi_guarded<F>(
 where
     F: FnOnce(Duration, OpenBiOutcome),
 {
-    let guard = begin_inflight(inflight_table, slot_id);
+    let guard = begin_inflight(connection_state)
+        .ok_or_else(|| ProxyError::quic_connection_lost("connection retired"))?;
     let immediate = conn.open_bi().now_or_never();
     match immediate {
         Some(Ok((send, recv))) => {

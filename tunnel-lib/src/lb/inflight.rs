@@ -1,30 +1,38 @@
 use crossbeam_utils::CachePadded;
-use parking_lot::Mutex;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::Notify;
 
 thread_local! {
     static ROTATING_INDEX: Cell<usize> = const { Cell::new(0) };
 }
 
-pub struct InflightSlot {
+struct InflightCounters {
     pending_opens: AtomicUsize,
     active_streams: AtomicUsize,
     notify: Arc<Notify>,
 }
 
-pub type InflightSlotId = usize;
+pub struct ConnectionState {
+    id: u64,
+    counters: CachePadded<InflightCounters>,
+    admission: AtomicUsize,
+    registered: AtomicBool,
+    owner: Weak<InflightTable>,
+}
+
+const RETIRED_BIT: usize = 1usize << (usize::BITS - 1);
+const ADMISSION_COUNT_MASK: usize = RETIRED_BIT - 1;
 
 pub struct InflightTable {
-    slots: Vec<CachePadded<InflightSlot>>,
-    free: Mutex<Vec<InflightSlotId>>,
+    capacity: usize,
+    registered: AtomicUsize,
+    next_id: AtomicU64,
 }
 
 pub struct InflightGuard {
-    table: Arc<InflightTable>,
-    slot_id: InflightSlotId,
+    state: Arc<ConnectionState>,
     phase: InflightPhase,
 }
 
@@ -35,36 +43,102 @@ enum InflightPhase {
 
 impl InflightTable {
     pub fn new(size: usize) -> Self {
-        let len = size.max(1);
-        let mut free = Vec::with_capacity(len);
-        let mut slots = Vec::with_capacity(len);
-        for slot_id in 0..len {
-            free.push(slot_id);
-            slots.push(CachePadded::new(InflightSlot {
+        Self {
+            capacity: size.max(1),
+            registered: AtomicUsize::new(0),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    pub fn allocate(self: &Arc<Self>) -> Option<Arc<ConnectionState>> {
+        let mut registered = self.registered.load(Ordering::Acquire);
+        loop {
+            if registered >= self.capacity {
+                return None;
+            }
+            match self.registered.compare_exchange_weak(
+                registered,
+                registered + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => registered = actual,
+            }
+        }
+
+        Some(Arc::new(ConnectionState {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            counters: CachePadded::new(InflightCounters {
                 pending_opens: AtomicUsize::new(0),
                 active_streams: AtomicUsize::new(0),
                 notify: Arc::new(Notify::new()),
-            }));
-        }
-        free.reverse();
-        Self {
-            slots,
-            free: Mutex::new(free),
+            }),
+            admission: AtomicUsize::new(0),
+            registered: AtomicBool::new(true),
+            owner: Arc::downgrade(self),
+        }))
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn registered_connections(&self) -> usize {
+        self.registered.load(Ordering::Acquire)
+    }
+}
+
+impl ConnectionState {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        self.admission.load(Ordering::Acquire) & RETIRED_BIT == 0
+    }
+
+    pub fn retire(&self) -> bool {
+        self.admission.fetch_or(RETIRED_BIT, Ordering::AcqRel);
+        self.release_registration()
+    }
+
+    fn try_acquire_admission(&self) -> bool {
+        let mut admission = self.admission.load(Ordering::Acquire);
+        loop {
+            if admission & RETIRED_BIT != 0
+                || admission & ADMISSION_COUNT_MASK == ADMISSION_COUNT_MASK
+            {
+                return false;
+            }
+            match self.admission.compare_exchange_weak(
+                admission,
+                admission + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => admission = actual,
+            }
         }
     }
 
-    pub fn alloc_slot(&self) -> Option<InflightSlotId> {
-        self.free.lock().pop()
-    }
-
-    pub fn free_slot(&self, slot_id: InflightSlotId) {
-        if slot_id < self.slots.len() {
-            self.free.lock().push(slot_id);
+    fn release_registration(&self) -> bool {
+        if self.registered.swap(false, Ordering::AcqRel) {
+            if let Some(owner) = self.owner.upgrade() {
+                let previous = owner.registered.fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "inflight registration count underflow");
+            }
+            true
+        } else {
+            false
         }
     }
+}
 
-    fn slot(&self, slot_id: InflightSlotId) -> &InflightSlot {
-        &self.slots[slot_id]
+impl Drop for ConnectionState {
+    fn drop(&mut self) {
+        self.release_registration();
     }
 }
 
@@ -72,23 +146,29 @@ pub fn new_inflight_table(size: usize) -> Arc<InflightTable> {
     Arc::new(InflightTable::new(size))
 }
 
-pub fn begin_inflight(table: &Arc<InflightTable>, slot_id: InflightSlotId) -> InflightGuard {
-    table
-        .slot(slot_id)
-        .pending_opens
-        .fetch_add(1, Ordering::Relaxed);
-    InflightGuard {
-        table: table.clone(),
-        slot_id,
-        phase: InflightPhase::PendingOpen,
+pub fn begin_inflight(state: &Arc<ConnectionState>) -> Option<InflightGuard> {
+    if !state.try_acquire_admission() {
+        return None;
     }
+    state.counters.pending_opens.fetch_add(1, Ordering::Relaxed);
+    Some(InflightGuard {
+        state: state.clone(),
+        phase: InflightPhase::PendingOpen,
+    })
 }
 
 impl InflightGuard {
     pub fn promote(mut self) -> Self {
-        let slot = self.table.slot(self.slot_id);
-        slot.pending_opens.fetch_sub(1, Ordering::Relaxed);
-        slot.active_streams.fetch_add(1, Ordering::Relaxed);
+        let previous = self
+            .state
+            .counters
+            .pending_opens
+            .fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0, "pending inflight count underflow");
+        self.state
+            .counters
+            .active_streams
+            .fetch_add(1, Ordering::Relaxed);
         self.phase = InflightPhase::ActiveStream;
         self
     }
@@ -96,43 +176,24 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let slot = self.table.slot(self.slot_id);
         let counter = match self.phase {
-            InflightPhase::PendingOpen => &slot.pending_opens,
-            InflightPhase::ActiveStream => &slot.active_streams,
+            InflightPhase::PendingOpen => &self.state.counters.pending_opens,
+            InflightPhase::ActiveStream => &self.state.counters.active_streams,
         };
-        let mut current = counter.load(Ordering::Relaxed);
-        loop {
-            if current == 0 {
-                break;
-            }
-            match counter.compare_exchange_weak(
-                current,
-                current - 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    slot.notify.notify_one();
-                    break;
-                }
-                Err(actual) => current = actual,
-            }
-        }
+        let previous = counter.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0, "inflight count underflow");
+        let admission = self.state.admission.fetch_sub(1, Ordering::Release);
+        debug_assert!(admission & ADMISSION_COUNT_MASK > 0);
+        self.state.counters.notify.notify_one();
     }
 }
 
-pub fn inflight_load(
-    table: &Arc<InflightTable>,
-    slot_id: InflightSlotId,
-    ordering: Ordering,
-) -> usize {
-    let slot = table.slot(slot_id);
-    slot.pending_opens.load(ordering) + slot.active_streams.load(ordering)
+pub fn inflight_load(state: &ConnectionState, ordering: Ordering) -> usize {
+    state.counters.pending_opens.load(ordering) + state.counters.active_streams.load(ordering)
 }
 
-pub fn inflight_notify(table: &Arc<InflightTable>, slot_id: InflightSlotId) -> Arc<Notify> {
-    table.slot(slot_id).notify.clone()
+pub fn inflight_notify(state: &ConnectionState) -> Arc<Notify> {
+    state.counters.notify.clone()
 }
 
 pub fn pick_least_inflight<T, H, I>(items: &[T], is_healthy: H, inflight: I) -> Option<&T>
@@ -219,4 +280,69 @@ where
 
     // All random P2C picks were unhealthy, fallback to O(N) scan
     pick_least_inflight(items, is_healthy, inflight)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_connection_guard_cannot_touch_replacement() {
+        let table = new_inflight_table(1);
+        let old = table.allocate().unwrap();
+        let old_guard = begin_inflight(&old).unwrap().promote();
+
+        assert!(old.retire());
+        let replacement = table.allocate().unwrap();
+        let replacement_guard = begin_inflight(&replacement).unwrap().promote();
+        assert_ne!(old.id(), replacement.id());
+        assert_eq!(inflight_load(&replacement, Ordering::Relaxed), 1);
+
+        drop(old_guard);
+
+        assert_eq!(inflight_load(&old, Ordering::Relaxed), 0);
+        assert_eq!(inflight_load(&replacement, Ordering::Relaxed), 1);
+        drop(replacement_guard);
+    }
+
+    #[test]
+    fn concurrent_old_guard_drops_do_not_modify_new_connection() {
+        let table = new_inflight_table(1);
+        let old = table.allocate().unwrap();
+        let guards: Vec<_> = (0..64)
+            .map(|_| begin_inflight(&old).unwrap().promote())
+            .collect();
+        old.retire();
+
+        let replacement = table.allocate().unwrap();
+        let replacement_guard = begin_inflight(&replacement).unwrap().promote();
+        let threads: Vec<_> = guards
+            .into_iter()
+            .map(|guard| std::thread::spawn(move || drop(guard)))
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(inflight_load(&old, Ordering::Relaxed), 0);
+        assert_eq!(inflight_load(&replacement, Ordering::Relaxed), 1);
+        drop(replacement_guard);
+    }
+
+    #[test]
+    fn retirement_is_idempotent_and_releases_registration_capacity_once() {
+        let table = new_inflight_table(1);
+        let state = table.allocate().unwrap();
+        assert_eq!(table.capacity(), 1);
+        assert_eq!(table.registered_connections(), 1);
+        assert!(table.allocate().is_none());
+
+        assert!(state.retire());
+        assert!(!state.retire());
+        assert!(begin_inflight(&state).is_none());
+        assert_eq!(table.registered_connections(), 0);
+        let replacement = table.allocate().unwrap();
+        assert_eq!(table.registered_connections(), 1);
+        drop(replacement);
+    }
 }

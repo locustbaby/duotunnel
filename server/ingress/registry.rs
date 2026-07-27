@@ -56,14 +56,10 @@ impl ClientGroup {
             let snapshot = shard.load();
             pick_p2c_inflight_owned(
                 snapshot.as_slice(),
-                |c| c.handle.close_reason().is_none(),
                 |c| {
-                    inflight_load(
-                        c.handle.inflight_table(),
-                        c.handle.slot_id(),
-                        Ordering::Relaxed,
-                    )
+                    c.handle.connection_state().is_selectable() && c.handle.close_reason().is_none()
                 },
+                |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
             )
         })
     }
@@ -94,7 +90,11 @@ pub struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    pub fn new(shard_count: usize, max_concurrent_streams: u32, max_pending_streams: usize) -> Self {
+    pub fn new(
+        shard_count: usize,
+        max_concurrent_streams: u32,
+        max_pending_streams: usize,
+    ) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
@@ -136,30 +136,33 @@ impl ClientRegistry {
                             capabilities = negotiated.capabilities,
                             "registering client"
                         );
+                        if let Some(old_info) = clients.get(&client_id) {
+                            if let Some(old_shards) = group_conns.get(&old_info.group_id) {
+                                if let Some(existing) =
+                                    old_shards[old_info.shard_id].get(&client_id)
+                                {
+                                    existing.handle.retire();
+                                }
+                            }
+                        }
+                        let Some(connection_state) = inflight_table.allocate() else {
+                            let _ = reply.send(Err("connection state capacity exhausted"));
+                            continue;
+                        };
                         let group = {
                             let entry = groups_clone
                                 .entry(group_id.clone())
                                 .or_insert_with(|| Arc::new(ClientGroup::new(shard_count)));
                             entry.value().clone()
                         };
-
                         let shards = group_conns
                             .entry(group_id.clone())
                             .or_insert_with(|| (0..shard_count).map(|_| HashMap::new()).collect());
                         let idx = &mut shards[shard_id % shard_count];
-                        let slot_id = if let Some(existing) = idx.get(&client_id) {
-                            existing.handle.slot_id()
-                        } else if let Some(slot) = inflight_table.alloc_slot() {
-                            slot
-                        } else {
-                            let _ = reply.send(Err("inflight slot table exhausted"));
-                            continue;
-                        };
 
                         let handle = ConnectionHandle::spawn(
                             conn,
-                            inflight_table.clone(),
-                            slot_id,
+                            connection_state,
                             shard_id % shard_count,
                             max_concurrent_streams,
                             max_pending_streams,
@@ -180,7 +183,7 @@ impl ClientRegistry {
                                 if let Some(old_shards) = group_conns.get_mut(&old_info.group_id) {
                                     let old_idx = &mut old_shards[old_info.shard_id];
                                     if let Some(existing) = old_idx.remove(&client_id) {
-                                        inflight_table.free_slot(existing.handle.slot_id());
+                                        existing.handle.retire();
                                     }
                                     if let Some(old_group) = groups_clone.get(&old_info.group_id) {
                                         old_group.shards[old_info.shard_id]
@@ -207,7 +210,7 @@ impl ClientRegistry {
                             if let Some(shards) = group_conns.get_mut(&info.group_id) {
                                 let idx = &mut shards[info.shard_id];
                                 if let Some(existing) = idx.remove(&client_id) {
-                                    inflight_table.free_slot(existing.handle.slot_id());
+                                    existing.handle.retire();
                                 }
                                 let should_remove =
                                     if let Some(group) = groups_clone.get(&info.group_id) {
@@ -238,7 +241,7 @@ impl ClientRegistry {
                                 if !dead_in_group.is_empty() {
                                     for cid in &dead_in_group {
                                         if let Some(existing) = idx.remove(cid) {
-                                            inflight_table.free_slot(existing.handle.slot_id());
+                                            existing.handle.retire();
                                         }
                                         dead_clients.push(cid.clone());
                                         dead_count += 1;
@@ -318,9 +321,15 @@ impl ClientRegistry {
     }
 
     pub fn unregister(&self, client_id: &ClientId) {
-        let _ = self.tx.try_send(RegistryMsg::Unregister {
+        let message = RegistryMsg::Unregister {
             client_id: client_id.clone(),
-        });
+        };
+        if let Err(mpsc::error::TrySendError::Full(message)) = self.tx.try_send(message) {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(message).await;
+            });
+        }
     }
 
     pub fn select_client_for_group(&self, group_id: &str) -> Option<Arc<SelectedConnection>> {

@@ -24,7 +24,6 @@ pub(crate) struct ServerApp {
 struct ServerRuntime {
     state: Arc<ServerState>,
     shutdown: CancellationToken,
-    ready: Arc<std::sync::atomic::AtomicBool>,
     proxy_handle: tokio::runtime::Handle,
 }
 
@@ -50,7 +49,6 @@ impl ServerRuntime {
         Ok(Self {
             state: build_server_state(bootstrap).await?,
             shutdown: CancellationToken::new(),
-            ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             proxy_handle: tokio::runtime::Handle::current(),
         })
     }
@@ -125,12 +123,16 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
     });
     let bootstrap = Arc::new(bootstrap);
     let supervisor = start_supervisor(bootstrap.clone(), &runtime);
-    let result = proxy_main(
-        runtime.state.clone(),
-        runtime.shutdown.clone(),
-        runtime.ready.clone(),
-    )
-    .await;
+    let health = runtime.state.health().clone();
+    let mut proxy = Box::pin(proxy_main(runtime.state.clone(), runtime.shutdown.clone()));
+    let result = tokio::select! {
+        result = &mut proxy => result,
+        failure = health.wait_for_failure() => {
+            runtime.shutdown.cancel();
+            let _ = proxy.await;
+            Err(anyhow::anyhow!("critical component failed: {failure}"))
+        }
+    };
     if runtime.shutdown.is_cancelled() {
         wait_for_shutdown_drain("server").await;
     }
@@ -149,30 +151,28 @@ fn start_supervisor(bootstrap: Arc<ServerBootstrap>, runtime: &ServerRuntime) ->
         state: runtime.state.clone(),
         bootstrap,
         shutdown: runtime.shutdown.clone(),
-        ready: runtime.ready.clone(),
         proxy_handle: runtime.proxy_handle.clone(),
     };
     ServerSupervisor::start(components, ctx)
 }
 
-async fn proxy_main(
-    state: Arc<ServerState>,
-    shutdown: CancellationToken,
-    ready: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
+async fn proxy_main(state: Arc<ServerState>, shutdown: CancellationToken) -> Result<()> {
     let listeners = state.ingress_listeners();
-    sync_listeners(&state, &listeners).await;
+    sync_listeners(&state, &listeners).await?;
 
     let quic_state = state.clone();
     let quic_shutdown = shutdown.clone();
     let mut quic_handle = runtime::spawn_task(async move {
-        handlers::quic::run_quic_server(quic_state, ready, quic_shutdown).await
+        handlers::quic::run_quic_server(quic_state, quic_shutdown).await
     });
 
     tokio::select! {
         r = &mut quic_handle => {
             r??;
             shutdown_all_listeners(&state).await;
+            if !shutdown.is_cancelled() {
+                anyhow::bail!("QUIC server exited unexpectedly");
+            }
             return Ok(());
         }
         _ = shutdown.cancelled() => {}

@@ -26,6 +26,10 @@ pub async fn run_tcp_accept_loop(
         let group_id = group_id.clone();
         async move {
             let stream = accepted.stream;
+            if !state.health().admits_new_work() {
+                debug!("rejecting public TCP connection while server is not ready");
+                return;
+            }
             if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;
@@ -91,12 +95,7 @@ async fn handle_tcp_connection(
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
-        maybe_slow_path(
-            selected.handle.inflight_table(),
-            selected.handle.slot_id(),
-            state.overload_limits(),
-        )
-        .await;
+        maybe_slow_path(selected.handle.connection_state(), state.overload_limits()).await;
 
         let open_timeout = state.open_stream_timeout();
         let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);

@@ -30,7 +30,7 @@ pub use infra::runtime::{
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
 pub use lb::inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
-    pick_p2c_inflight, InflightGuard, InflightSlotId, InflightTable,
+    pick_p2c_inflight, ConnectionState, InflightGuard, InflightTable,
 };
 pub use lb::overload::{
     maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
@@ -48,8 +48,8 @@ pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
     decode_udp_datagram_envelope, encode_udp_datagram_envelope, negotiate_protocol, recv_message,
     recv_message_bounded, recv_message_type, recv_routing_info, recv_typed_message, send_message,
-    send_routing_info, ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol, RoutingInfo,
-    UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
+    send_routing_info, ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol,
+    RoutingInfo, UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
     MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
     SUPPORTED_CAPABILITIES,
 };

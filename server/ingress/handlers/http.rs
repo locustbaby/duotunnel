@@ -35,6 +35,10 @@ pub async fn run_http_accept_loop(
                 accepted_at,
                 ..
             } = accepted;
+            if !state.health().admits_new_work() {
+                debug!("rejecting public HTTP connection while server is not ready");
+                return;
+            }
             if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;

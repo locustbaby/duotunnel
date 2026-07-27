@@ -10,7 +10,6 @@ use std::collections::HashSet;
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -42,14 +41,9 @@ pub struct ControlClientService {
 }
 
 impl BackgroundService for ControlClientService {
-    fn name(&self) -> &'static str {
-        "control-client"
-    }
-
     fn run(
         self: Box<Self>,
         state: Arc<ServerState>,
-        ready: Arc<std::sync::atomic::AtomicBool>,
         shutdown: CancellationToken,
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
@@ -59,7 +53,6 @@ impl BackgroundService for ControlClientService {
                 self.auth_token,
                 self.config_path,
                 state,
-                ready,
                 shutdown,
             )
             .await;
@@ -182,7 +175,6 @@ async fn watch_loop(
     auth_token: Option<String>,
     config_path: String,
     state: Arc<ServerState>,
-    ready: Arc<std::sync::atomic::AtomicBool>,
     shutdown: CancellationToken,
 ) {
     let snapshot_path = get_snapshot_path(&config_path);
@@ -198,7 +190,7 @@ async fn watch_loop(
                 );
                 match apply_snapshot(&lkg.snapshot, &state).await {
                     Ok(()) => {
-                        ready.store(true, Ordering::Release);
+                        state.health().mark_config_valid();
                         watch_state.last_version = lkg.snapshot.resource_version;
                         watch_state.applied = Some(AppliedControlState {
                             revision: lkg.revision,
@@ -225,7 +217,6 @@ async fn watch_loop(
                 ctld_addr,
                 auth_token.as_deref(),
                 &state,
-                &ready,
                 &mut watch_state,
                 &snapshot_path,
             ) => {
@@ -261,7 +252,6 @@ async fn connect_and_watch(
     addr: SocketAddr,
     auth_token: Option<&str>,
     state: &Arc<ServerState>,
-    ready: &Arc<std::sync::atomic::AtomicBool>,
     watch_state: &mut WatchState,
     snapshot_path: &Path,
 ) -> anyhow::Result<()> {
@@ -290,8 +280,12 @@ async fn connect_and_watch(
             ReceivedWatchEvent::Legacy(WatchEvent::Snapshot(snap)) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
-                apply_snapshot(&snap, state).await?;
-                ready.store(true, Ordering::Release);
+                state.health().begin_config_apply();
+                if let Err(error) = apply_snapshot(&snap, state).await {
+                    state.health().fail_config_apply();
+                    return Err(error);
+                }
+                state.health().finish_config_apply();
                 watch_state.last_version = v;
                 let lkg = LastKnownGood {
                     format_version: LKG_FORMAT_VERSION,
@@ -311,8 +305,15 @@ async fn connect_and_watch(
                 let v = patch.resource_version;
                 info!(resource_version = v, "received Patch from ctld");
                 if let Some(snapshot) = watch_state.current_snapshot.as_mut() {
+                    state.health().begin_config_apply();
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
-                    apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await?;
+                    if let Err(error) =
+                        apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await
+                    {
+                        state.health().fail_config_apply();
+                        return Err(error);
+                    }
+                    state.health().finish_config_apply();
                     watch_state.last_version = v;
                     let lkg = LastKnownGood {
                         format_version: LKG_FORMAT_VERSION,
@@ -331,15 +332,8 @@ async fn connect_and_watch(
                 }
             }
             ReceivedWatchEvent::V2(WatchEventV2::Snapshot(versioned)) => {
-                handle_v2_snapshot(
-                    versioned,
-                    state,
-                    ready,
-                    watch_state,
-                    snapshot_path,
-                    &mut writer,
-                )
-                .await?;
+                handle_v2_snapshot(versioned, state, watch_state, snapshot_path, &mut writer)
+                    .await?;
             }
         }
     };
@@ -398,7 +392,6 @@ fn classify_revision(
 async fn handle_v2_snapshot<W>(
     versioned: VersionedConfigSnapshot,
     state: &Arc<ServerState>,
-    ready: &Arc<std::sync::atomic::AtomicBool>,
     watch_state: &mut WatchState,
     snapshot_path: &Path,
     writer: &mut W,
@@ -431,6 +424,7 @@ where
     ) {
         RevisionDecision::Duplicate => {
             watch_state.last_version = versioned.revision.sequence;
+            state.health().finish_config_apply();
             send_apply_response(
                 writer,
                 &versioned.revision,
@@ -455,7 +449,9 @@ where
         RevisionDecision::Apply => {}
     }
 
+    state.health().begin_config_apply();
     if let Err(error) = apply_snapshot(&versioned.snapshot, state).await {
+        state.health().fail_config_apply();
         let reason = format!("runtime apply failed: {error}");
         send_apply_response(
             writer,
@@ -467,6 +463,7 @@ where
         .await?;
         return Err(error);
     }
+    state.health().finish_config_apply();
 
     let lkg = LastKnownGood {
         format_version: LKG_FORMAT_VERSION,
@@ -488,7 +485,6 @@ where
         return Err(error);
     }
 
-    ready.store(true, Ordering::Release);
     watch_state.last_version = versioned.revision.sequence;
     watch_state.current_snapshot = Some(versioned.snapshot);
     watch_state.applied = Some(AppliedControlState {
@@ -538,7 +534,7 @@ async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) -> anyh
     let (listeners, routing_snapshot) = build_runtime_snapshot(snap, state)?;
     update_token_cache(&snap.token_cache, state);
     state.replace_routing(routing_snapshot);
-    crate::ingress::sync_all_listeners(state, &listeners).await;
+    crate::ingress::sync_all_listeners(state, &listeners).await?;
     Ok(())
 }
 
@@ -603,7 +599,7 @@ async fn apply_patch_to_runtime(
     update_token_cache(&snapshot.token_cache, state);
     state.replace_routing(routing_snapshot);
     if !patch.ingress_listeners.is_empty() {
-        crate::ingress::sync_listener_subset(state, &listeners, affected_ports).await;
+        crate::ingress::sync_listener_subset(state, &listeners, affected_ports).await?;
     }
     Ok(())
 }

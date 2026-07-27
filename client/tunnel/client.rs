@@ -1,9 +1,8 @@
 use anyhow::anyhow;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
@@ -16,21 +15,33 @@ use crate::egress::udp_listener::{forward_incoming_datagram, UdpListenerRegistry
 use crate::ingress::app::LocalProxyMap;
 use crate::ingress::handler::handle_work_stream;
 use crate::plugins;
-use crate::tunnel::conn_pool::EntryConnPool;
+use crate::tunnel::conn_pool::{EntryConnPool, SessionActivity};
 use crate::tunnel::supervisor::ConnectError;
 
 // Kept shorter than the app-level 30s drain backstop in runtime::app so both
 // waits stay bounded even when the local drain times out.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Debug)]
+pub(crate) enum RunClientOutcome {
+    Shutdown,
+    SessionEnded(SessionReport),
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionReport {
+    pub(crate) lifetime: Duration,
+    pub(crate) completed_business: bool,
+    pub(crate) error: ConnectError,
+}
+
 pub(crate) async fn run_client(
     config: &ClientConfigFile,
     endpoint: &quinn::Endpoint,
     shutdown: CancellationToken,
-    ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
     udp_registry: Arc<UdpListenerRegistry>,
-) -> std::result::Result<(), ConnectError> {
+) -> std::result::Result<RunClientOutcome, ConnectError> {
     // Nothing is in flight until the connection joins the pool, so racing this
     // phase against shutdown is both safe and necessary: connect walks every
     // resolved address and login spans several timeouts, so a sequential await
@@ -39,7 +50,7 @@ pub(crate) async fn run_client(
         biased;
         _ = shutdown.cancelled() => {
             info!("shutdown signal received before tunnel session was established");
-            return Ok(());
+            return Ok(RunClientOutcome::Shutdown);
         }
         established = establish_session(config, endpoint) => established?,
     };
@@ -55,20 +66,33 @@ pub(crate) async fn run_client(
         )
         .map_err(ConnectError::fatal)?,
     );
-    let session_cancel = CancellationToken::new();
     let tcp_params = tunnel_lib::TcpParams::from(&config.tcp);
 
-    entry_pool.push(conn.clone(), negotiated).await;
-    ready.store(true, Ordering::Release);
-    let result = loop {
+    let activity = Arc::new(SessionActivity::default());
+    let commit = entry_pool
+        .push(conn.clone(), negotiated, activity.clone())
+        .await
+        .map_err(ConnectError::fatal)?;
+    info!(
+        active_tunnels = commit.active_tunnels,
+        changed = commit.changed,
+        "tunnel committed to connection pool"
+    );
+    let session_started = Instant::now();
+    let mut completed_business = false;
+    let session_error = loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
                 info!("shutdown signal received, stopping tunnel stream accept");
-                break Ok(());
+                break None;
+            }
+            _ = activity.wait_for_business_completion(), if !completed_business => {
+                completed_business = true;
+                info!("tunnel session completed business traffic");
             }
             reason = conn.closed() => {
                 warn!(reason = ?reason, "Connection closed by server");
-                break Err(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
+                break Some(ConnectError::transient(anyhow!("connection closed by server: {:?}", reason)));
             }
             stream_result = conn.accept_bi() => {
                 match stream_result {
@@ -76,19 +100,25 @@ pub(crate) async fn run_client(
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
+                        let activity = activity.clone();
                         // Deliberately untracked: work-stream tasks end when
                         // the connection closes (their QUIC streams error
                         // out), and per-stream tracking would tax the hot
                         // path.
                         crate::runtime::spawn_task(async move {
-                            if let Err(e) = handle_work_stream(send, recv, proxy_map, tcp_params).await {
-                                debug!(error = %e, "work stream error");
+                            match handle_work_stream(send, recv, proxy_map, tcp_params).await {
+                                Ok(()) => {
+                                    activity.mark_business_completed();
+                                }
+                                Err(e) => {
+                                    debug!(error = %e, "work stream error");
+                                }
                             }
                         });
                     }
                     Err(e) => {
                         warn!(error = %e, "Connection error");
-                        break Err(ConnectError::transient(anyhow!("accept_bi failed: {}", e)));
+                        break Some(ConnectError::transient(anyhow!("accept_bi failed: {}", e)));
                     }
                 }
             }
@@ -97,19 +127,33 @@ pub(crate) async fn run_client(
                     Ok(payload) => {
                         if let Err(e) = forward_incoming_datagram(&udp_registry, payload).await {
                             debug!(error = %e, "udp datagram forward error");
+                        } else if !completed_business {
+                            activity.mark_business_completed();
+                            completed_business = true;
+                            info!("tunnel session completed business traffic");
                         }
                     }
                     Err(e) => {
                         warn!(error = %e, "datagram read error");
-                        break Err(ConnectError::transient(anyhow!("read_datagram failed: {}", e)));
+                        break Some(ConnectError::transient(anyhow!("read_datagram failed: {}", e)));
                     }
                 }
             }
         }
     };
-    session_cancel.cancel();
-    entry_pool.remove(&conn).await;
-    ready.store(false, Ordering::Release);
+    completed_business |= activity.business_completed();
+    let lifetime = session_started.elapsed();
+    let commit = entry_pool
+        .remove(&conn)
+        .await
+        .map_err(ConnectError::fatal)?;
+    info!(
+        active_tunnels = commit.active_tunnels,
+        changed = commit.changed,
+        session_lifetime_ms = lifetime.as_millis(),
+        completed_business,
+        "tunnel removed from connection pool"
+    );
     if shutdown.is_cancelled() {
         // Entry listeners stop accepting on the same token; drain local
         // in-flight relays before closing, because CONNECTION_CLOSE aborts
@@ -117,13 +161,20 @@ pub(crate) async fn run_client(
         let drained = tunnel_lib::wait_for_resource_drain(SHUTDOWN_DRAIN_TIMEOUT).await;
         info!(drained, "closing tunnel connection: client shutting down");
         conn.close(0u32.into(), b"client shutting down");
-        return Ok(());
+        return Ok(RunClientOutcome::Shutdown);
     }
     tokio::select! {
         _ = shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(config.reconnect.grace_ms)) => {}
     }
-    result
+    match session_error {
+        Some(error) => Ok(RunClientOutcome::SessionEnded(SessionReport {
+            lifetime,
+            completed_business,
+            error,
+        })),
+        None => Ok(RunClientOutcome::Shutdown),
+    }
 }
 
 /// Connects and completes the login handshake. Split out of `run_client` so the

@@ -1,19 +1,22 @@
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::bootstrap::cli::Args;
 use crate::bootstrap::ClientBootstrap;
 use crate::egress::listener::EntryListenerConfig;
 use crate::egress::udp_listener::{UdpEgressListenerService, UdpListenerRegistry};
+use crate::health::ClientHealth;
 use crate::runtime::engine::RuntimeEngine;
 use crate::runtime::spawn_task;
 use crate::tunnel::conn_pool::EntryConnPool;
 
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_READY_TUNNELS: usize = 1;
+const HEALTH_MAX_CONNECTIONS: usize = 64;
+const HEALTH_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct ClientApp {
     args: Args,
@@ -43,14 +46,6 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         info!("Received shutdown signal, shutting down...");
         cancel_clone.cancel();
     });
-    let ready = Arc::new(AtomicBool::new(false));
-    if let Some(port) = config.metrics_port {
-        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .install_recorder()
-            .expect("failed to install prometheus recorder");
-        crate::metrics::set_handle(handle);
-        spawn_task(run_healthz_server(port, ready.clone(), cancel.clone()));
-    }
     let resolved_connections = tunnel_lib::resolve_connection_count(config.quic.connections);
     let shard_count =
         tunnel_lib::resolve_shard_count(config.quic.shards, Some(resolved_connections as usize));
@@ -74,12 +69,32 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         max_concurrent_streams = config.quic.max_concurrent_streams,
         "overload protection resolved"
     );
+    let health = Arc::new(ClientHealth::new(
+        config.entry.port.is_some(),
+        resolved_connections as usize,
+        MIN_READY_TUNNELS,
+    ));
     let entry_pool = EntryConnPool::new(
         config.quic.max_concurrent_streams,
         overload_limits.max_pending_streams,
         resolved_connections,
         shard_count,
+        health.clone(),
     )?;
+    info!(
+        active_tunnels = 0,
+        desired_tunnels = resolved_connections,
+        min_ready_tunnels = MIN_READY_TUNNELS,
+        degraded = true,
+        "client readiness initialized"
+    );
+    if let Some(port) = config.metrics_port {
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("failed to install prometheus recorder");
+        crate::metrics::set_handle(handle);
+        spawn_task(run_healthz_server(port, health.clone(), cancel.clone()));
+    }
     let udp_registry = Arc::new(UdpListenerRegistry::default());
     let mut engine = RuntimeEngine::new(cancel.clone());
 
@@ -101,6 +116,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         engine.add_service(Arc::new(crate::egress::listener::EgressListenerService {
             entry_cfg,
             pool: entry_pool.clone(),
+            health: health.clone(),
         }));
     }
 
@@ -116,7 +132,6 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
         config,
         endpoint,
         entry_pool,
-        ready,
         udp_registry,
         resolved_connections,
     }));
@@ -128,8 +143,7 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     result
 }
 
-async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, shutdown: CancellationToken) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn run_healthz_server(port: u16, health: Arc<ClientHealth>, shutdown: CancellationToken) {
     use tokio::net::TcpListener;
     let addr = format!("0.0.0.0:{}", port);
     let listener = match TcpListener::bind(&addr).await {
@@ -140,6 +154,7 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, shutdown: Cancell
         }
     };
     info!(addr = %addr, "healthz server started");
+    let connection_limit = Arc::new(tokio::sync::Semaphore::new(HEALTH_MAX_CONNECTIONS));
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -150,33 +165,81 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, shutdown: Cancell
                 let Ok((mut stream, _)) = accept else {
                     continue;
                 };
-                let ready = ready.clone();
-                spawn_task(async move {
-                    let mut buf = [0u8; 256];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-                    let (status, content_type, body) = if req.starts_with("GET /healthz") {
-                        if ready.load(Ordering::Acquire) {
-                            ("200 OK", "text/plain", "ok\n".to_string())
-                        } else {
-                            ("503 Service Unavailable", "text/plain", "not ready\n".to_string())
-                        }
-                    } else if req.starts_with("GET /metrics") {
-                        ("200 OK", "text/plain; charset=utf-8", crate::metrics::encode())
-                    } else {
-                        ("400 Bad Request", "text/plain", "bad request\n".to_string())
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
-                        status,
-                        content_type,
-                        body.len(),
-                        body
+                let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
+                    warn!(
+                        max_connections = HEALTH_MAX_CONNECTIONS,
+                        "healthz connection rejected at concurrency limit"
                     );
-                    let _ = stream.write_all(response.as_bytes()).await;
+                    drop(stream);
+                    continue;
+                };
+                let health = health.clone();
+                spawn_task(async move {
+                    let _permit = permit;
+                    serve_health_connection(&mut stream, &health).await;
                 });
             }
         }
+    }
+}
+
+async fn serve_health_connection(stream: &mut tokio::net::TcpStream, health: &ClientHealth) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = [0u8; 256];
+    let n = match tokio::time::timeout(HEALTH_IO_TIMEOUT, stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(error)) => {
+            debug!(error = %error, "healthz request read failed");
+            return;
+        }
+        Err(_) => {
+            debug!("healthz request read timed out");
+            return;
+        }
+    };
+    let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
+    let (status, content_type, body) = health_response(request, health);
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        content_type,
+        body.len(),
+        body
+    );
+    match tokio::time::timeout(HEALTH_IO_TIMEOUT, stream.write_all(response.as_bytes())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => debug!(error = %error, "healthz response write failed"),
+        Err(_) => debug!("healthz response write timed out"),
+    }
+}
+
+fn health_response(request: &str, health: &ClientHealth) -> (&'static str, &'static str, String) {
+    if request.starts_with("GET /healthz") {
+        let snapshot = health.snapshot();
+        let body = format!(
+            "{} active_tunnels={} desired_tunnels={} min_ready_tunnels={} degraded={} entry_listener_ready={} pool_actor_alive={}\n",
+            if snapshot.ready { "ok" } else { "not ready" },
+            snapshot.active_tunnels,
+            snapshot.desired_tunnels,
+            snapshot.min_ready_tunnels,
+            snapshot.degraded,
+            snapshot.entry_listener_ready,
+            snapshot.pool_actor_alive
+        );
+        if snapshot.ready {
+            ("200 OK", "text/plain", body)
+        } else {
+            ("503 Service Unavailable", "text/plain", body)
+        }
+    } else if request.starts_with("GET /metrics") {
+        (
+            "200 OK",
+            "text/plain; charset=utf-8",
+            crate::metrics::encode(health),
+        )
+    } else {
+        ("400 Bad Request", "text/plain", "bad request\n".to_string())
     }
 }
 

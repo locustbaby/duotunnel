@@ -4,7 +4,6 @@ use crate::ingress::tunnel_handler;
 use crate::runtime::metrics;
 use crate::ServerState;
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -26,11 +25,7 @@ const CONN_TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 // log amplifier; the counter metric carries the exact rate.
 const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
-pub async fn run_quic_server(
-    state: Arc<ServerState>,
-    ready: Arc<AtomicBool>,
-    shutdown: CancellationToken,
-) -> Result<()> {
+pub async fn run_quic_server(state: Arc<ServerState>, shutdown: CancellationToken) -> Result<()> {
     let addr = state.tunnel_addr();
     let quic_params = state.quic_transport_params();
     let server_config = tunnel_lib::transport::quic::create_server_config_with(&quic_params)?;
@@ -53,6 +48,7 @@ pub async fn run_quic_server(
         max_unauthenticated_connections = state.max_unauthenticated_connections(),
         "QUIC server listening"
     );
+    state.health().mark_quic_bound(true);
     let conn_tasks = TaskTracker::new();
     let mut last_refusal_log: Option<tokio::time::Instant> = None;
     loop {
@@ -95,11 +91,10 @@ pub async fn run_quic_server(
                     continue;
                 };
                 let state = state.clone();
-                let ready = ready.clone();
                 let conn_shutdown = shutdown.clone();
                 conn_tasks.spawn(async move {
                     metrics::quic_connection_opened();
-                    if let Err(e) = handle_quic_connection(state, ready, incoming, permit, conn_shutdown).await {
+                    if let Err(e) = handle_quic_connection(state, incoming, permit, conn_shutdown).await {
                         error!(error = % e, "QUIC connection error");
                     }
                     metrics::quic_connection_closed();
@@ -127,6 +122,7 @@ pub async fn run_quic_server(
         );
     }
     endpoint.close(0u32.into(), b"server shutting down");
+    state.health().mark_quic_bound(false);
     Ok(())
 }
 // `unauth_permit` accounts this connection against the pre-auth budget; every
@@ -136,7 +132,6 @@ pub async fn run_quic_server(
 // of the configured login timeout.
 async fn handle_quic_connection(
     state: Arc<ServerState>,
-    ready: Arc<AtomicBool>,
     incoming: quinn::Incoming,
     unauth_permit: OwnedSemaphorePermit,
     shutdown: CancellationToken,
@@ -152,20 +147,19 @@ async fn handle_quic_connection(
     };
     let remote_addr = conn.remote_address();
     info!(addr = % remote_addr, "new QUIC connection");
-    let (mut send, mut recv) = match tokio::time::timeout_at(pre_auth_deadline, conn.accept_bi())
-        .await
-    {
-        Ok(Ok(streams)) => streams,
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_elapsed) => {
-            warn!(
-                addr = % remote_addr,
-                "login handshake timed out waiting for login stream"
-            );
-            conn.close(0u32.into(), b"login timeout");
-            return Ok(());
-        }
-    };
+    let (mut send, mut recv) =
+        match tokio::time::timeout_at(pre_auth_deadline, conn.accept_bi()).await {
+            Ok(Ok(streams)) => streams,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_elapsed) => {
+                warn!(
+                    addr = % remote_addr,
+                    "login handshake timed out waiting for login stream"
+                );
+                conn.close(0u32.into(), b"login timeout");
+                return Ok(());
+            }
+        };
     let msg_type =
         match tokio::time::timeout_at(pre_auth_deadline, recv_message_type(&mut recv)).await {
             Ok(Ok(t)) => t,
@@ -200,31 +194,30 @@ async fn handle_quic_connection(
         }
         return Ok(());
     }
-    let login: Login =
-        match tokio::time::timeout_at(
-            pre_auth_deadline,
-            recv_message_bounded(&mut recv, MAX_LOGIN_BYTES),
-        )
-        .await
-        {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return Err(e),
-            Err(_elapsed) => {
-                warn!(
-                    addr = % remote_addr, "login handshake timed out waiting for login body"
-                );
-                if let Err(e) = send_message(
-                    &mut send,
-                    MessageType::LoginResp,
-                    &LoginResp::failure_retryable("login timeout"),
-                )
-                .await
-                {
-                    debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
-                }
-                return Ok(());
+    let login: Login = match tokio::time::timeout_at(
+        pre_auth_deadline,
+        recv_message_bounded(&mut recv, MAX_LOGIN_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            warn!(
+                addr = % remote_addr, "login handshake timed out waiting for login body"
+            );
+            if let Err(e) = send_message(
+                &mut send,
+                MessageType::LoginResp,
+                &LoginResp::failure_retryable("login timeout"),
+            )
+            .await
+            {
+                debug!(addr = %remote_addr, error = %e, "send login body timeout response failed");
             }
-        };
+            return Ok(());
+        }
+    };
     let Some(negotiated) = negotiate_protocol(login.protocol_version, login.capabilities) else {
         warn!(
             addr = %remote_addr,
@@ -247,7 +240,7 @@ async fn handle_quic_connection(
         conn.close(0u32.into(), b"incompatible protocol version");
         return Ok(());
     };
-    if !ready.load(Ordering::Acquire) {
+    if !state.health().admits_new_work() {
         warn!(addr = %remote_addr, "server not ready for login yet");
         if let Err(e) = send_message(
             &mut send,
@@ -319,7 +312,12 @@ async fn handle_quic_connection(
     let conn_id = ClientId::from(uuid::Uuid::new_v4().to_string());
     if let Err(e) = state
         .registry()
-        .register(conn_id.clone(), client_group.clone(), conn.clone(), negotiated)
+        .register(
+            conn_id.clone(),
+            client_group.clone(),
+            conn.clone(),
+            negotiated,
+        )
         .await
     {
         warn!(conn_id = %conn_id, error = %e, "failed to register client connection");

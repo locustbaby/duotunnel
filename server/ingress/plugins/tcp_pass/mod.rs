@@ -57,12 +57,7 @@ impl IngressProtocolHandler for TcpPassHandler {
                 .select_client_for_group(&group_id)
                 .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
-            tunnel_lib::maybe_slow_path(
-                selected.handle.inflight_table(),
-                selected.handle.slot_id(),
-                &ctx.overload,
-            )
-            .await;
+            tunnel_lib::maybe_slow_path(selected.handle.connection_state(), &ctx.overload).await;
 
             let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
             match selected
