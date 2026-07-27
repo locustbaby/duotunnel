@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 pub(crate) const CONTROL_DEGRADED_AFTER: Duration = Duration::from_secs(60);
+pub(crate) const CONTROL_SECURITY_STALE_AFTER: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_STALE_AFTER: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub(crate) struct ListenerHealth {
 struct MutableFacts {
     listeners: BTreeMap<u16, ListenerHealth>,
     last_successfully_applied: Option<Instant>,
+    last_control_confirmed: Option<Instant>,
     failed_component: Option<String>,
     required_components: BTreeSet<String>,
     running_components: BTreeSet<String>,
@@ -38,17 +40,24 @@ pub(crate) struct ServerHealthFacts {
     mutable: RwLock<MutableFacts>,
     failed: Notify,
     degraded_after: Duration,
+    security_stale_after: Duration,
     stale_after: Duration,
 }
 
 impl ServerHealthFacts {
     pub(crate) fn new(managed_control: bool) -> Self {
-        Self::with_thresholds(managed_control, CONTROL_DEGRADED_AFTER, CONTROL_STALE_AFTER)
+        Self::with_thresholds(
+            managed_control,
+            CONTROL_DEGRADED_AFTER,
+            CONTROL_SECURITY_STALE_AFTER,
+            CONTROL_STALE_AFTER,
+        )
     }
 
     fn with_thresholds(
         managed_control: bool,
         degraded_after: Duration,
+        security_stale_after: Duration,
         stale_after: Duration,
     ) -> Self {
         Self {
@@ -59,6 +68,7 @@ impl ServerHealthFacts {
             mutable: RwLock::new(MutableFacts::default()),
             failed: Notify::new(),
             degraded_after,
+            security_stale_after,
             stale_after,
         }
     }
@@ -71,19 +81,30 @@ impl ServerHealthFacts {
         self.config_applying.store(true, Ordering::Release);
     }
 
-    pub(crate) fn mark_config_valid(&self) {
-        self.config_valid.store(true, Ordering::Release);
-    }
-
     pub(crate) fn finish_config_apply(&self) {
         let mut facts = self.mutable.write();
-        facts.last_successfully_applied = Some(Instant::now());
+        let now = Instant::now();
+        facts.last_successfully_applied = Some(now);
+        facts.last_control_confirmed = Some(now);
+        self.config_valid.store(true, Ordering::Release);
+        self.config_applying.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn restore_config_applied(&self, age: Duration) {
+        let mut facts = self.mutable.write();
+        let restored = Instant::now().checked_sub(age);
+        facts.last_successfully_applied = restored;
+        facts.last_control_confirmed = restored;
         self.config_valid.store(true, Ordering::Release);
         self.config_applying.store(false, Ordering::Release);
     }
 
     pub(crate) fn fail_config_apply(&self) {
         self.config_applying.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn confirm_control_freshness(&self) {
+        self.mutable.write().last_control_confirmed = Some(Instant::now());
     }
 
     pub(crate) fn replace_listener_facts(
@@ -150,10 +171,10 @@ impl ServerHealthFacts {
         if !self.managed_control {
             return ControlFreshness::Fresh;
         }
-        let Some(last_applied) = self.mutable.read().last_successfully_applied else {
+        let Some(last_confirmed) = self.mutable.read().last_control_confirmed else {
             return ControlFreshness::Stale;
         };
-        let age = last_applied.elapsed();
+        let age = last_confirmed.elapsed();
         if age >= self.stale_after {
             ControlFreshness::Stale
         } else if age >= self.degraded_after {
@@ -183,6 +204,21 @@ impl ServerHealthFacts {
     pub(crate) fn admits_new_work(&self) -> bool {
         self.is_ready()
     }
+
+    pub(crate) fn admits_security_sensitive_work(&self) -> bool {
+        if self.config_applying.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.managed_control {
+            return self.config_valid.load(Ordering::Acquire);
+        }
+        self.config_valid.load(Ordering::Acquire)
+            && self
+                .mutable
+                .read()
+                .last_control_confirmed
+                .is_some_and(|last_confirmed| last_confirmed.elapsed() < self.security_stale_after)
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +230,7 @@ mod tests {
         let health = ServerHealthFacts::with_thresholds(
             true,
             Duration::from_millis(5),
+            Duration::from_millis(8),
             Duration::from_millis(10),
         );
         health.mark_quic_bound(true);
@@ -205,6 +242,35 @@ mod tests {
         assert_eq!(health.control_freshness(), ControlFreshness::Stale);
         assert!(!health.is_ready());
         assert!(!health.admits_new_work());
+    }
+
+    #[test]
+    fn security_staleness_fences_auth_before_general_admission() {
+        let health = ServerHealthFacts::with_thresholds(
+            true,
+            Duration::from_millis(2),
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        );
+        health.finish_config_apply();
+        assert!(health.admits_security_sensitive_work());
+
+        std::thread::sleep(Duration::from_millis(8));
+
+        assert!(!health.admits_security_sensitive_work());
+        assert_ne!(health.control_freshness(), ControlFreshness::Stale);
+    }
+
+    #[test]
+    fn config_apply_fences_security_sensitive_work() {
+        let health = ServerHealthFacts::new(false);
+        assert!(health.admits_security_sensitive_work());
+
+        health.begin_config_apply();
+
+        assert!(!health.admits_security_sensitive_work());
+        health.fail_config_apply();
+        assert!(health.admits_security_sensitive_work());
     }
 
     #[test]

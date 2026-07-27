@@ -18,7 +18,9 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use infra::dns_cache::EgressDnsCache;
-pub use infra::metrics::{wait_for_resource_drain, METRICS};
+pub use infra::metrics::{
+    track_resource, wait_for_resource_drain, ResourceGuard, TrackedResource, METRICS,
+};
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
@@ -47,11 +49,11 @@ pub use models::defs::{
 pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
     decode_udp_datagram_envelope, encode_udp_datagram_envelope, negotiate_protocol, recv_message,
-    recv_message_bounded, recv_message_type, recv_routing_info, recv_typed_message, send_message,
-    send_routing_info, ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol,
-    RoutingInfo, UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
-    MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
-    SUPPORTED_CAPABILITIES,
+    recv_message_bounded, recv_message_type, recv_routing_info, recv_routing_info_bounded,
+    recv_typed_message, send_message, send_routing_info, ClientConfig, Login, LoginResp,
+    MessageType, NegotiatedProtocol, RoutingInfo, UdpDatagramEnvelope, UdpSessionKey,
+    UpstreamConfig, UpstreamServer, CAP_NONE, MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES,
+    MAX_ROUTING_INFO_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION, SUPPORTED_CAPABILITIES,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::sniff::{

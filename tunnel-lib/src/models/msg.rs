@@ -29,6 +29,7 @@ pub const MAX_DATAGRAM_BYTES: usize = 1200;
 /// headroom covers token length growth without letting an unauthenticated peer
 /// dictate a large allocation.
 pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
+pub const MAX_ROUTING_INFO_BYTES: usize = 8 * 1024;
 
 /// Highest wire-protocol version this build speaks.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -289,6 +290,21 @@ where
     R: AsyncReadExt + Unpin,
 {
     recv_typed_message(reader, MessageType::RoutingInfo).await
+}
+
+pub async fn recv_routing_info_bounded<R>(reader: &mut R) -> Result<RoutingInfo>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let msg_type = recv_message_type(reader).await?;
+    if msg_type != MessageType::RoutingInfo {
+        return Err(anyhow!(
+            "expected {:?}, got {:?}",
+            MessageType::RoutingInfo,
+            msg_type
+        ));
+    }
+    recv_message_bounded(reader, MAX_ROUTING_INFO_BYTES).await
 }
 
 pub fn encode_udp_datagram_envelope(envelope: &UdpDatagramEnvelope) -> Result<AlignedVec<16>> {
@@ -558,6 +574,26 @@ mod tests {
         let decoded_info = recv_routing_info(&mut reader).await.unwrap();
         assert_eq!(decoded_info.proxy_name, "p");
         assert_eq!(decoded_info.host.as_deref(), Some("foo.com"));
+    }
+
+    #[tokio::test]
+    async fn routing_info_rejects_oversized_frame_before_allocation() {
+        let (mut writer, mut reader) = tokio::io::duplex(16);
+        writer
+            .write_u8(MessageType::RoutingInfo as u8)
+            .await
+            .unwrap();
+        writer
+            .write_u32((MAX_ROUTING_INFO_BYTES + 1) as u32)
+            .await
+            .unwrap();
+
+        let error = recv_routing_info_bounded(&mut reader)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Message too large"));
     }
 
     #[test]

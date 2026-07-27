@@ -143,9 +143,8 @@ mod tests {
             ..QuicTransportParams::default()
         };
 
-        let error = build_transport_config(&params)
-            .err()
-            .expect("out-of-range stream window must fail");
+        let error =
+            build_transport_config(&params).expect_err("out-of-range stream window must fail");
         assert!(error.to_string().contains("stream receive window"));
     }
 
@@ -156,9 +155,8 @@ mod tests {
             ..QuicTransportParams::default()
         };
 
-        let error = build_transport_config(&params)
-            .err()
-            .expect("out-of-range connection window must fail");
+        let error =
+            build_transport_config(&params).expect_err("out-of-range connection window must fail");
         assert!(error.to_string().contains("connection receive window"));
     }
 
@@ -169,9 +167,8 @@ mod tests {
             ..QuicTransportParams::default()
         };
 
-        let error = build_transport_config(&params)
-            .err()
-            .expect("out-of-range idle timeout must fail");
+        let error =
+            build_transport_config(&params).expect_err("out-of-range idle timeout must fail");
         assert!(error.to_string().contains("idle timeout"));
     }
 }

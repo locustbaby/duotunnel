@@ -315,7 +315,10 @@ async fn purge_loop(
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = interval.tick() => {
-                let purged = registry.purge_dead().await;
+                let purged = registry
+                    .purge_dead()
+                    .await
+                    .map_err(anyhow::Error::msg)?;
                 if purged > 0 {
                     info!(purged, "registry: purged dead connections");
                 }

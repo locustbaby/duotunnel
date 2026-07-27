@@ -12,24 +12,28 @@ use tunnel_lib::{
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
     state: Arc<ServerState>,
-    _port: u16,
-    proxy_name: ProxyName,
-    group_id: GroupId,
+    port: u16,
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
     let emfile_backoff = state.emfile_backoff();
-    info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
+    info!(addr = %addr, port, "TCP accept loop started");
     run_accept_worker(listener, cancel, emfile_backoff, "tcp", move |accepted| {
         let state = state.clone();
-        let proxy_name = proxy_name.clone();
-        let group_id = group_id.clone();
         async move {
             let stream = accepted.stream;
-            if !state.health().admits_new_work() {
+            let Some(generation) = state.admit_runtime_generation() else {
                 debug!("rejecting public TCP connection while server is not ready");
                 return;
-            }
+            };
+            let Some((group_id, proxy_name)) = generation.routing().tcp_route(port) else {
+                debug!(
+                    port,
+                    generation = generation.sequence(),
+                    "rejecting TCP connection without a route in the pinned generation"
+                );
+                return;
+            };
             if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;

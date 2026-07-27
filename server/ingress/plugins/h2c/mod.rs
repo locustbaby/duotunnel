@@ -10,14 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
-use tunnel_lib::plugin::{
-    IngressProtocolHandler, PhaseResult, ProtocolHint, ProtocolKind, Route, RouteCtx,
-    RouteResolver, ServerCtx,
-};
+use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
 use tunnel_lib::transport::listener::RouteTarget;
 use tunnel_lib::{EmptyBodyRetryTemplate, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection, SharedRegistry};
+use crate::RuntimeGeneration;
 
 #[derive(Clone)]
 struct CachedSender {
@@ -79,21 +77,33 @@ fn observe_h2c_error(metrics: &Arc<dyn tunnel_lib::plugin::MetricsSink>, err: &P
 /// `ProtocolKind::H2c` and passes `None` as the route.
 pub struct H2cHandler {
     pub registry: SharedRegistry,
-    pub route_resolver: Arc<dyn RouteResolver>,
+    pub generation: Arc<arc_swap::ArcSwap<RuntimeGeneration>>,
+    pub(crate) health: Arc<crate::runtime::health::ServerHealthFacts>,
     pub single_authority: bool,
 }
 
+type SenderCacheKey = (u64, RouteTarget);
+const MAX_ROUTE_CACHE_ENTRIES: usize = 256;
+const MAX_SENDER_CACHE_ENTRIES: usize = 64;
+const PROTOCOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn get_or_create_sender(
-    sender_cache: &Mutex<HashMap<RouteTarget, CachedSender>>,
+    sender_cache: &Mutex<HashMap<SenderCacheKey, CachedSender>>,
     registry: &SharedRegistry,
+    generation: u64,
     route_target: &RouteTarget,
 ) -> Option<CachedSender> {
     let mut guard = sender_cache.lock();
-    if let Some(entry) = guard.get(route_target) {
+    guard.retain(|(cached_generation, _), entry| {
+        *cached_generation >= generation.saturating_sub(1)
+            && entry.selected.handle.close_reason().is_none()
+    });
+    let key = (generation, route_target.clone());
+    if let Some(entry) = guard.get(&key) {
         if entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
         }
-        guard.remove(route_target);
+        guard.remove(&key);
     }
 
     let selected = registry.select_client_for_group(&route_target.group_id)?;
@@ -101,21 +111,27 @@ fn get_or_create_sender(
         selected,
         sender: tunnel_lib::new_h2_sender(),
     };
-    guard.insert(route_target.clone(), entry.clone());
+    if guard.len() >= MAX_SENDER_CACHE_ENTRIES {
+        if let Some(oldest) = guard.keys().next().cloned() {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key, entry.clone());
     Some(entry)
 }
 
 fn invalidate_sender_if_matches(
-    sender_cache: &Mutex<HashMap<RouteTarget, CachedSender>>,
+    sender_cache: &Mutex<HashMap<SenderCacheKey, CachedSender>>,
+    generation: u64,
     route_target: &RouteTarget,
     conn_id: usize,
 ) {
     let mut guard = sender_cache.lock();
     if guard
-        .get(route_target)
+        .get(&(generation, route_target.clone()))
         .is_some_and(|entry| entry.selected.handle.stable_id() == conn_id)
     {
-        guard.remove(route_target);
+        guard.remove(&(generation, route_target.clone()));
     }
 }
 
@@ -135,19 +151,19 @@ impl IngressProtocolHandler for H2cHandler {
         let src_addr = ctx.peer_addr.ip().to_string();
         let src_port = ctx.peer_addr.port();
         let listener_port = ctx.listener_port;
-        let client_addr = ctx.peer_addr;
         let single_authority = self.single_authority;
         let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
         let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let route_cache: Arc<Mutex<HashMap<String, Option<RouteTarget>>>> =
+        let route_cache: Arc<Mutex<HashMap<(u64, String), Option<RouteTarget>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sender_cache: Arc<Mutex<HashMap<RouteTarget, CachedSender>>> =
+        let sender_cache: Arc<Mutex<HashMap<SenderCacheKey, CachedSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let registry = self.registry.clone();
-        let route_resolver = self.route_resolver.clone();
+        let generation = self.generation.clone();
+        let health = self.health.clone();
         let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -155,11 +171,18 @@ impl IngressProtocolHandler for H2cHandler {
             let first_authority = first_authority.clone();
             let route_cache = route_cache.clone();
             let sender_cache = sender_cache.clone();
-            let route_resolver = route_resolver.clone();
+            let generation = generation.clone();
+            let health = health.clone();
             let metrics = metrics.clone();
             let src_addr = src_addr.clone();
             let overload = overload.clone();
             async move {
+                let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::HttpRequest);
+                if !health.admits_new_work() {
+                    let err = ProxyError::no_client_available("server-not-ready");
+                    observe_h2c_error(&metrics, &err);
+                    return Ok(error_response(&err));
+                }
                 let authority = req.uri().authority().map(|a| a.to_string()).or_else(|| {
                     req.headers()
                         .get(hyper::header::HOST)
@@ -175,6 +198,8 @@ impl IngressProtocolHandler for H2cHandler {
                     }
                 };
                 let route_host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
+                let runtime = generation.load_full();
+                let runtime_generation = runtime.sequence();
 
                 if single_authority {
                     let mut fa = first_authority.lock();
@@ -189,35 +214,22 @@ impl IngressProtocolHandler for H2cHandler {
                     }
                 }
 
-                let cached_route = { route_cache.lock().get(&route_host).cloned() };
+                let route_cache_key = (runtime_generation, route_host.clone());
+                let cached_route = { route_cache.lock().get(&route_cache_key).cloned() };
                 let route_target = match cached_route {
                     Some(route) => route,
                     None => {
-                        let resolve_ctx = RouteCtx {
-                            listener_port,
-                            client_addr,
-                            hint: ProtocolHint::new(ProtocolKind::H2c, bytes::Bytes::new())
-                                .with_authority(route_host.clone()),
-                        };
-                        let resolved = match route_resolver.resolve(&resolve_ctx).await {
-                            Ok(PhaseResult::Continue(route)) => Some(RouteTarget {
-                                group_id: route.group_id,
-                                proxy_name: route.proxy_name,
-                            }),
-                            Ok(PhaseResult::Reject { .. }) => None,
-                            Err(e) => {
-                                let err = ProxyError::h2c_route_resolve(format!(
-                                    "host={}: {}",
-                                    route_host, e
-                                ));
-                                observe_h2c_error(&metrics, &err);
-                                tracing::error!(kind = ?err.kind, error = %err, "h2c route resolve failed");
-                                return Ok(error_response(&err));
+                        let resolved = runtime.routing().route_target(listener_port, &route_host);
+                        let mut cache = route_cache.lock();
+                        cache.retain(|(cached_generation, _), _| {
+                            *cached_generation >= runtime_generation.saturating_sub(1)
+                        });
+                        if cache.len() >= MAX_ROUTE_CACHE_ENTRIES {
+                            if let Some(oldest) = cache.keys().next().cloned() {
+                                cache.remove(&oldest);
                             }
-                        };
-                        route_cache
-                            .lock()
-                            .insert(route_host.clone(), resolved.clone());
+                        }
+                        cache.insert(route_cache_key, resolved.clone());
                         resolved
                     }
                 };
@@ -231,15 +243,19 @@ impl IngressProtocolHandler for H2cHandler {
                 };
 
                 let proxy_name = route_target.proxy_name.clone();
-                let sender_entry =
-                    match get_or_create_sender(&sender_cache, &registry, &route_target) {
-                        Some(entry) => entry,
-                        None => {
-                            let err = ProxyError::h2c_no_client(route_target.group_id.to_string());
-                            observe_h2c_error(&metrics, &err);
-                            return Ok(error_response(&err));
-                        }
-                    };
+                let sender_entry = match get_or_create_sender(
+                    &sender_cache,
+                    &registry,
+                    runtime_generation,
+                    &route_target,
+                ) {
+                    Some(entry) => entry,
+                    None => {
+                        let err = ProxyError::h2c_no_client(route_target.group_id.to_string());
+                        observe_h2c_error(&metrics, &err);
+                        return Ok(error_response(&err));
+                    }
+                };
 
                 let (parts, body) = req.into_parts();
                 debug!(
@@ -274,6 +290,7 @@ impl IngressProtocolHandler for H2cHandler {
                     Err(first_err) => {
                         invalidate_sender_if_matches(
                             &sender_cache,
+                            runtime_generation,
                             &route_target,
                             sender_entry.selected.handle.stable_id(),
                         );
@@ -284,9 +301,12 @@ impl IngressProtocolHandler for H2cHandler {
                         );
 
                         if let Some(template) = retryable_request.as_ref() {
-                            if let Some(retry_entry) =
-                                get_or_create_sender(&sender_cache, &registry, &route_target)
-                            {
+                            if let Some(retry_entry) = get_or_create_sender(
+                                &sender_cache,
+                                &registry,
+                                runtime_generation,
+                                &route_target,
+                            ) {
                                 metrics.incr("duotunnel_h2c_retry_total", &[("result", "attempt")]);
                                 let retry_req = template.build();
                                 match tunnel_lib::forward_h2_request(
@@ -317,6 +337,7 @@ impl IngressProtocolHandler for H2cHandler {
                                         );
                                         invalidate_sender_if_matches(
                                             &sender_cache,
+                                            runtime_generation,
                                             &route_target,
                                             retry_entry.selected.handle.stable_id(),
                                         );
@@ -348,10 +369,31 @@ impl IngressProtocolHandler for H2cHandler {
         });
 
         let io = TokioIo::new(stream);
-        tunnel_lib::proxy::h2::hardened_h2_server_builder(hyper_util::rt::TokioExecutor::new())
-            .serve_connection(io, service)
-            .await
-            .map_err(|e| ProxyError::downstream_connection(format!("H2 connection error: {e}")))?;
+        let connection =
+            tunnel_lib::proxy::h2::hardened_h2_server_builder(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(io, service);
+        tokio::pin!(connection);
+        tokio::select! {
+            result = &mut connection => {
+                result.map_err(|e| {
+                    ProxyError::downstream_connection(format!("H2 connection error: {e}"))
+                })?;
+            }
+            _ = ctx.quiesce.cancelled() => {
+                connection.as_mut().graceful_shutdown();
+                match tokio::time::timeout(PROTOCOL_DRAIN_TIMEOUT, connection.as_mut()).await {
+                    Ok(result) => result.map_err(|e| {
+                        ProxyError::downstream_connection(format!("H2 drain error: {e}"))
+                    })?,
+                    Err(_) => {
+                        return Err(ProxyError::downstream_connection(
+                            "H2 drain timed out after 15s",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

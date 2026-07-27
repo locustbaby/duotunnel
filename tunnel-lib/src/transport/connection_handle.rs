@@ -69,6 +69,10 @@ impl ConnectionHandle {
         self.connection_state.retire()
     }
 
+    pub fn close(&self, code: u32, reason: &[u8]) {
+        self.conn.close(code.into(), reason);
+    }
+
     pub async fn open_stream(
         &self,
         request: OpenStreamRequest,

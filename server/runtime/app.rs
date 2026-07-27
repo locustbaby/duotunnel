@@ -105,7 +105,7 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
         "Configuration loaded"
     );
     tunnel_lib::init_cert_cache(bootstrap.pki());
-    {
+    if bootstrap.metrics_port().is_some() {
         use metrics_exporter_prometheus::PrometheusBuilder;
 
         let handle = PrometheusBuilder::new()

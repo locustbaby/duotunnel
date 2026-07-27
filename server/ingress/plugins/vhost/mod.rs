@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tunnel_lib::plugin::{PhaseResult, Route, RouteCtx, RouteResolver};
 
-use crate::RoutingSnapshot;
+use crate::RuntimeGeneration;
 
 /// Route resolver that looks up the vhost router from the current
 /// `RoutingSnapshot` (exact + wildcard match).
@@ -13,7 +13,7 @@ use crate::RoutingSnapshot;
 /// Internally uses `VhostRouter<RouteTarget>` which is already populated by
 /// `build_routing_snapshot` — no duplicate data structures.
 pub struct VhostPlugin {
-    pub routing: Arc<ArcSwap<RoutingSnapshot>>,
+    pub generation: Arc<ArcSwap<RuntimeGeneration>>,
 }
 
 #[async_trait]
@@ -26,8 +26,16 @@ impl RouteResolver for VhostPlugin {
             .or_else(|| ctx.hint.authority.clone())
             .unwrap_or_default();
 
-        let snapshot = self.routing.load();
-        let target = snapshot.route_target(ctx.listener_port, &host);
+        let generation = self.generation.load();
+        if generation.sequence() != ctx.runtime_generation {
+            return Ok(PhaseResult::Reject {
+                status: 503,
+                message: b"runtime generation changed during admission"
+                    .as_slice()
+                    .into(),
+            });
+        }
+        let target = generation.routing().route_target(ctx.listener_port, &host);
 
         match target {
             Some(t) => Ok(PhaseResult::Continue(Route::new(

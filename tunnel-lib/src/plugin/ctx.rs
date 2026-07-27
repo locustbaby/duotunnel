@@ -143,6 +143,7 @@ pub struct RouteCtx {
     /// Remote peer that opened the connection.
     pub client_addr: SocketAddr,
     pub hint: ProtocolHint,
+    pub runtime_generation: u64,
 }
 
 // ── ServerCtx ─────────────────────────────────────────────────────────────────
@@ -167,12 +168,15 @@ pub struct ServerCtx {
     pub peer_addr: SocketAddr,
     pub listener_port: u16,
     pub relay_buf_size: usize,
+    pub runtime_generation: u64,
+    pub quiesce: tokio_util::sync::CancellationToken,
 
     // Timing for the logging phase
     pub timing: PhaseTiming,
 }
 
 impl ServerCtx {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_addr: SocketAddr,
         metrics: Arc<dyn MetricsSink>,
@@ -181,6 +185,8 @@ impl ServerCtx {
         timeouts: Timeouts,
         listener_port: u16,
         relay_buf_size: usize,
+        runtime_generation: u64,
+        quiesce: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             metrics,
@@ -193,6 +199,8 @@ impl ServerCtx {
             peer_addr,
             listener_port,
             relay_buf_size,
+            runtime_generation,
+            quiesce,
             timing: PhaseTiming::new(),
         }
     }

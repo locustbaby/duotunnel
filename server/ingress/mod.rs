@@ -5,6 +5,4 @@ pub(crate) mod registry;
 pub(crate) mod tunnel_handler;
 pub(crate) mod tunnel_service;
 
-pub(crate) use listener_mgr::{
-    shutdown_all_listeners, sync_all_listeners, sync_listener_subset, sync_listeners,
-};
+pub(crate) use listener_mgr::{shutdown_all_listeners, sync_all_listeners, sync_listeners};

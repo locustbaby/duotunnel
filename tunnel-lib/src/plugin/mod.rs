@@ -166,6 +166,7 @@ mod tests {
             listener_port: 8080,
             client_addr: "127.0.0.1:1234".parse().expect("test failed"),
             hint,
+            runtime_generation: 0,
         };
         let result = resolver.resolve(&ctx).await.expect("test failed");
         match result {
