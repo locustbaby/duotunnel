@@ -5,10 +5,10 @@
 > agent 独立核查并交叉反审，**未运行测试、压测或 benchmark**；因此文中严格区分
 > “代码可直接证明的问题”与“必须 profile 才能决定的优化”。
 >
-> **后续实施记录（2026-07-27）**：本文识别的 M0a-0～M0e 已在
-> `fix/m0-runtime-consistency` 完成代码实现，并由三个 Agent 分别复核 control/LKG、
-> listener/UDP/readiness、QUIC/drain/upstream 后交叉收口。本地 workspace test、
-> check、all-targets Clippy 已通过；未执行性能压测，因此本文 P1/P2 的收益判断保持不变。
+> **后续实施记录（2026-07-27）**：`fix/m0-runtime-consistency` 已完成一轮代码加固，
+> 但本文列出的所有 M0 项并未全部闭合。当前只做了静态检查（`cargo fmt`、
+> `git diff --check`、`cargo check --workspace`），按要求未运行测试、Clippy 或压测；
+> 因此协议边界和性能收益仍需 CI/专门 benchmark 验证。
 
 ## 1. 结论
 
@@ -46,6 +46,9 @@
 | P1 | 连接/slot 容量乘法未 checked，server slot 固定 4096 | 溢出、过量分配或隐含容量天花板 | 部分覆盖 |
 | P1 | UDP listener 以 `proxy_name` 直接覆盖 registry socket | 重名配置导致回包错投/旧 socket 失联 | 未覆盖 |
 | P2 | 多 Endpoint 被静态推断为主瓶颈 | 复杂度先于证据，可能优化错目标 | 结论过强 |
+
+> 本表保留初始复核时的“原报告覆盖”快照；“未覆盖”不是当前修复状态。当前 HEAD 的
+> 已修复项、误报和明确暂缓项统一以第 10 节为准。
 
 ## 3. 控制面与运行时一致性
 
@@ -305,10 +308,11 @@ M0a-0 旧 wire 完整快照止血
                          └─ P2 profile-gated 多 Endpoint / runtime / pool 分片
 ```
 
-截至 2026-07-27，M0a-0～M0e 的代码闭环均已完成；跨版本/多 leader、大规模并发、
-故障注入与长稳仍按验收清单执行。后续主线先收这些 rollout 证据，再进入 P1 可信基线。
-M0 的代码闭环不等于 P1 性能收益已被证明，也不放宽多 Endpoint/runtime 改造的
-profile 门槛。
+截至 2026-07-27，watch 的当前实现已改为发送完整 Snapshot，V2 已带 revision/hash/ACK，
+token revoke、readiness 聚合、稳定 session backoff、inflight ownership 和 listener
+generation fencing 也已有代码闭环。本批仍不覆盖增量 Patch 的 replay 语义、listener actor
+彻底拆分、UDP 跨 session 调度等后续设计；跨版本/多 leader、大规模并发、故障注入与长稳
+仍按验收清单执行，M0 修复也不等于 P1 性能收益已被证明。
 
 详细方案：
 
@@ -333,3 +337,46 @@ profile 门槛。
 - [ ] retired-generation count/age/bytes 与 revoke close unfinished/deadline 指标；
 - [x] shutdown 与 reload 由 listener/security apply gate、generation fence 和 owned
   close handle 保证单一 owner。
+
+## 10. 第三轮代码复核与实施记录（2026-07-27）
+
+### 已确认并修复
+
+- 上游主动探活的 lease epoch 采用 CAS 后的新 epoch；被动请求在探活 lease 期间失败时
+  会重新安排 probe，避免后端永久停留在 ejected。
+- 健康注册表管理 API 复用已有配置 fingerprint，不再以 fingerprint=0 覆盖运行态；
+  健康条目仍有弱引用和容量上限。
+- LKG 在 control epoch 不同的情况下不比较 resource version，避免旧 epoch 胜出；
+  snapshot content hash 在 apply 与 LKG 持久化之间复用，去掉重复哈希。
+- PKI 动态证书缓存增加硬上限，生成失败/取消时 inflight 键由 RAII 清理。
+- supervisor shutdown 主动 cancel 组件 token；TCP/H1 ingress 仅在确认 QUIC 连接丢失时
+  注销 client，避免单次 open timeout 误摘除健康连接。
+- H1 拒绝重复 Host 并保留重复非 Host 字段；H1 body 使用 Quinn `read_chunk` 直接转交
+  `Bytes`；H2 非法 URI 返回 400，不再 panic。
+- H1 上游请求及响应体写入增加有界超时；H2 client 初始发送 stream 数收敛到 200；
+  health tick deadline 使用 wrapping arithmetic，避免长期运行整数溢出。
+- UDP session 容量耗尽时先尝试回收一个确认 idle 的本连接 session；仍保留全局容量、
+  队列容量和超时边界。
+
+### 误报或暂缓项
+
+- TLS H1 keep-alive 仍按 SNI pinning 路由；为避免 Host/SNI 不一致造成跨 vhost 歧义，
+  当前已拒绝不匹配的 HTTP/1.1 Host。若未来支持 per-request vhost，再单独设计重路由策略。
+- 24-bit health tick 使用半范围比较可正确处理 wrap-around；无需改成每请求读取 u64
+  时钟。
+- copy buffer pool 现在会在 local/global pool 中遍历当前已有条目并保留容量不足的 buffer，
+  避免混合 buffer size 时静默丢弃并反复分配。
+- listener prepare 阶段持锁跨越 bind 是 predecessor fencing 的设计取舍；要移除该锁
+  必须引入 reservation/actor 协议，列为后续独立任务。
+- UDP 不同 session 的 worker HOL、二进制 session key、immutable route index、multi-
+  endpoint 等仍属 P1/P2 设计项，需先有 profile 和协议兼容方案，本批次未扩大改动面。
+
+### 当前剩余优先级
+
+1. P1：当前 watch 发送完整 Snapshot，V2 ACK/hash 已闭环；只有未来重新启用增量 Patch 时，
+   才需要增加 base/new revision、NACK/replay 和旧客户端双栈策略。listener 的 reservation
+   与 generation fence 已生效，但稳定 acceptor/actor 的彻底拆分仍是后续任务。
+2. P1：UDP per-session singleflight 与跨 session 公平调度、`proxy_name` 唯一性/稳定 entry
+   ID、健康/metrics/watch 入站预算、typed drain，以及 reload 双代的统一资源预算。
+3. P2：只有在可复现 profile 证明收益后，再推进二进制 UDP session key、immutable route
+   index、多 Endpoint 和 runtime/pool 分片。

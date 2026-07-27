@@ -12,6 +12,7 @@ use tracing::debug;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
 type CachedSendRequest = Arc<Option<SendRequest<BoxBody>>>;
+const H2_CLIENT_MAX_SEND_STREAMS: usize = 200;
 
 #[derive(Clone)]
 pub struct EmptyBodyRetryTemplate {
@@ -122,7 +123,7 @@ where
                     let io = TokioIo::new(quic_stream);
                     let (new_sender, conn_driver) =
                         H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
-                            .initial_max_send_streams(usize::MAX)
+                            .initial_max_send_streams(H2_CLIENT_MAX_SEND_STREAMS)
                             .handshake(io)
                             .await?;
 

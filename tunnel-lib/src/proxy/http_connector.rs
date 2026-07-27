@@ -3,7 +3,6 @@ use super::h2::serve_h2_forward;
 use super::h2_proxy::EmptyBodyRetryTemplate;
 use super::http::HttpPeer;
 use super::peers::HttpPeerSpec;
-use super::upstream::UpstreamHealthRegistry;
 use crate::egress::http::{H2cClient, HttpsClient};
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
@@ -27,52 +26,26 @@ pub struct HttpConnector {
     https_client: HttpsClient,
     h2c_client: H2cClient,
     prefer_h1: Mutex<HashMap<String, Instant>>,
-    upstream_health: Option<Arc<UpstreamHealthRegistry>>,
 }
 
 impl HttpConnector {
     pub fn new(https_client: HttpsClient, h2c_client: H2cClient) -> SharedHttpConnector {
-        Self::new_with_health(https_client, h2c_client, None)
-    }
-
-    pub fn new_with_health(
-        https_client: HttpsClient,
-        h2c_client: H2cClient,
-        upstream_health: Option<Arc<UpstreamHealthRegistry>>,
-    ) -> SharedHttpConnector {
         Arc::new(Self {
             https_client,
             h2c_client,
             prefer_h1: Mutex::new(HashMap::new()),
-            upstream_health,
         })
     }
 
     fn mark_upstream_healthy(&self, spec: &HttpPeerSpec) {
         if let Some(ref b_ref) = spec.backend_ref {
             b_ref.mark_success();
-        } else if let (Some(health), Some(namespace), Some(server)) = (
-            &self.upstream_health,
-            &spec.upstream_name,
-            &spec.upstream_addr_str,
-        ) {
-            health.mark_healthy(namespace, server);
         }
     }
 
     fn mark_upstream_unhealthy(&self, spec: &HttpPeerSpec) {
         if let Some(ref b_ref) = spec.backend_ref {
-            if let Some(probe_token) = b_ref.mark_failure() {
-                if let Some(health) = &self.upstream_health {
-                    health.spawn_probe_by_token(b_ref.entry.clone(), probe_token);
-                }
-            }
-        } else if let (Some(health), Some(namespace), Some(server)) = (
-            &self.upstream_health,
-            &spec.upstream_name,
-            &spec.upstream_addr_str,
-        ) {
-            health.mark_unhealthy(namespace, server);
+            b_ref.record_failure();
         }
     }
 
@@ -95,14 +68,16 @@ impl HttpConnector {
     fn mark_prefer_h1(&self, spec: &HttpPeerSpec) {
         let key = Self::cache_key(spec);
         let mut prefer_h1 = self.prefer_h1.lock();
-        prefer_h1.retain(|_, timestamp| timestamp.elapsed() <= PREFER_H1_TTL);
-        if prefer_h1.len() >= MAX_PREFER_H1_ENTRIES && !prefer_h1.contains_key(&key) {
-            let oldest = prefer_h1
-                .iter()
-                .min_by_key(|(_, timestamp)| **timestamp)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                prefer_h1.remove(&oldest);
+        if !prefer_h1.contains_key(&key) && prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
+            prefer_h1.retain(|_, timestamp| timestamp.elapsed() <= PREFER_H1_TTL);
+            if prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
+                if let Some(oldest) = prefer_h1
+                    .iter()
+                    .min_by_key(|(_, timestamp)| **timestamp)
+                    .map(|(key, _)| key.clone())
+                {
+                    prefer_h1.remove(&oldest);
+                }
             }
         }
         prefer_h1.insert(key, Instant::now());

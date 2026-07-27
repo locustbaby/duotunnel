@@ -253,6 +253,25 @@ impl UdpSessionManager {
         }
     }
 
+    fn evict_one_idle_session(&self) -> bool {
+        let now = current_time_secs();
+        let key = self
+            .sessions
+            .iter()
+            .find(|entry| {
+                now.saturating_sub(entry.value().last_activity.load(Ordering::Relaxed))
+                    > UDP_SESSION_IDLE_TIMEOUT_SECS
+            })
+            .map(|entry| entry.key().clone());
+        key.and_then(|key| {
+            remove_session_if_idle(&self.sessions, &key, now).map(|session| {
+                session.cancel_token.cancel();
+                true
+            })
+        })
+        .unwrap_or(false)
+    }
+
     async fn forward_client_envelope(&self, envelope: UdpDatagramEnvelope) -> Result<()> {
         let session = self.get_or_create_session(&envelope.session).await?;
         session
@@ -275,11 +294,15 @@ impl UdpSessionManager {
             .state
             .admit_runtime_generation()
             .context("server is not admitting new UDP sessions")?;
-        let capacity = self
-            .session_capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow::anyhow!("UDP session capacity exhausted"))?;
+        let capacity = match self.session_capacity.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) if self.evict_one_idle_session() => self
+                .session_capacity
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow::anyhow!("UDP session capacity exhausted"))?,
+            Err(_) => return Err(anyhow::anyhow!("UDP session capacity exhausted")),
+        };
         let global_capacity = self
             .global_session_capacity
             .clone()

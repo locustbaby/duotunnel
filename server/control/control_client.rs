@@ -260,6 +260,7 @@ fn select_newer_lkg(primary: LastKnownGood, previous: LastKnownGood) -> LastKnow
         }
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
+        (Some(_), Some(_)) => Ordering::Equal,
         _ => primary
             .snapshot
             .resource_version
@@ -330,7 +331,7 @@ async fn watch_loop(
                     resource_version = lkg.snapshot.resource_version,
                     "loaded local snapshot fallback"
                 );
-                match apply_snapshot(&lkg.snapshot, &state).await {
+                match apply_snapshot(&lkg.snapshot, &lkg.content_hash, &state).await {
                     Ok(()) => {
                         let age =
                             validate_lkg_timestamp(lkg.generated_at_unix_ms).unwrap_or(MAX_LKG_AGE);
@@ -424,20 +425,16 @@ async fn connect_and_watch(
             ReceivedWatchEvent::Legacy(WatchEvent::Snapshot(snap)) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
+                let content_hash = snapshot_content_hash(&snap)?;
                 state.health().begin_config_apply();
-                if let Err(error) = apply_snapshot(&snap, state).await {
+                if let Err(error) = apply_snapshot(&snap, &content_hash, state).await {
                     state.health().fail_config_apply();
                     return Err(error);
                 }
                 state.health().finish_config_apply();
                 watch_state.last_version = v;
                 watch_state.current_snapshot = Some(snap.clone());
-                let lkg = make_lkg(
-                    None,
-                    snapshot_content_hash(&snap)?,
-                    unix_time_ms(),
-                    snap.clone(),
-                )?;
+                let lkg = make_lkg(None, content_hash, unix_time_ms(), snap.clone())?;
                 watch_state.applied = Some(AppliedControlState {
                     revision: None,
                     content_hash: lkg.content_hash.clone(),
@@ -452,22 +449,24 @@ async fn connect_and_watch(
                 info!(resource_version = v, "received Patch from ctld");
                 if let Some(current) = watch_state.current_snapshot.as_ref() {
                     let mut candidate = current.clone();
-                    state.health().begin_config_apply();
                     let affected_ports = apply_patch_to_snapshot(&mut candidate, &patch);
-                    if let Err(error) =
-                        apply_patch_to_runtime(&candidate, &patch, &affected_ports, state).await
+                    let content_hash = snapshot_content_hash(&candidate)?;
+                    state.health().begin_config_apply();
+                    if let Err(error) = apply_patch_to_runtime(
+                        &candidate,
+                        &content_hash,
+                        &patch,
+                        &affected_ports,
+                        state,
+                    )
+                    .await
                     {
                         state.health().fail_config_apply();
                         return Err(error);
                     }
                     state.health().finish_config_apply();
                     watch_state.last_version = v;
-                    let lkg = make_lkg(
-                        None,
-                        snapshot_content_hash(&candidate)?,
-                        unix_time_ms(),
-                        candidate.clone(),
-                    )?;
+                    let lkg = make_lkg(None, content_hash, unix_time_ms(), candidate.clone())?;
                     watch_state.applied = Some(AppliedControlState {
                         revision: None,
                         content_hash: lkg.content_hash.clone(),
@@ -546,10 +545,10 @@ async fn handle_v2_snapshot<W>(
 where
     W: AsyncWriteExt + Unpin,
 {
+    let actual_hash = snapshot_content_hash(&versioned.snapshot)?;
     let reject = if versioned.revision.sequence != versioned.snapshot.resource_version {
         Some("revision and snapshot version diverged".to_string())
     } else {
-        let actual_hash = snapshot_content_hash(&versioned.snapshot)?;
         (actual_hash != versioned.content_hash).then(|| "content hash mismatch".to_string())
     };
     if let Some(reason) = reject {
@@ -597,7 +596,7 @@ where
     }
 
     state.health().begin_config_apply();
-    if let Err(error) = apply_snapshot(&versioned.snapshot, state).await {
+    if let Err(error) = apply_snapshot(&versioned.snapshot, &actual_hash, state).await {
         state.health().fail_config_apply();
         let reason = format!("runtime apply failed: {error}");
         send_apply_response(
@@ -668,9 +667,12 @@ fn unix_time_ms() -> u64 {
 }
 
 /// Build and publish one immutable runtime generation.
-async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) -> anyhow::Result<()> {
-    let content_hash = snapshot_content_hash(snap)?;
-    let (listeners, generation) = build_runtime_generation(snap, &content_hash, state)?;
+async fn apply_snapshot(
+    snap: &ConfigSnapshot,
+    content_hash: &str,
+    state: &Arc<ServerState>,
+) -> anyhow::Result<()> {
+    let (listeners, generation) = build_runtime_generation(snap, content_hash, state)?;
     let _security_commit = state.security_apply_gate().write().await;
     fence_revoked_sessions(
         state,
@@ -768,12 +770,13 @@ async fn fence_revoked_sessions(
 
 async fn apply_patch_to_runtime(
     snapshot: &ConfigSnapshot,
+    content_hash: &str,
     patch: &ConfigPatch,
     affected_ports: &HashSet<u16>,
     state: &Arc<ServerState>,
 ) -> anyhow::Result<()> {
     let _ = (patch, affected_ports);
-    apply_snapshot(snapshot, state).await
+    apply_snapshot(snapshot, content_hash, state).await
 }
 
 fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {

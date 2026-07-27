@@ -4,7 +4,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{ErrorKind, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::SharedRegistry;
 
@@ -73,14 +73,22 @@ impl IngressProtocolHandler for TcpPassHandler {
             {
                 Ok(opened) => break opened,
                 Err(e) => {
+                    let connection_lost = selected.handle.close_reason().is_some()
+                        || matches!(
+                            e.kind,
+                            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+                        );
                     warn!(
                         conn_id = %selected.conn_id,
                         group_id = %group_id,
                         attempt = attempts,
                         error = %e,
-                        "failed to open QUIC stream on selected passthrough TCP connection, unregistering and retrying"
+                        connection_lost,
+                        "failed to open QUIC stream on selected passthrough TCP connection, retrying"
                     );
-                    self.registry.unregister(&selected.conn_id);
+                    if connection_lost {
+                        self.registry.unregister(&selected.conn_id);
+                    }
                     if attempts >= max_attempts {
                         return Err(e.into());
                     }

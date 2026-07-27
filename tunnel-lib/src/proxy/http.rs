@@ -11,6 +11,7 @@ use quinn::{RecvStream, SendStream};
 use std::time::Duration;
 use tracing::debug;
 const KEEPALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct HttpPeer {
     pub connector: SharedHttpConnector,
     pub spec: HttpPeerSpec,
@@ -56,9 +57,14 @@ impl HttpPeer {
             }
             let request = builder.body(req.body)?;
             debug!(upstream = %self.spec.target_host, uri = %request.uri(), "H1 sending request to upstream");
-            let response = match self.connector.request(&self.spec, request).await {
-                Ok(resp) => resp,
-                Err(e) => {
+            let response = match tokio::time::timeout(
+                UPSTREAM_REQUEST_TIMEOUT,
+                self.connector.request(&self.spec, request),
+            )
+            .await
+            {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
                     let proxy_err = ProxyError::http_upstream_request(format!(
                         "{}: {}",
                         self.spec.target_host, e
@@ -73,11 +79,33 @@ impl HttpPeer {
                     let _ = driver.write_502(&proxy_err.to_string()).await;
                     break;
                 }
+                Err(_) => {
+                    let proxy_err = ProxyError::http_upstream_request(format!(
+                        "{}: upstream request timed out after {:?}",
+                        self.spec.target_host, UPSTREAM_REQUEST_TIMEOUT
+                    ));
+                    debug!(
+                        upstream = %self.spec.target_host,
+                        error = %proxy_err,
+                        "H1 upstream request timed out, sending 502"
+                    );
+                    let _ = driver.write_502(&proxy_err.to_string()).await;
+                    break;
+                }
             };
             debug!(upstream = %self.spec.target_host, status = %response.status(), "H1 received response");
-            if let Err(e) = driver.write_response(response).await {
-                debug!(upstream = %self.spec.target_host, error = %e, "H1 write_response error, closing");
-                break;
+            match tokio::time::timeout(UPSTREAM_REQUEST_TIMEOUT, driver.write_response(response))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    debug!(upstream = %self.spec.target_host, error = %e, "H1 write_response error, closing");
+                    break;
+                }
+                Err(_) => {
+                    debug!(upstream = %self.spec.target_host, "H1 response body timed out, closing");
+                    break;
+                }
             }
             if driver.should_close || should_close_after {
                 debug!(upstream = %self.spec.target_host, "H1 keep-alive: Connection: close, closing");

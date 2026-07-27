@@ -109,6 +109,7 @@ impl ComponentHandle {
 
 pub(crate) struct ServerSupervisor {
     handles: Vec<ComponentHandle>,
+    shutdown: CancellationToken,
 }
 
 impl ServerSupervisor {
@@ -123,10 +124,14 @@ impl ServerSupervisor {
             info!(component = name, state = ?handle.state(), "component started");
             handles.push(handle);
         }
-        Self { handles }
+        Self {
+            handles,
+            shutdown: ctx.shutdown,
+        }
     }
 
     pub(crate) fn shutdown(self) {
+        self.shutdown.cancel();
         for handle in &self.handles {
             handle.begin_shutdown();
         }

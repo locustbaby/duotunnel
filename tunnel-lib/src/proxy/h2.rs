@@ -85,7 +85,7 @@ where
         let spec = spec.clone();
         async move {
             let (mut parts, body) = req.into_parts();
-            let target_uri: hyper::Uri = format!(
+            let target_uri = match format!(
                 "{}://{}{}",
                 spec.scheme,
                 spec.target_host,
@@ -95,8 +95,22 @@ where
                     .map(|pq| pq.as_str())
                     .unwrap_or("/")
             )
-            .parse()
-            .expect("failed to parse valid uri");
+            .parse::<hyper::Uri>()
+            {
+                Ok(uri) => uri,
+                Err(error) => {
+                    let body = http_body_util::Full::new(Bytes::from(format!(
+                        "invalid request target: {error}"
+                    )))
+                    .map_err(|never| match never {})
+                    .boxed();
+                    return Ok(Response::builder()
+                        .status(hyper::StatusCode::BAD_REQUEST)
+                        .header(hyper::header::CONTENT_TYPE, "text/plain")
+                        .body(body)
+                        .expect("static response builder"));
+                }
+            };
             parts.uri = target_uri;
             if let Ok(hv) = spec.target_host.parse() {
                 parts.headers.insert(hyper::header::HOST, hv);

@@ -6,7 +6,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    maybe_slow_path, proxy, run_accept_worker, GroupId, OpenBiOutcome, OpenStreamRequest, ProxyName,
+    maybe_slow_path, proxy, run_accept_worker, ErrorKind, GroupId, OpenBiOutcome,
+    OpenStreamRequest, ProxyName,
 };
 
 pub async fn run_tcp_accept_loop(
@@ -123,16 +124,22 @@ async fn handle_tcp_connection(
         {
             Ok(opened) => break opened,
             Err(e) => {
+                let connection_lost = selected.handle.close_reason().is_some()
+                    || matches!(
+                        e.kind,
+                        ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+                    );
                 warn!(
                     conn_id = %selected.conn_id,
                     group_id = %group_id,
                     attempt = attempts,
                     error = %e,
-                    "failed to open QUIC stream on selected TCP proxy connection, unregistering and retrying"
+                    connection_lost,
+                    "failed to open QUIC stream on selected TCP proxy connection, retrying"
                 );
-                // Raw TCP has no per-connection H2 sender cache to invalidate; dropping this
-                // selected client lets the next attempt pick a different connection immediately.
-                state.registry().unregister(&selected.conn_id);
+                if connection_lost {
+                    state.registry().unregister(&selected.conn_id);
+                }
                 if attempts >= max_attempts {
                     return Err(e.into());
                 }

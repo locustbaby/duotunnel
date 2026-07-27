@@ -180,6 +180,27 @@ impl IngressProtocolHandler for TlsHandler {
                     (pinned_generation, pinned_route_target)
                 };
                 let (mut parts, body) = req.into_parts();
+                if !negotiated_h2 && parts.headers.contains_key(hyper::header::HOST) {
+                    let host_matches_sni = parts
+                        .headers
+                        .get(hyper::header::HOST)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<hyper::http::uri::Authority>().ok())
+                        .is_some_and(|authority| {
+                            authority.host().eq_ignore_ascii_case(target_host.as_str())
+                        });
+                    if !host_matches_sni {
+                        let err = ProxyError::h2c_misdirected(format!(
+                            "HTTP/1.1 Host does not match TLS SNI {target_host}"
+                        ));
+                        tunnel_lib::plugin::observe_proxy_error(
+                            metrics.as_ref(),
+                            ProtocolKind::Tls.as_label(),
+                            &err,
+                        );
+                        return Ok(error_response(&err));
+                    }
+                }
                 let mut uri_parts = parts.uri.clone().into_parts();
                 if let Ok(authority) = target_host.parse() {
                     uri_parts.authority = Some(authority);
