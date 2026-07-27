@@ -2,7 +2,7 @@ use crate::bootstrap::config::ClientConfigFile;
 use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -16,7 +16,6 @@ pub(crate) struct TunnelPoolService {
     pub(crate) config: ClientConfigFile,
     pub(crate) endpoint: quinn::Endpoint,
     pub(crate) entry_pool: Arc<EntryConnPool>,
-    pub(crate) ready: Arc<AtomicBool>,
     pub(crate) udp_registry: Arc<UdpListenerRegistry>,
     pub(crate) resolved_connections: u32,
 }
@@ -36,7 +35,6 @@ impl ClientService for TunnelPoolService {
                 self.config.clone(),
                 self.endpoint.clone(),
                 shutdown,
-                self.ready.clone(),
                 self.entry_pool.clone(),
                 self.udp_registry.clone(),
                 self.resolved_connections,
@@ -48,7 +46,6 @@ impl ClientService for TunnelPoolService {
                 self.config.clone(),
                 self.endpoint.clone(),
                 shutdown,
-                self.ready.clone(),
                 self.entry_pool.clone(),
                 self.udp_registry.clone(),
             )

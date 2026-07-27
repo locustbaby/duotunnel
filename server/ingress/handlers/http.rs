@@ -23,11 +23,13 @@ pub async fn run_http_accept_loop(
         port,
     ));
     let metrics_sink = state.plugin_registry().metrics_sink.clone();
+    let connection_quiesce = cancel.clone();
 
     run_accept_worker(listener, cancel, emfile_backoff, "http", move |accepted| {
         let state = state.clone();
         let dispatcher = dispatcher.clone();
         let metrics_sink = metrics_sink.clone();
+        let quiesce = connection_quiesce.clone();
         async move {
             let AcceptedConn {
                 stream,
@@ -35,6 +37,10 @@ pub async fn run_http_accept_loop(
                 accepted_at,
                 ..
             } = accepted;
+            let Some(runtime_generation) = state.admit_runtime_generation() else {
+                debug!("rejecting public HTTP connection while server is not ready");
+                return;
+            };
             if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;
@@ -55,6 +61,8 @@ pub async fn run_http_accept_loop(
                 timeouts,
                 port,
                 state.relay_buf_size(),
+                runtime_generation.sequence(),
+                quiesce,
             );
             ctx.timing.accepted_at = accepted_at;
 

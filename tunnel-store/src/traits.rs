@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use tunnel_lib::{ClientStatus, GroupId, TokenStatus};
 pub struct AuthResult {
     pub client_group: GroupId,
+    pub token_hash: [u8; 32],
 }
 pub enum AuthError {
     InvalidToken,

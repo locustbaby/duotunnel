@@ -2,7 +2,7 @@ use crate::bootstrap::config::ClientConfigFile;
 use crate::egress::udp_listener::UdpListenerRegistry;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -10,7 +10,6 @@ pub async fn run_pool(
     config: ClientConfigFile,
     endpoint: quinn::Endpoint,
     cancel: CancellationToken,
-    ready: Arc<AtomicBool>,
     entry_pool: Arc<EntryConnPool>,
     udp_registry: Arc<UdpListenerRegistry>,
     connections: u32,
@@ -22,7 +21,6 @@ pub async fn run_pool(
         let slot_config = config.clone();
         let endpoint = endpoint.clone();
         let slot_cancel = cancel.clone();
-        let slot_ready = ready.clone();
         let slot_pool = entry_pool.clone();
         let slot_udp_registry = udp_registry.clone();
         slots.spawn(async move {
@@ -30,7 +28,6 @@ pub async fn run_pool(
                 slot_config,
                 endpoint,
                 slot_cancel,
-                slot_ready,
                 slot_pool,
                 slot_udp_registry,
             )

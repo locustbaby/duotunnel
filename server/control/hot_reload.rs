@@ -1,38 +1,26 @@
 use crate::bootstrap::config::{self, ServerConfigFile};
 use crate::control::service::BackgroundService;
 use crate::ingress::sync_listeners;
-use crate::{build_routing_snapshot, ServerState};
+use crate::{build_routing_snapshot_with_health, RuntimeGeneration, ServerState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub struct HotReloadService {
     pub config_path: String,
 }
 
 impl BackgroundService for HotReloadService {
-    fn name(&self) -> &'static str {
-        "hot-reload"
-    }
-
     fn run(
         self: Box<Self>,
         state: Arc<ServerState>,
-        ready: Arc<std::sync::atomic::AtomicBool>,
         shutdown: CancellationToken,
         _proxy_handle: tokio::runtime::Handle,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
-        Box::pin(async move {
-            ready.store(true, Ordering::Release);
-            if let Err(e) = watch_loop(self.config_path, state, shutdown).await {
-                error!(error = %e, "hot-reload watcher exited unexpectedly");
-            }
-            Ok(())
-        })
+        Box::pin(async move { watch_loop(self.config_path, state, shutdown).await })
     }
 }
 
@@ -92,6 +80,17 @@ async fn watch_loop(
 }
 
 async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
+    state.health().begin_config_apply();
+    let result = reload_routing_inner(config_path, state).await;
+    if result.is_ok() {
+        state.health().finish_config_apply();
+    } else {
+        state.health().fail_config_apply();
+    }
+    result
+}
+
+async fn reload_routing_inner(config_path: &str, state: &Arc<ServerState>) -> anyhow::Result<()> {
     let http_params = state.http_client_params();
     let (tm, egress) = match ServerConfigFile::load(config_path) {
         Ok(new_config) => {
@@ -109,9 +108,17 @@ async fn reload_routing(config_path: &str, state: &Arc<ServerState>) -> anyhow::
             state.config_source().load().await?
         }
     };
-    let snapshot = build_routing_snapshot(&tm, &egress, &http_params);
-    state.replace_routing(snapshot);
+    let routing =
+        build_routing_snapshot_with_health(&tm, &egress, &http_params, state.upstream_health())?;
+    let previous = state.runtime_generation();
+    let generation = Arc::new(RuntimeGeneration::managed(
+        previous.sequence().saturating_add(1),
+        Arc::<str>::from("standalone-hot-reload"),
+        routing,
+        Arc::new(previous.token_map().clone()),
+    ));
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
-    sync_listeners(state, &listeners).await;
+    sync_listeners(state, &listeners).await?;
+    state.publish_generation(generation);
     Ok(())
 }

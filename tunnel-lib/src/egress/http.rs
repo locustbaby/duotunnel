@@ -48,16 +48,16 @@ impl Default for HttpClientParams {
         }
     }
 }
-pub fn create_https_client() -> HttpsClient {
+pub fn create_https_client() -> Result<HttpsClient> {
     create_https_client_with(&HttpClientParams::default())
 }
-pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
+pub fn create_https_client_with(params: &HttpClientParams) -> Result<HttpsClient> {
     let mut http = HttpConnector::new();
     http.set_nodelay(true);
     http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
-        .unwrap()
+        .map_err(|e| anyhow::anyhow!("failed to load native roots for HTTPS client: {e}"))?
         .https_or_http()
         .enable_http1()
         .enable_http2()
@@ -69,7 +69,7 @@ pub fn create_https_client_with(params: &HttpClientParams) -> HttpsClient {
     if let Some(secs) = params.pool_idle_timeout_secs {
         builder.pool_idle_timeout(Duration::from_secs(secs));
     }
-    builder.build(https)
+    Ok(builder.build(https))
 }
 pub fn create_h2c_client() -> H2cClient {
     create_h2c_client_with(&HttpClientParams::default())
@@ -88,6 +88,7 @@ pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
     }
     builder.build(http)
 }
+
 pub async fn forward_http(
     mut recv: RecvStream,
     mut send: SendStream,
@@ -263,4 +264,15 @@ pub async fn forward_http(
     debug!(bytes = total_bytes, "response complete");
     send.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod client_construction_tests {
+    use super::*;
+
+    #[test]
+    fn https_client_construction_returns_result() {
+        create_https_client_with(&HttpClientParams::default())
+            .expect("native roots should construct an HTTPS client");
+    }
 }

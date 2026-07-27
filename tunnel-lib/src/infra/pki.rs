@@ -8,9 +8,14 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, OnceLock,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+
+const MAX_CERT_CACHE_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -59,6 +64,7 @@ struct CachedEntry {
 
 struct InflightEntry {
     lock: Arc<Mutex<()>>,
+    users: Arc<AtomicUsize>,
 }
 
 struct CertState {
@@ -102,6 +108,16 @@ impl CertState {
         let ttl = self.ttl;
         self.entries
             .retain(|_, entry| entry.created_at.elapsed() < ttl);
+        if self.entries.len() >= MAX_CERT_CACHE_ENTRIES && !self.entries.contains_key(&host) {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(host, _)| host.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
         self.entries.insert(
             host,
             CachedEntry {
@@ -114,6 +130,31 @@ impl CertState {
 
 static CERT_STATE: RwLock<Option<CertState>> = RwLock::new(None);
 static PKI_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+struct InflightCleanup {
+    host: String,
+    lock: Arc<Mutex<()>>,
+    users: Arc<AtomicUsize>,
+}
+
+impl Drop for InflightCleanup {
+    fn drop(&mut self) {
+        if self.users.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let mut guard = CERT_STATE.write();
+        if let Some(state) = guard.as_mut() {
+            let should_remove = state.inflight.get(&self.host).is_some_and(|entry| {
+                Arc::ptr_eq(&entry.lock, &self.lock)
+                    && Arc::ptr_eq(&entry.users, &self.users)
+                    && self.users.load(Ordering::Acquire) == 0
+            });
+            if should_remove {
+                state.inflight.remove(&self.host);
+            }
+        }
+    }
+}
 
 enum RootCaIssuer {
     Generated(CertifiedIssuer<'static, KeyPair>),
@@ -162,10 +203,9 @@ impl RootCa {
             let k_path = std::path::Path::new(k_path);
             if c_path.exists() && k_path.exists() {
                 harden_existing_private_key(k_path);
-                if let (Ok(cert_pem), Ok(key_pem)) = (
-                    std::fs::read_to_string(c_path),
-                    std::fs::read_to_string(k_path),
-                ) {
+                if let (Ok(cert_pem), Ok(key_pem)) =
+                    (read_existing_file(c_path), read_existing_file(k_path))
+                {
                     match KeyPair::from_pem(&key_pem) {
                         Ok(key_pair) => match Issuer::from_ca_cert_pem(&cert_pem, key_pair) {
                             Ok(issuer) => match pem_to_der(&cert_pem) {
@@ -220,7 +260,7 @@ impl RootCa {
             let issuer = CertifiedIssuer::self_signed(params, key)?;
             let cert_pem = issuer.pem();
 
-            if let Err(e) = std::fs::write(c_path, cert_pem) {
+            if let Err(e) = write_certificate(c_path, cert_pem.as_bytes()) {
                 tracing::error!(error = %e, path = %c_path.display(), "failed to save CA cert to disk");
             }
             if let Err(e) = write_private_key(k_path, key_pem.as_bytes()) {
@@ -254,6 +294,72 @@ impl RootCa {
 /// fchmod covers the case where the file already existed, since `mode` only
 /// applies to files this call creates. Truncation happens only after those
 /// checks pass, so a rejected path is left untouched.
+#[cfg(unix)]
+fn read_existing_file(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.uid() != unsafe { libc::getuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to read CA material from unsafe path {}",
+                path.display()
+            ),
+        ));
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+#[cfg(not(unix))]
+fn read_existing_file(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+#[cfg(unix)]
+fn write_certificate(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.uid() != unsafe { libc::getuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to write CA certificate to unsafe path {}",
+                path.display()
+            ),
+        ));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    file.set_len(0)?;
+    file.write_all(pem)
+}
+
+#[cfg(not(unix))]
+fn write_certificate(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(pem)
+}
+
 #[cfg(unix)]
 fn write_private_key(path: &std::path::Path, pem: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -399,7 +505,7 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
         }
     }
 
-    let (entry_lock, permits, root_ca) = {
+    let (entry_lock, entry_users, permits, root_ca) = {
         let mut guard = CERT_STATE.write();
         let state = guard.as_mut().unwrap();
         if let Some(config) = state.get(host) {
@@ -410,15 +516,24 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
             .entry(host.to_string())
             .or_insert_with(|| InflightEntry {
                 lock: Arc::new(Mutex::new(())),
+                users: Arc::new(AtomicUsize::new(0)),
             });
+        entry.users.fetch_add(1, Ordering::AcqRel);
         (
             entry.lock.clone(),
+            entry.users.clone(),
             state.permits.clone(),
             Arc::clone(&state.root_ca),
         )
     };
 
-    let _entry_guard = entry_lock.lock().await;
+    let _inflight_cleanup = InflightCleanup {
+        host: host.to_string(),
+        lock: entry_lock.clone(),
+        users: entry_users.clone(),
+    };
+    let _entry_guard = entry_lock.clone().lock_owned().await;
+    drop(entry_lock);
     {
         let guard = CERT_STATE.read();
         if let Some(state) = guard.as_ref() {
@@ -443,7 +558,6 @@ pub async fn get_or_create_server_config(host: &str) -> Result<Arc<rustls::Serve
     let mut guard = CERT_STATE.write();
     let state = guard.as_mut().unwrap();
     state.insert(host.to_string(), Arc::clone(&config));
-    state.inflight.remove(host);
     Ok(config)
 }
 

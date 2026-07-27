@@ -106,7 +106,10 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 > **历史说明**：下表是 PR #58 当批识别出的 11 项，已全部实施并合入 main。它不再代表
 > “当前 HEAD 的全部 P0 已闭合”。2026-07-27 第三轮复核又发现控制面 Patch 丢失、
 > token 撤销未闭环、非幂等重放和 listener/slot 生命周期等新阻断项，见
-> [14](./14-performance-robustness-stability-addendum.md)；当前状态回到 **M0 待闭合**。
+> [14](./14-performance-robustness-stability-addendum.md)。这些问题已在
+> `fix/m0-runtime-consistency` 完成代码闭环；本地 workspace test、check 和
+> all-targets Clippy 均通过。大规模并发、故障注入、跨版本/多 leader 与长稳仍是
+> rollout 验收项，不能由本地单测替代；远端 CI 状态见下方实施记录。
 >
 > PR #58 实施过程中经三轮对抗式
 > review（并发/内存、HTTP 协议合规、安全/协商），又查出 8 项后续问题一并修复——其中
@@ -131,17 +134,17 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | ✅ 面向公网 H2 未设显式防滥用上界（rapid-reset） | 09 §4.4 | `h2.rs:81`+`tls/mod.rs:230` | **已闭合**；顺带修 TLS 侧 ALPN 分派缺失 |
 | ✅ 线协议无版本协商 → 无法滚动升级/灰度（新旧混跑批量断连） | 13 §4 | `msg.rs:41,56,119`+`quic.rs:83` | **已闭合**（ALPN 世代化为 `tunnel-quic/v1`） |
 
-#### 第三轮新增 M0 阻断项（2026-07-27，尚未实施）
+#### 第三轮新增 M0 阻断项（2026-07-27，已实施）
 
 | 项 | 证据 | 方案 |
 | --- | --- | --- |
-| control `watch` 可跳过相对 Patch，server 无 gap/hash 校验 | `service.rs:98-109`、`watch.rs:96-126`、`control_client.rs:195-220` | D9：旧 wire 全量止血；V2 双栈后再启 revision/hash/ACK |
-| revoke/rotate 不关闭已认证连接 | `quic.rs:346,398-421`；全库无 `revocation_tx.send` | D9：session 保存 token identity，新代 commit 后精确撤销 |
-| 空 body 非幂等请求可在 ambiguous failure 后重放 | `tls/mod.rs:130-226`、`h2c/mod.rs:270-361` | D2：method + dispatch phase + budget |
-| inflight slot 提前复用，旧 guard 可修改新连接计数 | `registry.rs:199-247`、`inflight.rs:60-122` | D9/D10：owned `ConnectionState` |
-| listener apply 非事务且存在 stale generation/orphan worker | `listener_mgr.rs:55-70,201-264` | D9：ConfigApplier + prepare/commit/fencing |
-| 配置转换/证书加载可 panic，容量乘法与固定 4096 slot 无预算 | `quic.rs:49-56`、`http.rs:59-60`、`conn_pool.rs:86`、`registry.rs:100` | D9/D10：checked validation + 统一资源预算 |
-| UDP listener 重名会静默覆盖 reply socket | `udp_listener.rs:19-21,54-57` | D9：配置代内唯一 identity，重复整代拒绝 |
+| ✅ control `watch` 可跳过相对 Patch，server 无 gap/hash 校验 | `service.rs`、`watch.rs`、`control_client.rs` | V1 始终发完整快照；V2 持久 epoch/sequence、canonical hash、Applied ACK 与 LKG |
+| ✅ revoke/rotate 不关闭已认证连接 | `handlers/quic.rs`、`registry.rs` | session 固定 token identity；安全写门内先 fence/revoke，再发布新 generation |
+| ✅ 空 body 非幂等请求可在 ambiguous failure 后重放 | `tls/mod.rs`、`h2c/mod.rs` | 仅 allowlist 的安全 method + 空 body 可自动重试 |
+| ✅ inflight slot 提前复用，旧 guard 可修改新连接计数 | `connection_handle.rs`、`inflight.rs`、`registry.rs` | owned `ConnectionState`，retire 与容量释放 exactly-once |
+| ✅ listener apply 非事务且存在 stale generation/orphan worker | `listener_mgr.rs` | 同一稳定视图下全端口 pre-bind；全部成功才统一 commit；generation fencing + bounded abort |
+| ✅ 配置转换/证书加载可 panic，容量乘法与固定 slot 无预算 | config、QUIC、pool/registry | checked validation；连接、stream、queue、session、cache 均有硬上限 |
+| ✅ UDP listener 重名会静默覆盖 reply socket | `udp_listener.rs` | 配置代内 proxy identity 唯一；重复配置整代拒绝 |
 
 ### M0 — 共享正确性/稳定性（上线阻断）
 
@@ -150,6 +153,9 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | owned ConnectionState + reliable unregister | 14 §4.1/§6.1, D9 §5 | 消除 slot ABA 与容量/生命周期混用 |
 | client/server 聚合 readiness | 14 §4.3, D9 §6 | 避免 last-writer-wins 与关键组件假 ready |
 | UDP/stream 解耦 + session/task/queue 上限 | 14 §6.2, D9 §8, D10 §2.3 | 同时是稳定性与性能 P0 |
+| RuntimeGeneration + control V2/LKG + revoke fence | D9 §2-§4 | 防止配置撕裂、回滚、丢更新和安全状态延迟生效 |
+| listener 全量 prepare/commit + protocol/QUIC typed drain | D9 §4/§7 | 防止部分监听提交、drain 期间新 work 和无限等待 |
+| 跨代 backend health + HTTP/TCP/DNS 被动隔离 | D9 §2, D10 §2 | reload 不清空故障状态，group 间不互相误伤 |
 
 ### P1 — 性能/测量，达成可信基线与确定性优化
 
@@ -208,19 +214,41 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 ```
 M0 运行时一致性/生命周期 ──▶ M1 可信测量+确定热点 ──▶ M2 Profile-gated扩展 ──▶ M3 抽象
-   ◀── 当前所在              cpuset/协议分层           多Endpoint/runtime       HttpFilter/LB
+   ✅ 代码闭环                 ◀── 后续主线             多Endpoint/runtime       HttpFilter/LB
 ```
 
 **PR #58 完成情况**：当批 P0 清单 11 项已闭合，另修 8 项追加问题；但第三轮复核证明
 旧清单没有覆盖 control delivery、撤销传播、slot ownership、listener transaction、
-聚合 readiness 与协议级 drain。它们统一进入 M0，不再把“已修完旧清单”等同于
-“生产正确性闭合”。
+聚合 readiness 与协议级 drain。本批已把这些统一收口为 M0；后续不再回到会放大
+生命周期复杂度的架构改造，而是先推进 M1 的可信测量与剩余确定热点。
 
 M0 之后先做 [06](./06-bench-methodology.md) 与
 [D10](./design/10-performance-hardening.md) 的可信基线、UDP HOL、指标基数、buffer
 接线和确定分配项。多 Endpoint 只有 profiler 指向 endpoint driver 时再谈。
 
-**顺序铁律**：M0 未闭合前，不启动会放大生命周期复杂度的架构优化；CI 可信基线
+**M0 验证记录（2026-07-27）**：手动触发
+[GitHub Actions CI #30235538443](https://github.com/locustbaby/duotunnel/actions/runs/30235538443)，
+release build、workspace test/coverage、all-targets Clippy、`cargo-udeps`、
+`cargo-audit` 与全协议 integration 均通过；stress/trace/dial9 按本批验证范围关闭，
+留待 M1 可信基线建立后执行。
+
+### 后续 task 拆分
+
+1. **M0 rollout 验收**：watch 跨 1000 revision、A→B→C/supersede、reload×shutdown、
+   worker panic/磁盘满、跨版本矩阵与 10 次 reload 长连接；单独测试/CI commit。
+2. **control authority reset**：在启用多 leader 前设计并实现显式 epoch reset、审计与
+   failover 测试；当前单 leader 对未知 epoch 保持 fail-closed。
+3. **generation/revoke 可观测性**：retired generation count/age/bytes、revoked close
+   unfinished/deadline 与 durability-degraded 指标；不改变本批 ACK 前 admission fence。
+4. **listener/commit 强化（若 rollout 证据要求）**：stable acceptor 或 bind-not-listen/
+   FD handoff，进一步消除 `SO_REUSEPORT` prepare 的 OS 可见窗口；为 post-plan fault
+   injection 定义自动 retry/forward-fix，不把 fail-closed 误写成可回滚事务。
+5. **M1 测量基线**：cpuset 固定的协议分层 benchmark、allocator/lock/CPU profile；
+   结果独立 commit，先测量再选择优化。
+6. **确定热点**：按 profile 依次评估 buffer 接线、UDP 表示/拷贝、H1 scratch/copy、
+   metrics 基数与 DNS/cache；每个优化独立 commit 与 before/after 数据。
+
+**顺序铁律**：M0 闭合后仍不直接启动会放大生命周期复杂度的架构优化；CI 可信基线
 （M1 首步）建立前，所有 CI 数字不可作为
 优化判据。
 

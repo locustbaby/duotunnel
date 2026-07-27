@@ -24,6 +24,7 @@ pub struct UdpEntryConfig {
 #[serde(default)]
 pub struct ClientQuicConfig {
     pub connections: u32,
+    pub min_ready_tunnels: u32,
     pub shards: Option<usize>,
     pub max_concurrent_streams: u32,
     pub stream_window_mb: Option<u64>,
@@ -39,6 +40,7 @@ impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
             connections: 0,
+            min_ready_tunnels: 1,
             shards: None,
             max_concurrent_streams: 1000,
             stream_window_mb: None,
@@ -282,6 +284,7 @@ impl ClientConfigFile {
                         "server_addr",
                         "server_port",
                         "quic.connections",
+                        "quic.min_ready_tunnels",
                         "quic.shards",
                     ])
                     .split("__"),
@@ -322,6 +325,15 @@ impl ClientConfigFile {
         }
         if matches!(self.quic.shards, Some(0)) {
             errors.push("quic.shards must be >= 1 when set".into());
+        }
+        if self.quic.min_ready_tunnels == 0 {
+            errors.push("quic.min_ready_tunnels must be >= 1".into());
+        }
+        if self.quic.connections > 0 && self.quic.min_ready_tunnels > self.quic.connections {
+            errors.push(format!(
+                "quic.min_ready_tunnels ({}) must be <= quic.connections ({})",
+                self.quic.min_ready_tunnels, self.quic.connections
+            ));
         }
         if self.quic.max_concurrent_streams == 0 {
             errors.push("quic.max_concurrent_streams must be >= 1".into());

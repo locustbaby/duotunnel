@@ -1,4 +1,5 @@
 use crate::bootstrap::{cli, CtldBootstrap};
+use crate::control::revision::SqliteControlRevisionStore;
 use crate::control::service::ControlService;
 use crate::control::token::cache::{SqliteTokenCacheProvider, TokenCacheProvider};
 use crate::control::watch::WatchServer;
@@ -82,7 +83,15 @@ async fn build_control_service(
         seed_routing_if_needed(rule_store.as_ref(), server_cfg_path).await;
     }
 
-    ControlService::new(auth_store, rule_store, token_cache).await
+    let revision_store = Arc::new(SqliteControlRevisionStore::initialize(pool.clone()).await?);
+    ControlService::new_with_sqlite_revision_store(
+        auth_store,
+        rule_store,
+        token_cache,
+        revision_store,
+        pool,
+    )
+    .await
 }
 
 async fn seed_routing_if_needed(rule_store: &dyn tunnel_store::RuleStore, server_cfg_path: &str) {

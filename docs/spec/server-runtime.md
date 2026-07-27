@@ -120,7 +120,9 @@ See [architecture.md](./architecture.md) for full diagrams. Server-side summary:
 | **Client egress** (client → internet) | QUIC stream from client | `tunnel_handler.rs` → `ProxyEngine(ServerEgressMap)` → external upstream |
 | **Tunnel control** | `handlers/quic.rs` | auth → register in `ClientRegistry` → `accept_bi` loop for server-initiated streams |
 
-Routing reads always go through `routing_snapshot()` guard; mutations via `replace_routing()` only from control/hot-reload paths.
+Routing, token cache and client config reads pin one immutable `RuntimeGeneration`.
+Control/hot-reload paths construct the complete replacement and publish it through one `ArcSwap`;
+request paths never observe field-by-field mutation.
 
 ## Runtime State
 
@@ -131,6 +133,11 @@ Internal subdivisions:
 - ingress runtime
 - connection runtime
 - control runtime
+
+`IngressRuntime` also owns two process-stable capabilities:
+
+- `ArcSwap<RuntimeGeneration>` for atomic configuration publication
+- `Arc<UpstreamHealthRegistry>` for health state that must survive a generation swap
 
 Rules:
 
@@ -151,16 +158,20 @@ Examples of capability-style access:
 - shutdown-related channels
 - proxy runtime handle
 
-## Routing Snapshot
+## Runtime Generation and Routing Snapshot
 
-`RoutingSnapshot` is an immutable runtime snapshot for ingress routing and egress routing state.
+`RuntimeGeneration` is the publication unit. It contains the immutable `RoutingSnapshot`, token
+map and revision/hash. `RoutingSnapshot` contains ingress routing, client
+configuration and egress routing objects.
 
 Rules:
 
 - build as a whole
 - swap atomically
+- reject rollback and equal-revision/different-hash input
 - expose routing operations through methods
 - avoid cross-module field reach-through
+- pin one generation per request/stream work unit
 
 Expected uses:
 
@@ -180,6 +191,10 @@ Rules:
 - listener generation and active map are implementation details
 - listener startup and drain behavior stay inside the manager
 - accept loops are spawned on the proxy runtime handle, never with bare `tokio::spawn`
+- a reconcile computes every start/drain against one locked table view
+- every required socket is pre-bound before any listener is cancelled or table state is committed
+- any pre-bind failure drops prepared sockets and leaves all predecessor listeners unchanged
+- rollback may restore a predecessor only while its workers are still live
 
 ### Runtime Ownership
 
@@ -232,15 +247,81 @@ The server supports two background modes.
 
 Mode selection belongs to bootstrap and supervisor wiring, not handlers.
 
+## Managed Control Apply
+
+Managed control supports legacy full snapshots and versioned V2 snapshots. A V2 apply:
+
+1. validates epoch/sequence/hash and builds a complete `RuntimeGeneration`
+2. raises the config-apply admission fence
+3. takes the security publication write gate and fences sessions authenticated by tokens revoked
+   in the new generation
+4. pre-binds and commits the listener set on the proxy runtime
+5. publishes the generation, lowers the admission fence and returns an Applied ACK
+
+Authentication holds the matching read gate through auth and registry registration, then releases
+it before writing the login response. This prevents a login from escaping between revoke fencing
+and generation publication without allowing a slow peer write to stall security updates.
+
+On a successful apply with a healthy listener lifecycle, listener commit and generation publication
+form an application-level quiesced cutover for new business work: the apply fence rejects new
+public connections/requests, logins, client-initiated reverse streams and new UDP sessions
+throughout the transition. They are not one OS-level atomic socket operation:
+pre-bound listeners may become kernel-visible before the generation pointer is published, but
+cannot admit business work until the fence is lowered. New accept workers start before predecessor
+drain and are held behind a start gate until lifecycle handles are registered. Existing work
+remains pinned to its prior generation.
+
+Public admission double-checks readiness around generation load. HTTP route resolution carries the
+pinned sequence and fails closed if a concurrent publish made it stale. QUIC reverse streams move
+the admitted generation's egress map into the task. Every new UDP session loads an admitted
+generation, resolves through that egress map and then retains the fixed connected target until
+eviction; new sessions are rejected while apply/stale policy fences admission.
+
+A failed apply is fail-closed, not rollback-transactional. If candidate-revoked sessions were
+retired before a later listener failure, config/security admission remains fenced until a later
+complete apply succeeds; the old token cannot re-enter during that recovery window. Listener
+lifecycle failures publish unhealthy facts and require retry/forward-fix. The old generation
+pointer remains intact, but availability side effects are not claimed to be reversible.
+
+Control freshness is based on the last confirmation from the authority, including an idempotent
+confirmation of the current revision/hash; the last successful apply is tracked separately for
+durability and LKG age. A different control epoch fails closed. The current deployment contract is
+single-leader; multi-leader failover requires an explicit authority-reset workflow.
+
+The last-known-good cache stores a bounded, validated envelope with format/protocol version,
+payload length, hash, revision and timestamp. Rotation durably writes `previous` before replacing
+`primary`; load validates both candidates and selects the highest valid revision.
+
+## Upstream Health
+
+`UpstreamHealthRegistry` is owned by `ServerState`, not by a routing generation. Keys include the
+upstream group and backend address, so reload preserves state for a stable backend while identical
+addresses in different groups remain isolated. HTTP connect failures, TCP/DNS failures and TLS
+handshake failures feed passive ejection; success clears the matching entry. The registry and
+h2c-to-H1 preference cache have hard entry caps and TTL cleanup. Active probes have a process-wide
+128-task budget and deterministic jitter; a probe owner token prevents stale-task ABA cleanup.
+
+Client-initiated reverse streams have both per-connection (256) and process-wide (4096) admission
+budgets. Routing metadata is capped at 8 KiB and must arrive within 5 seconds; over-budget streams
+are reset before a task is spawned.
+
 ## Shutdown
 
 `ServerApp` installs SIGINT/SIGTERM handlers and cancels the shared shutdown token (`server/runtime/app.rs:121`). The sequence is ordered so drain counters can reach zero before anything is force-closed:
 
 1. public accepts stop first: `proxy_main` calls `shutdown_all_listeners` (`server/runtime/app.rs:183`), which cancels every listener and waits for each to report drained, bounded by `LISTENER_DRAIN_TIMEOUT` (10s, `server/ingress/listener_mgr.rs:82`)
-2. each tunnel connection handler drains in-flight streams for up to `CONN_SHUTDOWN_DRAIN_TIMEOUT` (15s, `server/ingress/handlers/quic.rs:22`) and only then issues `conn.close` (`server/ingress/handlers/quic.rs:355`-`357`) — QUIC `CONNECTION_CLOSE` aborts every open stream, so the close must follow the drain, not precede it
-3. the connection's `UdpSessionManager::shutdown` cancels and joins its session tasks with a 2s cap (`server/ingress/handlers/udp_datagram.rs:106`), then the connection unregisters from the registry
-4. `run_quic_server` waits on the connection `TaskTracker` for `CONN_TASK_WAIT_TIMEOUT` (20s, `server/ingress/handlers/quic.rs:24`) before `endpoint.close`; closing the endpoint earlier would abort the handlers mid-drain
-5. `ServerApp` backstops the whole sequence with `wait_for_resource_drain` for the app-level `SHUTDOWN_DRAIN_TIMEOUT` (30s, `server/runtime/app.rs:18`) and then forces exit
+2. each tunnel handler retires/unregisters its connection before drain, so no selector can open new
+   work during shutdown
+3. UDP workers and reverse-stream tasks drain with deadlines; timeout aborts their owned handles
+4. each tunnel connection handler drains in-flight streams for up to
+   `CONN_SHUTDOWN_DRAIN_TIMEOUT` (15s) and only then issues `conn.close` — QUIC
+   `CONNECTION_CLOSE` aborts every open stream, so close follows drain
+5. `run_quic_server` waits on the connection `TaskTracker` for `CONN_TASK_WAIT_TIMEOUT` (20s)
+   before `endpoint.close`
+6. `ServerApp` backstops the sequence with the app-level 30s drain deadline
+
+H2c, TLS-H2 and TLS-H1 first request Hyper graceful shutdown and then wait at most 15s. Timeout
+drops the connection future, force-closes the socket and returns a typed downstream drain error.
 
 The constants are deliberately nested (10s < 15s < 20s < 30s) so every inner wait can complete before the next layer gives up.
 

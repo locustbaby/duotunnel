@@ -156,6 +156,7 @@ impl AuthStore for SqliteAuthStore {
         }
         Ok(AuthResult {
             client_group: client_group.into(),
+            token_hash: candidate,
         })
     }
     async fn create_client(&self, name: &str) -> Result<String> {

@@ -1,5 +1,6 @@
 use super::core::Protocol;
 use super::h2::serve_h2_forward;
+use super::h2_proxy::EmptyBodyRetryTemplate;
 use super::http::HttpPeer;
 use super::peers::HttpPeerSpec;
 use crate::egress::http::{H2cClient, HttpsClient};
@@ -7,30 +8,24 @@ use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
-use dashmap::DashMap;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::BodyExt;
+use parking_lot::Mutex;
 use quinn::{RecvStream, SendStream};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
 
 const PREFER_H1_TTL: Duration = Duration::from_secs(300);
+const MAX_PREFER_H1_ENTRIES: usize = 1024;
 
 pub type SharedHttpConnector = Arc<HttpConnector>;
-
-#[derive(Clone)]
-struct RetryableRequest {
-    method: hyper::Method,
-    uri: hyper::Uri,
-    version: hyper::Version,
-    headers: hyper::HeaderMap,
-}
 
 pub struct HttpConnector {
     https_client: HttpsClient,
     h2c_client: H2cClient,
-    prefer_h1: DashMap<String, Instant>,
+    prefer_h1: Mutex<HashMap<String, Instant>>,
 }
 
 impl HttpConnector {
@@ -38,8 +33,20 @@ impl HttpConnector {
         Arc::new(Self {
             https_client,
             h2c_client,
-            prefer_h1: DashMap::new(),
+            prefer_h1: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn mark_upstream_healthy(&self, spec: &HttpPeerSpec) {
+        if let Some(ref b_ref) = spec.backend_ref {
+            b_ref.mark_success();
+        }
+    }
+
+    fn mark_upstream_unhealthy(&self, spec: &HttpPeerSpec) {
+        if let Some(ref b_ref) = spec.backend_ref {
+            b_ref.record_failure();
+        }
     }
 
     fn cache_key(spec: &HttpPeerSpec) -> String {
@@ -47,10 +54,11 @@ impl HttpConnector {
     }
 
     fn gc_prefer_h1(&self, key: &str) -> bool {
-        match self.prefer_h1.get(key) {
-            Some(ts) if ts.elapsed() <= PREFER_H1_TTL => true,
+        let mut prefer_h1 = self.prefer_h1.lock();
+        match prefer_h1.get(key) {
+            Some(timestamp) if timestamp.elapsed() <= PREFER_H1_TTL => true,
             Some(_) => {
-                self.prefer_h1.remove(key);
+                prefer_h1.remove(key);
                 false
             }
             None => false,
@@ -59,24 +67,20 @@ impl HttpConnector {
 
     fn mark_prefer_h1(&self, spec: &HttpPeerSpec) {
         let key = Self::cache_key(spec);
-        self.prefer_h1.insert(key, Instant::now());
-    }
-
-    fn build_retry_request(
-        template: &RetryableRequest,
-    ) -> hyper::Request<super::h2_proxy::BoxBody> {
-        let mut req = hyper::Request::builder()
-            .method(template.method.clone())
-            .uri(template.uri.clone())
-            .version(template.version)
-            .body(
-                Empty::<Bytes>::new()
-                    .map_err(|never| match never {})
-                    .boxed(),
-            )
-            .expect("Failed to build retry request");
-        *req.headers_mut() = template.headers.clone();
-        req
+        let mut prefer_h1 = self.prefer_h1.lock();
+        if !prefer_h1.contains_key(&key) && prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
+            prefer_h1.retain(|_, timestamp| timestamp.elapsed() <= PREFER_H1_TTL);
+            if prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
+                if let Some(oldest) = prefer_h1
+                    .iter()
+                    .min_by_key(|(_, timestamp)| **timestamp)
+                    .map(|(key, _)| key.clone())
+                {
+                    prefer_h1.remove(&oldest);
+                }
+            }
+        }
+        prefer_h1.insert(key, Instant::now());
     }
 
     fn box_response<RespBody>(
@@ -161,15 +165,9 @@ impl HttpConnector {
     {
         let can_try_h2c = spec.scheme == "http" && matches!(spec.upstream_protocol, Protocol::H2);
         let prefer_h1 = can_try_h2c && self.gc_prefer_h1(&Self::cache_key(spec));
-        let retryable_request =
-            (can_try_h2c && !prefer_h1 && request.body().is_end_stream()).then(|| {
-                RetryableRequest {
-                    method: request.method().clone(),
-                    uri: request.uri().clone(),
-                    version: request.version(),
-                    headers: request.headers().clone(),
-                }
-            });
+        let retryable_request = (can_try_h2c && !prefer_h1)
+            .then(|| EmptyBodyRetryTemplate::from_request(&request))
+            .flatten();
         let (parts, body) = request.into_parts();
         let boxed_body = body
             .map_frame(|f| f.map_data(Into::into))
@@ -184,20 +182,26 @@ impl HttpConnector {
         };
 
         match result {
-            Ok(resp) => Ok(Self::box_response(resp)),
+            Ok(resp) => {
+                self.mark_upstream_healthy(spec);
+                Ok(Self::box_response(resp))
+            }
             Err(e) => {
                 if can_try_h2c && !prefer_h1 {
                     // Phase 1 policy: when cleartext H2 fails once, pin this upstream to H1 for a TTL window.
                     self.mark_prefer_h1(spec);
                     if let Some(template) = retryable_request.as_ref() {
                         debug!(target = %spec.target_host, "cleartext h2c request failed; retrying once with H1");
-                        match self
-                            .https_client
-                            .request(Self::build_retry_request(template))
-                            .await
-                        {
-                            Ok(resp) => return Ok(Self::box_response(resp)),
+                        match self.https_client.request(template.build()).await {
+                            Ok(resp) => {
+                                self.mark_upstream_healthy(spec);
+                                return Ok(Self::box_response(resp));
+                            }
                             Err(retry_err) => {
+                                if retry_err.is_connect() {
+                                    tracing::warn!(target = %spec.target_host, error = %retry_err, "HTTP connection to upstream failed on retry, marking unhealthy");
+                                    self.mark_upstream_unhealthy(spec);
+                                }
                                 return Err(ProxyError::http_upstream_request(
                                     retry_err.to_string(),
                                 )
@@ -205,6 +209,11 @@ impl HttpConnector {
                             }
                         }
                     }
+                    return Err(ProxyError::http_upstream_request(e.to_string()).into());
+                }
+                if e.is_connect() {
+                    tracing::warn!(target = %spec.target_host, error = %e, "HTTP connection to upstream failed, marking unhealthy");
+                    self.mark_upstream_unhealthy(spec);
                 }
                 Err(ProxyError::http_upstream_request(e.to_string()).into())
             }

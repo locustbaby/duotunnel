@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -43,18 +43,43 @@ impl Default for QuicTransportParams {
         }
     }
 }
-fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTransportParams) {
+fn apply_transport_params(
+    tc: &mut quinn::TransportConfig,
+    params: &QuicTransportParams,
+) -> Result<()> {
+    let stream_receive_window = quinn::VarInt::from_u64(params.stream_receive_window_bytes)
+        .map_err(|e| {
+            anyhow!(
+                "invalid QUIC stream receive window {} bytes: {}",
+                params.stream_receive_window_bytes,
+                e
+            )
+        })?;
+    let connection_receive_window = quinn::VarInt::from_u64(params.connection_receive_window_bytes)
+        .map_err(|e| {
+            anyhow!(
+                "invalid QUIC connection receive window {} bytes: {}",
+                params.connection_receive_window_bytes,
+                e
+            )
+        })?;
+    let idle_timeout = std::time::Duration::from_secs(params.idle_timeout_secs)
+        .try_into()
+        .map_err(|e| {
+            anyhow!(
+                "invalid QUIC idle timeout {} seconds: {}",
+                params.idle_timeout_secs,
+                e
+            )
+        })?;
+
     tc.max_concurrent_bidi_streams(params.max_concurrent_streams.into());
     tc.max_concurrent_uni_streams(params.max_concurrent_streams.into());
-    tc.stream_receive_window(params.stream_receive_window_bytes.try_into().unwrap());
-    tc.receive_window(params.connection_receive_window_bytes.try_into().unwrap());
+    tc.stream_receive_window(stream_receive_window);
+    tc.receive_window(connection_receive_window);
     tc.send_window(params.send_window_bytes);
     tc.keep_alive_interval(Some(std::time::Duration::from_secs(params.keepalive_secs)));
-    tc.max_idle_timeout(Some(
-        std::time::Duration::from_secs(params.idle_timeout_secs)
-            .try_into()
-            .unwrap(),
-    ));
+    tc.max_idle_timeout(Some(idle_timeout));
     match params.congestion.as_deref().unwrap_or("bbr") {
         m if m.eq_ignore_ascii_case("bbr") => {
             tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
@@ -69,6 +94,7 @@ fn apply_transport_params(tc: &mut quinn::TransportConfig, params: &QuicTranspor
             // unknown value, fall back to quinn default (NewReno)
         }
     }
+    Ok(())
 }
 pub fn build_udp_socket(
     addr: SocketAddr,
@@ -95,13 +121,54 @@ pub fn create_server_config_with(params: &QuicTransportParams) -> Result<ServerC
     let mut server_config =
         ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let mut transport_config = quinn::TransportConfig::default();
-    apply_transport_params(&mut transport_config, params);
+    apply_transport_params(&mut transport_config, params)?;
     server_config.transport_config(Arc::new(transport_config));
     Ok(server_config)
 }
 
-pub fn build_transport_config(params: &QuicTransportParams) -> Arc<quinn::TransportConfig> {
+pub fn build_transport_config(params: &QuicTransportParams) -> Result<Arc<quinn::TransportConfig>> {
     let mut tc = quinn::TransportConfig::default();
-    apply_transport_params(&mut tc, params);
-    Arc::new(tc)
+    apply_transport_params(&mut tc, params)?;
+    Ok(Arc::new(tc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_transport_config_rejects_out_of_range_stream_window() {
+        let params = QuicTransportParams {
+            stream_receive_window_bytes: 1 << 62,
+            ..QuicTransportParams::default()
+        };
+
+        let error =
+            build_transport_config(&params).expect_err("out-of-range stream window must fail");
+        assert!(error.to_string().contains("stream receive window"));
+    }
+
+    #[test]
+    fn build_transport_config_rejects_out_of_range_connection_window() {
+        let params = QuicTransportParams {
+            connection_receive_window_bytes: 1 << 62,
+            ..QuicTransportParams::default()
+        };
+
+        let error =
+            build_transport_config(&params).expect_err("out-of-range connection window must fail");
+        assert!(error.to_string().contains("connection receive window"));
+    }
+
+    #[test]
+    fn build_transport_config_rejects_out_of_range_idle_timeout() {
+        let params = QuicTransportParams {
+            idle_timeout_secs: u64::MAX,
+            ..QuicTransportParams::default()
+        };
+
+        let error =
+            build_transport_config(&params).expect_err("out-of-range idle timeout must fail");
+        assert!(error.to_string().contains("idle timeout"));
+    }
 }

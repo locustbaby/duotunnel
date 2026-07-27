@@ -1,10 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError};
+use tunnel_lib::{ErrorKind, OpenStreamRequest, ProxyError};
 
 use crate::ingress::registry::SharedRegistry;
 
@@ -54,17 +55,28 @@ impl IngressProtocolHandler for H1Handler {
         let max_attempts = 3;
         let opened = loop {
             attempts += 1;
-            let selected = self
-                .registry
-                .select_client_for_group(&group_id)
-                .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
+            let selected = match self.registry.select_client_for_group(&group_id) {
+                Some(client) => client,
+                None => {
+                    let e = ProxyError::no_client_available(group_id.to_string());
+                    let error_msg = format!("ProxyError: {}", e);
+                    let response = format!(
+                        "HTTP/1.1 502 Bad Gateway\r\n\
+                         Content-Type: text/plain\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        error_msg.len(),
+                        error_msg
+                    );
+                    let mut stream = stream;
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return Err(e.into());
+                }
+            };
 
-            tunnel_lib::maybe_slow_path(
-                selected.handle.inflight_table(),
-                selected.handle.slot_id(),
-                &ctx.overload,
-            )
-            .await;
+            tunnel_lib::maybe_slow_path(selected.handle.connection_state(), &ctx.overload).await;
 
             let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
             let routing_info = tunnel_lib::RoutingInfo {
@@ -87,15 +99,36 @@ impl IngressProtocolHandler for H1Handler {
             {
                 Ok(opened) => break opened,
                 Err(e) => {
+                    let connection_lost = selected.handle.close_reason().is_some()
+                        || matches!(
+                            e.kind,
+                            ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+                        );
                     warn!(
                         conn_id = %selected.conn_id,
                         group_id = %group_id,
                         attempt = attempts,
                         error = %e,
-                        "failed to open QUIC stream on selected H1 connection, unregistering and retrying"
+                        connection_lost,
+                        "failed to open QUIC stream on selected H1 connection, retrying"
                     );
-                    self.registry.unregister(&selected.conn_id);
+                    if connection_lost {
+                        self.registry.unregister(&selected.conn_id);
+                    }
                     if attempts >= max_attempts {
+                        let error_msg = format!("ProxyError: failed to open QUIC stream: {}", e);
+                        let response = format!(
+                            "HTTP/1.1 502 Bad Gateway\r\n\
+                             Content-Type: text/plain\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\
+                             \r\n\
+                             {}",
+                            error_msg.len(),
+                            error_msg
+                        );
+                        let mut stream = stream;
+                        let _ = stream.write_all(response.as_bytes()).await;
                         return Err(e.into());
                     }
                 }

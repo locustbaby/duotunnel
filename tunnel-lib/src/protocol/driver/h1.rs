@@ -54,10 +54,13 @@ impl Http1Driver {
         self.send.finish()?;
         Ok(())
     }
-    pub async fn write_502(&mut self) -> Result<()> {
-        const RESP: &[u8] =
-            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        self.send.write_all(RESP).await?;
+    pub async fn write_502(&mut self, error_msg: &str) -> Result<()> {
+        let resp = format!(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+            error_msg.len(),
+            error_msg
+        );
+        self.send.write_all(resp.as_bytes()).await?;
         Ok(())
     }
     async fn reclaim_recv(&mut self) -> Result<()> {
@@ -218,15 +221,27 @@ impl ProtocolDriver for Http1Driver {
                         break Err((RESP_400, format!("unsupported method: {method_str}")));
                     };
                     let mut header_map = HeaderMap::new();
+                    let mut host_count = 0;
+                    let mut duplicate_host = false;
                     for h in req.headers.iter() {
                         if !h.name.is_empty() {
+                            if h.name.eq_ignore_ascii_case("host") {
+                                host_count += 1;
+                                if host_count > 1 {
+                                    duplicate_host = true;
+                                    break;
+                                }
+                            }
                             if let (Ok(name), Ok(value)) = (
                                 http::header::HeaderName::from_bytes(h.name.as_bytes()),
                                 http::header::HeaderValue::from_bytes(h.value),
                             ) {
-                                header_map.insert(name, value);
+                                header_map.append(name, value);
                             }
                         }
+                    }
+                    if duplicate_host {
+                        break Err((RESP_400, "multiple Host headers".to_string()));
                     }
                     break Ok(ParsedHead {
                         header_end: n,
@@ -333,7 +348,6 @@ impl ProtocolDriver for Http1Driver {
                     body_prefix: Some(body_prefix),
                     remaining: body_remaining,
                     reclaim_tx: Some(reclaim_tx),
-                    scratch: vec![0u8; 8192],
                 },
                 |mut state| async move {
                     if let Some(prefix) = state.body_prefix.take() {
@@ -355,11 +369,12 @@ impl ProtocolDriver for Http1Driver {
                         Some(r) => r,
                         None => return Ok(None),
                     };
-                    let to_read = state.remaining.min(state.scratch.len());
-                    match recv.read(&mut state.scratch[..to_read]).await {
-                        Ok(Some(n)) => {
+                    let to_read = state.remaining.min(8192);
+                    match recv.read_chunk(to_read, true).await {
+                        Ok(Some(chunk)) => {
+                            let n = chunk.bytes.len();
                             state.remaining -= n;
-                            let data = Bytes::copy_from_slice(&state.scratch[..n]);
+                            let data = chunk.bytes;
                             if state.remaining == 0 {
                                 if let (Some(tx), Some(recv)) =
                                     (state.reclaim_tx.take(), state.recv.take())
@@ -597,7 +612,6 @@ struct BodyState {
     body_prefix: Option<Bytes>,
     remaining: usize,
     reclaim_tx: Option<oneshot::Sender<Reclaim>>,
-    scratch: Vec<u8>,
 }
 
 #[cfg(test)]

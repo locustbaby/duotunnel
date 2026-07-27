@@ -18,7 +18,9 @@ pub use egress::http::{
 pub use engine::bridge::relay_quic_to_tcp;
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use infra::dns_cache::EgressDnsCache;
-pub use infra::metrics::{wait_for_resource_drain, METRICS};
+pub use infra::metrics::{
+    track_resource, wait_for_resource_drain, ResourceGuard, TrackedResource, METRICS,
+};
 pub use infra::peek_buf::PeekBufPool;
 pub use infra::pki::{get_or_create_server_config, init_cert_cache, PkiParams};
 pub use infra::runtime::{apply_worker_threads, build_proxy_runtime, build_single_thread_runtime};
@@ -30,7 +32,7 @@ pub use infra::runtime::{
 pub use infra::timeout::{sleep, timeout, tokio_timeout, Elapsed as TimeoutElapsed};
 pub use lb::inflight::{
     begin_inflight, inflight_load, inflight_notify, new_inflight_table, pick_least_inflight,
-    pick_p2c_inflight, InflightGuard, InflightSlotId, InflightTable,
+    pick_p2c_inflight, ConnectionState, InflightGuard, InflightTable,
 };
 pub use lb::overload::{
     maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
@@ -47,11 +49,11 @@ pub use models::defs::{
 pub use models::id::{ClientId, GroupId, ProxyName, ReuseHash};
 pub use models::msg::{
     decode_udp_datagram_envelope, encode_udp_datagram_envelope, negotiate_protocol, recv_message,
-    recv_message_bounded, recv_message_type, recv_routing_info, recv_typed_message, send_message,
-    send_routing_info, ClientConfig, Login, LoginResp, MessageType, NegotiatedProtocol, RoutingInfo,
-    UdpDatagramEnvelope, UdpSessionKey, UpstreamConfig, UpstreamServer, CAP_NONE,
-    MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
-    SUPPORTED_CAPABILITIES,
+    recv_message_bounded, recv_message_type, recv_routing_info, recv_routing_info_bounded,
+    recv_typed_message, send_message, send_routing_info, ClientConfig, Login, LoginResp,
+    MessageType, NegotiatedProtocol, RoutingInfo, UdpDatagramEnvelope, UdpSessionKey,
+    UpstreamConfig, UpstreamServer, CAP_NONE, MAX_DATAGRAM_BYTES, MAX_LOGIN_BYTES,
+    MAX_ROUTING_INFO_BYTES, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION, SUPPORTED_CAPABILITIES,
 };
 pub use protocol::detect::detect_protocol_and_host;
 pub use protocol::sniff::{
@@ -59,7 +61,7 @@ pub use protocol::sniff::{
     H2cDetector, Http1Detector, ProtocolDetector, SniffOutcome, SniffPolicy, SniffPrefix,
     SniffResult, SniffRuntime, SniffStream, TlsClientHelloDetector,
 };
-pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, H2Sender};
+pub use proxy::h2_proxy::{forward_h2_request, new_h2_sender, EmptyBodyRetryTemplate, H2Sender};
 pub use proxy::ProxyBufferParams;
 pub use proxy::UpstreamGroup;
 pub use transport::accept::{run_accept_worker, AcceptedConn};

@@ -362,10 +362,8 @@ impl SqliteRuleStore {
             },
         }
     }
-}
-#[async_trait]
-impl RuleStore for SqliteRuleStore {
-    async fn load_routing(&self) -> Result<RoutingData> {
+
+    pub async fn load_routing_on(conn: &mut sqlx::SqliteConnection) -> Result<RoutingData> {
         let listener_rows = sqlx::query(
             "SELECT l.id, l.port, l.mode, l.tcp_group, l.tcp_proxy,
                     r.match_host, r.group_id, r.proxy_name
@@ -373,7 +371,7 @@ impl RuleStore for SqliteRuleStore {
              LEFT JOIN ingress_vhost_rules r ON r.listener_id = l.id
              ORDER BY l.id, r.id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .context("load ingress listeners")?;
         let mut listeners: Vec<IngressListener> = Vec::new();
@@ -430,7 +428,7 @@ impl RuleStore for SqliteRuleStore {
              LEFT JOIN client_upstream_servers s ON s.upstream_id = u.id
              ORDER BY g.id, u.id, s.id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .context("load client groups")?;
         let mut groups: Vec<ClientGroup> = Vec::new();
@@ -499,7 +497,7 @@ impl RuleStore for SqliteRuleStore {
              LEFT JOIN egress_upstream_servers s ON s.upstream_id = u.id
              ORDER BY u.id, s.id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .context("load egress upstreams")?;
         let mut egress_upstreams: Vec<EgressUpstreamDef> = Vec::new();
@@ -534,7 +532,7 @@ impl RuleStore for SqliteRuleStore {
         }
         let vhost_rows =
             sqlx::query("SELECT match_host, action_upstream FROM egress_vhost_rules ORDER BY id")
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *conn)
                 .await
                 .context("load egress vhost rules")?;
         let egress_vhost_rules = vhost_rows
@@ -550,6 +548,14 @@ impl RuleStore for SqliteRuleStore {
             egress_upstreams,
             egress_vhost_rules,
         })
+    }
+}
+
+#[async_trait]
+impl RuleStore for SqliteRuleStore {
+    async fn load_routing(&self) -> Result<RoutingData> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_routing_on(&mut conn).await
     }
     async fn save_routing(&self, data: &RoutingData) -> Result<()> {
         let current = self.load_routing().await?;

@@ -6,26 +6,35 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    maybe_slow_path, proxy, run_accept_worker, GroupId, OpenBiOutcome, OpenStreamRequest, ProxyName,
+    maybe_slow_path, proxy, run_accept_worker, ErrorKind, GroupId, OpenBiOutcome,
+    OpenStreamRequest, ProxyName,
 };
 
 pub async fn run_tcp_accept_loop(
     listener: Arc<TcpListener>,
     state: Arc<ServerState>,
-    _port: u16,
-    proxy_name: ProxyName,
-    group_id: GroupId,
+    port: u16,
     cancel: CancellationToken,
 ) -> Result<()> {
     let addr = listener.local_addr()?;
     let emfile_backoff = state.emfile_backoff();
-    info!(addr = %addr, proxy = %proxy_name, group = %group_id, "TCP accept loop started");
+    info!(addr = %addr, port, "TCP accept loop started");
     run_accept_worker(listener, cancel, emfile_backoff, "tcp", move |accepted| {
         let state = state.clone();
-        let proxy_name = proxy_name.clone();
-        let group_id = group_id.clone();
         async move {
             let stream = accepted.stream;
+            let Some(generation) = state.admit_runtime_generation() else {
+                debug!("rejecting public TCP connection while server is not ready");
+                return;
+            };
+            let Some((group_id, proxy_name)) = generation.routing().tcp_route(port) else {
+                debug!(
+                    port,
+                    generation = generation.sequence(),
+                    "rejecting TCP connection without a route in the pinned generation"
+                );
+                return;
+            };
             if let Err(e) = state.tcp_params().apply(&stream) {
                 debug!(error = %e, "tcp_params.apply failed");
                 return;
@@ -91,12 +100,7 @@ async fn handle_tcp_connection(
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
-        maybe_slow_path(
-            selected.handle.inflight_table(),
-            selected.handle.slot_id(),
-            state.overload_limits(),
-        )
-        .await;
+        maybe_slow_path(selected.handle.connection_state(), state.overload_limits()).await;
 
         let open_timeout = state.open_stream_timeout();
         let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
@@ -120,16 +124,22 @@ async fn handle_tcp_connection(
         {
             Ok(opened) => break opened,
             Err(e) => {
+                let connection_lost = selected.handle.close_reason().is_some()
+                    || matches!(
+                        e.kind,
+                        ErrorKind::QuicConnectionLost | ErrorKind::QuicConnectionFatal
+                    );
                 warn!(
                     conn_id = %selected.conn_id,
                     group_id = %group_id,
                     attempt = attempts,
                     error = %e,
-                    "failed to open QUIC stream on selected TCP proxy connection, unregistering and retrying"
+                    connection_lost,
+                    "failed to open QUIC stream on selected TCP proxy connection, retrying"
                 );
-                // Raw TCP has no per-connection H2 sender cache to invalidate; dropping this
-                // selected client lets the next attempt pick a different connection immediately.
-                state.registry().unregister(&selected.conn_id);
+                if connection_lost {
+                    state.registry().unregister(&selected.conn_id);
+                }
                 if attempts >= max_attempts {
                     return Err(e.into());
                 }

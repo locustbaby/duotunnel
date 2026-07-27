@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Body;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -10,9 +9,10 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use tunnel_lib::plugin::{IngressProtocolHandler, ProtocolKind, Route, ServerCtx};
-use tunnel_lib::{OpenStreamRequest, ProxyError, RouteTarget};
+use tunnel_lib::{EmptyBodyRetryTemplate, OpenStreamRequest, ProxyError, RouteTarget};
 
 use crate::ingress::registry::{unregister_if_connection_lost, SelectedConnection, SharedRegistry};
+use crate::RuntimeGeneration;
 
 #[derive(Clone)]
 struct CachedSender {
@@ -20,43 +20,70 @@ struct CachedSender {
     sender: tunnel_lib::H2Sender,
 }
 
+type SenderCacheKey = (u64, RouteTarget);
+const MAX_SENDER_CACHE_ENTRIES: usize = 64;
+const PROTOCOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn get_or_create_sender(
-    sender_cache: &parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
+    sender_cache: &parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
     registry: &SharedRegistry,
+    generation: u64,
     route_target: &RouteTarget,
 ) -> Option<CachedSender> {
-    let mut guard = sender_cache.lock();
-    if let Some(entry) = guard.get(route_target) {
+    let key = (generation, route_target.clone());
+    {
+        let guard = sender_cache.read();
+        if let Some(entry) = guard.get(&key) {
+            if entry.selected.handle.close_reason().is_none() {
+                return Some(entry.clone());
+            }
+        }
+    }
+
+    let mut guard = sender_cache.write();
+    guard.retain(|(cached_generation, _), entry| {
+        *cached_generation >= generation.saturating_sub(1)
+            && entry.selected.handle.close_reason().is_none()
+    });
+    if let Some(entry) = guard.get(&key) {
         if entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
         }
-        guard.remove(route_target);
+        guard.remove(&key);
     }
     let selected = registry.select_client_for_group(&route_target.group_id)?;
     let entry = CachedSender {
         selected,
         sender: tunnel_lib::new_h2_sender(),
     };
-    guard.insert(route_target.clone(), entry.clone());
+    if guard.len() >= MAX_SENDER_CACHE_ENTRIES {
+        if let Some(oldest) = guard.keys().next().cloned() {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key, entry.clone());
     Some(entry)
 }
 
 fn invalidate_sender_if_matches(
-    sender_cache: &parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
+    sender_cache: &parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
+    generation: u64,
     route_target: &RouteTarget,
     stable_id: usize,
 ) {
-    let mut guard = sender_cache.lock();
+    let mut guard = sender_cache.write();
     if guard
-        .get(route_target)
+        .get(&(generation, route_target.clone()))
         .is_some_and(|entry| entry.selected.handle.stable_id() == stable_id)
     {
-        guard.remove(route_target);
+        guard.remove(&(generation, route_target.clone()));
     }
 }
 
 pub struct TlsHandler {
     pub registry: SharedRegistry,
+    pub generation: Arc<arc_swap::ArcSwap<RuntimeGeneration>>,
+    pub(crate) health: Arc<crate::runtime::health::ServerHealthFacts>,
 }
 
 #[async_trait]
@@ -101,21 +128,25 @@ impl IngressProtocolHandler for TlsHandler {
             "TLS terminated, serving with authority rewriting"
         );
 
-        let route_target = RouteTarget {
-            group_id: route.group_id.clone(),
-            proxy_name: route.proxy_name.clone(),
+        let pinned_route_target = RouteTarget {
+            group_id: route.group_id,
+            proxy_name: route.proxy_name,
         };
+        let pinned_generation = ctx.runtime_generation;
         let peer_addr = ctx.peer_addr;
         let src_addr = peer_addr.ip().to_string();
         let src_port = peer_addr.port();
         let target_host = host.clone();
         let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
+        let listener_port = ctx.listener_port;
 
         let registry = self.registry.clone();
+        let generation = self.generation.clone();
+        let health = self.health.clone();
         let sender_cache: Arc<
-            parking_lot::Mutex<std::collections::HashMap<RouteTarget, CachedSender>>,
-        > = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+            parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
+        > = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
         let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -123,18 +154,62 @@ impl IngressProtocolHandler for TlsHandler {
             let sender_cache = sender_cache.clone();
             let metrics = metrics.clone();
             let target_host = target_host.clone();
-            let route_target = route_target.clone();
+            let generation = generation.clone();
+            let health = health.clone();
+            let pinned_route_target = pinned_route_target.clone();
             let src_addr = src_addr.clone();
             let overload = overload.clone();
             async move {
-                let retryable_request = req.body().is_end_stream().then(|| RetryableRequest {
-                    method: req.method().clone(),
-                    uri: req.uri().clone(),
-                    version: req.version(),
-                    headers: req.headers().clone(),
-                });
-
+                let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::HttpRequest);
+                if !health.admits_new_work() {
+                    let err = ProxyError::no_client_available("server-not-ready");
+                    tunnel_lib::plugin::observe_proxy_error(
+                        metrics.as_ref(),
+                        ProtocolKind::Tls.as_label(),
+                        &err,
+                    );
+                    return Ok(error_response(&err));
+                }
+                let (runtime_generation, route_target) = if negotiated_h2 {
+                    let runtime = generation.load_full();
+                    let runtime_generation = runtime.sequence();
+                    let Some(route_target) =
+                        runtime.routing().route_target(listener_port, &target_host)
+                    else {
+                        let err = ProxyError::route_not_found(target_host.clone());
+                        tunnel_lib::plugin::observe_proxy_error(
+                            metrics.as_ref(),
+                            ProtocolKind::Tls.as_label(),
+                            &err,
+                        );
+                        return Ok(error_response(&err));
+                    };
+                    (runtime_generation, route_target)
+                } else {
+                    (pinned_generation, pinned_route_target)
+                };
                 let (mut parts, body) = req.into_parts();
+                if !negotiated_h2 && parts.headers.contains_key(hyper::header::HOST) {
+                    let host_matches_sni = parts
+                        .headers
+                        .get(hyper::header::HOST)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<hyper::http::uri::Authority>().ok())
+                        .is_some_and(|authority| {
+                            authority.host().eq_ignore_ascii_case(target_host.as_str())
+                        });
+                    if !host_matches_sni {
+                        let err = ProxyError::h2c_misdirected(format!(
+                            "HTTP/1.1 Host does not match TLS SNI {target_host}"
+                        ));
+                        tunnel_lib::plugin::observe_proxy_error(
+                            metrics.as_ref(),
+                            ProtocolKind::Tls.as_label(),
+                            &err,
+                        );
+                        return Ok(error_response(&err));
+                    }
+                }
                 let mut uri_parts = parts.uri.clone().into_parts();
                 if let Ok(authority) = target_host.parse() {
                     uri_parts.authority = Some(authority);
@@ -161,6 +236,7 @@ impl IngressProtocolHandler for TlsHandler {
 
                 let boxed_body = body.map_err(std::io::Error::other).boxed();
                 let upstream_req = Request::from_parts(parts, boxed_body);
+                let retryable_request = EmptyBodyRetryTemplate::from_request(&upstream_req);
 
                 let mut attempts = 0;
                 let max_attempts = 3;
@@ -168,31 +244,34 @@ impl IngressProtocolHandler for TlsHandler {
 
                 loop {
                     attempts += 1;
-                    let sender_entry =
-                        match get_or_create_sender(&sender_cache, &registry, &route_target) {
-                            Some(entry) => entry,
-                            None => {
-                                let err = ProxyError::no_client_available(
-                                    route_target.group_id.to_string(),
-                                );
-                                tunnel_lib::plugin::observe_proxy_error(
-                                    metrics.as_ref(),
-                                    ProtocolKind::Tls.as_label(),
-                                    &err,
-                                );
-                                return Ok(error_response(&err));
-                            }
-                        };
+                    let sender_entry = match get_or_create_sender(
+                        &sender_cache,
+                        &registry,
+                        runtime_generation,
+                        &route_target,
+                    ) {
+                        Some(entry) => entry,
+                        None => {
+                            let err =
+                                ProxyError::no_client_available(route_target.group_id.to_string());
+                            tunnel_lib::plugin::observe_proxy_error(
+                                metrics.as_ref(),
+                                ProtocolKind::Tls.as_label(),
+                                &err,
+                            );
+                            return Ok(error_response(&err));
+                        }
+                    };
 
                     let req_to_send = if attempts == 1 {
                         current_req
                             .take()
                             .expect("current_req should be available on attempt 1")
                     } else if let Some(template) = &retryable_request {
-                        build_retry_request(template)
+                        template.build()
                     } else {
                         let err = ProxyError::upstream_forward(
-                            "cannot retry request with body".to_string(),
+                            "request is not eligible for automatic retry".to_string(),
                         );
                         return Ok(error_response(&err));
                     };
@@ -223,6 +302,7 @@ impl IngressProtocolHandler for TlsHandler {
                         Err(e) => {
                             invalidate_sender_if_matches(
                                 &sender_cache,
+                                runtime_generation,
                                 &route_target,
                                 sender_entry.selected.handle.stable_id(),
                             );
@@ -246,46 +326,60 @@ impl IngressProtocolHandler for TlsHandler {
 
         let io = TokioIo::new(tls_stream);
         if negotiated_h2 {
-            tunnel_lib::proxy::h2::hardened_h2_server_builder(hyper_util::rt::TokioExecutor::new())
-                .serve_connection(io, service)
-                .await
-                .map_err(|e| {
-                    ProxyError::downstream_connection(format!("H2 connection error: {e}"))
-                })?;
+            let connection = tunnel_lib::proxy::h2::hardened_h2_server_builder(
+                hyper_util::rt::TokioExecutor::new(),
+            )
+            .serve_connection(io, service);
+            tokio::pin!(connection);
+            tokio::select! {
+                result = &mut connection => {
+                    result.map_err(|e| {
+                        ProxyError::downstream_connection(format!("H2 connection error: {e}"))
+                    })?;
+                }
+                _ = ctx.quiesce.cancelled() => {
+                    connection.as_mut().graceful_shutdown();
+                    match tokio::time::timeout(PROTOCOL_DRAIN_TIMEOUT, connection.as_mut()).await {
+                        Ok(result) => result.map_err(|e| {
+                            ProxyError::downstream_connection(format!("H2 drain error: {e}"))
+                        })?,
+                        Err(_) => {
+                            return Err(ProxyError::downstream_connection(
+                                "H2 drain timed out after 15s",
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
         } else {
-            tunnel_lib::proxy::h2::hardened_h1_server_builder()
-                .serve_connection(io, service)
-                .await
-                .map_err(|e| {
-                    ProxyError::downstream_connection(format!("HTTP/1 connection error: {e}"))
-                })?;
+            let connection =
+                tunnel_lib::proxy::h2::hardened_h1_server_builder().serve_connection(io, service);
+            tokio::pin!(connection);
+            tokio::select! {
+                result = &mut connection => {
+                    result.map_err(|e| {
+                        ProxyError::downstream_connection(format!("HTTP/1 connection error: {e}"))
+                    })?;
+                }
+                _ = ctx.quiesce.cancelled() => {
+                    connection.as_mut().graceful_shutdown();
+                    match tokio::time::timeout(PROTOCOL_DRAIN_TIMEOUT, connection.as_mut()).await {
+                        Ok(result) => result.map_err(|e| {
+                            ProxyError::downstream_connection(format!("HTTP/1 drain error: {e}"))
+                        })?,
+                        Err(_) => {
+                            return Err(ProxyError::downstream_connection(
+                                "HTTP/1 drain timed out after 15s",
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
-}
-
-struct RetryableRequest {
-    method: hyper::Method,
-    uri: hyper::Uri,
-    version: hyper::Version,
-    headers: hyper::HeaderMap,
-}
-
-fn build_retry_request(
-    template: &RetryableRequest,
-) -> Request<tunnel_lib::proxy::h2_proxy::BoxBody> {
-    let mut req = Request::builder()
-        .method(template.method.clone())
-        .uri(template.uri.clone())
-        .version(template.version)
-        .body(
-            http_body_util::Empty::<bytes::Bytes>::new()
-                .map_err(|never| match never {})
-                .boxed(),
-        )
-        .expect("Failed to build retry request");
-    *req.headers_mut() = template.headers.clone();
-    req
 }
 
 fn error_response(err: &ProxyError) -> Response<tunnel_lib::proxy::h2_proxy::BoxBody> {

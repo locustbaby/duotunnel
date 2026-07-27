@@ -18,15 +18,24 @@ fn global_pool() -> &'static ArrayQueue<BytesMut> {
 // `read_buf` fills the uninitialized capacity directly, so no zeroing and no
 // `set_len` over uninitialized memory is ever needed.
 fn take_buffer(buffer_size: usize) -> BytesMut {
-    if let Some(buf) = LOCAL_POOL.with(|pool| pool.borrow_mut().pop()) {
-        if buf.capacity() >= buffer_size {
-            return buf;
-        }
+    if let Some(buf) = LOCAL_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        pool.iter()
+            .position(|buf| buf.capacity() >= buffer_size)
+            .map(|index| pool.swap_remove(index))
+    }) {
+        return buf;
     }
     let global = global_pool();
-    while let Some(buf) = global.pop() {
+    let scan_limit = global.len();
+    for _ in 0..scan_limit {
+        let Some(buf) = global.pop() else {
+            break;
+        };
         if buf.capacity() >= buffer_size {
             return buf;
+        } else {
+            let _ = global.push(buf);
         }
     }
     BytesMut::with_capacity(buffer_size)

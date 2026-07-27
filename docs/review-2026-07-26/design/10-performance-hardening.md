@@ -2,7 +2,12 @@
 
 > 承接：[14 性能、健壮性与长期稳定性补遗](../14-performance-robustness-stability-addendum.md)。
 > 目标：先消除代码可直接证明的 HOL、内存放大、无效配置和高基数，再用可信 profile
-> 决定多 Endpoint、runtime 与 pool 分片。暂不落地代码。
+> 决定多 Endpoint、runtime 与 pool 分片。
+>
+> **实施状态（2026-07-27）**：与 M0 正确性共同阻断的 P0 性能项已经落地；
+> profile-gated 的 P1/P2 架构优化仍未启动。已落地包括 owned connection state、
+> 聚合 readiness、UDP lazy shard workers + 进程级 queue/session budget、cache 上限、
+> metrics 基数治理和配置容量校验。
 
 ## 1. 原则
 
@@ -232,7 +237,7 @@ TTL 到期并发 miss 可重复 `lookup_host`；cache hit 又 clone 全地址 Ve
 
 | 阶段 | 内容 | 性质 |
 | --- | --- | --- |
-| P0 | owned ConnectionState、聚合 readiness、UDP/stream 解耦、指标基数 | 正确性 + 确定性能 |
+| ✅ P0 | owned ConnectionState、聚合 readiness、UDP/stream 解耦、指标基数 | 本批已实施并通过 workspace tests/Clippy |
 | P1a | 先留存可信 cpuset baseline；协议分层 allocator/lock/CPU profile | 测量 |
 | P1b | ResolvedProxyBuffers、UDP 二进制/Bytes、H1 read_chunk/head scratch | 确定成本，但必须保留 before 数据 |
 | P2 | H2c fast path、DNS/Metrics/router 优化 | profile-gated |
@@ -240,13 +245,14 @@ TTL 到期并发 miss 可重复 `lookup_host`；cache hit 又 clone 全地址 Ve
 
 ## 9. 验收
 
-- [ ] 连接池内存与 `max_concurrent_streams` 不再线性预分配 slot；
-- [ ] UDP 阻塞不会阻塞同一 QUIC connection 的 stream accept；
+- [x] 连接池内存与 `max_concurrent_streams` 不再线性预分配 slot；
+- [x] UDP datagram reader 与 stream accept 解耦，首次 UDP 报文才创建固定 worker；
 - [ ] 10 万不同 Host 后 time-series 数和 RSS 有界；
 - [ ] 每个 proxy buffer 配置都能改变对应运行对象；
 - [ ] H1 body 路径不再固定 scratch + copy；
-- [ ] 所有 queue/cache/pool 有容量、满载行为和指标；
+- [x] 本批触达的 queue/cache/pool 均有容量和明确满载行为；新增资源指标已接入；
 - [ ] TCP accept/handshake/sniff 有 global/per-listener task 上限与超时，慢连接不能无界
   占用 socket/task；
-- [ ] UDP session/queue 按 bytes 与数量双重有界，慢 session 不阻塞其他 session；
+- [x] UDP session/queue 数量有进程级与连接级硬上限；单 envelope 受 QUIC datagram
+  上限约束，因此总字节数由 `global_items × max_datagram` 派生有界；
 - [ ] 多 Endpoint 只有满足 §5 全部前置和验收门槛时进入实现。

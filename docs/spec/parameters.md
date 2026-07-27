@@ -36,6 +36,7 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **keepalive_secs** | `quinn::TransportConfig.keep_alive_interval` | 20s | `quic.keepalive_secs` | QUIC 心跳 PING 间隔；必须 < `idle_timeout_secs` 否则空闲连接会被关 | 代码见 `transport/quic.rs:38`（应用点 `:52`） |
 | **idle_timeout_secs** | `quinn::TransportConfig.max_idle_timeout` | 180s | `quic.idle_timeout_secs` | 空闲 QUIC 连接被关闭的阈值；同步日志阻塞时可能先触发 | §4 Logging Latency 相关 |
 | **connections** | `client/tunnel/pool.rs`: 启动 supervisor 的数量 | `0` = auto (`effective_runtime_parallelism()`；CI `CPUQuota=100%` → **1**) | `quic.connections` | 总吞吐能力 = connections × max_concurrent_streams | resolver: `resolve_connection_count` |
+| **min_ready_tunnels** | `ClientHealth` + `EntryConnPool` 已提交 active connection count | **1** | `quic.min_ready_tunnels` | 连接在 cleanup 前先退池；低于该值 `/healthz` 才返回 not ready。必须 ≤ resolved `quic.connections`；低于 desired 但仍达到该值只标记 degraded | 启动日志: `client readiness initialized` |
 | **shards** | `ClientRegistry` / `EntryConnPool` shard 数 | 未配置 → `effective_runtime_parallelism()`；client 上限为 `connections` | `quic.shards` | 注册表/连接池分片数；影响选路与 actor 并行度 | `resolve_shard_count`; env `TUNNEL_CLIENT__quic.shards` |
 | **congestion_controller** | `quinn::BbrConfig` / `CubicConfig` / `NewRenoConfig` | bbr | `quic.congestion` | 丢包重传与吞吐爬坡算法；bbr 适合高带宽波动链路；未知值 fallback 到 quinn 默认（NewReno） | 代码见 `transport/quic.rs:58-71` |
 | **login_timeout_secs** | `server/ingress/handlers/quic.rs:144-145` → `pre_auth_deadline` | 10s | `server.login_timeout_secs` | **整个认证前阶段共享的单一 deadline**（不是每步独立超时）：QUIC handshake (`:146`)、`accept_bi` (`:155`)、收 message type (`:170`)、收 Login body (`:204`)、`auth_store().authenticate()` (`:264`) 全部用同一个 `timeout_at(pre_auth_deadline)`。因此一条连接从被 accept 到认证结束最多占用 `login_timeout_secs`，慢速对端无法靠"每步都卡到快超时"把未认证 permit 持有若干倍时长。调参时按"整段预算"而非"单步预算"理解；与 client `reconnect.login_timeout_ms` (10000ms) 对齐 | 默认值 `tunnel-store/src/config/mod.rs:164-166`；启动校验 `:303-305`（必须 >= 1）。日志: `login handshake timed out waiting for ...` / `authentication timed out` |
@@ -44,6 +45,8 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **MAX_LOGIN_BYTES** | `tunnel-lib/src/models/msg.rs:31`；消费点 `server/ingress/handlers/quic.rs:206` (`recv_message_bounded(&mut recv, MAX_LOGIN_BYTES)`) | 64 KiB | ❌ (常量) | 认证**前**读取的 Login 帧的独立大小上限，远小于通用的 `MAX_MESSAGE_BYTES`（10 MiB，`msg.rs:25`）。真实 Login 只是一个 token 加两个整数，这个上限给 token 长度留余量，同时不让未认证对端指定大额分配。`recv_message_bounded` 内部还会再和 `MAX_MESSAGE_BYTES` 取 min (`msg.rs:254`) | — |
 | **udp_recv_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_RCVBUF` | 8 MiB | `quic.udp_recv_buf_mb` | Linux 内核将请求值翻倍（受 `net.core.rmem_max` 上限约束）。过小导致高 RPS 下 UDP 丢包（`recvmsg ENOBUFS`），是 8000 RPS 延迟尖刺主因之一 | `ss -udp -e` 看 `rmem`；`/proc/net/udp` 的 `drops` 列 |
 | **udp_send_buf_mb** | `tunnel-lib/src/transport/quic.rs`: `build_udp_socket` → `SO_SNDBUF` | 8 MiB | `quic.udp_send_buf_mb` | 发送侧内核队列；过小时 quinn GSO batch 被截断，单次 `sendmmsg` 提交的包数减少，CPU 消耗上升 | `ss -udp -e` 看 `wmem` |
+| **UDP session/queue hard budgets** | server `udp_datagram.rs` | 每连接 session 1024；进程 session 16384；进程 queued envelope 16384；4×256 分片仅在首包后创建 | ❌ (常量) | 任一预算满立即 drop；queue/decode drop 计 counter，session cap 当前写 debug；DNS/bind/connect/send 单步 3s；shutdown 超时 abort worker | `duotunnel_udp_datagram_dropped_total`、`duotunnel_udp_tasks_active` |
+| **Reverse stream admission** | server `handlers/quic.rs` + `tunnel_handler.rs` | 每连接 256；进程 4096；RoutingInfo 8 KiB / 5s | ❌ (常量) | permit 满立即 reset/stop；routing 首帧超大或超时关闭该 stream，避免认证连接堆积 stalled task/allocation | `duotunnel_reverse_stream_rejected_total`、`duotunnel_reverse_streams_active` |
 
 
 ---
@@ -76,6 +79,8 @@ Full request path: `k6 → TCP (entry) → client → QUIC → server → TCP (u
 | **http_pool.idle_timeout_secs** | `HttpClientParams.pool_idle_timeout_secs` | None (yaml 示例: 90) | `http_pool.idle_timeout_secs` | 池内空闲连接最大存活时间；None = 不主动关闭 | `tunnel-lib/src/config/http_pool.rs:13` |
 | **http_pool.tcp_keepalive_secs** | `HttpClientParams.tcp_keepalive_secs` | 15s | `http_pool.tcp_keepalive_secs` | egress 池连接的 TCP_KEEPALIVE 间隔 | `tunnel-lib/src/config/http_pool.rs:15` |
 | **H2c→H1 pin TTL** | `tunnel-lib/src/proxy/http_connector.rs:18` `PREFER_H1_TTL` → `prefer_h1` 缓存 | 300s (硬编码) | ❌ (常量) | cleartext H2c 请求失败后，该 upstream host 在 TTL 内强制走 H1 (`http_connector.rs:49-62`、`:190-191`) | 日志: `cleartext h2c request failed; retrying once with H1` |
+| **H2c→H1 pin cache cap** | `HttpConnector.prefer_h1` | 1024 entries | ❌ (常量) | 配置 churn 下仍保持内存有界；满载淘汰最旧记录 | — |
+| **Upstream passive-health cap** | `UpstreamHealthRegistry` | 4096 entries / eject 10s；active probe 128 | ❌ (常量) | 状态跨 generation 保留，但按 upstream group + backend 隔离；满载淘汰最早到期项；probe 使用 owner token 与 0–499ms 确定性 jitter | 日志: `active health probe...` |
 | **DNS cache TTL** | `client/plugins/resolver_cached/mod.rs:9` `DNS_CACHE_TTL` / `:10` `MAX_CACHE_ENTRIES` | 30s / 上限 1024 条 (硬编码) | ❌ (常量) | client 侧 upstream DNS 解析缓存；IP literal 不走缓存 | — |
 
 ---
@@ -154,6 +159,7 @@ Client → Server QUIC 建连与登录握手的时间预算。`initial_delay_ms 
 | **H1_SERVER_MAX_HEADERS** | `hardened_h1_server_builder` → `max_headers` (`h2.rs:67`) | 100 (`h2.rs:38`) | ❌ (常量) | header 条数上限；代价是每请求一次 header slot 堆分配，只落在 legacy-client 回退路径上，可接受 | — |
 | **H1_SERVER_MAX_BUF_SIZE** | 同上 → `max_buf_size` (`h2.rs:68`) | 64 KiB (`h2.rs:39`) | ❌ (常量) | 单连接读写缓冲上限 | — |
 | **H1_SERVER_HEADER_READ_TIMEOUT** | 同上 → `header_read_timeout` (`h2.rs:71`) | 10s (`h2.rs:40`) | ❌ (常量) | slowloris 预算：header 必须在此时间内读完；同样需要 `timer(TokioTimer)` (`h2.rs:69-70`) | — |
+| **PROTOCOL_DRAIN_TIMEOUT** | server H2c / TLS-H2 / TLS-H1 Hyper connection | 15s | ❌ (常量) | 先 graceful shutdown；超时 drop future 强制关闭，避免 keep-alive/body 永久拖住 listener drain | typed downstream drain error |
 
 > 与 §2 `max_concurrent_streams` (QUIC，默认 1000) 无关：那是隧道内部的 QUIC 流上限，这里是下游 HTTP/2 连接的流上限。
 

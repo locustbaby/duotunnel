@@ -2,6 +2,7 @@ use clap::Parser;
 
 pub(crate) mod bootstrap;
 pub(crate) mod egress;
+pub(crate) mod health;
 pub(crate) mod ingress;
 pub(crate) mod metrics;
 pub(crate) mod plugins;

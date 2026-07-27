@@ -2,10 +2,10 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quinn::Connection;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::info;
+use tracing::{error, info};
 use tunnel_lib::{
     inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
     stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, NegotiatedProtocol,
@@ -20,6 +20,21 @@ struct ClientInfo {
 struct RegisteredConn {
     handle: Arc<ConnectionHandle>,
     negotiated: NegotiatedProtocol,
+    token_hash: [u8; 32],
+}
+
+fn fail_closed_registry(groups: &DashMap<GroupId, Arc<ClientGroup>>) {
+    for group in groups.iter() {
+        for shard in &group.shards {
+            let snapshot = shard.load_full();
+            for selected in snapshot.iter() {
+                selected.handle.retire();
+                selected.handle.close(0, b"registry unavailable");
+            }
+            shard.store(Arc::new(Vec::new()));
+        }
+    }
+    groups.clear();
 }
 
 #[derive(Clone)]
@@ -56,14 +71,10 @@ impl ClientGroup {
             let snapshot = shard.load();
             pick_p2c_inflight_owned(
                 snapshot.as_slice(),
-                |c| c.handle.close_reason().is_none(),
                 |c| {
-                    inflight_load(
-                        c.handle.inflight_table(),
-                        c.handle.slot_id(),
-                        Ordering::Relaxed,
-                    )
+                    c.handle.connection_state().is_selectable() && c.handle.close_reason().is_none()
                 },
+                |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
             )
         })
     }
@@ -76,6 +87,7 @@ enum RegistryMsg {
         conn: Connection,
         shard_id: usize,
         negotiated: NegotiatedProtocol,
+        token_hash: [u8; 32],
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
     Unregister {
@@ -84,24 +96,34 @@ enum RegistryMsg {
     PurgeDead {
         reply: oneshot::Sender<usize>,
     },
+    RevokeTokens {
+        token_hashes: Arc<std::collections::HashSet<[u8; 32]>>,
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 pub struct ClientRegistry {
     groups: Arc<DashMap<GroupId, Arc<ClientGroup>>>,
+    actor_alive: Arc<AtomicBool>,
     shard_count: usize,
     next_register_shard: AtomicUsize,
     tx: mpsc::Sender<RegistryMsg>,
 }
 
 impl ClientRegistry {
-    pub fn new(shard_count: usize, max_concurrent_streams: u32, max_pending_streams: usize) -> Self {
+    pub fn new(
+        shard_count: usize,
+        max_concurrent_streams: u32,
+        max_pending_streams: usize,
+    ) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
         let (tx, mut rx) = mpsc::channel(1024);
         let groups_clone = groups.clone();
+        let actor_alive = Arc::new(AtomicBool::new(true));
 
-        tokio::spawn(async move {
+        let actor = tokio::spawn(async move {
             let mut clients: HashMap<ClientId, ClientInfo> = HashMap::new();
             let mut group_conns: HashMap<GroupId, Vec<HashMap<ClientId, RegisteredConn>>> =
                 HashMap::new();
@@ -126,6 +148,7 @@ impl ClientRegistry {
                         conn,
                         shard_id,
                         negotiated,
+                        token_hash,
                         reply,
                     } => {
                         info!(
@@ -136,35 +159,45 @@ impl ClientRegistry {
                             capabilities = negotiated.capabilities,
                             "registering client"
                         );
+                        if let Some(old_info) = clients.get(&client_id) {
+                            if let Some(old_shards) = group_conns.get(&old_info.group_id) {
+                                if let Some(existing) =
+                                    old_shards[old_info.shard_id].get(&client_id)
+                                {
+                                    existing.handle.retire();
+                                }
+                            }
+                        }
+                        let Some(connection_state) = inflight_table.allocate() else {
+                            let _ = reply.send(Err("connection state capacity exhausted"));
+                            continue;
+                        };
                         let group = {
                             let entry = groups_clone
                                 .entry(group_id.clone())
                                 .or_insert_with(|| Arc::new(ClientGroup::new(shard_count)));
                             entry.value().clone()
                         };
-
                         let shards = group_conns
                             .entry(group_id.clone())
                             .or_insert_with(|| (0..shard_count).map(|_| HashMap::new()).collect());
                         let idx = &mut shards[shard_id % shard_count];
-                        let slot_id = if let Some(existing) = idx.get(&client_id) {
-                            existing.handle.slot_id()
-                        } else if let Some(slot) = inflight_table.alloc_slot() {
-                            slot
-                        } else {
-                            let _ = reply.send(Err("inflight slot table exhausted"));
-                            continue;
-                        };
 
                         let handle = ConnectionHandle::spawn(
                             conn,
-                            inflight_table.clone(),
-                            slot_id,
+                            connection_state,
                             shard_id % shard_count,
                             max_concurrent_streams,
                             max_pending_streams,
                         );
-                        idx.insert(client_id.clone(), RegisteredConn { handle, negotiated });
+                        idx.insert(
+                            client_id.clone(),
+                            RegisteredConn {
+                                handle,
+                                negotiated,
+                                token_hash,
+                            },
+                        );
                         group.shards[shard_id % shard_count].store(Arc::new(build_snapshot(idx)));
 
                         if let Some(old_info) = clients.insert(
@@ -180,7 +213,7 @@ impl ClientRegistry {
                                 if let Some(old_shards) = group_conns.get_mut(&old_info.group_id) {
                                     let old_idx = &mut old_shards[old_info.shard_id];
                                     if let Some(existing) = old_idx.remove(&client_id) {
-                                        inflight_table.free_slot(existing.handle.slot_id());
+                                        existing.handle.retire();
                                     }
                                     if let Some(old_group) = groups_clone.get(&old_info.group_id) {
                                         old_group.shards[old_info.shard_id]
@@ -207,7 +240,7 @@ impl ClientRegistry {
                             if let Some(shards) = group_conns.get_mut(&info.group_id) {
                                 let idx = &mut shards[info.shard_id];
                                 if let Some(existing) = idx.remove(&client_id) {
-                                    inflight_table.free_slot(existing.handle.slot_id());
+                                    existing.handle.retire();
                                 }
                                 let should_remove =
                                     if let Some(group) = groups_clone.get(&info.group_id) {
@@ -238,7 +271,7 @@ impl ClientRegistry {
                                 if !dead_in_group.is_empty() {
                                     for cid in &dead_in_group {
                                         if let Some(existing) = idx.remove(cid) {
-                                            inflight_table.free_slot(existing.handle.slot_id());
+                                            existing.handle.retire();
                                         }
                                         dead_clients.push(cid.clone());
                                         dead_count += 1;
@@ -272,12 +305,43 @@ impl ClientRegistry {
 
                         let _ = reply.send(dead_count);
                     }
+                    RegistryMsg::RevokeTokens {
+                        token_hashes,
+                        reply,
+                    } => {
+                        let mut revoked = 0;
+                        for shards in group_conns.values_mut() {
+                            for idx in shards {
+                                for registered in idx.values() {
+                                    if token_hashes.contains(&registered.token_hash)
+                                        && registered.handle.retire()
+                                    {
+                                        registered.handle.close(0, b"token revoked");
+                                        revoked += 1;
+                                    }
+                                }
+                            }
+                        }
+                        let _ = reply.send(revoked);
+                    }
                 }
             }
+        });
+        let monitor_groups = groups.clone();
+        let monitor_alive = actor_alive.clone();
+        tokio::spawn(async move {
+            if let Err(join_error) = actor.await {
+                error!(error = %join_error, "registry actor failed");
+            } else {
+                error!("registry actor exited");
+            }
+            monitor_alive.store(false, Ordering::Release);
+            fail_closed_registry(&monitor_groups);
         });
 
         Self {
             groups,
+            actor_alive,
             shard_count,
             next_register_shard: AtomicUsize::new(0),
             tx,
@@ -294,6 +358,7 @@ impl ClientRegistry {
         group_id: GroupId,
         conn: Connection,
         negotiated: NegotiatedProtocol,
+        token_hash: [u8; 32],
     ) -> Result<(), &'static str> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let shard_id = self.next_register_shard.fetch_add(1, Ordering::Relaxed) % self.shard_count;
@@ -305,30 +370,45 @@ impl ClientRegistry {
                 conn,
                 shard_id,
                 negotiated,
+                token_hash,
                 reply: reply_tx,
             })
             .await
             .is_err()
         {
+            self.fail_closed();
             return Err("registry actor channel closed");
         }
-        reply_rx
-            .await
-            .unwrap_or(Err("registry actor response dropped"))
+        match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.fail_closed();
+                Err("registry actor response dropped")
+            }
+        }
     }
 
     pub fn unregister(&self, client_id: &ClientId) {
-        let _ = self.tx.try_send(RegistryMsg::Unregister {
+        self.retire_visible_client(client_id);
+        let message = RegistryMsg::Unregister {
             client_id: client_id.clone(),
-        });
+        };
+        match self.tx.try_send(message) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => self.fail_closed(),
+            Err(mpsc::error::TrySendError::Closed(_)) => self.fail_closed(),
+        }
     }
 
     pub fn select_client_for_group(&self, group_id: &str) -> Option<Arc<SelectedConnection>> {
+        if !self.actor_alive.load(Ordering::Acquire) {
+            return None;
+        }
         let group = self.groups.get(group_id)?;
         group.select_healthy(self.preferred_shard_for_group(group_id))
     }
 
-    pub async fn purge_dead(&self) -> usize {
+    pub async fn purge_dead(&self) -> Result<usize, &'static str> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -336,9 +416,54 @@ impl ClientRegistry {
             .await
             .is_err()
         {
-            return 0;
+            self.fail_closed();
+            return Err("registry actor channel closed");
         }
-        reply_rx.await.unwrap_or(0)
+        reply_rx.await.map_err(|_| {
+            self.fail_closed();
+            "registry actor response dropped"
+        })
+    }
+
+    pub async fn revoke_tokens(
+        &self,
+        token_hashes: std::collections::HashSet<[u8; 32]>,
+    ) -> Result<usize, &'static str> {
+        if token_hashes.is_empty() {
+            return Ok(0);
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RegistryMsg::RevokeTokens {
+                token_hashes: Arc::new(token_hashes),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                self.fail_closed();
+                "registry actor channel closed"
+            })?;
+        reply_rx.await.map_err(|_| {
+            self.fail_closed();
+            "registry actor response dropped"
+        })
+    }
+
+    fn fail_closed(&self) {
+        self.actor_alive.store(false, Ordering::Release);
+        fail_closed_registry(&self.groups);
+    }
+
+    fn retire_visible_client(&self, client_id: &ClientId) {
+        for group in self.groups.iter() {
+            for shard in &group.shards {
+                let snapshot = shard.load();
+                if let Some(selected) = snapshot.iter().find(|entry| &entry.conn_id == client_id) {
+                    selected.handle.retire();
+                    return;
+                }
+            }
+        }
     }
 }
 

@@ -13,7 +13,7 @@ pub(crate) async fn build_quic_endpoint(config: &ClientConfigFile) -> Result<qui
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
     ));
     let quic_params = QuicTransportParams::from(&config.quic);
-    let transport_config = tunnel_lib::build_transport_config(&quic_params);
+    let transport_config = tunnel_lib::build_transport_config(&quic_params)?;
     client_config.transport_config(transport_config);
     debug!(
         max_streams = % quic_params.max_concurrent_streams,
@@ -40,8 +40,8 @@ async fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientCon
             .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
             .with_no_client_auth());
     }
-    let mut root_store = rustls::RootCertStore::empty();
-    if let Some(ca_path) = &config.tls_ca_cert {
+    let root_store = if let Some(ca_path) = &config.tls_ca_cert {
+        let mut root_store = rustls::RootCertStore::empty();
         let ca_file_bytes = tokio::fs::read(ca_path)
             .await
             .map_err(|e| anyhow!("Failed to read CA cert file {}: {}", ca_path, e))?;
@@ -58,28 +58,75 @@ async fn build_tls_config(config: &ClientConfigFile) -> Result<rustls::ClientCon
                 .map_err(|e| anyhow!("Failed to add CA cert: {}", e))?;
         }
         info!(ca_path = %ca_path, "Loaded custom CA certificate");
+        root_store
     } else {
-        let native_certs = rustls_native_certs::load_native_certs();
-        for cert in native_certs.certs {
-            let _ = root_store.add(cert);
-        }
-        if root_store.is_empty() {
-            if config.allow_insecure_fallback {
-                warn!("No system root certificates found, falling back to insecure mode");
+        match load_native_root_store() {
+            Ok(root_store) => root_store,
+            Err(error) if config.allow_insecure_fallback => {
+                warn!(error = %error, "Failed to load system root certificates, falling back to insecure mode");
                 return Ok(rustls::ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
                     .with_no_client_auth());
             }
-            return Err(anyhow!(
-                "No system root certificates found; set tls_ca_cert or explicitly enable allow_insecure_fallback"
-            ));
+            Err(error) => return Err(error),
         }
-        debug!("Loaded {} system root certificates", root_store.len());
-    }
+    };
     Ok(rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth())
+}
+
+fn load_native_root_store() -> Result<rustls::RootCertStore> {
+    let native_certs = rustls_native_certs::load_native_certs();
+    let errors = native_certs
+        .errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    build_native_root_store(native_certs.certs, errors)
+}
+
+fn build_native_root_store(
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    errors: Vec<String>,
+) -> Result<rustls::RootCertStore> {
+    let mut root_store = rustls::RootCertStore::empty();
+    let mut invalid_cert_errors = Vec::new();
+    for cert in certs {
+        if let Err(error) = root_store.add(cert) {
+            invalid_cert_errors.push(error.to_string());
+        }
+    }
+    if root_store.is_empty() {
+        let details = errors
+            .iter()
+            .chain(invalid_cert_errors.iter())
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let detail = if details.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", details.join("; "))
+        };
+        return Err(anyhow!(
+            "No valid system root certificates found ({} load error(s), {} invalid certificate(s)){}; set tls_ca_cert or explicitly enable allow_insecure_fallback",
+            errors.len(),
+            invalid_cert_errors.len(),
+            detail
+        ));
+    }
+    if !errors.is_empty() || !invalid_cert_errors.is_empty() {
+        warn!(
+            load_errors = errors.len(),
+            invalid_certificates = invalid_cert_errors.len(),
+            valid_certificates = root_store.len(),
+            "Some system root certificates could not be loaded; continuing with valid roots"
+        );
+    }
+    debug!("Loaded {} system root certificates", root_store.len());
+    Ok(root_store)
 }
 
 #[derive(Debug)]
@@ -128,5 +175,46 @@ impl rustls::client::danger::ServerCertVerifier for InsecureServerCertVerifier {
             rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::ED25519,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_root_loader_surfaces_platform_errors() {
+        let error = build_native_root_store(
+            Vec::new(),
+            vec!["platform certificate store unavailable".to_string()],
+        )
+        .expect_err("native root errors must fail startup");
+
+        assert!(error
+            .to_string()
+            .contains("platform certificate store unavailable"));
+    }
+
+    #[test]
+    fn native_root_loader_rejects_empty_store() {
+        let error = build_native_root_store(Vec::new(), Vec::new())
+            .expect_err("empty native root store must fail startup");
+
+        assert!(error
+            .to_string()
+            .contains("No valid system root certificates found"));
+    }
+
+    #[test]
+    fn native_root_loader_keeps_valid_roots_when_some_loads_fail() {
+        let (certs, _) =
+            tunnel_lib::infra::pki::generate_self_signed_cert_for_host("example.com").unwrap();
+        let roots = build_native_root_store(
+            certs,
+            vec!["one platform certificate was unreadable".to_string()],
+        )
+        .expect("valid roots must survive partial platform errors");
+
+        assert!(!roots.is_empty());
     }
 }

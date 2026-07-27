@@ -19,11 +19,10 @@ impl SqliteTokenCacheProvider {
     pub fn new(pool: sqlx::sqlite::SqlitePool) -> Self {
         Self { pool }
     }
-}
 
-#[async_trait]
-impl TokenCacheProvider for SqliteTokenCacheProvider {
-    async fn load_token_cache(&self) -> Result<Vec<TokenCacheEntry>> {
+    pub async fn load_token_cache_on(
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<Vec<TokenCacheEntry>> {
         let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             "SELECT c.name as client_group, c.status as client_status,
                     t.token_hash, t.status as token_status
@@ -31,7 +30,7 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
              JOIN clients c ON c.id = t.client_id
              ORDER BY t.id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         Ok(rows
@@ -45,6 +44,14 @@ impl TokenCacheProvider for SqliteTokenCacheProvider {
                     .unwrap_or(TokenStatus::Revoked),
             })
             .collect())
+    }
+}
+
+#[async_trait]
+impl TokenCacheProvider for SqliteTokenCacheProvider {
+    async fn load_token_cache(&self) -> Result<Vec<TokenCacheEntry>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_token_cache_on(&mut conn).await
     }
 
     #[allow(dead_code)]

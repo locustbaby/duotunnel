@@ -29,7 +29,7 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         http_params: &HttpClientParams,
         lb: Arc<L>,
         resolver: Arc<R>,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut upstreams = HashMap::new();
         for upstream in &config.upstreams {
             let raw: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
@@ -54,15 +54,15 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
                 },
             );
         }
-        let https_client = tunnel_lib::create_https_client_with(http_params);
+        let https_client = tunnel_lib::create_https_client_with(http_params)?;
         let h2c_client = tunnel_lib::create_h2c_client_with(http_params);
         let http_connector =
             tunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
-        Self {
+        Ok(Self {
             upstreams,
             resolver,
             http_connector,
-        }
+        })
     }
 
     pub fn get_local_address(&self, proxy_name: &str, client_addr: SocketAddr) -> Option<String> {
@@ -126,6 +126,9 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     } else {
                         Protocol::H1
                     },
+                    upstream_name: None,
+                    upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -138,6 +141,9 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     } else {
                         Protocol::H2
                     },
+                    upstream_name: None,
+                    upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Http(spec))
             }
@@ -163,6 +169,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     },
                     upstream_name: None,
                     upstream_addr_str: None,
+                    backend_ref: None,
                 };
                 Ok(PeerSpec::Tcp(spec))
             }
@@ -185,6 +192,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                         tls: None,
                         upstream_name: None,
                         upstream_addr_str: None,
+                        backend_ref: None,
                     };
                     Ok(PeerSpec::Tcp(spec))
                 }
@@ -238,6 +246,9 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                             target_host: spec.tls_host,
                             scheme: "https".to_string(),
                             upstream_protocol: Protocol::H2,
+                            upstream_name: None,
+                            upstream_addr_str: None,
+                            backend_ref: None,
                         },
                     )
                     .await

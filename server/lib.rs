@@ -10,5 +10,5 @@ pub fn run() -> anyhow::Result<()> {
     runtime::run(runtime::ServerApp::new(bootstrap::cli::Cli::parse()).run())
 }
 
-pub(crate) use bootstrap::{build_routing_snapshot, RoutingSnapshot, ServerState};
+pub(crate) use bootstrap::{build_routing_snapshot_with_health, RuntimeGeneration, ServerState};
 pub(crate) use tunnel_lib::PeekBufPool;

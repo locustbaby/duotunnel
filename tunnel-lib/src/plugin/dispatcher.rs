@@ -155,6 +155,7 @@ impl IngressDispatcher {
                 listener_port: self.listener_port,
                 client_addr: ctx.peer_addr,
                 hint: hint.clone(),
+                runtime_generation: ctx.runtime_generation,
             };
             match self.registry.route_resolver.resolve(&route_ctx).await? {
                 PhaseResult::Continue(r) => {

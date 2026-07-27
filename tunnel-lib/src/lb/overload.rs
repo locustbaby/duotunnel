@@ -1,5 +1,4 @@
-use crate::lb::inflight::{inflight_load, inflight_notify, InflightSlotId, InflightTable};
-use std::sync::Arc;
+use crate::lb::inflight::{inflight_load, inflight_notify, ConnectionState};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,15 +61,11 @@ impl OverloadLimits {
     }
 }
 
-pub async fn maybe_slow_path(
-    table: &Arc<InflightTable>,
-    slot_id: InflightSlotId,
-    limits: &OverloadLimits,
-) {
+pub async fn maybe_slow_path(state: &ConnectionState, limits: &OverloadLimits) {
     if limits.mode == OverloadMode::Burst {
         return;
     }
-    let cur = inflight_load(table, slot_id, std::sync::atomic::Ordering::Relaxed);
+    let cur = inflight_load(state, std::sync::atomic::Ordering::Relaxed);
     if cur < limits.inflight_yield_threshold {
         return;
     }
@@ -88,7 +83,7 @@ pub async fn maybe_slow_path(
     }
     let _guard = SlowpathGuard;
 
-    let notify = inflight_notify(table, slot_id);
+    let notify = inflight_notify(state);
     if cur < limits.inflight_sleep_threshold {
         let notified = notify.notified();
         tokio::select! {
@@ -102,7 +97,7 @@ pub async fn maybe_slow_path(
     }
     let deadline = tokio::time::Instant::now() + limits.inflight_sleep_budget;
     loop {
-        if inflight_load(table, slot_id, std::sync::atomic::Ordering::Relaxed)
+        if inflight_load(state, std::sync::atomic::Ordering::Relaxed)
             < limits.inflight_sleep_threshold
         {
             return;

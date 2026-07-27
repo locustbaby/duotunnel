@@ -3,16 +3,25 @@ use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tunnel_lib::{
-    decode_udp_datagram_envelope, encode_udp_datagram_envelope, ProxyName, UdpDatagramEnvelope,
-    UdpSessionKey, MAX_DATAGRAM_BYTES,
+    encode_udp_datagram_envelope, ProxyName, UdpDatagramEnvelope, UdpSessionKey, MAX_DATAGRAM_BYTES,
 };
+
+const UDP_AFFINITY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_UDP_AFFINITIES_PER_LISTENER: usize = 4096;
+const UDP_AFFINITY_SWEEP_INTERVAL: u64 = 256;
+
+struct UdpAffinity {
+    stable_id: usize,
+    last_seen: Instant,
+}
 
 #[derive(Default)]
 pub struct UdpListenerRegistry {
@@ -62,6 +71,8 @@ async fn start_udp_listener(
     info!(addr = %addr, proxy_name = %entry.proxy_name, "client udp listener started");
 
     let mut buf = [0u8; MAX_DATAGRAM_BYTES];
+    let mut affinities = HashMap::<UdpSessionKey, UdpAffinity>::new();
+    let mut received_datagrams = 0u64;
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -78,6 +89,7 @@ async fn start_udp_listener(
                     },
                     payload: buf[..n].to_vec(),
                 };
+                let session_key = envelope.session.clone();
                 let encoded = match encode_udp_datagram_envelope(&envelope) {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -85,31 +97,93 @@ async fn start_udp_listener(
                         continue;
                     }
                 };
+                let encoded = bytes::Bytes::copy_from_slice(encoded.as_slice());
+                received_datagrams = received_datagrams.wrapping_add(1);
+                if received_datagrams.is_multiple_of(UDP_AFFINITY_SWEEP_INTERVAL) {
+                    affinities.retain(|_, affinity| {
+                        affinity.last_seen.elapsed() < UDP_AFFINITY_IDLE_TIMEOUT
+                            && pool.connection_by_stable_id(affinity.stable_id).is_some()
+                    });
+                }
                 let pool_size = pool.pool_size();
                 let preferred_shard =
                     pool.shard_for_hash(&(entry.proxy_name.as_str(), client_addr.ip(), client_addr.port()));
-                let mut tried_conn_ids = Vec::with_capacity(pool_size.min(8));
+                let mut tried_conn_ids = HashSet::with_capacity(pool_size.min(8));
                 let mut delivered = false;
+                if let Some(stable_id) = affinities.get(&session_key).map(|entry| entry.stable_id) {
+                    tried_conn_ids.insert(stable_id);
+                    if let Some(conn) = pool.connection_by_stable_id(stable_id) {
+                        match conn.handle.send_datagram(encoded.clone()).await {
+                            Ok(()) => {
+                                conn.mark_business_completed();
+                                if let Some(affinity) = affinities.get_mut(&session_key) {
+                                    affinity.last_seen = Instant::now();
+                                }
+                                delivered = true;
+                            }
+                            Err(error) => {
+                                warn!(conn_id = stable_id, error = %error, "sticky udp datagram send failed");
+                                affinities.remove(&session_key);
+                                if conn.handle.close_reason().is_some() {
+                                    pool.remove_stable_id(stable_id).await.map_err(|actor_error| {
+                                        anyhow::anyhow!(
+                                            "failed to evict closed UDP connection {stable_id}: {actor_error}"
+                                        )
+                                    })?;
+                                }
+                            }
+                        }
+                    } else {
+                        affinities.remove(&session_key);
+                    }
+                }
+                if delivered {
+                    continue;
+                }
                 for _ in 0..pool_size.max(1) {
                     let Some(conn) = pool
                         .next_conn_for_shard_excluding(preferred_shard, &tried_conn_ids)
                     else {
                         break;
                     };
-                    tried_conn_ids.push(conn.handle.stable_id());
+                    tried_conn_ids.insert(conn.handle.stable_id());
                     match conn
                         .handle
-                        .send_datagram(bytes::Bytes::copy_from_slice(encoded.as_slice()))
+                        .send_datagram(encoded.clone())
                         .await
                     {
                         Ok(()) => {
+                            conn.mark_business_completed();
+                            if affinities.len() >= MAX_UDP_AFFINITIES_PER_LISTENER {
+                                if let Some(oldest) = affinities
+                                    .iter()
+                                    .min_by_key(|(_, affinity)| affinity.last_seen)
+                                    .map(|(key, _)| key.clone())
+                                {
+                                    affinities.remove(&oldest);
+                                }
+                            }
+                            affinities.insert(
+                                session_key.clone(),
+                                UdpAffinity {
+                                    stable_id: conn.handle.stable_id(),
+                                    last_seen: Instant::now(),
+                                },
+                            );
                             delivered = true;
                             break;
                         }
                         Err(e) => {
                             warn!(conn_id = conn.handle.stable_id(), error = %e, "udp datagram send failed");
                             if conn.handle.close_reason().is_some() {
-                                pool.remove_stable_id(conn.handle.stable_id()).await;
+                                pool.remove_stable_id(conn.handle.stable_id())
+                                    .await
+                                    .map_err(|actor_error| {
+                                        anyhow::anyhow!(
+                                            "failed to evict closed UDP connection {}: {actor_error}",
+                                            conn.handle.stable_id()
+                                        )
+                                    })?;
                             }
                         }
                     }
@@ -120,14 +194,6 @@ async fn start_udp_listener(
             }
         }
     }
-}
-
-pub async fn forward_incoming_datagram(
-    registry: &UdpListenerRegistry,
-    payload: bytes::Bytes,
-) -> Result<()> {
-    let envelope = decode_udp_datagram_envelope(payload.as_ref())?;
-    registry.forward_reply(envelope).await
 }
 
 #[async_trait::async_trait]
