@@ -226,6 +226,12 @@ M0 之后先做 [06](./06-bench-methodology.md) 与
 [D10](./design/10-performance-hardening.md) 的可信基线、UDP HOL、指标基数、buffer
 接线和确定分配项。多 Endpoint 只有 profiler 指向 endpoint driver 时再谈。
 
+**M0 验证记录（2026-07-27）**：手动触发
+[GitHub Actions CI #30235538443](https://github.com/locustbaby/duotunnel/actions/runs/30235538443)，
+release build、workspace test/coverage、all-targets Clippy、`cargo-udeps`、
+`cargo-audit` 与全协议 integration 均通过；stress/trace/dial9 按本批验证范围关闭，
+留待 M1 可信基线建立后执行。
+
 ### 后续 task 拆分
 
 1. **M0 rollout 验收**：watch 跨 1000 revision、A→B→C/supersede、reload×shutdown、
