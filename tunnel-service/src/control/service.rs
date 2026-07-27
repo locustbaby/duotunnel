@@ -1,4 +1,7 @@
 use crate::control::proto::{ConfigSnapshot, TokenCacheEntry};
+use crate::control::revision::ControlRevisionStore;
+#[cfg(test)]
+use crate::control::revision::EphemeralControlRevisionStore;
 use crate::control::token::cache::TokenCacheProvider;
 use anyhow::Result;
 use std::sync::atomic::Ordering;
@@ -17,6 +20,8 @@ pub struct ControlService {
     current_snapshot: arc_swap::ArcSwap<ConfigSnapshot>,
     /// Monotonically increasing; incremented on every mutation.
     resource_version: std::sync::atomic::AtomicU64,
+    revision_epoch: String,
+    revision_store: Arc<dyn ControlRevisionStore>,
     watch_tx: watch::Sender<u64>,
     /// Kept alive so the channel never closes while ControlService lives.
     _watch_rx: watch::Receiver<u64>,
@@ -26,12 +31,33 @@ pub struct ControlService {
 
 impl ControlService {
     /// Create and initialise the service. Loads initial snapshot from stores.
+    #[cfg(test)]
     pub async fn new(
         auth_store: Arc<dyn AuthStore>,
         rule_store: Arc<dyn RuleStore>,
         token_cache: Arc<dyn TokenCacheProvider>,
     ) -> Result<Arc<Self>> {
-        let initial = Self::build_snapshot(&*rule_store, &*token_cache, 1).await?;
+        Self::new_with_revision_store(
+            auth_store,
+            rule_store,
+            token_cache,
+            Arc::new(EphemeralControlRevisionStore::new()),
+        )
+        .await
+    }
+
+    pub async fn new_with_revision_store(
+        auth_store: Arc<dyn AuthStore>,
+        rule_store: Arc<dyn RuleStore>,
+        token_cache: Arc<dyn TokenCacheProvider>,
+        revision_store: Arc<dyn ControlRevisionStore>,
+    ) -> Result<Arc<Self>> {
+        let persisted_revision = revision_store.current().await?;
+        let mut initial =
+            Self::build_snapshot(&*rule_store, &*token_cache, persisted_revision.sequence).await?;
+        let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&initial)?;
+        let revision = revision_store.commit_snapshot_hash(&content_hash).await?;
+        initial.resource_version = revision.sequence;
         let (watch_tx, _watch_rx) = watch::channel(initial.resource_version);
         // Channel capacity 1: multiple senders collapse into a single pending signal.
         let (publish_tx, publish_rx) = mpsc::channel::<()>(1);
@@ -40,12 +66,18 @@ impl ControlService {
             rule_store,
             token_cache,
             current_snapshot: arc_swap::ArcSwap::from_pointee(initial.clone()),
-            resource_version: std::sync::atomic::AtomicU64::new(1),
+            resource_version: std::sync::atomic::AtomicU64::new(revision.sequence),
+            revision_epoch: revision.epoch,
+            revision_store,
             watch_tx,
             _watch_rx,
             publish_tx,
         });
-        info!("ControlService initialised, resource_version=1");
+        info!(
+            epoch = %svc.revision_epoch,
+            resource_version = initial.resource_version,
+            "ControlService initialised"
+        );
         // Spawn the debounce task. Uses a Weak reference so the task exits cleanly
         // when the last strong Arc<ControlService> is dropped.
         let weak = Arc::downgrade(&svc);
@@ -68,6 +100,16 @@ impl ControlService {
 
     pub fn snapshot(&self) -> Arc<ConfigSnapshot> {
         self.current_snapshot.load_full()
+    }
+
+    pub fn revision_for_snapshot(
+        &self,
+        snapshot: &ConfigSnapshot,
+    ) -> tunnel_lib::ctld_proto::ControlRevision {
+        tunnel_lib::ctld_proto::ControlRevision {
+            epoch: self.revision_epoch.clone(),
+            sequence: snapshot.resource_version,
+        }
     }
 
     // ── Snapshot builder ────────────────────────────────────────────────────
@@ -94,10 +136,24 @@ impl ControlService {
     /// Rebuilds the snapshot from DB and signals all watchers.
     /// Called only from the debounce task — not directly from mutation methods.
     pub(crate) async fn do_publish(&self) -> Result<()> {
-        let next = self.resource_version.load(Ordering::Acquire) + 1;
-        let snapshot = Self::build_snapshot(&*self.rule_store, &*self.token_cache, next).await?;
+        let candidate_version = self.resource_version.load(Ordering::Acquire) + 1;
+        let mut snapshot =
+            Self::build_snapshot(&*self.rule_store, &*self.token_cache, candidate_version).await?;
+        let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&snapshot)?;
+        let revision = self
+            .revision_store
+            .commit_snapshot_hash(&content_hash)
+            .await?;
+        if revision.epoch != self.revision_epoch {
+            anyhow::bail!("control revision epoch changed while service was running");
+        }
+        let next = revision.sequence;
+        if next == self.resource_version.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        snapshot.resource_version = next;
         self.current_snapshot.store(Arc::new(snapshot));
-        self.resource_version.fetch_add(1, Ordering::AcqRel);
+        self.resource_version.store(next, Ordering::Release);
         info!(
             resource_version = next,
             "signalling config snapshot change to watchers"
@@ -160,6 +216,7 @@ impl ControlService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::revision::SqliteControlRevisionStore;
     use crate::control::token::cache::SqliteTokenCacheProvider;
     use tunnel_store::sqlite::{open_sqlite_pool, SqliteAuthStore};
     use tunnel_store::sqlite_rules::SqliteRuleStore;
@@ -206,5 +263,45 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn restart_advances_revision_when_db_changed_before_publish() {
+        let pool = open_sqlite_pool("sqlite::memory:", 1).await.unwrap();
+        let auth_store = Arc::new(SqliteAuthStore::from_pool(pool.clone()));
+        auth_store.migrate().await.unwrap();
+        let rule_store = Arc::new(SqliteRuleStore::new(pool.clone()));
+        rule_store.migrate().await.unwrap();
+
+        let first = ControlService::new_with_revision_store(
+            auth_store.clone(),
+            rule_store.clone(),
+            Arc::new(SqliteTokenCacheProvider::new(pool.clone())),
+            Arc::new(
+                SqliteControlRevisionStore::initialize(pool.clone())
+                    .await
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let first_revision = first.snapshot().resource_version;
+        drop(first);
+
+        auth_store
+            .create_client("crash-window-client")
+            .await
+            .unwrap();
+
+        let restarted = ControlService::new_with_revision_store(
+            auth_store,
+            rule_store,
+            Arc::new(SqliteTokenCacheProvider::new(pool.clone())),
+            Arc::new(SqliteControlRevisionStore::initialize(pool).await.unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(restarted.snapshot().resource_version, first_revision + 1);
     }
 }

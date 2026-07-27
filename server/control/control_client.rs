@@ -1,3 +1,5 @@
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 /// ControlClient: connects to tunnel-ctld and maintains the list-watch stream.
 ///
@@ -7,18 +9,21 @@ use std::collections::HashSet;
 ///   3. Loops receiving WatchEvent::Patch → applies incremental updates
 ///   4. On disconnect: exponential back-off, then reconnect
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    send_watch_request, ConfigPatch, ConfigSnapshot, ProtoClientGroup, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ResourceOp, WatchEvent,
-    WatchRequest,
+    recv_watch_event, send_watch_request, snapshot_content_hash, ApplyResponse, ApplyStatus,
+    ConfigPatch, ConfigSnapshot, ControlRevision, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ReceivedWatchEvent,
+    ResourceOp, VersionedConfigSnapshot, WatchEvent, WatchEventV2, WatchRequest,
 };
-use tunnel_lib::models::msg::{recv_typed_message, MessageType};
+use tunnel_lib::models::msg::{send_message, MessageType};
 
 use crate::bootstrap::config::{
     ClientConfigs, EgressHttpRule, EgressRules, GroupConfig, HttpListenerConfig, IngressListener,
@@ -63,25 +68,113 @@ impl BackgroundService for ControlClientService {
     }
 }
 
-fn get_snapshot_path(config_path: &str) -> std::path::PathBuf {
+const LKG_FORMAT_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LastKnownGood {
+    format_version: u32,
+    revision: Option<ControlRevision>,
+    content_hash: String,
+    generated_at_unix_ms: u64,
+    snapshot: ConfigSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedControlState {
+    revision: Option<ControlRevision>,
+    content_hash: String,
+}
+
+#[derive(Default)]
+struct WatchState {
+    last_version: u64,
+    current_snapshot: Option<ConfigSnapshot>,
+    applied: Option<AppliedControlState>,
+}
+
+fn get_snapshot_path(config_path: &str) -> PathBuf {
     let mut p = std::path::PathBuf::from(config_path);
     p.set_file_name("local_snapshot.json");
     p
 }
 
-async fn save_snapshot_to_disk(path: &std::path::Path, snap: &ConfigSnapshot) {
-    match serde_json::to_string(snap) {
-        Ok(json) => {
-            if let Err(e) = tokio::fs::write(path, json).await {
-                error!(error = %e, path = ?path, "failed to save snapshot to disk");
-            } else {
-                tracing::debug!(path = ?path, version = snap.resource_version, "saved snapshot to disk");
+async fn save_snapshot_to_disk(path: &Path, lkg: &LastKnownGood) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(lkg)?;
+    let owned_path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || atomic_write(&owned_path, &bytes))
+        .await
+        .context("LKG writer task failed")??;
+    tracing::debug!(
+        path = ?path,
+        version = lkg.snapshot.resource_version,
+        "saved snapshot to disk"
+    );
+    Ok(())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("local_snapshot.json");
+    let temp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    let result = (|| -> anyhow::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+async fn load_snapshot_from_disk(path: &Path) -> anyhow::Result<LastKnownGood> {
+    let content = tokio::fs::read(path).await?;
+    if let Ok(lkg) = serde_json::from_slice::<LastKnownGood>(&content) {
+        if lkg.format_version != LKG_FORMAT_VERSION {
+            anyhow::bail!("unsupported LKG format version {}", lkg.format_version);
+        }
+        let actual_hash = snapshot_content_hash(&lkg.snapshot)?;
+        if actual_hash != lkg.content_hash {
+            anyhow::bail!("LKG content hash mismatch");
+        }
+        if let Some(revision) = &lkg.revision {
+            if revision.sequence != lkg.snapshot.resource_version {
+                anyhow::bail!("LKG revision and snapshot version diverged");
             }
         }
-        Err(e) => {
-            error!(error = %e, "failed to serialize snapshot");
-        }
+        return Ok(lkg);
     }
+
+    let snapshot: ConfigSnapshot =
+        serde_json::from_slice(&content).context("failed to parse LKG")?;
+    Ok(LastKnownGood {
+        format_version: LKG_FORMAT_VERSION,
+        revision: None,
+        content_hash: snapshot_content_hash(&snapshot)?,
+        generated_at_unix_ms: 0,
+        snapshot,
+    })
 }
 
 async fn watch_loop(
@@ -93,36 +186,33 @@ async fn watch_loop(
     shutdown: CancellationToken,
 ) {
     let snapshot_path = get_snapshot_path(&config_path);
-    let mut current_snapshot: Option<ConfigSnapshot> = None;
-    let mut last_version: u64 = 0;
+    let mut watch_state = WatchState::default();
 
-    // Load fallback snapshot on boot if it exists on disk
     if snapshot_path.exists() {
-        match tokio::fs::read_to_string(&snapshot_path).await {
-            Ok(content) => match serde_json::from_str::<ConfigSnapshot>(&content) {
-                Ok(snap) => {
-                    info!(
-                        path = ?snapshot_path,
-                        resource_version = snap.resource_version,
-                        "loaded local snapshot fallback"
-                    );
-                    match apply_snapshot(&snap, &state).await {
-                        Ok(()) => {
-                            ready.store(true, Ordering::Release);
-                            last_version = snap.resource_version;
-                            current_snapshot = Some(snap);
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "failed to apply local snapshot fallback");
-                        }
+        match load_snapshot_from_disk(&snapshot_path).await {
+            Ok(lkg) => {
+                info!(
+                    path = ?snapshot_path,
+                    resource_version = lkg.snapshot.resource_version,
+                    "loaded local snapshot fallback"
+                );
+                match apply_snapshot(&lkg.snapshot, &state).await {
+                    Ok(()) => {
+                        ready.store(true, Ordering::Release);
+                        watch_state.last_version = lkg.snapshot.resource_version;
+                        watch_state.applied = Some(AppliedControlState {
+                            revision: lkg.revision,
+                            content_hash: lkg.content_hash,
+                        });
+                        watch_state.current_snapshot = Some(lkg.snapshot);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to apply local snapshot fallback");
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, "failed to parse local snapshot fallback");
-                }
-            },
+            }
             Err(e) => {
-                warn!(error = %e, "failed to read local snapshot fallback file");
+                warn!(error = %e, "failed to load local snapshot fallback");
             }
         }
     }
@@ -136,8 +226,7 @@ async fn watch_loop(
                 auth_token.as_deref(),
                 &state,
                 &ready,
-                &mut last_version,
-                &mut current_snapshot,
+                &mut watch_state,
                 &snapshot_path,
             ) => {
                 match result {
@@ -173,9 +262,8 @@ async fn connect_and_watch(
     auth_token: Option<&str>,
     state: &Arc<ServerState>,
     ready: &Arc<std::sync::atomic::AtomicBool>,
-    last_version: &mut u64,
-    current_snapshot: &mut Option<ConfigSnapshot>,
-    snapshot_path: &std::path::Path,
+    watch_state: &mut WatchState,
+    snapshot_path: &Path,
 ) -> anyhow::Result<()> {
     info!(addr = %addr, "connecting to tunnel-ctld");
     let stream = TcpStream::connect(addr).await?;
@@ -184,51 +272,265 @@ async fn connect_and_watch(
 
     // Step 1: send WatchRequest
     let req = WatchRequest {
-        resource_version: *last_version,
+        resource_version: watch_state.last_version,
         token: auth_token.map(str::to_string),
-    };
+    }
+    .advertise_v2();
     send_watch_request(&mut writer, &req).await?;
-    info!(addr = %addr, resource_version = *last_version, "sent WatchRequest");
+    info!(addr = %addr, resource_version = watch_state.last_version, "sent WatchRequest");
 
     // Step 2+3: receive Snapshot then stream Patches until error/disconnect.
     // Returns the last seen resource_version so the caller can reconnect with it.
     let err = loop {
-        let event: WatchEvent = match recv_typed_message(&mut reader, MessageType::ConfigPush).await
-        {
+        let event = match recv_watch_event(&mut reader).await {
             Ok(e) => e,
             Err(e) => break e,
         };
         match event {
-            WatchEvent::Snapshot(snap) => {
+            ReceivedWatchEvent::Legacy(WatchEvent::Snapshot(snap)) => {
                 let v = snap.resource_version;
                 info!(resource_version = v, "received Snapshot from ctld");
                 apply_snapshot(&snap, state).await?;
                 ready.store(true, Ordering::Release);
-                *last_version = v;
-                *current_snapshot = Some(snap);
-                save_snapshot_to_disk(snapshot_path, current_snapshot.as_ref().unwrap()).await;
+                watch_state.last_version = v;
+                let lkg = LastKnownGood {
+                    format_version: LKG_FORMAT_VERSION,
+                    revision: None,
+                    content_hash: snapshot_content_hash(&snap)?,
+                    generated_at_unix_ms: unix_time_ms(),
+                    snapshot: snap.clone(),
+                };
+                save_snapshot_to_disk(snapshot_path, &lkg).await?;
+                watch_state.applied = Some(AppliedControlState {
+                    revision: None,
+                    content_hash: lkg.content_hash,
+                });
+                watch_state.current_snapshot = Some(snap);
             }
-            WatchEvent::Patch(patch) => {
+            ReceivedWatchEvent::Legacy(WatchEvent::Patch(patch)) => {
                 let v = patch.resource_version;
                 info!(resource_version = v, "received Patch from ctld");
-                if let Some(snapshot) = current_snapshot.as_mut() {
+                if let Some(snapshot) = watch_state.current_snapshot.as_mut() {
                     let affected_ports = apply_patch_to_snapshot(snapshot, &patch);
                     apply_patch_to_runtime(snapshot, &patch, &affected_ports, state).await?;
-                    *last_version = v;
-                    save_snapshot_to_disk(snapshot_path, snapshot).await;
+                    watch_state.last_version = v;
+                    let lkg = LastKnownGood {
+                        format_version: LKG_FORMAT_VERSION,
+                        revision: None,
+                        content_hash: snapshot_content_hash(snapshot)?,
+                        generated_at_unix_ms: unix_time_ms(),
+                        snapshot: snapshot.clone(),
+                    };
+                    save_snapshot_to_disk(snapshot_path, &lkg).await?;
+                    watch_state.applied = Some(AppliedControlState {
+                        revision: None,
+                        content_hash: lkg.content_hash,
+                    });
                 } else {
-                    warn!(
-                        resource_version = v,
-                        "received Patch before Snapshot; patch dropped, routing may be stale"
-                    );
+                    anyhow::bail!("received Patch before Snapshot at version {v}");
                 }
-                *last_version = v;
+            }
+            ReceivedWatchEvent::V2(WatchEventV2::Snapshot(versioned)) => {
+                handle_v2_snapshot(
+                    versioned,
+                    state,
+                    ready,
+                    watch_state,
+                    snapshot_path,
+                    &mut writer,
+                )
+                .await?;
             }
         }
     };
     // Return the last version we successfully applied so the reconnect sends
     // resource_version=N instead of 0, allowing future delta optimisation.
-    Err(err.context(format!("ctld disconnected at version {}", *last_version)))
+    Err(err.context(format!(
+        "ctld disconnected at version {}",
+        watch_state.last_version
+    )))
+}
+
+enum RevisionDecision {
+    Apply,
+    Duplicate,
+    Reject(String),
+}
+
+fn classify_revision(
+    applied: Option<&AppliedControlState>,
+    incoming: &ControlRevision,
+    content_hash: &str,
+) -> RevisionDecision {
+    let Some(applied) = applied else {
+        return RevisionDecision::Apply;
+    };
+    let Some(current) = applied.revision.as_ref() else {
+        return RevisionDecision::Apply;
+    };
+    if current.epoch != incoming.epoch {
+        return if incoming.epoch > current.epoch {
+            RevisionDecision::Apply
+        } else {
+            RevisionDecision::Reject(format!(
+                "epoch rollback: incoming={} current={}",
+                incoming.epoch, current.epoch
+            ))
+        };
+    }
+    if incoming.sequence < current.sequence {
+        return RevisionDecision::Reject(format!(
+            "revision rollback: incoming={} current={}",
+            incoming.sequence, current.sequence
+        ));
+    }
+    if incoming.sequence == current.sequence {
+        if applied.content_hash == content_hash {
+            return RevisionDecision::Duplicate;
+        }
+        return RevisionDecision::Reject(
+            "equal revision carries different content hash".to_string(),
+        );
+    }
+    RevisionDecision::Apply
+}
+
+async fn handle_v2_snapshot<W>(
+    versioned: VersionedConfigSnapshot,
+    state: &Arc<ServerState>,
+    ready: &Arc<std::sync::atomic::AtomicBool>,
+    watch_state: &mut WatchState,
+    snapshot_path: &Path,
+    writer: &mut W,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let reject = if versioned.revision.sequence != versioned.snapshot.resource_version {
+        Some("revision and snapshot version diverged".to_string())
+    } else {
+        let actual_hash = snapshot_content_hash(&versioned.snapshot)?;
+        (actual_hash != versioned.content_hash).then(|| "content hash mismatch".to_string())
+    };
+    if let Some(reason) = reject {
+        send_apply_response(
+            writer,
+            &versioned.revision,
+            &versioned.content_hash,
+            ApplyStatus::Rejected,
+            Some(reason.clone()),
+        )
+        .await?;
+        anyhow::bail!(reason);
+    }
+
+    match classify_revision(
+        watch_state.applied.as_ref(),
+        &versioned.revision,
+        &versioned.content_hash,
+    ) {
+        RevisionDecision::Duplicate => {
+            watch_state.last_version = versioned.revision.sequence;
+            send_apply_response(
+                writer,
+                &versioned.revision,
+                &versioned.content_hash,
+                ApplyStatus::Duplicate,
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
+        RevisionDecision::Reject(reason) => {
+            send_apply_response(
+                writer,
+                &versioned.revision,
+                &versioned.content_hash,
+                ApplyStatus::Rejected,
+                Some(reason.clone()),
+            )
+            .await?;
+            anyhow::bail!(reason);
+        }
+        RevisionDecision::Apply => {}
+    }
+
+    if let Err(error) = apply_snapshot(&versioned.snapshot, state).await {
+        let reason = format!("runtime apply failed: {error}");
+        send_apply_response(
+            writer,
+            &versioned.revision,
+            &versioned.content_hash,
+            ApplyStatus::Rejected,
+            Some(reason),
+        )
+        .await?;
+        return Err(error);
+    }
+
+    let lkg = LastKnownGood {
+        format_version: LKG_FORMAT_VERSION,
+        revision: Some(versioned.revision.clone()),
+        content_hash: versioned.content_hash.clone(),
+        generated_at_unix_ms: versioned.generated_at_unix_ms,
+        snapshot: versioned.snapshot.clone(),
+    };
+    if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
+        let reason = format!("LKG persist failed: {error}");
+        send_apply_response(
+            writer,
+            &versioned.revision,
+            &versioned.content_hash,
+            ApplyStatus::Rejected,
+            Some(reason),
+        )
+        .await?;
+        return Err(error);
+    }
+
+    ready.store(true, Ordering::Release);
+    watch_state.last_version = versioned.revision.sequence;
+    watch_state.current_snapshot = Some(versioned.snapshot);
+    watch_state.applied = Some(AppliedControlState {
+        revision: Some(versioned.revision.clone()),
+        content_hash: versioned.content_hash.clone(),
+    });
+    send_apply_response(
+        writer,
+        &versioned.revision,
+        &versioned.content_hash,
+        ApplyStatus::Applied,
+        None,
+    )
+    .await
+}
+
+async fn send_apply_response<W>(
+    writer: &mut W,
+    revision: &ControlRevision,
+    content_hash: &str,
+    status: ApplyStatus,
+    reason: Option<String>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let response = ApplyResponse {
+        revision: revision.clone(),
+        content_hash: content_hash.to_string(),
+        status,
+        reason,
+    };
+    send_message(writer, MessageType::ConfigPush, &response).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Apply a ConfigSnapshot to both the routing ArcSwap and the token cache.
@@ -466,5 +768,145 @@ fn proto_to_server_egress(
     ServerEgressUpstream {
         upstreams: upstream_map,
         rules: EgressRules { vhost },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_snapshot(resource_version: u64) -> ConfigSnapshot {
+        ConfigSnapshot {
+            resource_version,
+            ingress_listeners: Vec::new(),
+            client_groups: Vec::new(),
+            egress_upstreams: Vec::new(),
+            egress_vhost_rules: Vec::new(),
+            token_cache: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn revision_validation_rejects_rollback_and_split_brain() {
+        let current = AppliedControlState {
+            revision: Some(ControlRevision {
+                epoch: "epoch-a".to_string(),
+                sequence: 8,
+            }),
+            content_hash: "hash-a".to_string(),
+        };
+
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                &ControlRevision {
+                    epoch: "epoch-a".to_string(),
+                    sequence: 7,
+                },
+                "hash-a"
+            ),
+            RevisionDecision::Reject(_)
+        ));
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                &ControlRevision {
+                    epoch: "epoch-a".to_string(),
+                    sequence: 8,
+                },
+                "hash-b"
+            ),
+            RevisionDecision::Reject(_)
+        ));
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                &ControlRevision {
+                    epoch: "epoch-a".to_string(),
+                    sequence: 8,
+                },
+                "hash-a"
+            ),
+            RevisionDecision::Duplicate
+        ));
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                &ControlRevision {
+                    epoch: "epoch-0".to_string(),
+                    sequence: 999,
+                },
+                "hash-a"
+            ),
+            RevisionDecision::Reject(_)
+        ));
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                &ControlRevision {
+                    epoch: "epoch-z".to_string(),
+                    sequence: 1,
+                },
+                "hash-b"
+            ),
+            RevisionDecision::Apply
+        ));
+    }
+
+    #[tokio::test]
+    async fn lkg_round_trip_verifies_hash_and_uses_envelope() {
+        let dir = std::env::temp_dir().join(format!(
+            "duotunnel-lkg-test-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("local_snapshot.json");
+        let snapshot = empty_snapshot(4);
+        let lkg = LastKnownGood {
+            format_version: LKG_FORMAT_VERSION,
+            revision: Some(ControlRevision {
+                epoch: "epoch-a".to_string(),
+                sequence: 4,
+            }),
+            content_hash: snapshot_content_hash(&snapshot).unwrap(),
+            generated_at_unix_ms: 123,
+            snapshot,
+        };
+
+        save_snapshot_to_disk(&path, &lkg).await.unwrap();
+        let loaded = load_snapshot_from_disk(&path).await.unwrap();
+
+        assert_eq!(loaded.format_version, LKG_FORMAT_VERSION);
+        assert_eq!(loaded.revision, lkg.revision);
+        assert_eq!(loaded.content_hash, lkg.content_hash);
+        assert_eq!(loaded.generated_at_unix_ms, 123);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lkg_hash_corruption_is_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "duotunnel-lkg-corrupt-test-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("local_snapshot.json");
+        let snapshot = empty_snapshot(5);
+        let lkg = LastKnownGood {
+            format_version: LKG_FORMAT_VERSION,
+            revision: Some(ControlRevision {
+                epoch: "epoch-a".to_string(),
+                sequence: 5,
+            }),
+            content_hash: "not-the-content-hash".to_string(),
+            generated_at_unix_ms: 123,
+            snapshot,
+        };
+
+        save_snapshot_to_disk(&path, &lkg).await.unwrap();
+        assert!(load_snapshot_from_disk(&path).await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
