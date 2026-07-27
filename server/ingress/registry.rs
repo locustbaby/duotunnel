@@ -104,6 +104,7 @@ enum RegistryMsg {
 
 pub struct ClientRegistry {
     groups: Arc<DashMap<GroupId, Arc<ClientGroup>>>,
+    client_to_group: Arc<DashMap<ClientId, (GroupId, usize)>>,
     actor_alive: Arc<AtomicBool>,
     shard_count: usize,
     next_register_shard: AtomicUsize,
@@ -118,9 +119,11 @@ impl ClientRegistry {
     ) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::new());
+        let client_to_group = Arc::new(DashMap::new());
         let inflight_table = new_inflight_table(4096);
         let (tx, mut rx) = mpsc::channel(1024);
         let groups_clone = groups.clone();
+        let client_to_group_clone = client_to_group.clone();
         let actor_alive = Arc::new(AtomicBool::new(true));
 
         let actor = tokio::spawn(async move {
@@ -230,6 +233,7 @@ impl ClientRegistry {
                         let _ = reply.send(Ok(()));
                     }
                     RegistryMsg::Unregister { client_id } => {
+                        client_to_group_clone.remove(&client_id);
                         if let Some(info) = clients.remove(&client_id) {
                             info!(
                                 client_id = %client_id,
@@ -284,6 +288,7 @@ impl ClientRegistry {
                         }
 
                         for cid in dead_clients {
+                            client_to_group_clone.remove(&cid);
                             if let Some(info) = clients.remove(&cid) {
                                 info!(
                                     client_id = %cid,
@@ -341,6 +346,7 @@ impl ClientRegistry {
 
         Self {
             groups,
+            client_to_group,
             actor_alive,
             shard_count,
             next_register_shard: AtomicUsize::new(0),
@@ -362,11 +368,12 @@ impl ClientRegistry {
     ) -> Result<(), &'static str> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let shard_id = self.next_register_shard.fetch_add(1, Ordering::Relaxed) % self.shard_count;
+        self.client_to_group.insert(client_id.clone(), (group_id.clone(), shard_id));
         if self
             .tx
             .send(RegistryMsg::Register {
-                client_id,
-                group_id,
+                client_id: client_id.clone(),
+                group_id: group_id.clone(),
                 conn,
                 shard_id,
                 negotiated,
@@ -376,12 +383,19 @@ impl ClientRegistry {
             .await
             .is_err()
         {
+            self.client_to_group.remove(&client_id);
             self.fail_closed();
             return Err("registry actor channel closed");
         }
         match reply_rx.await {
-            Ok(result) => result,
+            Ok(result) => {
+                if result.is_err() {
+                    self.client_to_group.remove(&client_id);
+                }
+                result
+            }
             Err(_) => {
+                self.client_to_group.remove(&client_id);
                 self.fail_closed();
                 Err("registry actor response dropped")
             }
@@ -404,7 +418,7 @@ impl ClientRegistry {
         if !self.actor_alive.load(Ordering::Acquire) {
             return None;
         }
-        let group = self.groups.get(group_id)?;
+        let group = self.groups.get(group_id).map(|r| r.value().clone())?;
         group.select_healthy(self.preferred_shard_for_group(group_id))
     }
 
@@ -455,12 +469,13 @@ impl ClientRegistry {
     }
 
     fn retire_visible_client(&self, client_id: &ClientId) {
-        for group in self.groups.iter() {
-            for shard in &group.shards {
-                let snapshot = shard.load();
-                if let Some(selected) = snapshot.iter().find(|entry| &entry.conn_id == client_id) {
-                    selected.handle.retire();
-                    return;
+        if let Some((_, (group_id, shard_id))) = self.client_to_group.remove(client_id) {
+            if let Some(group) = self.groups.get(&group_id) {
+                if shard_id < group.shards.len() {
+                    let snapshot = group.shards[shard_id].load();
+                    if let Some(selected) = snapshot.iter().find(|entry| &entry.conn_id == client_id) {
+                        selected.handle.retire();
+                    }
                 }
             }
         }
