@@ -19,7 +19,7 @@ use crate::ingress::listener_mgr;
 use crate::ingress::plugins;
 use crate::ingress::registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, RouteTarget, VhostRouter};
-use tunnel_store::{AuthStore, RuleStore};
+use tunnel_store::{AuthResult, AuthStore, RuleStore};
 
 pub(crate) struct ServerBootstrap {
     config_path: String,
@@ -123,6 +123,71 @@ impl RoutingSnapshot {
     pub(crate) fn egress_map(&self) -> Arc<egress::ServerEgressMap> {
         self.egress_map.clone()
     }
+
+    pub(crate) fn tcp_route(
+        &self,
+        listener_port: u16,
+    ) -> Option<(tunnel_lib::GroupId, tunnel_lib::ProxyName)> {
+        self.tunnel_management
+            .server_ingress_routing
+            .listeners
+            .iter()
+            .find(|listener| listener.port == listener_port)
+            .and_then(|listener| match &listener.mode {
+                IngressMode::Tcp(config) => {
+                    Some((config.client_group.clone(), config.proxy_name.clone()))
+                }
+                IngressMode::Http(_) => None,
+            })
+    }
+}
+
+pub(crate) struct RuntimeGeneration {
+    sequence: u64,
+    content_hash: Arc<str>,
+    routing: RoutingSnapshot,
+    token_map: Arc<local_auth::TokenMap>,
+}
+
+impl RuntimeGeneration {
+    pub(crate) fn local(routing: RoutingSnapshot, token_map: Arc<local_auth::TokenMap>) -> Self {
+        Self {
+            sequence: 0,
+            content_hash: Arc::from("local"),
+            routing,
+            token_map,
+        }
+    }
+
+    pub(crate) fn managed(
+        sequence: u64,
+        content_hash: impl Into<Arc<str>>,
+        routing: RoutingSnapshot,
+        token_map: Arc<local_auth::TokenMap>,
+    ) -> Self {
+        Self {
+            sequence,
+            content_hash: content_hash.into(),
+            routing,
+            token_map,
+        }
+    }
+
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub(crate) fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub(crate) fn routing(&self) -> &RoutingSnapshot {
+        &self.routing
+    }
+
+    pub(crate) fn token_map(&self) -> &local_auth::TokenMap {
+        &self.token_map
+    }
 }
 
 struct IngressRuntime {
@@ -130,7 +195,8 @@ struct IngressRuntime {
     tcp_params: tunnel_lib::TcpParams,
     proxy_buffer_params: tunnel_lib::ProxyBufferParams,
     peek_buf_pool: crate::PeekBufPool,
-    routing: Arc<ArcSwap<RoutingSnapshot>>,
+    generation: Arc<ArcSwap<RuntimeGeneration>>,
+    upstream_health: Arc<tunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     listeners: listener_mgr::ListenerManager,
     overload_limits: tunnel_lib::OverloadLimits,
     plugin_registry: Arc<tunnel_lib::plugin::PluginRegistry>,
@@ -146,11 +212,9 @@ struct ConnectionRuntime {
 }
 
 struct ControlRuntime {
-    auth_store: Arc<dyn AuthStore>,
+    auth_store: Option<Arc<dyn AuthStore>>,
     rule_store: Arc<dyn RuleStore>,
     config_source: Arc<dyn ConfigSource>,
-    revocation_tx: tokio::sync::broadcast::Sender<String>,
-    local_token_cache: Option<Arc<local_auth::LocalTokenCache>>,
 }
 
 pub(crate) struct ServerState {
@@ -158,6 +222,8 @@ pub(crate) struct ServerState {
     connection: ConnectionRuntime,
     control: ControlRuntime,
     health: Arc<crate::runtime::health::ServerHealthFacts>,
+    security_apply_gate: tokio::sync::RwLock<()>,
+    listener_apply_gate: tokio::sync::Mutex<()>,
 }
 
 impl ServerState {
@@ -167,6 +233,12 @@ impl ServerState {
 
     pub(crate) fn proxy_handle(&self) -> &tokio::runtime::Handle {
         &self.ingress.proxy_handle
+    }
+
+    pub(crate) fn upstream_health(
+        &self,
+    ) -> Arc<tunnel_lib::proxy::upstream::UpstreamHealthRegistry> {
+        self.ingress.upstream_health.clone()
     }
 
     pub(crate) fn accept_workers(&self) -> usize {
@@ -197,26 +269,62 @@ impl ServerState {
         self.ingress.config.server.max_unauthenticated_connections
     }
 
-    pub(crate) fn routing_snapshot(&self) -> arc_swap::Guard<Arc<RoutingSnapshot>> {
-        self.ingress.routing.load()
+    pub(crate) fn runtime_generation(&self) -> Arc<RuntimeGeneration> {
+        self.ingress.generation.load_full()
+    }
+
+    pub(crate) fn admit_runtime_generation(&self) -> Option<Arc<RuntimeGeneration>> {
+        if !self.health.admits_new_work() {
+            return None;
+        }
+        let generation = self.runtime_generation();
+        self.health.admits_new_work().then_some(generation)
+    }
+
+    pub(crate) fn routing_snapshot(&self) -> Arc<RuntimeGeneration> {
+        self.runtime_generation()
     }
 
     pub(crate) fn ingress_listeners(&self) -> Vec<IngressListener> {
-        self.routing_snapshot().ingress_listeners().to_vec()
-    }
-
-    pub(crate) fn egress_map(&self) -> Arc<egress::ServerEgressMap> {
-        self.routing_snapshot().egress_map()
-    }
-
-    pub(crate) fn client_config_for_group(&self, group_id: &str) -> tunnel_lib::ClientConfig {
         self.routing_snapshot()
+            .routing()
+            .ingress_listeners()
+            .to_vec()
+    }
+
+    pub(crate) fn client_config_for_generation(
+        &self,
+        generation: &RuntimeGeneration,
+        group_id: &str,
+    ) -> tunnel_lib::ClientConfig {
+        generation
+            .routing()
             .client_config_for_group(group_id)
             .unwrap_or_default()
     }
 
-    pub(crate) fn replace_routing(&self, snapshot: RoutingSnapshot) {
-        self.ingress.routing.store(Arc::new(snapshot));
+    pub(crate) fn publish_generation(&self, generation: Arc<RuntimeGeneration>) {
+        info!(
+            sequence = generation.sequence(),
+            content_hash = generation.content_hash(),
+            "publishing runtime generation"
+        );
+        self.ingress.generation.store(generation);
+    }
+
+    pub(crate) async fn authenticate_pinned(
+        &self,
+        raw_token: &str,
+    ) -> std::result::Result<(AuthResult, Arc<RuntimeGeneration>), tunnel_store::AuthError> {
+        let generation = self.runtime_generation();
+        match &self.control.auth_store {
+            None => local_auth::authenticate(generation.token_map(), raw_token)
+                .map(|result| (result, generation)),
+            Some(auth_store) => auth_store
+                .authenticate(raw_token)
+                .await
+                .map(|result| (result, generation)),
+        }
     }
 
     pub(crate) fn tcp_params(&self) -> &tunnel_lib::TcpParams {
@@ -247,24 +355,12 @@ impl ServerState {
         &self.connection.registry
     }
 
-    pub(crate) fn auth_store(&self) -> &Arc<dyn AuthStore> {
-        &self.control.auth_store
-    }
-
     pub(crate) fn rule_store(&self) -> &Arc<dyn RuleStore> {
         &self.control.rule_store
     }
 
     pub(crate) fn config_source(&self) -> &Arc<dyn ConfigSource> {
         &self.control.config_source
-    }
-
-    pub(crate) fn revocation_tx(&self) -> &tokio::sync::broadcast::Sender<String> {
-        &self.control.revocation_tx
-    }
-
-    pub(crate) fn local_token_cache(&self) -> Option<&Arc<local_auth::LocalTokenCache>> {
-        self.control.local_token_cache.as_ref()
     }
 
     pub(crate) fn listeners(&self) -> &listener_mgr::ListenerManager {
@@ -274,25 +370,25 @@ impl ServerState {
     pub(crate) fn health(&self) -> &Arc<crate::runtime::health::ServerHealthFacts> {
         &self.health
     }
+
+    pub(crate) fn security_apply_gate(&self) -> &tokio::sync::RwLock<()> {
+        &self.security_apply_gate
+    }
+
+    pub(crate) fn listener_apply_gate(&self) -> &tokio::sync::Mutex<()> {
+        &self.listener_apply_gate
+    }
 }
 
 pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Arc<ServerState>> {
     #[allow(clippy::type_complexity)]
-    let (auth_store, rule_store, config_source, local_token_cache): (
-        Arc<dyn AuthStore>,
+    let (auth_store, rule_store, config_source): (
+        Option<Arc<dyn AuthStore>>,
         Arc<dyn RuleStore>,
         Arc<dyn ConfigSource>,
-        Option<Arc<local_auth::LocalTokenCache>>,
     ) = if bootstrap.is_ctld_managed() {
         info!("running in ctld-managed mode; no local SQLite stores");
-        let token_cache = Arc::new(local_auth::LocalTokenCache::new());
-        let auth: Arc<dyn AuthStore> = token_cache.clone();
-        (
-            auth,
-            Arc::new(NullRuleStore),
-            Arc::new(NullConfigSource),
-            Some(token_cache),
-        )
+        (None, Arc::new(NullRuleStore), Arc::new(NullConfigSource))
     } else {
         let (auth_store, rule_store) = build_stores(&bootstrap.config.server.database_url).await?;
         info!(
@@ -315,13 +411,14 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             }
         }
         let cs = build_config_source(&bootstrap.config_path, rule_store.clone());
-        (auth_store, rule_store, cs, None)
+        (Some(auth_store), rule_store, cs)
     };
 
     let http_params = HttpClientParams::from(&bootstrap.config.server.http_pool);
     let (tm, egress) = config_source.load().await?;
-    let initial_snapshot = build_routing_snapshot(&tm, &egress, &http_params)?;
-    let (revocation_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+    let upstream_health = Arc::new(tunnel_lib::proxy::upstream::UpstreamHealthRegistry::default());
+    let initial_snapshot =
+        build_routing_snapshot_with_health(&tm, &egress, &http_params, upstream_health.clone())?;
     let proxy_buffer_params =
         tunnel_lib::ProxyBufferParams::from(&bootstrap.config.server.proxy_buffers);
     let peek_buf_pool = crate::PeekBufPool::new(proxy_buffer_params.peek_buf_size);
@@ -351,21 +448,30 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         max_streams,
         overload_limits.max_pending_streams,
     );
-    let routing = Arc::new(ArcSwap::from_pointee(initial_snapshot));
+    let generation = Arc::new(ArcSwap::from_pointee(RuntimeGeneration::local(
+        initial_snapshot,
+        Arc::new(HashMap::new()),
+    )));
+    let health = Arc::new(crate::runtime::health::ServerHealthFacts::new(
+        bootstrap.is_ctld_managed(),
+    ));
     let plugin_registry = {
         use tunnel_lib::plugin::PluginRegistry;
 
         let mut reg = PluginRegistry::new();
         let route_resolver: Arc<dyn tunnel_lib::plugin::RouteResolver> =
             Arc::new(plugins::vhost::VhostPlugin {
-                routing: routing.clone(),
+                generation: generation.clone(),
             });
         reg.register_ingress_handler(Arc::new(plugins::tls::TlsHandler {
             registry: shared_registry.clone(),
+            generation: generation.clone(),
+            health: health.clone(),
         }));
         reg.register_ingress_handler(Arc::new(plugins::h2c::H2cHandler {
             registry: shared_registry.clone(),
-            route_resolver: route_resolver.clone(),
+            generation: generation.clone(),
+            health: health.clone(),
             single_authority: bootstrap.config.server.h2_single_authority,
         }));
         reg.register_ingress_handler(Arc::new(plugins::h1::H1Handler {
@@ -386,7 +492,8 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             tcp_params: tunnel_lib::TcpParams::from(&bootstrap.config.server.tcp),
             proxy_buffer_params,
             peek_buf_pool,
-            routing,
+            generation,
+            upstream_health,
             listeners: listener_mgr::ListenerManager::new(),
             overload_limits,
             plugin_registry,
@@ -399,19 +506,18 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             auth_store,
             rule_store,
             config_source,
-            revocation_tx,
-            local_token_cache,
         },
-        health: Arc::new(crate::runtime::health::ServerHealthFacts::new(
-            bootstrap.is_ctld_managed(),
-        )),
+        health,
+        security_apply_gate: tokio::sync::RwLock::new(()),
+        listener_apply_gate: tokio::sync::Mutex::new(()),
     }))
 }
 
-pub(crate) fn build_routing_snapshot(
+pub(crate) fn build_routing_snapshot_with_health(
     tm: &TunnelManagement,
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
+    upstream_health: Arc<tunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
 ) -> Result<RoutingSnapshot> {
     let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
@@ -434,7 +540,8 @@ pub(crate) fn build_routing_snapshot(
             http_routers.insert(listener.port, Arc::new(router));
         }
     }
-    let egress_map = egress::ServerEgressMap::from_config(egress, http_params)?;
+    let egress_map =
+        egress::ServerEgressMap::from_config_with_health(egress, http_params, upstream_health)?;
     let egress_rules = egress
         .rules
         .vhost

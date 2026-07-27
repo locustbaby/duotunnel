@@ -255,10 +255,24 @@ pub fn snapshot_content_hash(snapshot: &ConfigSnapshot) -> Result<String> {
         group
             .upstreams
             .sort_by(|left, right| left.name.cmp(&right.name));
+        for upstream in &mut group.upstreams {
+            upstream.servers.sort_by(|left, right| {
+                left.address
+                    .cmp(&right.address)
+                    .then(left.resolve.cmp(&right.resolve))
+            });
+        }
     }
     canonical
         .egress_upstreams
         .sort_by(|left, right| left.name.cmp(&right.name));
+    for upstream in &mut canonical.egress_upstreams {
+        upstream.servers.sort_by(|left, right| {
+            left.address
+                .cmp(&right.address)
+                .then(left.resolve.cmp(&right.resolve))
+        });
+    }
     canonical
         .egress_vhost_rules
         .sort_by(|left, right| left.match_host.cmp(&right.match_host));

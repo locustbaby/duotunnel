@@ -1,8 +1,8 @@
 use crate::control::proto::{ConfigSnapshot, TokenCacheEntry};
-use crate::control::revision::ControlRevisionStore;
 #[cfg(test)]
 use crate::control::revision::EphemeralControlRevisionStore;
-use crate::control::token::cache::TokenCacheProvider;
+use crate::control::revision::{ControlRevisionStore, SqliteControlRevisionStore};
+use crate::control::token::cache::{SqliteTokenCacheProvider, TokenCacheProvider};
 use anyhow::Result;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,6 +22,7 @@ pub struct ControlService {
     resource_version: std::sync::atomic::AtomicU64,
     revision_epoch: String,
     revision_store: Arc<dyn ControlRevisionStore>,
+    snapshot_pool: Option<sqlx::SqlitePool>,
     watch_tx: watch::Sender<u64>,
     /// Kept alive so the channel never closes while ControlService lives.
     _watch_rx: watch::Receiver<u64>,
@@ -46,18 +47,50 @@ impl ControlService {
         .await
     }
 
+    #[cfg(test)]
     pub async fn new_with_revision_store(
         auth_store: Arc<dyn AuthStore>,
         rule_store: Arc<dyn RuleStore>,
         token_cache: Arc<dyn TokenCacheProvider>,
         revision_store: Arc<dyn ControlRevisionStore>,
     ) -> Result<Arc<Self>> {
+        Self::new_with_snapshot_pool(auth_store, rule_store, token_cache, revision_store, None)
+            .await
+    }
+
+    pub async fn new_with_sqlite_revision_store(
+        auth_store: Arc<dyn AuthStore>,
+        rule_store: Arc<dyn RuleStore>,
+        token_cache: Arc<dyn TokenCacheProvider>,
+        revision_store: Arc<dyn ControlRevisionStore>,
+        snapshot_pool: sqlx::SqlitePool,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_snapshot_pool(
+            auth_store,
+            rule_store,
+            token_cache,
+            revision_store,
+            Some(snapshot_pool),
+        )
+        .await
+    }
+
+    async fn new_with_snapshot_pool(
+        auth_store: Arc<dyn AuthStore>,
+        rule_store: Arc<dyn RuleStore>,
+        token_cache: Arc<dyn TokenCacheProvider>,
+        revision_store: Arc<dyn ControlRevisionStore>,
+        snapshot_pool: Option<sqlx::SqlitePool>,
+    ) -> Result<Arc<Self>> {
         let persisted_revision = revision_store.current().await?;
-        let mut initial =
-            Self::build_snapshot(&*rule_store, &*token_cache, persisted_revision.sequence).await?;
-        let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&initial)?;
-        let revision = revision_store.commit_snapshot_hash(&content_hash).await?;
-        initial.resource_version = revision.sequence;
+        let (initial, revision) = Self::build_and_commit_snapshot(
+            &*rule_store,
+            &*token_cache,
+            &*revision_store,
+            snapshot_pool.as_ref(),
+            persisted_revision.sequence,
+        )
+        .await?;
         let (watch_tx, _watch_rx) = watch::channel(initial.resource_version);
         // Channel capacity 1: multiple senders collapse into a single pending signal.
         let (publish_tx, publish_rx) = mpsc::channel::<()>(1);
@@ -69,6 +102,7 @@ impl ControlService {
             resource_version: std::sync::atomic::AtomicU64::new(revision.sequence),
             revision_epoch: revision.epoch,
             revision_store,
+            snapshot_pool,
             watch_tx,
             _watch_rx,
             publish_tx,
@@ -133,17 +167,55 @@ impl ControlService {
         })
     }
 
+    async fn build_and_commit_snapshot(
+        rule_store: &dyn RuleStore,
+        token_cache_provider: &dyn TokenCacheProvider,
+        revision_store: &dyn ControlRevisionStore,
+        snapshot_pool: Option<&sqlx::SqlitePool>,
+        version: u64,
+    ) -> Result<(ConfigSnapshot, tunnel_lib::ctld_proto::ControlRevision)> {
+        if let Some(pool) = snapshot_pool {
+            let mut tx = pool.begin().await?;
+            let routing =
+                tunnel_store::sqlite_rules::SqliteRuleStore::load_routing_on(&mut tx).await?;
+            let token_cache = SqliteTokenCacheProvider::load_token_cache_on(&mut tx).await?;
+            let (ingress_listeners, client_groups, egress_upstreams, egress_vhost_rules) =
+                crate::control::proto::routing_data_to_proto(&routing);
+            let mut snapshot = ConfigSnapshot {
+                resource_version: version,
+                ingress_listeners,
+                client_groups,
+                egress_upstreams,
+                egress_vhost_rules,
+                token_cache,
+            };
+            let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&snapshot)?;
+            let revision =
+                SqliteControlRevisionStore::commit_snapshot_hash_on(&mut tx, &content_hash).await?;
+            snapshot.resource_version = revision.sequence;
+            tx.commit().await?;
+            return Ok((snapshot, revision));
+        }
+
+        let mut snapshot = Self::build_snapshot(rule_store, token_cache_provider, version).await?;
+        let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&snapshot)?;
+        let revision = revision_store.commit_snapshot_hash(&content_hash).await?;
+        snapshot.resource_version = revision.sequence;
+        Ok((snapshot, revision))
+    }
+
     /// Rebuilds the snapshot from DB and signals all watchers.
     /// Called only from the debounce task — not directly from mutation methods.
     pub(crate) async fn do_publish(&self) -> Result<()> {
         let candidate_version = self.resource_version.load(Ordering::Acquire) + 1;
-        let mut snapshot =
-            Self::build_snapshot(&*self.rule_store, &*self.token_cache, candidate_version).await?;
-        let content_hash = tunnel_lib::ctld_proto::snapshot_content_hash(&snapshot)?;
-        let revision = self
-            .revision_store
-            .commit_snapshot_hash(&content_hash)
-            .await?;
+        let (snapshot, revision) = Self::build_and_commit_snapshot(
+            &*self.rule_store,
+            &*self.token_cache,
+            &*self.revision_store,
+            self.snapshot_pool.as_ref(),
+            candidate_version,
+        )
+        .await?;
         if revision.epoch != self.revision_epoch {
             anyhow::bail!("control revision epoch changed while service was running");
         }
@@ -151,7 +223,6 @@ impl ControlService {
         if next == self.resource_version.load(Ordering::Acquire) {
             return Ok(());
         }
-        snapshot.resource_version = next;
         self.current_snapshot.store(Arc::new(snapshot));
         self.resource_version.store(next, Ordering::Release);
         info!(

@@ -19,6 +19,8 @@ use tunnel_lib::ctld_proto::{
 };
 use tunnel_lib::models::msg::{send_message, MessageType};
 
+const SNAPSHOT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct WatchServer {
     svc: Arc<ControlService>,
     bind_addr: SocketAddr,
@@ -113,15 +115,18 @@ async fn handle_watch_connection(
         resource_version = current.resource_version,
         "sent initial Snapshot"
     );
+    let mut heartbeat = tokio::time::interval(SNAPSHOT_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
     loop {
-        // Wait for the next mutation
-        match rx.changed().await {
-            Ok(()) => {}
-            Err(_) => {
-                // Sender dropped — service shutting down
-                warn!(peer = %peer, "ControlService watch channel closed, dropping connection");
-                break;
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    warn!(peer = %peer, "ControlService watch channel closed, dropping connection");
+                    break;
+                }
             }
+            _ = heartbeat.tick() => {}
         }
         let current = svc.snapshot();
         if let Err(e) =

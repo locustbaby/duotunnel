@@ -1,7 +1,7 @@
 use crate::bootstrap::config::{self, ServerConfigFile};
 use crate::control::service::BackgroundService;
 use crate::ingress::sync_listeners;
-use crate::{build_routing_snapshot, ServerState};
+use crate::{build_routing_snapshot_with_health, RuntimeGeneration, ServerState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,9 +108,17 @@ async fn reload_routing_inner(config_path: &str, state: &Arc<ServerState>) -> an
             state.config_source().load().await?
         }
     };
-    let snapshot = build_routing_snapshot(&tm, &egress, &http_params)?;
-    state.replace_routing(snapshot);
+    let routing =
+        build_routing_snapshot_with_health(&tm, &egress, &http_params, state.upstream_health())?;
+    let previous = state.runtime_generation();
+    let generation = Arc::new(RuntimeGeneration::managed(
+        previous.sequence().saturating_add(1),
+        Arc::<str>::from("standalone-hot-reload"),
+        routing,
+        Arc::new(previous.token_map().clone()),
+    ));
     let listeners: Vec<_> = tm.server_ingress_routing.listeners.to_vec();
     sync_listeners(state, &listeners).await?;
+    state.publish_generation(generation);
     Ok(())
 }

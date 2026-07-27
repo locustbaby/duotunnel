@@ -112,15 +112,11 @@ impl SqliteControlRevisionStore {
                 .map_err(|_| anyhow!("control revision sequence is negative"))?,
         })
     }
-}
 
-#[async_trait]
-impl ControlRevisionStore for SqliteControlRevisionStore {
-    async fn current(&self) -> Result<ControlRevision> {
-        self.read_revision().await
-    }
-
-    async fn commit_snapshot_hash(&self, content_hash: &str) -> Result<ControlRevision> {
+    pub async fn commit_snapshot_hash_on(
+        conn: &mut sqlx::SqliteConnection,
+        content_hash: &str,
+    ) -> Result<ControlRevision> {
         let row = sqlx::query(
             "UPDATE control_revision
              SET sequence = CASE
@@ -132,7 +128,7 @@ impl ControlRevisionStore for SqliteControlRevisionStore {
              RETURNING epoch, sequence",
         )
         .bind(content_hash)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         let sequence: i64 = row.try_get("sequence")?;
         Ok(ControlRevision {
@@ -140,6 +136,18 @@ impl ControlRevisionStore for SqliteControlRevisionStore {
             sequence: u64::try_from(sequence)
                 .map_err(|_| anyhow!("control revision sequence is negative"))?,
         })
+    }
+}
+
+#[async_trait]
+impl ControlRevisionStore for SqliteControlRevisionStore {
+    async fn current(&self) -> Result<ControlRevision> {
+        self.read_revision().await
+    }
+
+    async fn commit_snapshot_hash(&self, content_hash: &str) -> Result<ControlRevision> {
+        let mut conn = self.pool.acquire().await?;
+        Self::commit_snapshot_hash_on(&mut conn, content_hash).await
     }
 }
 

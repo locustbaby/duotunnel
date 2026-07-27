@@ -83,9 +83,15 @@ async fn build_control_service(
         seed_routing_if_needed(rule_store.as_ref(), server_cfg_path).await;
     }
 
-    let revision_store = Arc::new(SqliteControlRevisionStore::initialize(pool).await?);
-    ControlService::new_with_revision_store(auth_store, rule_store, token_cache, revision_store)
-        .await
+    let revision_store = Arc::new(SqliteControlRevisionStore::initialize(pool.clone()).await?);
+    ControlService::new_with_sqlite_revision_store(
+        auth_store,
+        rule_store,
+        token_cache,
+        revision_store,
+        pool,
+    )
+    .await
 }
 
 async fn seed_routing_if_needed(rule_store: &dyn tunnel_store::RuleStore, server_cfg_path: &str) {
