@@ -678,7 +678,10 @@ async fn apply_snapshot(snap: &ConfigSnapshot, state: &Arc<ServerState>) -> anyh
         generation.token_map(),
     )
     .await?;
-    crate::ingress::sync_all_listeners(state, &listeners).await?;
+    if let Err(error) = crate::ingress::sync_all_listeners(state, &listeners).await {
+        state.health().hold_config_apply_fence();
+        return Err(error);
+    }
     state.publish_generation(generation);
     Ok(())
 }

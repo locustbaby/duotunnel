@@ -37,6 +37,7 @@ pub(crate) struct ServerHealthFacts {
     quic_bound: AtomicBool,
     config_valid: AtomicBool,
     config_applying: AtomicBool,
+    security_fence_held: AtomicBool,
     mutable: RwLock<MutableFacts>,
     failed: Notify,
     degraded_after: Duration,
@@ -65,6 +66,7 @@ impl ServerHealthFacts {
             quic_bound: AtomicBool::new(false),
             config_valid: AtomicBool::new(!managed_control),
             config_applying: AtomicBool::new(false),
+            security_fence_held: AtomicBool::new(false),
             mutable: RwLock::new(MutableFacts::default()),
             failed: Notify::new(),
             degraded_after,
@@ -87,6 +89,7 @@ impl ServerHealthFacts {
         facts.last_successfully_applied = Some(now);
         facts.last_control_confirmed = Some(now);
         self.config_valid.store(true, Ordering::Release);
+        self.security_fence_held.store(false, Ordering::Release);
         self.config_applying.store(false, Ordering::Release);
     }
 
@@ -96,11 +99,19 @@ impl ServerHealthFacts {
         facts.last_successfully_applied = restored;
         facts.last_control_confirmed = restored;
         self.config_valid.store(true, Ordering::Release);
+        self.security_fence_held.store(false, Ordering::Release);
         self.config_applying.store(false, Ordering::Release);
     }
 
+    pub(crate) fn hold_config_apply_fence(&self) {
+        self.security_fence_held.store(true, Ordering::Release);
+        self.config_applying.store(true, Ordering::Release);
+    }
+
     pub(crate) fn fail_config_apply(&self) {
-        self.config_applying.store(false, Ordering::Release);
+        if !self.security_fence_held.load(Ordering::Acquire) {
+            self.config_applying.store(false, Ordering::Release);
+        }
     }
 
     pub(crate) fn confirm_control_freshness(&self) {
@@ -270,6 +281,20 @@ mod tests {
 
         assert!(!health.admits_security_sensitive_work());
         health.fail_config_apply();
+        assert!(health.admits_security_sensitive_work());
+    }
+
+    #[test]
+    fn held_security_fence_survives_failed_apply_until_success() {
+        let health = ServerHealthFacts::new(false);
+        health.begin_config_apply();
+        health.hold_config_apply_fence();
+        health.fail_config_apply();
+
+        assert!(!health.admits_security_sensitive_work());
+        assert!(!health.admits_new_work());
+
+        health.finish_config_apply();
         assert!(health.admits_security_sensitive_work());
     }
 
