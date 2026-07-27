@@ -8,6 +8,14 @@ thread_local! {
     static ROTATING_INDEX: Cell<usize> = const { Cell::new(0) };
 }
 
+use crossbeam_queue::ArrayQueue;
+use std::sync::OnceLock;
+
+fn global_connection_state_pool() -> &'static ArrayQueue<Arc<ConnectionState>> {
+    static POOL: OnceLock<ArrayQueue<Arc<ConnectionState>>> = OnceLock::new();
+    POOL.get_or_init(|| ArrayQueue::new(2048))
+}
+
 struct InflightCounters {
     pending_opens: AtomicUsize,
     active_streams: AtomicUsize,
@@ -15,11 +23,11 @@ struct InflightCounters {
 }
 
 pub struct ConnectionState {
-    id: u64,
+    id: AtomicU64,
     counters: CachePadded<InflightCounters>,
     admission: AtomicUsize,
     registered: AtomicBool,
-    owner: Weak<InflightTable>,
+    owner: parking_lot::Mutex<Weak<InflightTable>>,
 }
 
 const RETIRED_BIT: usize = 1usize << (usize::BITS - 1);
@@ -67,8 +75,22 @@ impl InflightTable {
             }
         }
 
+        let new_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let pool = global_connection_state_pool();
+        while let Some(state) = pool.pop() {
+            if Arc::strong_count(&state) == 1 {
+                state.id.store(new_id, Ordering::Relaxed);
+                state.counters.pending_opens.store(0, Ordering::Relaxed);
+                state.counters.active_streams.store(0, Ordering::Relaxed);
+                state.admission.store(0, Ordering::Relaxed);
+                state.registered.store(true, Ordering::Relaxed);
+                *state.owner.lock() = Arc::downgrade(self);
+                return Some(state);
+            }
+        }
+
         Some(Arc::new(ConnectionState {
-            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            id: AtomicU64::new(new_id),
             counters: CachePadded::new(InflightCounters {
                 pending_opens: AtomicUsize::new(0),
                 active_streams: AtomicUsize::new(0),
@@ -76,7 +98,7 @@ impl InflightTable {
             }),
             admission: AtomicUsize::new(0),
             registered: AtomicBool::new(true),
-            owner: Arc::downgrade(self),
+            owner: parking_lot::Mutex::new(Arc::downgrade(self)),
         }))
     }
 
@@ -91,7 +113,7 @@ impl InflightTable {
 
 impl ConnectionState {
     pub fn id(&self) -> u64 {
-        self.id
+        self.id.load(Ordering::Relaxed)
     }
 
     pub fn is_selectable(&self) -> bool {
@@ -125,7 +147,7 @@ impl ConnectionState {
 
     fn release_registration(&self) -> bool {
         if self.registered.swap(false, Ordering::AcqRel) {
-            if let Some(owner) = self.owner.upgrade() {
+            if let Some(owner) = self.owner.lock().upgrade() {
                 let previous = owner.registered.fetch_sub(1, Ordering::AcqRel);
                 debug_assert!(previous > 0, "inflight registration count underflow");
             }

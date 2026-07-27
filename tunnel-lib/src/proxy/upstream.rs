@@ -436,6 +436,7 @@ pub struct UpstreamGroup {
     pub entries: Vec<Arc<BackendEntry>>,
     counter: AtomicUsize,
     health: Arc<UpstreamHealthRegistry>,
+    has_ejections: std::sync::atomic::AtomicBool,
 }
 impl UpstreamGroup {
     pub fn calculate_fingerprint(servers: &[String]) -> u64 {
@@ -467,15 +468,19 @@ impl UpstreamGroup {
         health: Arc<UpstreamHealthRegistry>,
         config_fingerprint: u64,
     ) -> Self {
-        let entries = servers
+        let entries: Vec<Arc<BackendEntry>> = servers
             .iter()
             .map(|s| health.get_or_create_entry(&health_namespace, s, config_fingerprint))
             .collect();
+        let has_ejections = entries
+            .iter()
+            .any(|e| matches!(e.state.is_healthy(), HealthSelection::Ejected));
         Self {
             servers,
             entries,
             counter: AtomicUsize::new(0),
             health,
+            has_ejections: std::sync::atomic::AtomicBool::new(has_ejections),
         }
     }
 
@@ -485,6 +490,21 @@ impl UpstreamGroup {
         }
         let len = self.entries.len();
         let raw = self.counter.fetch_add(1, Ordering::Relaxed);
+        if !self.has_ejections.load(Ordering::Relaxed) {
+            let idx = if len.is_power_of_two() {
+                raw & (len - 1)
+            } else {
+                raw % len
+            };
+            if let Some(entry) = self.entries.get(idx) {
+                return Some(BackendRef {
+                    entry: entry.clone(),
+                    observed_epoch: entry.state.current_epoch(),
+                    is_panic_fallback: false,
+                    registry: Some(Arc::downgrade(&self.health)),
+                });
+            }
+        }
         let now_ticks = current_health_ticks();
         for i in 0..len {
             let offset = raw.wrapping_add(i);
@@ -530,6 +550,15 @@ impl UpstreamGroup {
         }
     }
 
+    pub fn sync_ejection_flag(&self) {
+        let has_ejected = self
+            .entries
+            .iter()
+            .any(|e| matches!(e.state.is_healthy(), HealthSelection::Ejected));
+        self.has_ejections
+            .store(has_ejected, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn mark_unhealthy(&self, server: &str) {
         if let Some(entry) = self
             .entries
@@ -540,6 +569,7 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     if let Some(probe_token) = entry.state.mark_failure(observed_epoch) {
+                        self.has_ejections.store(true, std::sync::atomic::Ordering::Release);
                         self.health.spawn_probe_by_token(entry.clone(), probe_token);
                     }
                 }
@@ -558,6 +588,7 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     entry.state.mark_success(observed_epoch);
+                    self.sync_ejection_flag();
                 }
                 HealthSelection::Ejected => {}
             }
@@ -658,6 +689,7 @@ mod tests {
         fn force_unhealthy(&self, addr: &str) {
             if let Some(entry) = self.entries.iter().find(|e| e.raw_address.as_ref() == addr) {
                 entry.state.force_unhealthy();
+                self.sync_ejection_flag();
             }
         }
     }

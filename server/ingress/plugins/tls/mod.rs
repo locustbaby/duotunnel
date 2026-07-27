@@ -25,17 +25,26 @@ const MAX_SENDER_CACHE_ENTRIES: usize = 64;
 const PROTOCOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn get_or_create_sender(
-    sender_cache: &parking_lot::Mutex<std::collections::HashMap<SenderCacheKey, CachedSender>>,
+    sender_cache: &parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
     registry: &SharedRegistry,
     generation: u64,
     route_target: &RouteTarget,
 ) -> Option<CachedSender> {
-    let mut guard = sender_cache.lock();
+    let key = (generation, route_target.clone());
+    {
+        let guard = sender_cache.read();
+        if let Some(entry) = guard.get(&key) {
+            if entry.selected.handle.close_reason().is_none() {
+                return Some(entry.clone());
+            }
+        }
+    }
+
+    let mut guard = sender_cache.write();
     guard.retain(|(cached_generation, _), entry| {
         *cached_generation >= generation.saturating_sub(1)
             && entry.selected.handle.close_reason().is_none()
     });
-    let key = (generation, route_target.clone());
     if let Some(entry) = guard.get(&key) {
         if entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
@@ -57,12 +66,12 @@ fn get_or_create_sender(
 }
 
 fn invalidate_sender_if_matches(
-    sender_cache: &parking_lot::Mutex<std::collections::HashMap<SenderCacheKey, CachedSender>>,
+    sender_cache: &parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
     generation: u64,
     route_target: &RouteTarget,
     stable_id: usize,
 ) {
-    let mut guard = sender_cache.lock();
+    let mut guard = sender_cache.write();
     if guard
         .get(&(generation, route_target.clone()))
         .is_some_and(|entry| entry.selected.handle.stable_id() == stable_id)
@@ -136,8 +145,8 @@ impl IngressProtocolHandler for TlsHandler {
         let generation = self.generation.clone();
         let health = self.health.clone();
         let sender_cache: Arc<
-            parking_lot::Mutex<std::collections::HashMap<SenderCacheKey, CachedSender>>,
-        > = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+            parking_lot::RwLock<std::collections::HashMap<SenderCacheKey, CachedSender>>,
+        > = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
         let metrics = ctx.metrics.clone();
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
