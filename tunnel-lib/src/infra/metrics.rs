@@ -93,8 +93,10 @@ impl Drop for ResourceGuard {
             TrackedResource::HttpRequest => &METRICS.http_requests_active,
             TrackedResource::UdpTask => &METRICS.udp_tasks_active,
         };
-        counter.fetch_sub(1, Ordering::Relaxed);
-        CONNECTION_ACTIVITY.notify_waiters();
+        let previous = counter.fetch_sub(1, Ordering::Relaxed);
+        if previous <= 1 {
+            CONNECTION_ACTIVITY.notify_waiters();
+        }
     }
 }
 
