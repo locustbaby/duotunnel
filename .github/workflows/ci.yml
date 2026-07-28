@@ -174,7 +174,7 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Build all binaries
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --features tunnel-lib/buf-pool
 
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -209,6 +209,7 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP=none \
           CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
             cargo build --release --workspace \
+              --features tunnel-lib/buf-pool \
               --features server/dial9-telemetry \
               --features client/dial9-telemetry
 
