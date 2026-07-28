@@ -30,21 +30,19 @@ impl Http1Driver {
     pub fn new(
         send: SendStream,
         recv: RecvStream,
-        scheme: String,
-        authority: String,
+        scheme: http::uri::Scheme,
+        authority: http::uri::Authority,
         initial_bytes: Option<Bytes>,
     ) -> Self {
         let mut read_buf = BytesMut::with_capacity(8192);
         if let Some(data) = initial_bytes {
             read_buf.extend_from_slice(&data);
         }
-        let parsed_scheme = scheme.parse::<http::uri::Scheme>().unwrap_or(http::uri::Scheme::HTTP);
-        let parsed_authority = authority.parse::<http::uri::Authority>().unwrap_or_else(|_| http::uri::Authority::from_static("127.0.0.1"));
         Self {
             send,
             recv: Some(recv),
-            scheme: parsed_scheme,
-            authority: parsed_authority,
+            scheme,
+            authority,
             read_buf,
             inflight_reclaim: None,
             should_close: false,

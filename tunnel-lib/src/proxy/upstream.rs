@@ -591,7 +591,8 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     if let Some(probe_token) = entry.state.mark_failure(observed_epoch) {
-                        self.has_ejections.store(true, std::sync::atomic::Ordering::Release);
+                        self.has_ejections
+                            .store(true, std::sync::atomic::Ordering::Release);
                         self.health.spawn_probe_by_token(entry.clone(), probe_token);
                     }
                 }

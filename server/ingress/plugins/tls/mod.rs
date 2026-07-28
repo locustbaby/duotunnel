@@ -157,7 +157,7 @@ impl IngressProtocolHandler for TlsHandler {
             let generation = generation.clone();
             let health = health.clone();
             let pinned_route_target = pinned_route_target.clone();
-            let src_addr = src_addr.clone();
+            let src_addr = src_addr;
             let overload = overload.clone();
             async move {
                 let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::HttpRequest);
@@ -228,7 +228,7 @@ impl IngressProtocolHandler for TlsHandler {
 
                 let routing_info = tunnel_lib::RoutingInfo {
                     proxy_name: route_target.proxy_name.clone(),
-                    src_addr: src_addr.clone(),
+                    src_addr,
                     src_port,
                     protocol: tunnel_lib::proxy::core::Protocol::H2,
                     host: Some(target_host.clone()),

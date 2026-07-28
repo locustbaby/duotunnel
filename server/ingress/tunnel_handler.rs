@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::{debug, warn};
+use tracing::debug;
 use tunnel_lib::proxy::core::{ProxyEngine, UpstreamResolver};
 use tunnel_lib::recv_routing_info_bounded;
 

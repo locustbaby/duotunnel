@@ -19,18 +19,41 @@ pub struct HttpPeer {
 impl HttpPeer {
     pub async fn connect_inner(
         self,
-        send: SendStream,
+        mut send: SendStream,
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
         let upstream = self.spec.target_host.clone();
-        let mut driver = Http1Driver::new(
-            send,
-            recv,
-            self.spec.scheme.clone(),
-            self.spec.target_host.clone(),
-            initial_data,
-        );
+        let parsed_scheme = match self.spec.scheme.parse::<http::uri::Scheme>() {
+            Ok(s) => s,
+            Err(e) => {
+                let error_msg = format!("502 Bad Gateway: Invalid target scheme: {e}");
+                let resp = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                    error_msg.len(),
+                    error_msg
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                let _ = send.finish();
+                return Err(anyhow::anyhow!("invalid target scheme: {e}"));
+            }
+        };
+        let parsed_authority = match self.spec.target_host.parse::<http::uri::Authority>() {
+            Ok(a) => a,
+            Err(e) => {
+                let error_msg = format!("502 Bad Gateway: Invalid target authority: {e}");
+                let resp = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                    error_msg.len(),
+                    error_msg
+                );
+                let _ = send.write_all(resp.as_bytes()).await;
+                let _ = send.finish();
+                return Err(anyhow::anyhow!("invalid target authority: {e}"));
+            }
+        };
+        let mut driver =
+            Http1Driver::new(send, recv, parsed_scheme, parsed_authority, initial_data);
         loop {
             let req = match lazy_timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
                 Ok(Ok(Some(r))) => r,

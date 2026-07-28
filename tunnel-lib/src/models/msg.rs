@@ -32,9 +32,9 @@ pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
 pub const MAX_ROUTING_INFO_BYTES: usize = 8 * 1024;
 
 /// Highest wire-protocol version this build speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Oldest client version this build still accepts at login.
-pub const MIN_SUPPORTED_VERSION: u16 = 1;
+pub const MIN_SUPPORTED_VERSION: u16 = 2;
 /// Capability bits exchanged in the login handshake. Plain u64 masks with
 /// named constants (bitflags semantics without the dependency); no bits are
 /// defined yet.

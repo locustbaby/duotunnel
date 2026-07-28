@@ -7,9 +7,9 @@ use crate::egress::http::{H2cClient, HttpsClient};
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use arc_swap::ArcSwap;
 use quinn::{RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,8 +67,10 @@ impl HttpConnector {
         let key = Self::cache_key(spec);
         loop {
             let current = self.prefer_h1.load();
-            if current.contains_key(&key) {
-                break;
+            if let Some(timestamp) = current.get(&key) {
+                if timestamp.elapsed() <= PREFER_H1_TTL {
+                    return;
+                }
             }
             let mut new_map = (**current).clone();
             if !new_map.contains_key(&key) && new_map.len() >= MAX_PREFER_H1_ENTRIES {
@@ -86,7 +88,7 @@ impl HttpConnector {
             new_map.insert(key.clone(), Instant::now());
             let previous = self.prefer_h1.compare_and_swap(&current, Arc::new(new_map));
             if Arc::ptr_eq(&previous, &current) {
-                break;
+                return;
             }
         }
     }

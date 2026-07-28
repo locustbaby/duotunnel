@@ -1,14 +1,19 @@
 use bytes::{Bytes, BytesMut};
+#[cfg(feature = "buf-pool")]
 use crossbeam_queue::ArrayQueue;
 use quinn::{RecvStream, SendStream};
+#[cfg(feature = "buf-pool")]
 use std::cell::RefCell;
+#[cfg(feature = "buf-pool")]
 use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[cfg(feature = "buf-pool")]
 thread_local! {
     static LOCAL_POOL: RefCell<Vec<BytesMut>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(feature = "buf-pool")]
 fn global_pool() -> &'static ArrayQueue<BytesMut> {
     static GLOBAL_POOL: OnceLock<ArrayQueue<BytesMut>> = OnceLock::new();
     GLOBAL_POOL.get_or_init(|| ArrayQueue::new(1024))
@@ -18,63 +23,74 @@ fn global_pool() -> &'static ArrayQueue<BytesMut> {
 // `read_buf` fills the uninitialized capacity directly, so no zeroing and no
 // `set_len` over uninitialized memory is ever needed.
 fn take_buffer(buffer_size: usize) -> BytesMut {
-    if let Some(buf) = LOCAL_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        pool.iter()
-            .position(|buf| buf.capacity() >= buffer_size)
-            .map(|index| pool.swap_remove(index))
-    }) {
-        return buf;
-    }
-    let global = global_pool();
-    for _ in 0..3 {
-        if let Some(buf) = global.pop() {
-            if buf.capacity() >= buffer_size {
-                return buf;
+    #[cfg(feature = "buf-pool")]
+    {
+        if let Some(buf) = LOCAL_POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            pool.iter()
+                .position(|buf| buf.capacity() >= buffer_size)
+                .map(|index| pool.swap_remove(index))
+        }) {
+            return buf;
+        }
+        let global = global_pool();
+        for _ in 0..3 {
+            if let Some(buf) = global.pop() {
+                if buf.capacity() >= buffer_size {
+                    return buf;
+                }
+            } else {
+                break;
             }
-            // Discard too-small buffers to avoid queue pollution and busy CAS loop
-        } else {
-            break;
         }
     }
     BytesMut::with_capacity(buffer_size)
 }
 
-fn return_buffer(mut buf: BytesMut, buffer_size: usize) {
-    buf.clear();
-    if buf.capacity() < buffer_size {
-        return;
-    }
-    let mut maybe_buf = Some(buf);
-    let stored_locally = LOCAL_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if pool.len() < 8 {
-            if let Some(b) = maybe_buf.take() {
-                pool.push(b);
-            }
-            true
-        } else {
-            if let Some(ref returned_buf) = maybe_buf {
-                let returned_cap = returned_buf.capacity();
-                if let Some((index, _)) = pool.iter()
-                    .enumerate()
-                    .min_by_key(|(_, b)| b.capacity())
-                {
-                    if pool[index].capacity() < returned_cap {
-                        let _old_small_buf = std::mem::replace(&mut pool[index], maybe_buf.take().unwrap());
-                        return true;
+fn return_buffer(buf: BytesMut, buffer_size: usize) {
+    #[cfg(feature = "buf-pool")]
+    {
+        let mut buf = buf;
+        buf.clear();
+        if buf.capacity() < buffer_size {
+            return;
+        }
+        let mut maybe_buf = Some(buf);
+        let stored_locally = LOCAL_POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < 8 {
+                if let Some(b) = maybe_buf.take() {
+                    pool.push(b);
+                }
+                true
+            } else {
+                if let Some(ref returned_buf) = maybe_buf {
+                    let returned_cap = returned_buf.capacity();
+                    if let Some((index, _)) =
+                        pool.iter().enumerate().min_by_key(|(_, b)| b.capacity())
+                    {
+                        if pool[index].capacity() < returned_cap {
+                            let _old_small_buf =
+                                std::mem::replace(&mut pool[index], maybe_buf.take().unwrap());
+                            return true;
+                        }
                     }
                 }
+                false
             }
-            false
+        });
+        if stored_locally {
+            return;
         }
-    });
-    if stored_locally {
-        return;
+        if let Some(b) = maybe_buf {
+            let global = global_pool();
+            let _ = global.push(b);
+        }
     }
-    if let Some(b) = maybe_buf {
-        let global = global_pool();
-        let _ = global.push(b);
+    #[cfg(not(feature = "buf-pool"))]
+    {
+        let _ = buf;
+        let _ = buffer_size;
     }
 }
 
@@ -149,7 +165,8 @@ where
     let bytes = copy_buffered(reader, &mut writer, buffer_size).await?;
     let _ = writer.shutdown().await;
     Ok(bytes)
-}pub async fn copy_buffered_then_finish<R>(
+}
+pub async fn copy_buffered_then_finish<R>(
     mut reader: R,
     mut writer: SendStream,
     buffer_size: usize,
@@ -168,7 +185,7 @@ where
         if read == 0 {
             break;
         }
-        
+
         let chunk = if buf.len() < copy_threshold {
             let chunk_bytes = Bytes::copy_from_slice(&buf[..]);
             buf.clear();
@@ -177,7 +194,10 @@ where
             buf.split().freeze()
         };
 
-        writer.write_chunk(chunk).await.map_err(|e| std::io::Error::other(e))?;
+        writer
+            .write_chunk(chunk)
+            .await
+            .map_err(std::io::Error::other)?;
         copied += read as u64;
     }
     if let Err(error) = writer.finish() {

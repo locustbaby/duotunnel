@@ -352,7 +352,7 @@ async fn handle_quic_connection(
         let _ = send_message(
             &mut send,
             MessageType::LoginResp,
-            &LoginResp::failure_retryable("registration failed: slot table exhausted"),
+            &LoginResp::failure_retryable("registration failed"),
         )
         .await;
         conn.close(0u32.into(), b"registration failed");

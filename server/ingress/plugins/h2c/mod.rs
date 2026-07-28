@@ -164,7 +164,8 @@ impl IngressProtocolHandler for H2cHandler {
         let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
-        let first_authority: Arc<std::sync::OnceLock<String>> = Arc::new(std::sync::OnceLock::new());
+        let first_authority: Arc<std::sync::OnceLock<String>> =
+            Arc::new(std::sync::OnceLock::new());
         let route_cache: Arc<RwLock<HashMap<(u64, String), Option<RouteTarget>>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let sender_cache: Arc<RwLock<HashMap<SenderCacheKey, CachedSender>>> =
@@ -183,7 +184,7 @@ impl IngressProtocolHandler for H2cHandler {
             let generation = generation.clone();
             let health = health.clone();
             let metrics = metrics.clone();
-            let src_addr = src_addr.clone();
+            let src_addr = src_addr;
             let overload = overload.clone();
             async move {
                 let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::HttpRequest);
