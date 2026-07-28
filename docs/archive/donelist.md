@@ -4,7 +4,7 @@
 
 在 `perf/optimize-hotpaths` 分支中，我们对 Ingress、Tunnel 控制面及核心数据转发面进行了全方位的底层性能硬化与零分配重构：
 
-- **L7 零拷贝与混合策略**：重构 `copy_buffered_then_finish` 数据转发，实现 TCP → QUIC 转发的用户空间 100% 零拷贝（使用 `write_chunk`）。引入 **Hybrid (混合) 零拷贝/拷贝** 算法，对 `<16KB` 的小包拷贝后清空复用同一 Buffer，对 `>=16KB` 大包执行零拷贝拆分，兼顾吞吐并规避了慢速连接锁死大块内存（Memory Pinning）的隐患。
+- **L7 有界池化转发**：`copy_buffered_then_finish` 与 shutdown 路径统一使用始终启用的池化 `BytesMut + write_all`，消除高频小包的额外 `Bytes` 分配和 QUIC chunk 内存 pin，保持背压、生命周期和构建行为一致。
 - **IP 强类型化与零分配**：将控制面 `RoutingInfo` 的 `src_addr` 以及 UDP 会话键 `UdpSessionKey` 中的 `client_addr` 从 `String` 彻底重构为 `std::net::IpAddr`，消除了高并发下每包及每个控制流的 IP 格式化与反序列化解析开销。
 - **协程协商去 Box 堆分配**：将 QUIC 协商流时用的 `OpenWaitObserver` 回调从 Box 包装的 `Fn` 闭包重构为无分配的**静态函数指针（`fn` 指针）**，彻底切断了每条 Ingress 连接建连时的 Box 堆分配。
 - **HTTP/1.1 & HTTP/2 协议栈优化**：
@@ -340,4 +340,3 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
 - [x] **[TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi**: 已在 `tunnel-lib/src/open_bi.rs` 的 `open_bi_guarded` 中，对 `conn.open_bi()` 的等待期注入了 `waiting_for_stream_credit` 的 tracing debug span，使外部工具如 `tokio-console` 能清晰观测挂起协程。
 - [x] **[TODO-CR-AUDIT-13] Asymmetric Window Coupling in QUIC Configuration**: 已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小。
 - [x] **[TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety**: 已在 `tunnel-store/src/sqlite.rs` 进行了重构，通过 zero-copy 的 `&str` 代替 `String` 堆分配读取 SQLite 状态。
-

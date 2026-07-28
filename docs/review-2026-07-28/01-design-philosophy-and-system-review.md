@@ -63,11 +63,10 @@ compare-and-remove；失败回滚也只删除同一 key。若未来需要允许�
 
 ### P1（性能/内存证据待补）— QUIC 小包路径新增复制和分配
 
-`tunnel-lib/src/engine/copy.rs:152-186` 把 `copy_buffered_then_finish` 改为每次读取后调用
-`Bytes::copy_from_slice`（小于 `buffer_size / 4`），并不再使用原有 pooled buffer。该策略能
-缩短大 buffer 的 pin 时间，但短小高频 payload 会增加一次复制和一次 buffer 分配；是否收益
-取决于小包比例、QUIC 流控等待和 allocator。应与旧实现做同负载 A/B，观察 alloc、RSS、p99
-和 buffer pin 时间后再定案。
+`tunnel-lib/src/engine/copy.rs:152-186` 曾把 `copy_buffered_then_finish` 改为每次读取后调用
+`Bytes::copy_from_slice`，并绕过原有 pooled buffer。该策略在短小高频 payload 上增加复制和
+分配，已在后续修复中恢复为与 shutdown 路径一致的池化 `BytesMut + write_all`，并移除了
+`buf-pool` feature gate；后续验证重点转为同负载的 alloc、RSS 和 p99 对比。
 
 ### P1（生命周期/稳定性）— 时间缓存新增永久 OS 线程
 
@@ -219,12 +218,12 @@ identity，并在 `SelectedConnection`/注销事件中保留同一个值。若�
 不能写成无条件事实。应以目标平台 benchmark 决定；runtime-owned clock 只在 profile 证明
 时间读取占比显著时引入。它不应阻塞 Registry/H1 等 correctness fix。
 
-### buffer pool feature flag 可作为实验手段，但不是最终架构
+### buffer pool 已收敛为统一的 always-on 实现
 
-feature flag 便于 A/B，但会增加构建矩阵和发布组合；建议默认关闭、只用于 benchmark/灰度，
-并同时覆盖 `copy_buffered`、`copy_buffered_then_shutdown`、`PeekBufPool`，因为当前
-`copy_buffered_then_finish` 根本不走同一 pool。`cargo bench --bench copy_throughput` 目前
-也不是现成目标，实施前需要先创建 bench target 和采集 alloc/RSS/p99.9 的工具链。
+此前 feature flag 仅用于 A/B，但造成 CI、bench 和生产构建路径不一致；当前已移除该 feature
+及全部条件编译。`copy_buffered_then_finish`、`copy_buffered_then_shutdown` 和 `PeekBufPool`
+均始终启用各自的有界线程本地池，避免小包额外分配和构建组合漂移。后续如引入 bulk zero-copy，
+应作为独立语义 API，不得改变 L7 buffered relay 的默认路径。
 
 ### UDP Phase 1 方案目前不可直接实施
 
