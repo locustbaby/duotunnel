@@ -1,0 +1,48 @@
+server_egress_upstream:
+  upstreams:
+    http_echo_local:
+      servers:
+        - address: "127.0.0.1:9999"
+          resolve: false
+      lb_policy: "round_robin"
+  rules:
+    vhost:
+      - match_host: "wss.localtest.com"
+        action_upstream: "http_echo_local"
+
+tunnel_management:
+  server_ingress_routing:
+    listeners:
+      - port: 8081
+        mode: http
+        vhost:
+          - match_host: "wss.localtest.com"
+            client_group: "local-group"
+            proxy_name: "http_echo_local"
+          - match_host: "ws.localtest.com"
+            client_group: "local-group"
+            proxy_name: "ws_echo_local"
+          - match_host: "grpc.localtest.com"
+            client_group: "local-group"
+            proxy_name: "grpc_echo_local"
+
+  client_configs:
+    groups:
+      local-group:
+        config_version: "v1.0.0"
+        upstreams:
+          http_echo_local:
+            servers:
+              - address: "127.0.0.1:9999"
+                resolve: false
+            lb_policy: "round_robin"
+          ws_echo_local:
+            servers:
+              - address: "ws://127.0.0.1:8765"
+                resolve: false
+            lb_policy: "round_robin"
+          grpc_echo_local:
+            servers:
+              - address: "http://127.0.0.1:50051"
+                resolve: false
+            lb_policy: "round_robin"

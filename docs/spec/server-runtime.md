@@ -2,11 +2,11 @@
 
 ## Scope
 
-This spec defines the `server` crate runtime shape after the startup and boundary refactor.
+This spec defines the `duotunnel-server` crate runtime shape after the startup and boundary refactor.
 
 ## Public Entry
 
-`server::run()` is the only external entry for the crate runtime.
+`duotunnel_server::run()` is the only external entry for the crate runtime.
 
 Responsibilities at the outer boundary:
 
@@ -18,11 +18,11 @@ The binary target should not orchestrate startup directly.
 
 ## Runtime Layers
 
-The `server` crate is organized into four runtime layers.
+The `duotunnel-server` crate is organized into four runtime layers.
 
 ### 1. CLI
 
-`server/bootstrap/cli.rs`
+`crates/duotunnel-server/bootstrap/cli.rs`
 
 Owns:
 
@@ -39,13 +39,13 @@ Must not own:
 
 ### 2. Bootstrap
 
-`server/bootstrap/mod.rs`
+`crates/duotunnel-server/bootstrap/mod.rs`
 
 Owns:
 
 - loading server config
-- resolving standalone vs managed mode
-- building stores and config sources
+- connecting to `duotunnel-ctld`
+- building the local runtime from the watched configuration
 - building routing snapshots
 - building runtime state
 
@@ -59,8 +59,8 @@ Bootstrap is the composition root for server runtime dependencies.
 
 ### 3. App / Runtime
 
-`server/runtime/app.rs`
-`server/runtime/mod.rs`
+`crates/duotunnel-server/runtime/app.rs`
+`crates/duotunnel-server/runtime/mod.rs`
 
 Owns:
 
@@ -81,7 +81,7 @@ Must not own:
 
 ## 4. Supervisor / Components
 
-`server/runtime/supervisor.rs`
+`crates/duotunnel-server/runtime/supervisor.rs`
 
 Owns:
 
@@ -102,11 +102,10 @@ Request handling belongs below the startup layers.
 
 Main ingress/runtime modules:
 
-- `server/ingress/handlers/*`
-- `server/ingress/listener_mgr.rs`
-- `server/control/control_client.rs`
-- `server/control/hot_reload.rs`
-- `server/ingress/plugins/*`
+- `crates/duotunnel-server/ingress/handlers/*`
+- `crates/duotunnel-server/ingress/listener_mgr.rs`
+- `crates/duotunnel-server/control/control_client.rs`
+- `crates/duotunnel-server/ingress/plugins/*`
 
 These modules consume runtime capabilities from `ServerState` and should not perform top-level runtime assembly.
 
@@ -145,7 +144,7 @@ Rules:
 - callers should prefer capability methods over field access
 - routing swaps happen through runtime methods
 - listener management is reached through `ServerState`, not through raw shared maps
-- the proxy runtime is itself a capability: `IngressRuntime.proxy_handle` (`server/bootstrap/mod.rs:141`) is captured with `Handle::current()` at state construction (`server/bootstrap/mod.rs:385`) and read through `ServerState::proxy_handle()` (`server/bootstrap/mod.rs:167`)
+- the proxy runtime is itself a capability: `IngressRuntime.proxy_handle` (`crates/duotunnel-server/bootstrap/mod.rs:141`) is captured with `Handle::current()` at state construction (`crates/duotunnel-server/bootstrap/mod.rs:385`) and read through `ServerState::proxy_handle()` (`crates/duotunnel-server/bootstrap/mod.rs:167`)
 
 Examples of capability-style access:
 
@@ -182,7 +181,7 @@ Expected uses:
 
 ## Listener Management
 
-`server/ingress/listener_mgr.rs` is the owner of ingress listener lifecycle.
+`crates/duotunnel-server/ingress/listener_mgr.rs` is the owner of ingress listener lifecycle.
 
 Rules:
 
@@ -198,55 +197,55 @@ Rules:
 
 ### Runtime Ownership
 
-Listeners belong to the multi-threaded proxy runtime, not to whichever runtime happened to apply the config that created them. `spawn_single_listener` spawns every accept worker through `state.proxy_handle()` — `server/ingress/listener_mgr.rs:130` for HTTP, `server/ingress/listener_mgr.rs:165` for TCP — and the re-spawn that follows a drained listener uses the same handle (`server/ingress/listener_mgr.rs:240`).
+Listeners belong to the multi-threaded proxy runtime, not to whichever runtime happened to apply the config that created them. `spawn_single_listener` spawns every accept worker through `state.proxy_handle()` — `crates/duotunnel-server/ingress/listener_mgr.rs:130` for HTTP, `crates/duotunnel-server/ingress/listener_mgr.rs:165` for TCP — and the re-spawn that follows a drained listener uses the same handle (`crates/duotunnel-server/ingress/listener_mgr.rs:240`).
 
 This is load-bearing in ctld mode, where `apply_snapshot` runs on the `BackgroundComponent` current_thread runtime. A bare `tokio::spawn` there binds listeners to that single thread, with two consequences:
 
 - shutdown deadlock: the background runtime can be dropped before the accept workers observe cancellation, so the worker tail that decrements the counter and signals `drained` never runs, and `shutdown_all_listeners` waits on a notification nothing can send
-- no ingress parallelism: `run_accept_worker` spawns per-connection work onto the current runtime (`tunnel-lib/src/transport/accept.rs:39`), so accept, sniff, dispatch and relay all share that one thread while the proxy workers stay idle
+- no ingress parallelism: `run_accept_worker` spawns per-connection work onto the current runtime (`crates/duotunnel-core/src/transport/accept.rs:39`), so accept, sniff, dispatch and relay all share that one thread while the proxy workers stay idle
 
 See `docs/review-2026-07-26/02-scalability-and-cpu-affinity.md` §2.0 for the measured analysis.
 
-Drain waits are bounded independently of that fix: `wait_listener_drained` gives each listener `LISTENER_DRAIN_TIMEOUT` (10s, `server/ingress/listener_mgr.rs:82`) and warns instead of hanging when a worker was dropped rather than cancelled.
+Drain waits are bounded independently of that fix: `wait_listener_drained` gives each listener `LISTENER_DRAIN_TIMEOUT` (10s, `crates/duotunnel-server/ingress/listener_mgr.rs:82`) and warns instead of hanging when a worker was dropped rather than cancelled.
 
 ## Tunnel Admission
 
-`server/ingress/handlers/quic.rs` owns admission for client-facing tunnel connections. `run_quic_server` (`server/ingress/handlers/quic.rs:29`) checks in this order:
+`crates/duotunnel-server/ingress/handlers/quic.rs` owns admission for client-facing tunnel connections. `run_quic_server` (`crates/duotunnel-server/ingress/handlers/quic.rs:29`) checks in this order:
 
-1. address validation first: an `Incoming` whose source address is not validated is answered with quinn `Incoming::retry()` and consumes no budget (`server/ingress/handlers/quic.rs:73`); an unvalidated address that cannot be retried is ignored (`server/ingress/handlers/quic.rs:81`). Without this, spoofed Initial packets would each hold budget for a full handshake window and could lock out real clients at the cost of one extra RTT for honest ones.
-2. pre-auth budget: a validated `Incoming` must take a permit from a semaphore sized by `server.max_unauthenticated_connections` (`server/ingress/handlers/quic.rs:48`). Over budget the connection is refused rather than queued (`incoming.refuse()`, `server/ingress/handlers/quic.rs:94`), so a flood costs no task, stream, or crypto state.
-3. refusals increment `duotunnel_unauthenticated_connections_refused_total` (`server/runtime/metrics.rs:39`) and are logged at most once per `REFUSAL_LOG_INTERVAL` (1s, `server/ingress/handlers/quic.rs:27`); the counter carries the exact rate.
+1. address validation first: an `Incoming` whose source address is not validated is answered with quinn `Incoming::retry()` and consumes no budget (`crates/duotunnel-server/ingress/handlers/quic.rs:73`); an unvalidated address that cannot be retried is ignored (`crates/duotunnel-server/ingress/handlers/quic.rs:81`). Without this, spoofed Initial packets would each hold budget for a full handshake window and could lock out real clients at the cost of one extra RTT for honest ones.
+2. pre-auth budget: a validated `Incoming` must take a permit from a semaphore sized by `server.max_unauthenticated_connections` (`crates/duotunnel-server/ingress/handlers/quic.rs:48`). Over budget the connection is refused rather than queued (`incoming.refuse()`, `crates/duotunnel-server/ingress/handlers/quic.rs:94`), so a flood costs no task, stream, or crypto state.
+3. refusals increment `duotunnel_unauthenticated_connections_refused_total` (`crates/duotunnel-server/runtime/metrics.rs:39`) and are logged at most once per `REFUSAL_LOG_INTERVAL` (1s, `crates/duotunnel-server/ingress/handlers/quic.rs:27`); the counter carries the exact rate.
 
 Rules:
 
-- the permit covers the whole pre-auth phase and is dropped explicitly once authentication concludes (`server/ingress/handlers/quic.rs:309`); every failure path releases it by returning
-- the pre-auth phase shares a single deadline derived from `login_timeout` (`pre_auth_deadline`, `server/ingress/handlers/quic.rs:145`), not one timeout per step: handshake, login stream accept, message type, login body and the auth-store query all expire against it, so a peer that stalls each step cannot hold a permit for a multiple of the configured timeout
+- the permit covers the whole pre-auth phase and is dropped explicitly once authentication concludes (`crates/duotunnel-server/ingress/handlers/quic.rs:309`); every failure path releases it by returning
+- the pre-auth phase shares a single deadline derived from `login_timeout` (`pre_auth_deadline`, `crates/duotunnel-server/ingress/handlers/quic.rs:145`), not one timeout per step: handshake, login stream accept, message type, login body and the auth-store query all expire against it, so a peer that stalls each step cannot hold a permit for a multiple of the configured timeout
 - authenticated connections release their permit and are governed by the registry instead
 - rejection responses never echo internal error detail; `LoginResp.retryable` carries the only bit the client needs, and a backing-store fault must be marked retryable so a transient database blip does not permanently stop every client
 
 ### Protocol Negotiation
 
-`Login` carries `protocol_version` and `capabilities`. `negotiate_protocol` (`tunnel-lib/src/models/msg.rs:58`) returns `min(server max, client version)` plus the capability intersection, or `None` below `MIN_SUPPORTED_VERSION`; the server rejects a mismatch without echoing its supported range back to an unauthenticated peer (`server/ingress/handlers/quic.rs:228`).
+`Login` carries `protocol_version` and `capabilities`. `negotiate_protocol` (`crates/duotunnel-core/src/models/msg.rs:58`) returns `min(server max, client version)` plus the capability intersection, or `None` below `MIN_SUPPORTED_VERSION`; the server rejects a mismatch without echoing its supported range back to an unauthenticated peer (`crates/duotunnel-server/ingress/handlers/quic.rs:228`).
 
-The resulting `NegotiatedProtocol` is passed to `ClientRegistry::register` (`server/ingress/registry.rs:291`) and stored on the connection entry (`RegisteredConn`, `server/ingress/registry.rs:20`; surfaced as `SelectedConnection::negotiated`, `server/ingress/registry.rs:32`) so future features can gate on capabilities at the connection-selection site without re-plumbing. `LoginResp::success` echoes the negotiated version and capabilities to the client.
+The resulting `NegotiatedProtocol` is passed to `ClientRegistry::register` (`crates/duotunnel-server/ingress/registry.rs:291`) and stored on the connection entry (`RegisteredConn`, `crates/duotunnel-server/ingress/registry.rs:20`; surfaced as `SelectedConnection::negotiated`, `crates/duotunnel-server/ingress/registry.rs:32`) so future features can gate on capabilities at the connection-selection site without re-plumbing. `LoginResp::success` echoes the negotiated version and capabilities to the client.
 
-Wire generation is pinned by ALPN: `TUNNEL_ALPN` is `tunnel-quic/v1` (`tunnel-lib/src/transport/quic.rs:17`). Breaking layout changes require a new generation so incompatible peers fail in the TLS handshake instead of at login.
+Wire generation is pinned by ALPN: `TUNNEL_ALPN` is `tunnel-quic/v1` (`crates/duotunnel-core/src/transport/quic.rs:17`). Breaking layout changes require a new generation so incompatible peers fail in the TLS handshake instead of at login.
 
 ### Stream Admission
 
-Server-initiated streams go through `ConnectionHandle::open_stream` (`tunnel-lib/src/transport/connection_handle.rs:75`), which owns two per-connection semaphores: `stream_semaphore` for concurrent streams and `pending_semaphore` for streams waiting on QUIC flow-control credit (`tunnel-lib/src/transport/connection_handle.rs:39`-`42`), sized from `max_concurrent_streams` and the resolved `OverloadLimits::max_pending_streams` (`tunnel-lib/src/lb/overload.rs:25`) that the registry carries into `ConnectionHandle::spawn` (`server/ingress/registry.rs:159`).
+Server-initiated streams go through `ConnectionHandle::open_stream` (`crates/duotunnel-core/src/transport/connection_handle.rs:75`), which owns two per-connection semaphores: `stream_semaphore` for concurrent streams and `pending_semaphore` for streams waiting on QUIC flow-control credit (`crates/duotunnel-core/src/transport/connection_handle.rs:39`-`42`), sized from `max_concurrent_streams` and the resolved `OverloadLimits::max_pending_streams` (`crates/duotunnel-core/src/lb/overload.rs:25`) that the registry carries into `ConnectionHandle::spawn` (`crates/duotunnel-server/ingress/registry.rs:159`).
 
-The pending limit is per-connection, not a global check-then-act: `open_bi_guarded` admits through the connection's semaphore (`tunnel-lib/src/transport/open_bi.rs:90`), and the process-wide `stream_pending_queue_depth` gauge is a pure metric that gates nothing (`tunnel-lib/src/transport/open_bi.rs:88`). Rejections surface as `quic_open_rejected_overloaded` carrying the per-connection limit.
+The pending limit is per-connection, not a global check-then-act: `open_bi_guarded` admits through the connection's semaphore (`crates/duotunnel-core/src/transport/open_bi.rs:90`), and the process-wide `stream_pending_queue_depth` gauge is a pure metric that gates nothing (`crates/duotunnel-core/src/transport/open_bi.rs:88`). Rejections surface as `quic_open_rejected_overloaded` carrying the per-connection limit.
 
-## Background Mode
+## Control-plane Mode
 
-The server runs exclusively in managed mode, receiving its routing and token configuration from `tunnel-ctld`.
+The server runs exclusively with `duotunnel-ctld`, receiving its routing and token configuration from the watch stream.
 
 Mode selection and connection parameters are initialized during bootstrap.
 
-## Managed Control Apply
+## Control-plane Apply
 
-Managed control receives and processes both `ConfigEvent::Snapshot` and `ConfigEvent::Delta` events. The apply flow is as follows:
+The control client receives and processes both `ConfigEvent::Snapshot` and `ConfigEvent::Delta` events. The apply flow is as follows:
 
 1. Validates the incoming target revision and target hash. If a Delta is received, the operations are applied to a candidate copy of the last applied snapshot and validated against the target hash.
 2. Raises the config-apply admission fence.
@@ -299,9 +298,9 @@ are reset before a task is spawned.
 
 ## Shutdown
 
-`ServerApp` installs SIGINT/SIGTERM handlers and cancels the shared shutdown token (`server/runtime/app.rs:121`). The sequence is ordered so drain counters can reach zero before anything is force-closed:
+`ServerApp` installs SIGINT/SIGTERM handlers and cancels the shared shutdown token (`crates/duotunnel-server/runtime/app.rs:121`). The sequence is ordered so drain counters can reach zero before anything is force-closed:
 
-1. public accepts stop first: `proxy_main` calls `shutdown_all_listeners` (`server/runtime/app.rs:183`), which cancels every listener and waits for each to report drained, bounded by `LISTENER_DRAIN_TIMEOUT` (10s, `server/ingress/listener_mgr.rs:82`)
+1. public accepts stop first: `proxy_main` calls `shutdown_all_listeners` (`crates/duotunnel-server/runtime/app.rs:183`), which cancels every listener and waits for each to report drained, bounded by `LISTENER_DRAIN_TIMEOUT` (10s, `crates/duotunnel-server/ingress/listener_mgr.rs:82`)
 2. each tunnel handler retires/unregisters its connection before drain, so no selector can open new
    work during shutdown
 3. UDP workers and reverse-stream tasks drain with deadlines; timeout aborts their owned handles
@@ -317,7 +316,7 @@ drops the connection future, force-closes the socket and returns a typed downstr
 
 The constants are deliberately nested (10s < 15s < 20s < 30s) so every inner wait can complete before the next layer gives up.
 
-During drain, `tunnel_lib::METRICS` reports `active_connections` and `pending_streams`.
+During drain, `duotunnel_core::METRICS` reports `active_connections` and `pending_streams`.
 
 ## Plugin Ingress Pipeline
 
@@ -332,7 +331,7 @@ Bootstrap builds `PluginRegistry` at startup and wires server ingress plugins:
 
 Request-time ingress uses `IngressDispatcher` with this registry; handlers do not construct plugins ad hoc.
 
-Shard topology is resolved at bootstrap: `resolve_shard_count(server.quic.shards, None)` feeds `new_shared_registry(shard_count, max_streams, max_pending_streams)` (`server/bootstrap/mod.rs:333`, `server/bootstrap/mod.rs:345`) — the pending bound is per-connection and therefore travels with the registry into each `ConnectionHandle`.
+Shard topology is resolved at bootstrap: `resolve_shard_count(server.quic.shards, None)` feeds `new_shared_registry(shard_count, max_streams, max_pending_streams)` (`crates/duotunnel-server/bootstrap/mod.rs:333`, `crates/duotunnel-server/bootstrap/mod.rs:345`) — the pending bound is per-connection and therefore travels with the registry into each `ConnectionHandle`.
 
 ## Invariants
 
@@ -350,4 +349,4 @@ This spec does not define:
 - wire protocol details
 - metrics schema
 - database schema
-- plugin protocol contracts inside `tunnel-lib`
+- plugin protocol contracts inside `duotunnel-core`

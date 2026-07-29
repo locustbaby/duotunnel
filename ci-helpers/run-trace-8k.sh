@@ -50,7 +50,7 @@ if [ ! -f /tmp/trace-8k-initialized ]; then
   sleep 0.5
 
   mkdir -p data
-  ./target/release/tunnel-ctld --config ci-helpers/configs/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
+  ./target/release/duotunnel-ctld --config ci-helpers/configs/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
   echo $! > /tmp/ctld.pid
   for i in $(seq 1 60); do
     curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
@@ -62,10 +62,10 @@ if [ ! -f /tmp/trace-8k-initialized ]; then
     exit 1
   }
 
-  TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/configs/ctld.yaml \
-    client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
-    || ./target/release/tunnel-ctld --config ci-helpers/configs/ctld.yaml \
-    client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
+  TOKEN=$(./target/release/duotunnel-ctld --config ci-helpers/configs/ctld.yaml \
+    client create ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
+    || ./target/release/duotunnel-ctld --config ci-helpers/configs/ctld.yaml \
+    client rotate ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
   TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
   printf '%s' "$TOKEN" > /tmp/trace-8k-token
 
@@ -79,7 +79,7 @@ sudo systemd-run --scope --unit=duotunnel-server --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/server-trace.bin \
   "${TOKIO_ENV[@]}" \
-  -- ./target/release/server --config ci-helpers/configs/server.yaml \
+  -- ./target/release/duotunnel-server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "/tmp/ci-server-${SUFFIX}.log" 2>&1 &
 
 SERVER_UP=0
@@ -102,8 +102,8 @@ sudo systemd-run --scope --unit=duotunnel-client --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
   "${TOKIO_ENV[@]}" \
-  -E TUNNEL_CLIENT__AUTH_TOKEN="$TOKEN" \
-  -- ./target/release/client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
+  -E DUOTUNNEL_CLIENT__AUTH_TOKEN="$TOKEN" \
+  -- ./target/release/duotunnel-client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
 
 CLIENT_UP=0
 for i in $(seq 1 60); do
@@ -124,7 +124,7 @@ chmod +x ci-helpers/warmup.sh
 
 # 6. Collect & k6
 COLLECT_ENABLED=1
-if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
   COLLECT_ENABLED=0
 fi
 if [ "${COLLECT_ENABLED}" = "1" ]; then

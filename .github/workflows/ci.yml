@@ -3,11 +3,11 @@ on:
   push:
     branches: [main, "fix/**", "feat/**"]
     paths:
-      - "server/**"
-      - "client/**"
-      - "tunnel-lib/**"
-      - "tunnel-service/**"
-      - "tunnel-store/**"
+      - "crates/duotunnel-core/**"
+      - "crates/duotunnel-ctld/**"
+      - "crates/duotunnel-server/**"
+      - "crates/duotunnel-client/**"
+      - "crates/duotunnel-store/**"
       - "ci-helpers/*.py"
       - "ci-helpers/*.sh"
       - "ci-helpers/*.toml"
@@ -17,17 +17,22 @@ on:
       - "ci-helpers/proto/**"
       - "ci-helpers/src/**"
       - "ci-helpers/schema.json"
+      - "config/**"
+      - "docs/**"
+      - "scripts/**"
+      - ".github/actions/**"
+      - "README.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
-      - "server/**"
-      - "client/**"
-      - "tunnel-lib/**"
-      - "tunnel-service/**"
-      - "tunnel-store/**"
+      - "crates/duotunnel-core/**"
+      - "crates/duotunnel-ctld/**"
+      - "crates/duotunnel-server/**"
+      - "crates/duotunnel-client/**"
+      - "crates/duotunnel-store/**"
       - "ci-helpers/*.py"
       - "ci-helpers/*.sh"
       - "ci-helpers/*.toml"
@@ -37,6 +42,11 @@ on:
       - "ci-helpers/proto/**"
       - "ci-helpers/src/**"
       - "ci-helpers/schema.json"
+      - "config/**"
+      - "docs/**"
+      - "scripts/**"
+      - ".github/actions/**"
+      - "README.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
@@ -108,7 +118,7 @@ env:
   CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
   STRESS_CPU_QUOTA: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
   K6_CORE_STRESS_RATE: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate > 0 && inputs.stress_core_target_rate || '' }}"
-  COLLECT_RESOURCE_METRICS: "${{ (github.event_name != 'workflow_dispatch' || inputs.collect_resource_metrics != false) && '1' || '0' }}"
+  DUOTUNNEL_COLLECT_RESOURCE_METRICS: "${{ (github.event_name != 'workflow_dispatch' || inputs.collect_resource_metrics != false) && '1' || '0' }}"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -182,9 +192,9 @@ jobs:
           name: release-bins-${{ github.run_id }}
           retention-days: 1
           path: |
-            target/release/server
-            target/release/client
-            target/release/tunnel-ctld
+            target/release/duotunnel-server
+            target/release/duotunnel-client
+            target/release/duotunnel-ctld
             target/release/http-echo-server
             target/release/ws-echo-server
             target/release/grpc-echo-server
@@ -209,8 +219,8 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP=none \
           CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${SEP}-Cforce-frame-pointers=yes${SEP}-Cdebuginfo=1${SEP}--cfg${SEP}tokio_unstable" \
             cargo build --release --workspace \
-              --features server/dial9-telemetry \
-              --features client/dial9-telemetry
+              --features duotunnel-server/dial9-telemetry \
+              --features duotunnel-client/dial9-telemetry
 
       - name: Upload binaries (dial9)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -218,9 +228,9 @@ jobs:
           name: release-bins-dial9-${{ github.run_id }}
           retention-days: 1
           path: |
-            target/release/server
-            target/release/client
-            target/release/tunnel-ctld
+            target/release/duotunnel-server
+            target/release/duotunnel-client
+            target/release/duotunnel-ctld
             target/release/http-echo-server
             target/release/ws-echo-server
             target/release/grpc-echo-server
@@ -269,7 +279,7 @@ jobs:
         uses: ./.github/actions/setup-target
         with:
           artifact_name: release-bins-${{ github.run_id }}
-          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server,ci-test-client
+          binaries: duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server,ci-test-client
 
       - name: Start DuoTunnel infra
         uses: ./.github/actions/start-infra
@@ -607,7 +617,7 @@ jobs:
         uses: ./.github/actions/setup-target
         with:
           artifact_name: release-bins-${{ github.run_id }}
-          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+          binaries: duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -623,7 +633,7 @@ jobs:
       - name: Bench — basic
         run: |
           COLLECT=1
-          if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+          if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
             COLLECT=0
           fi
           if [ "$COLLECT" = "1" ]; then
@@ -651,7 +661,7 @@ jobs:
       - name: Bench — body_size
         run: |
           COLLECT=1
-          if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+          if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
             COLLECT=0
           fi
           if [ "$COLLECT" = "1" ]; then
@@ -728,7 +738,7 @@ jobs:
         uses: ./.github/actions/setup-target
         with:
           artifact_name: release-bins-${{ github.run_id }}
-          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+          binaries: duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -827,7 +837,7 @@ jobs:
         uses: ./.github/actions/setup-target
         with:
           artifact_name: release-bins-${{ github.run_id }}
-          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+          binaries: duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -930,7 +940,7 @@ jobs:
         uses: ./.github/actions/setup-target
         with:
           artifact_name: ${{ github.event_name == 'workflow_dispatch' && inputs.build_profile == 'release' && 'release-bins-' || 'release-bins-dial9-' }}${{ github.run_id }}
-          binaries: server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
+          binaries: duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server
 
       - uses: grafana/setup-k6-action@98db1bcacc2d06234a3cade8629ebc97e0130ec2 # v1
 
@@ -1258,13 +1268,13 @@ jobs:
       - name: Publish benchmark to gh-pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"
-          TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_client_url }}"
-          TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_server_url }}"
-          TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_client_url }}"
-          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_server_url }}"
-          TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_client_url }}"
-          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_server_url }}"
-          TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_client_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_INGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_server_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_INGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_8000qps_client_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_EGRESS_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_server_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_EGRESS_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_8000qps_client_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_server_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_INGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_ingress_multihost_8000qps_client_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_SERVER_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_server_url }}"
+          DUOTUNNEL_TRACE_ARTIFACT_EGRESS_MULTIHOST_8000QPS_CLIENT_URL: "${{ needs.bench-8k.outputs.trace_artifact_egress_multihost_8000qps_client_url }}"
         run: |
           bash "${{ github.workspace }}/ci-helpers/bench_ui/publish-gh-pages.sh"

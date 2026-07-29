@@ -247,8 +247,8 @@ Characteristics:
 Applies to:
 
 - `ingress/registry.rs` (`ClientRegistry` — register/unregister/purge via mpsc)
-- `client/tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
-- `tunnel-lib/src/transport/open_bi.rs` (`open_bi_guarded` — per-connection pending-stream gate before the `open_bi` wait)
+- `crates/duotunnel-client/tunnel/conn_pool.rs` (`EntryConnPool` — pool mutations via mpsc)
+- `crates/duotunnel-core/src/transport/open_bi.rs` (`open_bi_guarded` — per-connection pending-stream gate before the `open_bi` wait)
 
 ### Applying the Framework
 

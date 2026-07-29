@@ -13,9 +13,9 @@
 ### 1.1 现状拓扑（已核实）
 
 ```
-client/runtime/app.rs:38   build_quic_endpoint()  ← 全进程唯一一次
+crates/duotunnel-client/runtime/app.rs:38   build_quic_endpoint()  ← 全进程唯一一次
         │
-        └─ TunnelPoolService { endpoint }        （client/tunnel/mod.rs:17）
+        └─ TunnelPoolService { endpoint }        （crates/duotunnel-client/tunnel/mod.rs:17）
               │
               └─ pool.rs:23  endpoint.clone() × N  ← N 个 supervisor 共享同一 Endpoint
                     ├─ supervisor 1 → Connection 1 ┐
@@ -28,12 +28,12 @@ client/runtime/app.rs:38   build_quic_endpoint()  ← 全进程唯一一次
 
 | 事实 | 证据 | 对设计的意义 |
 | --- | --- | --- |
-| endpoint 全进程建一次 | `client/runtime/app.rs:38` | 唯一改动源头 |
-| N 个 slot 共享同一 clone | `client/tunnel/pool.rs:23` | **改这里即可** |
+| endpoint 全进程建一次 | `crates/duotunnel-client/runtime/app.rs:38` | 唯一改动源头 |
+| N 个 slot 共享同一 clone | `crates/duotunnel-client/tunnel/pool.rs:23` | **改这里即可** |
 | `supervisor` 签名已是**拥有** `endpoint: quinn::Endpoint` | `supervisor.rs:50-57` | **签名不用改** |
 | 重连时复用同一 endpoint（只重建 Connection） | `supervisor.rs:72-87` 循环内 `run_client(&config, &endpoint, …)` | 语义保持不变 |
-| UDP socket 绑 `0.0.0.0:0`（内核分配临时端口） | `client/tunnel/endpoint.rs:24` | 多 endpoint 天然不冲突 |
-| `EntryConnPool` **不感知** endpoint，只存 `ConnectionHandle` | `client/tunnel/conn_pool.rs` 全文无 endpoint | **pool 不用改** |
+| UDP socket 绑 `0.0.0.0:0`（内核分配临时端口） | `crates/duotunnel-client/tunnel/endpoint.rs:24` | 多 endpoint 天然不冲突 |
+| `EntryConnPool` **不感知** endpoint，只存 `ConnectionHandle` | `crates/duotunnel-client/tunnel/conn_pool.rs` 全文无 endpoint | **pool 不用改** |
 | 无 `endpoint.close()` / `wait_idle()` 调用 | 全 client 目录 grep 无 | 关闭路径需顺带补（§2.7） |
 
 **结论：改动面比预想的小得多**——`supervisor` / `conn_pool` / 重连逻辑都不用动，
@@ -54,20 +54,20 @@ I/O/锁进入主要 CPU 或 p99 路径。
 ### 2.1 核心改动
 
 ```rust
-// client/tunnel/mod.rs —— TunnelPoolService 改为持有 N 个 endpoint
+// crates/duotunnel-client/tunnel/mod.rs —— TunnelPoolService 改为持有 N 个 endpoint
 pub(crate) struct TunnelPoolService {
     pub(crate) endpoints: Vec<quinn::Endpoint>,   // 原: endpoint: quinn::Endpoint
     pub(crate) resolved_connections: u32,
     // ... 其余不变
 }
 
-// client/tunnel/pool.rs —— coordinator 保留 owner；每个 connection slot 取稳定映射的 clone
+// crates/duotunnel-client/tunnel/pool.rs —— coordinator 保留 owner；每个 connection slot 取稳定映射的 clone
 for slot_idx in 0..resolved_connections {
     let endpoint = endpoints[slot_idx % endpoints.len()].clone();
     slots.spawn(run_supervisor(cfg.clone(), endpoint, /* … */));
 }
 
-// client/runtime/app.rs —— 建 N 个而非 1 个
+// crates/duotunnel-client/runtime/app.rs —— 建 N 个而非 1 个
 let endpoints = build_quic_endpoints(&config, endpoint_count).await?;
 ```
 

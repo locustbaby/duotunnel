@@ -65,7 +65,7 @@ Reverse Proxy (Egress):   Internal Request → Client → Server → External Se
 
 ```
 tunnel/
-├── tunnel-lib/                    # Core library
+├── duotunnel-core/                    # Core library
 │   └── src/
 │       ├── config/                # Startup-time config types (QuicConfig, TcpConfig, ...)
 │       ├── models/msg.rs          # Message protocol definitions
@@ -103,7 +103,7 @@ tunnel/
 │           ├── peek_buf.rs        # PeekBufPool thread-local cache
 │           └── observability.rs   # Logging and tracing
 │
-├── server/                        # Server
+├── crates/duotunnel-server/                        # Server
 │   ├── main.rs                    # Thin binary entry
 │   ├── lib.rs                     # Server runtime facade
 │   ├── bootstrap/
@@ -117,9 +117,7 @@ tunnel/
 │   │   └── supervisor.rs          # Long-running component lifecycle
 │   ├── control/
 │   │   ├── control_client.rs      # Ctld watch client
-│   │   ├── hot_reload.rs          # File-watch reload path
-│   │   ├── local_auth.rs          # Managed-mode token cache auth
-│   │   ├── null_stores.rs         # Managed-mode null stores
+│   │   ├── local_auth.rs          # In-memory token cache auth
 │   │   └── service.rs             # Background service trait
 │   ├── ingress/
 │   │   ├── handlers/
@@ -140,7 +138,7 @@ tunnel/
 │   └── egress/
 │       └── mod.rs                 # Outbound routing (HttpConnector wrapper)
 │
-├── tunnel-service/                # Control service
+├── crates/duotunnel-ctld/                # Control service
 │   └── src/
 │       ├── main.rs                # Thin binary entry
 │       ├── lib.rs                 # Ctld runtime facade
@@ -159,7 +157,7 @@ tunnel/
 │           └── token/
 │               └── cache.rs       # Token cache provider
 │
-└── client/                        # Client
+└── crates/duotunnel-client/                        # Client
     ├── main.rs                    # Thin binary entry
     ├── lib.rs                     # Client runtime facade
     ├── bootstrap/
@@ -211,7 +209,7 @@ pub enum MessageType {
     LoginResp   = 0x02,  // Server → Client: success + ClientConfig
     Ping        = 0x04,
     Pong        = 0x05,
-    ConfigPush  = 0x06,  // ctld watch: Snapshot / Patch
+  ConfigPush  = 0x06,  // ctld watch: Snapshot / Delta
     RoutingInfo = 0x10,  // First message on each forwarded bidi stream
 }
 ```
@@ -248,7 +246,7 @@ pub struct RoutingInfo {
 }
 ```
 
-Implementation: `tunnel-lib/src/models/msg.rs`.
+Implementation: `crates/duotunnel-core/src/models/msg.rs`.
 
 ---
 
@@ -286,7 +284,7 @@ Implementation: `tunnel-lib/src/models/msg.rs`.
 
 ### 4.2 Client Reconnection Mechanism
 
-Implemented in `client/tunnel/supervisor.rs`:
+Implemented in `crates/duotunnel-client/tunnel/supervisor.rs`:
 
 - `JitterBackoff` over `reconnect.initial_delay_ms` … `max_delay_ms` (doubling with jitter per step).
 - `startup_jitter_ms` before first connect (thundering herd avoidance).
@@ -508,7 +506,6 @@ Historical note: global `quic_semaphore` / `tcp_semaphore` connection caps were 
 ```yaml
 server:
   tunnel_port: 4433
-  database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone only
   metrics_port: 9090
   login_timeout_secs: 10
   open_stream_timeout_ms: 5000
@@ -520,7 +517,13 @@ server:
     inflight_yield_pct: 0.80
     inflight_sleep_pct: 0.95
     max_pending_streams: 250     # optional; default = max_concurrent_streams / 4
+```
 
+### 9.2 Routing Base Layer (YAML)
+
+`routing.yaml` is loaded by `duotunnel-ctld` as the low-priority base layer. SQLite overrides are merged by resource key and the effective result is published to every server.
+
+```yaml
 server_egress_upstream:
   upstreams:
     external-api:
@@ -561,7 +564,7 @@ Egress vhost matching semantics:
 - Wildcards follow `VhostRouter` semantics: exact routes win over wildcard routes, and `*.example.com` matches `api.example.com` but not `example.com`.
 - Client-side local rejection is an early fast-fail mirror of the same allowlist. If a sniffed host has no matching egress vhost rule, HTTP/1.x receives `502 Bad Gateway` with `X-DuoTunnel-Reject: no-egress-route`; TLS/Other connections receive a clean EOF. Connections with no sniffed host continue to the server for final routing.
 
-### 9.2 Client Configuration (YAML)
+### 9.3 Client Configuration (YAML)
 
 ```yaml
 server_addr: "tunnel.example.com"
@@ -621,7 +624,7 @@ duotunnel_requests_total{type,status} # Total requests (tcp/http, success/error)
 ### 11.1 Transport Security
 
 - **QUIC TLS 1.3**: All tunnel traffic encrypted
-- **ALPN**: `tunnel-quic/v1` protocol identifier (generation-scoped; a breaking wire change takes a new generation so incompatible peers fail at the QUIC handshake). Handshake additionally negotiates `protocol_version` + capability bits — see `tunnel-lib/src/models/msg.rs`.
+- **ALPN**: `tunnel-quic/v1` protocol identifier (generation-scoped; a breaking wire change takes a new generation so incompatible peers fail at the QUIC handshake). Handshake additionally negotiates `protocol_version` + capability bits — see `crates/duotunnel-core/src/models/msg.rs`.
 - **Certificate Verification**: Supports custom CA or system certificates
 
 ### 11.2 Authentication Mechanism

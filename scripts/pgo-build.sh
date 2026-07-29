@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# pgo-build.sh — Profile-Guided Optimization (PGO) build for tunnel server/client
+# pgo-build.sh — Profile-Guided Optimization (PGO) build for DuoTunnel server/client
 #
 # PGO feeds real traffic profiles back to LLVM so it can make better inlining
 # and branch-prediction decisions.  Typical gain: 10–20% throughput.
 #
 # Requirements:
 #   - llvm-profdata in PATH  (apt: llvm / brew: llvm)
-#   - A running server + client for the profiling step (see below)
+#   - A running duotunnel-server + duotunnel-client for the profiling step (see below)
 #
 # Usage:
 #   bash scripts/pgo-build.sh
 #
 # Output:
-#   ./target/release/server   (PGO-optimised)
-#   ./target/release/client   (PGO-optimised)
+#   ./target/release/duotunnel-server   (PGO-optimised)
+#   ./target/release/duotunnel-client   (PGO-optimised)
 
 set -euo pipefail
 
@@ -37,8 +37,8 @@ echo "    Start the server and client with the instrumented binaries, run your"
 echo "    workload for at least 30 seconds, then press ENTER to continue."
 echo ""
 echo "    Example (in separate terminals):"
-echo "      ./target/release/server --config config/server.yaml"
-echo "      ./target/release/client --config config/client.yaml"
+echo "      ./target/release/duotunnel-server --config config/server.yaml"
+echo "      ./target/release/duotunnel-client --config config/client.yaml"
 echo "      bash verify_proxy.sh   # or run wrk / curl for more coverage"
 echo ""
 read -r -p "    Press ENTER when profiling is complete…"
@@ -80,8 +80,8 @@ RUSTFLAGS="-Cprofile-use=$MERGED -Cllvm-args=-pgo-warn-missing-function" \
 
 echo ""
 echo "==> PGO build complete."
-echo "    server: ./target/release/server"
-echo "    client: ./target/release/client"
+echo "    server: ./target/release/duotunnel-server"
+echo "    client: ./target/release/duotunnel-client"
 echo ""
 echo "    Profile data kept in: $PROFILE_DIR"
 echo "    To rebuild without re-profiling: RUSTFLAGS=\"-Cprofile-use=$MERGED\" cargo build --release"

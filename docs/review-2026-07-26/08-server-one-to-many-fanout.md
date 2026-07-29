@@ -17,7 +17,7 @@
 | # | 发现 | 严重级别 | CI 可见性 | todo 关系 |
 | --- | --- | --- | --- | --- |
 | F1 | **注册分片 vs 选择分片语义错配**：一个 group 的多个 client 被全局轮询分散到各 shard，但选择只从 group 哈希出的**单一** shard 取，其余 shard 的 client 变成纯故障备份而非负载分担 | **高**（正是 1-to-many LB 目标所在）；实际危害是**负载不均 / 单 client 成瓶颈**，**不是**可用性损失 | ❌ 不可见（CI shard_count=1） | 新发现 |
-| F2 | registry inflight slot 表硬编码 4096，全 server 存活 client 连接上限 4096，超出后鉴权成功但注册失败 | **低-中**（按实际规模 2-3 client/group，4096 远非约束；属可观测性卫生项） | ❌ 不可见 | TODO-146 |
+| F2 | registry inflight slot 表硬编码 4096，全 server 存活 client 连接上限 4096，超出后鉴权成功但注册失败 | **低-中**（按实际规模 2-3 crates/duotunnel-client/group，4096 远非约束；属可观测性卫生项） | ❌ 不可见 | TODO-146 |
 | F3 | P2C 只在被选中的单一 shard 内比较两者，过载时不会外溢到其它 shard 的空闲 client | 中（F1 的推论） | ❌ 不可见 | 随 F1 修 |
 | F4 | ingress 侧按**连接**而非按**请求**选择 client（keep-alive 连接一旦选定即固定），LB 粒度偏粗 | 低-中 | 部分 | 新发现 |
 
@@ -170,7 +170,7 @@ A 在"选择覆盖全组"与"突变成本有界"之间取得最优平衡，且�
 | P2C 需要两个不同候选而全集=1 | 退化取唯一者，不 panic |
 | 选择与并发注册/注销 | 读的是各 shard 的 ArcSwap 瞬时快照；跨 shard 非原子，可能读到"注册中"的偏差一个，与现有单 shard 读的弱一致性同级，LB 近似不影响正确性 |
 | 大 group（数千 client） | A 读 N 个 guard 仍 O(N)，P2C O(1)；不受 group 规模影响（优于方案 B） |
-| 客户端侧同名原语 | `client/tunnel/conn_pool.rs` 的 `next_conn_for_shard_excluding` 也用 `pick_from_preferred_shards`，但**语义不同且可接受**：那里是"在 client 自己的多条隧道连接间为某条流选一条"，preferred=hash(host,"entry") 是把流散布到不同本地连接的亲和策略，且其调用点带 `excluding` 重试循环会在失败时遍历所有连接（`egress/listener.rs:165-169`）。故 client 侧**不需要**同样改动——本缺陷是 server 特有 |
+| 客户端侧同名原语 | `crates/duotunnel-client/tunnel/conn_pool.rs` 的 `next_conn_for_shard_excluding` 也用 `pick_from_preferred_shards`，但**语义不同且可接受**：那里是"在 client 自己的多条隧道连接间为某条流选一条"，preferred=hash(host,"entry") 是把流散布到不同本地连接的亲和策略，且其调用点带 `excluding` 重试循环会在失败时遍历所有连接（`egress/listener.rs:165-169`）。故 client 侧**不需要**同样改动——本缺陷是 server 特有 |
 
 ### 2.8 取舍
 
@@ -215,7 +215,7 @@ A 在"选择覆盖全组"与"突变成本有界"之间取得最优平衡，且�
 2. **暴露耗尽指标**——capacity / allocated / high-water / exhaustion 计数进 /metrics，
    耗尽时可告警、可归因。
 
-**明确不做**：**不实现可增长表 / 分段表**（TODO-146 原选项 (c)）。在 2-3 client/group 的
+**明确不做**：**不实现可增长表 / 分段表**（TODO-146 原选项 (c)）。在 2-3 crates/duotunnel-client/group 的
 真实规模下，为一个有一个数量级余量的常量引入"slot 引用稳定性 + 扩容期并发"的复杂度不划算；
 显式 `max_client_connections` 配置项（原选项 (a)）同样**暂不需要**——4096 已是事实上的
 安全默认，配置化只是把一个不构成约束的数搬到 yaml 里，徒增配置面。
@@ -277,7 +277,7 @@ flowchart TD
 
 - **F1 是前置**：任何"绑核/多核化"（02）落地前必须先修 F1，否则多核化会立刻
   放大分发失衡，且压测结论不可信。
-- **F2 与 F1 独立且不阻塞多核化**：按 2-3 client/group 的实际规模，4096 不构成约束，
+- **F2 与 F1 独立且不阻塞多核化**：按 2-3 crates/duotunnel-client/group 的实际规模，4096 不构成约束，
   只需补启动日志 + 耗尽指标，可搭 06 §2.3.4 配置快照那批一起做。
 - **F3 随 F1 自然消解**。
 - **F4 延后**，依赖 TODO-140 基线证据。

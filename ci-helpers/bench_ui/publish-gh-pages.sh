@@ -46,10 +46,10 @@ for CASE_NAME in ingress_8000qps egress_8000qps ingress_multihost_8000qps egress
   SRV_URL=""
   CLI_URL=""
   
-  # URLs are passed via environment variables (TRACE_ARTIFACT_...)
+  # URLs are passed via environment variables (DUOTUNNEL_TRACE_ARTIFACT_...)
   # We use indirect expansion or just check the specific vars
-  VAR_SRV="TRACE_ARTIFACT_${CASE_NAME^^}_SERVER_URL"
-  VAR_CLI="TRACE_ARTIFACT_${CASE_NAME^^}_CLIENT_URL"
+  VAR_SRV="DUOTUNNEL_TRACE_ARTIFACT_${CASE_NAME^^}_SERVER_URL"
+  VAR_CLI="DUOTUNNEL_TRACE_ARTIFACT_${CASE_NAME^^}_CLIENT_URL"
   SRV_ARTIFACT_URL="${!VAR_SRV:-}"
   CLI_ARTIFACT_URL="${!VAR_CLI:-}"
 

@@ -52,7 +52,7 @@ Session 拥有该链。
 ### 2.1 核心 trait 与类型
 
 ```rust
-// tunnel-lib/src/plugin/http_filter.rs (新)
+// crates/duotunnel-core/src/plugin/http_filter.rs (新)
 use http::{HeaderMap, Method, Uri, Version, StatusCode};
 use std::net::SocketAddr;
 use std::time::Instant;

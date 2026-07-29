@@ -1,7 +1,7 @@
 database_url: "sqlite://./data/duotunnel-ci.db?mode=rwc"
 watch_addr: "127.0.0.1:7788"
 log_level: "info"
-admin_socket: "./data/tunnel-ctld.admin.sock"
+admin_socket: "./data/duotunnel-ctld.admin.sock"
 config:
   sources:
     - type: yaml

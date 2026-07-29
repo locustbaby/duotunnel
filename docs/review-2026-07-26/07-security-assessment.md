@@ -52,12 +52,12 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 
 ## 2. 已做对的（基线合格项）
 
-- **Token 存储**：只存 SHA-256 摘要（`tunnel-store/src/token.rs:12-18`），
+- **Token 存储**：只存 SHA-256 摘要（`crates/duotunnel-store/src/token.rs:12-18`），
   明文 token 32 字节 CSPRNG（`rand::fill`，:5），`dt_` 前缀 + base64url。
   DB 泄露不直接暴露可用凭证 ✅。
 - **日志脱敏**：`dt_...` 子串在 `AuthError` 格式化前被掩码（TODO-CR-AUDIT-8 完成）✅。
 - **协议嗅探超时**：sniff 包 `timeout(sniff_timeout, ...)`（`dispatcher.rs:38`、
-  `client/egress/listener.rs:109`、`core.rs:70`），默认 5s，挡 Slowloris
+  `crates/duotunnel-client/egress/listener.rs:109`、`core.rs:70`），默认 5s，挡 Slowloris
   嗅探阶段（TODO-CR-AUDIT-18 完成）✅。
 - **登录握手超时**：`handlers/quic.rs:69-132` 每步 `timeout(login_timeout)` ✅。
 - **消息帧上限**：`MAX_MESSAGE_BYTES=10MiB`（`msg.rs:14,126,154`）收发双向校验，
@@ -65,11 +65,11 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 - **UDP datagram 上限**：`MAX_DATAGRAM_BYTES=1200`（`msg.rs:15,195`）✅（但硬编码
   见 §4.4）。
 - **egress 双层防御**：client 本地 allowlist（`conn_pool.rs:163`）+ server 端
-  vhost 兜底（`server/egress/mod.rs:96` 无匹配即 `route_not_found`）✅。
+  vhost 兜底（`crates/duotunnel-server/egress/mod.rs:96` 无匹配即 `route_not_found`）✅。
 - **stream 并发上限**：per-connection `Semaphore(max_concurrent_streams)`
   （`connection_handle.rs:36,72-78`），单连接开流被限流 ✅。
 - **ctld watch 控制面鉴权**：`WatchServer` 接 `auth_token`
-  （`tunnel-service/src/control/watch.rs:25-31`），消息级校验 `WatchRequest.token`
+  （`crates/duotunnel-ctld/src/control/watch.rs:25-31`），消息级校验 `WatchRequest.token`
   （`watch.rs:87-89`），且用 `subtle::ConstantTimeEq` 常量时间比较（`watch.rs:141-145`）；
   默认 `watch_addr: 127.0.0.1:7788` 仅回环 ✅（残留低危缺口见 §4.6）。
 
@@ -212,7 +212,7 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 - **论证 / 备选**：泛化对端信息是标准做法；保留服务端日志不损可观测性。
 - **场景覆盖 & Corner Cases**：**泄露面主要在 standalone SQLite 模式**——managed 模式下
   `LocalTokenCache::authenticate` 只返回 `InvalidToken/ClientDisabled/TokenRevoked`
-  （`server/control/local_auth.rs`），不产生带 DB 细节的 `Internal`；SqliteAuthStore
+  （`crates/duotunnel-server/control/local_auth.rs`），不产生带 DB 细节的 `Internal`；SqliteAuthStore
   才会把 DB 错误升成 `Internal`。修复应覆盖两种 store 的返回映射，别只改一处。
 - **取舍**：对端拿不到细粒度失败原因，客户端排障略难——可用错误码（非文本）弥补。
 - **改动量 / 影响面**：~0.5 天。改 `handlers/quic.rs:152-157` 登录失败返回映射一处。**独立项。**
@@ -243,7 +243,7 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 ### 4.4 UDP datagram 1200 硬编码 `[已追踪 TODO-144]`
 
 - **现象与证据**：`msg.rs:15` 固定 1200，未按协商的 QUIC datagram / path MTU 处理；
-  大于此的包被**静默丢弃**（`client/egress/udp_listener.rs:83-86`）。
+  大于此的包被**静默丢弃**（`crates/duotunnel-client/egress/udp_listener.rs:83-86`）。
 - **攻击场景 / 根因**：非攻击面，属**功能正确性**问题——大 UDP 包（如大 DNS 响应、QUIC-in-UDP）
   被无声吞掉，表现为偶发丢包难排查。
 - **风险等级**：**功能正确性（非安全评级）**，todo 已记。
@@ -275,7 +275,7 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 
 - **现象与证据（已读码确认，鉴权存在）**：
   - `WatchServer::new(svc, bind_addr, auth_token: Option<String>)`
-    （`tunnel-service/src/control/watch.rs:25-31`）——token 是构造参数，空串被归一为 `None`；
+    （`crates/duotunnel-ctld/src/control/watch.rs:25-31`）——token 是构造参数，空串被归一为 `None`；
   - **消息级校验**：读完 `WatchRequest` 后立即比对其 `token` 字段
     （`watch.rs:87-89`），不匹配即 `warn!` + 断开；
   - **常量时间比较**：`tokens_equal` 用 `subtle::ConstantTimeEq`（`watch.rs:141-145`），
@@ -284,9 +284,9 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
     "Set when exposing watch_addr beyond localhost. Server must pass the same value"）；
   - **默认绑回环**：`watch_addr: "127.0.0.1:7788"`（`config/ctld.yaml:2`），
     server 侧 managed 模式携带 `ctld_token`（`ServerMode::Managed { ctld_token }`，
-    `server/bootstrap/mod.rs:35,45` 由 `resolved_ctld_token()` 注入）与之对应。
+    `crates/duotunnel-server/bootstrap/mod.rs:35,45` 由 `resolved_ctld_token()` 注入）与之对应。
 - **架构说明（值得记录的实际数据流）**：ctld **轮询 SQLite** 感知变更
-  （`tunnel-service/src/control/reactor.rs:43` `db_poll_task`），server 作为 watch 客户端
+  （`crates/duotunnel-ctld/src/control/reactor.rs:43` `db_poll_task`），server 作为 watch 客户端
   消费 ctld 的推送流（先 Snapshot、后 Patch）。控制面不是 server 主动查库。
 - **残留缺口 / 根因**：鉴权本身没问题，缺的是**启动期强制**——"绑非回环就必须设 token"
   目前**只由 YAML 注释约束**，运维把 `watch_addr` 改成 `0.0.0.0:7788` 而忘了取消注释

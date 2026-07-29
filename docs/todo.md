@@ -189,7 +189,7 @@ flowchart TD
 
 ### [TODO-CR-AUDIT-16] 消除复制引擎全局缓冲池锁竞争
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
-* **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
+* **Fix**: Replaced `SegQueue` with bounded `ArrayQueue<Vec<u8>>(1024)` in [copy.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/engine/copy.rs). Overflow drops silently; no O(N) `len()` call anywhere in the hot path.
 
 ### [TODO-97] Replace unsound uninitialized `Vec<u8>` relay buffer with `read_buf`
 * **Priority**: Critical | **Status**: ✅ Done (2026-07-26, PR #58) | **Track**: Zero-Copy & Buffer Pooling
@@ -202,7 +202,7 @@ flowchart TD
 
 ### [performance_optimization_proposal.md §1] L7 Zero-Copy Body Streaming
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
-* **Fix**: QUIC→TCP relay uses `copy_quic_to_shutdown` backed by `recv.read_chunk()` throughout [bridge.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/bridge.rs) and [base.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/proxy/base.rs). HTTP body forwarding in [egress/http.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/egress/http.rs) uses `read_chunk` with a streaming `try_unfold` body, avoiding intermediate heap-allocated copies.
+* **Fix**: QUIC→TCP relay uses `copy_quic_to_shutdown` backed by `recv.read_chunk()` throughout [bridge.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/engine/bridge.rs) and [base.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/proxy/base.rs). HTTP body forwarding in [egress/http.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/egress/http.rs) uses `read_chunk` with a streaming `try_unfold` body, avoiding intermediate heap-allocated copies.
 
 ### [performance_optimization_proposal.md §2] L7 Zero-Copy Chunked Response Writer
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
@@ -213,12 +213,12 @@ flowchart TD
 
 ### [TODO-81] Optimize Peek Buffer Copy in ProxyEngine (Zero-Copy)
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Zero-Copy & Buffer Pooling
-* **Fix**: `SniffRuntime::sniff` in [sniff.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/protocol/sniff.rs) now takes a `&PeekBufPool`, reads directly into a pooled `Vec<u8>`, and returns a `SniffPrefix::Pooled` — an `Arc<PooledBufInner>` that returns the buffer to `PeekBufPool` on the last drop. No intermediate `Bytes::copy_from_slice` on the fast (Matched) path.
+* **Fix**: `SniffRuntime::sniff` in [sniff.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/protocol/sniff.rs) now takes a `&PeekBufPool`, reads directly into a pooled `Vec<u8>`, and returns a `SniffPrefix::Pooled` — an `Arc<PooledBufInner>` that returns the buffer to `PeekBufPool` on the last drop. No intermediate `Bytes::copy_from_slice` on the fast (Matched) path.
 * **Residual**: `PeekBufPool::take()` zero-fills when a reused buffer is shorter than `buf_size`. This is sound; replacing it with `Vec::set_len` before `AsyncReadExt::read` would not be. Its zero-fill removal is now explicitly tracked as TODO-136 rather than deferred to task locality work.
 
 ### [TODO-104] EgressDnsCache global Mutex lock removal via DashMap & Single-Flight
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
-* **Fix**: [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/dns_cache.rs) now uses `DashMap<(String,u16), DnsEntry>` for cache and `DashMap<(String,u16), broadcast::Sender<...>>` for inflight dedup. Each unique `(host, port)` races an `Entry::Vacant` insertion to become the single resolver; all concurrent waiters subscribe and receive the result via broadcast. Resolution is wrapped in `tokio::time::timeout(5s)`. Stale cache served on failure.
+* **Fix**: [dns_cache.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-core/src/infra/dns_cache.rs) now uses `DashMap<(String,u16), DnsEntry>` for cache and `DashMap<(String,u16), broadcast::Sender<...>>` for inflight dedup. Each unique `(host, port)` races an `Entry::Vacant` insertion to become the single resolver; all concurrent waiters subscribe and receive the result via broadcast. Resolution is wrapped in `tokio::time::timeout(5s)`. Stale cache served on failure.
 
 ### [TODO-89] Support DNS Round-Robin and Fallback in Egress Dns Resolution
 * **Priority**: Medium | **Status**: ✅ Done (Phase 1 tail) | **Track**: Transport & Performance
@@ -231,12 +231,12 @@ flowchart TD
 
 ### [TODO-76] Client-side local egress rule evaluation and early truncation
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Core Proxy & Protocol
-* **Fix**: Egress vhost rules pushed to client config via `EntryConnPool::set_egress_rules`. In [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/client/egress/listener.rs), after SNI/host sniff, rules are evaluated as a local allowlist: HTTP plain without a matching route → `502 Bad Gateway` with `X-DuoTunnel-Reject: no-egress-route`; TLS/Other → clean EOF. Warning log + `egress_rejections_total` Prometheus counter incremented with reason `no_egress_route`. Server-side rule check still active as final defense. Matching strips optional ports, lowercases domains, and supports the same exact/wildcard semantics as server egress routing.
+* **Fix**: Egress vhost rules pushed to client config via `EntryConnPool::set_egress_rules`. In [listener.rs](file:///Users/sexy/Documents/GitHub/duotunnel/crates/duotunnel-client/egress/listener.rs), after SNI/host sniff, rules are evaluated as a local allowlist: HTTP plain without a matching route → `502 Bad Gateway` with `X-DuoTunnel-Reject: no-egress-route`; TLS/Other → clean EOF. Warning log + `egress_rejections_total` Prometheus counter incremented with reason `no_egress_route`. Server-side rule check still active as final defense. Matching strips optional ports, lowercases domains, and supports the same exact/wildcard semantics as server egress routing.
 
 ### [TODO-82] Decouple SQLite from Edge Server (Stateless Edge)
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Control Plane & Config
 * **Problem**:
-  边缘节点 `server` 仍然需要直接编译 SQLite 驱动并查询 local `tunnel-store` 数据库，阻碍了边缘节点的去状态化横向伸缩。
+  边缘节点 `server` 仍然需要直接编译 SQLite 驱动并查询 local `duotunnel-store` 数据库，阻碍了边缘节点的去状态化横向伸缩。
 * **Fix**:
   ctld-managed 模式下，server 启动已不再构建本地 SQLite `AuthStore`/`RuleStore`，改为使用 `ControlClientService` 从中心控制面持续接收 `Snapshot/Patch`，并将 token cache 与 routing snapshot 保存在内存里；首个 Snapshot 到达前 `/healthz` 保持 not ready，QUIC login 也会直接返回 `server not ready`，避免空配置窗口对外服务。
   本地快照持久化已完全实现：在成功从控制面拉取快照时写入本地文件，并在启动时如果控制面不可达，能自动加载本地备份快照作为只读 fallback。
@@ -366,7 +366,7 @@ flowchart TD
 * **Problem**:
   现有 benchmark 能看到端到端延迟、吞吐和部分 runtime 指标，但难以直接归因到具体函数边界。很多性能 TODO（HTTP egress scratch、relay buffer、H2 sender、UDP PPS、EntryConnPool actor）都需要先确认热点是否真的落在目标路径上。
 * **Implementation plan**:
-  以可选 Cargo feature 接入 `hotpath`，优先只启用函数耗时 profiling：在 server/client runtime 入口创建 guard，并对 QUIC stream open、sniff、route lookup、HTTP egress、TCP relay、UDP datagram encode/decode、H2 sender rebuild 和 EntryConnPool mutation 等少量关键边界加 `#[measure]`。先产出静态 JSON 报告并接入现有 benchmark artifact；不要默认打开 `hotpath-alloc` 或 `hotpath-cpu`，前者需先验证与现有 `mimalloc` 全局 allocator 的关系，后者需要独立 profiling profile/debug symbols，不能混入常规 release/CI 结果。
+  以可选 Cargo feature 接入 `hotpath`，优先只启用函数耗时 profiling：在 duotunnel-server + duotunnel-client runtime 入口创建 guard，并对 QUIC stream open、sniff、route lookup、HTTP egress、TCP relay、UDP datagram encode/decode、H2 sender rebuild 和 EntryConnPool mutation 等少量关键边界加 `#[measure]`。先产出静态 JSON 报告并接入现有 benchmark artifact；不要默认打开 `hotpath-alloc` 或 `hotpath-cpu`，前者需先验证与现有 `mimalloc` 全局 allocator 的关系，后者需要独立 profiling profile/debug symbols，不能混入常规 release/CI 结果。
 * **Adoption stages**:
   Stage 1 uses only `functions-timing` + `threads` with `HOTPATH_OUTPUT_FORMAT=json`, `HOTPATH_OUTPUT_PATH`, `HOTPATH_REPORT` and `HOTPATH_FOCUS`, so benchmark artifacts answer "which measured boundary got slower" without changing allocator/runtime behavior. Stage 2 may add `channel!`, `future!`, `stream!`, `mutex!` and `rw_lock!` only for suspected contention or backpressure points such as EntryConnPool, control watch, H2 sender rebuild and UDP session paths; wrapper macros can change named endpoint/lock types, so use `hotpath::wrap::*` deliberately and keep the profiled build semantically identical to the normal build. Stage 3 may add TUI/live inspection for local debugging and PR comment-style CI comparison after the benchmark matrix is stable.
 * **Do not copy blindly**:
@@ -450,7 +450,7 @@ flowchart TD
 ### [TODO-84] Event-driven Control Plane DB Synchronization
 * **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
 * **Problem**:
-  `tunnel-service` 使用 1500ms 的强轮询 `db_poll_task` 来同步数据更改。
+  `crates/duotunnel-ctld` 使用 1500ms 的强轮询 `db_poll_task` 来同步数据更改。
 * **Implementation plan**:
   在控制面自己的成功 DB mutation 路径中，于事务提交后发布带 resource version 的事件（必要时使用 outbox/sequence 表保证重启恢复）；`ControlService` 继续以现有 watch channel 向 server 推送 Patch/Snapshot。不要把 SQLite WAL 或文件系统 `notify` 当作正确性来源：事件可能合并、遗漏或无法区分写入语义。保留低频 reconciliation poll 作为外部写入与故障恢复 fallback，直到所有写入都统一经过发布路径。
 
@@ -461,10 +461,10 @@ flowchart TD
 * **Fix**:
   配合 `notify` 监听本地证书文件的改变，在不切断存量连接的情况下动态 Swap acceptor。
 
-### [TODO-83] Deconstruct tunnel-lib into targeted sub-crates
+### [TODO-83] Deconstruct duotunnel-core into targeted sub-crates
 * **Priority**: Medium | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
-  `tunnel-lib` 库趋向庞大混乱，混合了协议、中继以及 Client/Server 的具体实现。
+  `duotunnel-core` 库趋向庞大混乱，混合了协议、中继以及 Client/Server 的具体实现。
 * **Fix**:
   拆分为 `tunnel-proto` (协议帧), `tunnel-engine` (复制中继) 与 `tunnel-plugins` (接口插件)。
 
@@ -516,7 +516,7 @@ flowchart TD
 ### [TODO-105] Enable TCP Autotuning by defaulting buffer sizes to None
 * **Priority**: High | **Status**: Ready for implementation | **Track**: Transport & Performance
 * **Problem**:
-  在 `tunnel-lib/src/transport/tcp_params.rs` 中，`recv_buf_size` 和 `send_buf_size` 默认被设置为 `Some(4 * 1024 * 1024)`；`TcpConfig::default()` 会透传这两个值，所有未显式配置的 TCP 路径都会调用 `setsockopt`。这会固定 socket buffer 的策略，放弃由 Linux 的 `tcp_rmem` / `tcp_wmem` 随 RTT 与 BDP 调节的默认能力，并为大量空闲连接保留过高的缓冲上限。
+  在 `crates/duotunnel-core/src/transport/tcp_params.rs` 中，`recv_buf_size` 和 `send_buf_size` 默认被设置为 `Some(4 * 1024 * 1024)`；`TcpConfig::default()` 会透传这两个值，所有未显式配置的 TCP 路径都会调用 `setsockopt`。这会固定 socket buffer 的策略，放弃由 Linux 的 `tcp_rmem` / `tcp_wmem` 随 RTT 与 BDP 调节的默认能力，并为大量空闲连接保留过高的缓冲上限。
 * **Implementation plan**:
   将 `TcpParams` 默认值改为 `None`，让 `TcpConfig::default()` 自然继承；保留配置文件中显式 `recv_buf_size` / `send_buf_size` 的覆盖语义。补充默认值、显式覆盖和 `apply()` 不调用对应 `setsockopt` 的测试，并在 Linux 上对低 RTT 与高 BDP 两组负载做吞吐/内存回归。不要修改 QUIC 的 UDP buffer 参数，它们是独立的收包队列调优项。
 
@@ -650,7 +650,7 @@ flowchart TD
 ### [TODO-103] Expose active slowpath waiting tasks metric on /metrics
 * **Priority**: Low | **Status**: ✅ Done (Phase 1 tail) | **Track**: HA, Overload & Observability
 * **Fix**:
-  Server and client `/metrics` now append `duotunnel_slowpath_waiting_tasks` from `tunnel_lib::METRICS.waiting_tasks()`, exposing the in-memory overload backoff queue depth to Prometheus.
+  Server and client `/metrics` now append `duotunnel_slowpath_waiting_tasks` from `duotunnel_core::METRICS.waiting_tasks()`, exposing the in-memory overload backoff queue depth to Prometheus.
 
 ### [TODO-CR-AUDIT-1] 共享 Arc<TcpListener> 与 SO_REUSEPORT 概念背离
 * **Priority**: Low | **Status**: ✅ Done for managed ingress | **Track**: Transport & Performance

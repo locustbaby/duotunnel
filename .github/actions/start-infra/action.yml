@@ -46,7 +46,7 @@ runs:
       shell: bash
       run: |
         mkdir -p data
-        ./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
+        ./target/release/duotunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
         echo $! > /tmp/ctld.pid
         for i in $(seq 1 60); do
           curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
@@ -71,18 +71,19 @@ runs:
         sudo systemd-run --scope --unit=duotunnel-server --collect \
           "${QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           "${SERVER_TOKIO_ENV[@]}" \
-          -- ./target/release/server --config ${{ inputs.tun_config_dir }}/server.yaml \
+          -- ./target/release/duotunnel-server --config ${{ inputs.tun_config_dir }}/server.yaml \
           --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
         for i in $(seq 1 60); do
           curl -sf --max-time 1 http://127.0.0.1:9090/healthz > /dev/null 2>&1 && break
           sleep 0.5
         done
 
-        TOKEN=$(./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
-          client create-client ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
-          || ./target/release/tunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
-          client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
+        TOKEN=$(./target/release/duotunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
+          client create ci-group 2>/dev/null | grep '^Token:' | awk '{print $2}' \
+          || ./target/release/duotunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml \
+          client rotate ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
         TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
+        printf '%s' "$TOKEN" > /tmp/ci-token
 
         sleep 3
 
@@ -90,12 +91,12 @@ runs:
         if [ -n "${{ inputs.worker_threads }}" ] && [ "${{ inputs.worker_threads }}" != "0" ]; then
           CLIENT_TOKIO_ENV=(-E TOKIO_WORKER_THREADS="${{ inputs.worker_threads }}")
         fi
-        CLIENT_TOKIO_ENV+=(-E TUNNEL_CLIENT__AUTH_TOKEN="$TOKEN")
+        CLIENT_TOKIO_ENV+=(-E DUOTUNNEL_CLIENT__AUTH_TOKEN="$TOKEN")
 
         sudo systemd-run --scope --unit=duotunnel-client --collect \
           "${QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           "${CLIENT_TOKIO_ENV[@]}" \
-          -- ./target/release/client --config ${{ inputs.tun_config_dir }}/client.yaml >> /tmp/ci-client.log 2>&1 &
+          -- ./target/release/duotunnel-client --config ${{ inputs.tun_config_dir }}/client.yaml >> /tmp/ci-client.log 2>&1 &
         for i in $(seq 1 60); do
           systemctl is-failed duotunnel-client.scope > /dev/null 2>&1 && break
           curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break

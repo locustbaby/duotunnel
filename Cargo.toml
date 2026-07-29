@@ -1,11 +1,11 @@
 [workspace]
 
 members = [
-    "tunnel-lib",
-    "tunnel-store",
-    "tunnel-service",
-    "server",
-    "client",
+    "crates/duotunnel-core",
+    "crates/duotunnel-store",
+    "crates/duotunnel-ctld",
+    "crates/duotunnel-server",
+    "crates/duotunnel-client",
     "ci-helpers",
 ]
 
@@ -20,4 +20,3 @@ opt-level = 3
 codegen-units = 1      # Single codegen unit enables better inlining
 strip = "debuginfo"    # Smaller binaries; retain symbol names for stack traces
 panic = "abort"        # No unwinding machinery; smaller binary + faster panic path
-

@@ -50,7 +50,7 @@ Single source of truth for dashboard labels, units, and process grouping (`ci-he
 **Multihost**
 
 - k6 uses `MULTIHOST_COUNT = 50` hosts: `echo-01.local` … `echo-50.local` (`bench.js`).
-- Routing in `ci-helpers/configs/server.yaml` and `frpc.toml` covers `echo-01` … `echo-50`.
+- Routing in `ci-helpers/configs/routing.yaml` and `frpc.toml` covers `echo-01` … `echo-50`; `server.yaml` contains server runtime tuning only.
 - `/etc/hosts` also lists `echo-51` … `echo-60` for future expansion; they are **not** used by current cases.
 
 **Thresholds (actual, not legacy comments)**
@@ -142,7 +142,7 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 
 | Input | Type | Form default | Effective on push | Meaning |
 |-------|------|--------------|-------------------|---------|
-| `collect_resource_metrics` | bool | `true` | `true` | Run `bench-tool.py collect` during k6 (`COLLECT_RESOURCE_METRICS` env: `1` / `0`) |
+| `collect_resource_metrics` | bool | `true` | `true` | Run `bench-tool.py collect` during k6 (`DUOTUNNEL_COLLECT_RESOURCE_METRICS` env: `1` / `0`) |
 
 ### 4.4 Environment variables (job `env`)
 
@@ -150,7 +150,7 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 |----------|--------|-----------|
 | `STRESS_CPU_QUOTA` | `inputs.stress_cpu_quota` or `100%` | systemd scopes |
 | `K6_CORE_STRESS_RATE` | set only if `stress_core_target_rate > 0` | k6 `bench.js` via `run-bench-case.sh` |
-| `COLLECT_RESOURCE_METRICS` | `1` on push; `0` when dispatch sets `collect_resource_metrics=false` | `run-bench-case.sh`, `run-trace-8k.sh`, `bench-basic` job |
+| `DUOTUNNEL_COLLECT_RESOURCE_METRICS` | `1` on push; `0` when dispatch sets `collect_resource_metrics=false` | `run-bench-case.sh`, `run-trace-8k.sh`, `bench-basic` job |
 
 ---
 

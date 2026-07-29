@@ -2,15 +2,15 @@
 
 > 方法论：**以当前 HEAD 代码为唯一事实来源**，不转述历史文档结论；每条发现附
 > `file:line` 证据，并标注与 `docs/todo.md` 的关系（`[已追踪 TODO-xx]` /
-> `[新发现]` / `[需确认]`）。分析场景锚定 CI 8000 QPS 压测（server/client 各
+> `[新发现]` / `[需确认]`）。分析场景锚定 CI 8000 QPS 压测（duotunnel-server + duotunnel-client 各
 > 1 CPU cgroup 配额）。
 >
 > **文档结构**：每篇均按统一报告模板组织——**背景 → 问题陈述 → 结论速览 →
 > （每条发现）现象与证据 → 根因 → 方案 → 论证/备选对比 → 场景覆盖 & Corner
 > Cases → 取舍 → 收益/改动量/影响面 → 实施顺序与依赖**。
 
-审阅覆盖：`tunnel-lib` / `tunnel-store` / `server` / `client` /
-`tunnel-service` / `ci-helpers`（~21k 行 Rust）+ `../pingora` 实证对照 + CI 编排。
+审阅覆盖：`duotunnel-core` / `duotunnel-store` / `server` / `client` /
+`crates/duotunnel-ctld` / `ci-helpers`（~21k 行 Rust）+ `../pingora` 实证对照 + CI 编排。
 
 ---
 
@@ -151,7 +151,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | 项 | 文档 | 原因 |
 | --- | --- | --- |
 | owned ConnectionState + reliable unregister | 14 §4.1/§6.1, D9 §5 | 消除 slot ABA 与容量/生命周期混用 |
-| client/server 聚合 readiness | 14 §4.3, D9 §6 | 避免 last-writer-wins 与关键组件假 ready |
+| duotunnel-client + duotunnel-server 聚合 readiness | 14 §4.3, D9 §6 | 避免 last-writer-wins 与关键组件假 ready |
 | UDP/stream 解耦 + session/task/queue 上限 | 14 §6.2, D9 §8, D10 §2.3 | 同时是稳定性与性能 P0 |
 | RuntimeGeneration + control V2/LKG + revoke fence | D9 §2-§4 | 防止配置撕裂、回滚、丢更新和安全状态延迟生效 |
 | listener 全量 prepare/commit + protocol/QUIC typed drain | D9 §4/§7 | 防止部分监听提交、drain 期间新 work 和无限等待 |
@@ -177,7 +177,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | upstream 级 L4/L7 开关（原 passthrough vhost）**⏸️ 已搁置**（D-7） | 01 §4.2 | 仅记录需求 |
 | 统一 Session 抽象（简化 H1 body reclaim） | 04 §3.2 A4 | TODO-77 |
 | 配置去重下沉 + 统一参数校验 | 04 §2.2-2.3 | CR-AUDIT-6 |
-| tunnel-lib 拆分（先 tunnel-proto，利于 fuzz） | 04 §3.2 A6 | TODO-83 |
+| duotunnel-core 拆分（先 tunnel-proto，利于 fuzz） | 04 §3.2 A6 | TODO-83 |
 | sniff/codec/udp fuzz 靶 | 07 §4.5 | CR-AUDIT-20（建议升优先级） |
 | client 多 Endpoint | 02 Phase B / D7 / D10 §5 | **降为 profile-gated P2** |
 | server 多 endpoint（eBPF CID steering） | 02 Phase D | TODO-24（维持研究门槛） |
