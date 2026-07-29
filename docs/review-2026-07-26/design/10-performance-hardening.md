@@ -40,7 +40,7 @@ health endpoint 只读聚合快照，不由 supervisor 写 bool。除稳定性�
 
 ### 2.3 UDP 与 stream accept 解耦
 
-当前 client/server 在同一 QUIC connection loop 内处理：
+当前 duotunnel-client + duotunnel-server 在同一 QUIC connection loop 内处理：
 
 ```text
 accept_bi
@@ -121,7 +121,7 @@ struct ResolvedProxyBuffers {
 }
 ```
 
-由 server/client state 共享，注入 sniffer、dispatcher、H1 driver 和 relay。每个字段
+由 duotunnel-server + duotunnel-client state 共享，注入 sniffer、dispatcher、H1 driver 和 relay。每个字段
 做 checked min/max；`并发上限 × per-connection buffer` 与全局预算也用 checked
 arithmetic。预算包含 reload 时 old+new generation 双驻留峰值；0、极端值、乘法溢出或
 超过 hard max 在启动/prepare 阶段结构化拒绝。删除固定
@@ -212,7 +212,7 @@ TTL 到期并发 miss 可重复 `lookup_host`；cache hit 又 clone 全地址 Ve
 | --- | --- |
 | 吞吐 | accepted QPS、successful QPS、bytes/s |
 | 延迟 | p50/p95/p99/p99.9，按 H1/H2/TCP/UDP 分开 |
-| CPU | server/client user+sys、throttle、per-thread、scheduler |
+| CPU | duotunnel-server + duotunnel-client user+sys、throttle、per-thread、scheduler |
 | 内存 | steady RSS、峰值 RSS、每连接、每 active stream、snapshot apply 峰值 |
 | 分配 | alloc count/bytes，按协议与连接 churn 分开 |
 | 网络 | UDP drop、socket errors、QUIC retransmit、accept/open wait |

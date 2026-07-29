@@ -65,7 +65,7 @@ wait_unit_gone
 echo "Restarting server..."
 sudo systemd-run --scope --unit=duotunnel-server --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
-  -- ./target/release/server --config ci-helpers/configs/server.yaml \
+  -- ./target/release/duotunnel-server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "$SERVER_LOG" 2>&1 &
 
 SERVER_UP=0
@@ -80,9 +80,15 @@ if [ "$SERVER_UP" -eq 0 ]; then
 fi
 
 echo "Restarting client..."
+CLIENT_TOKEN=$(cat /tmp/ci-token 2>/dev/null || true)
+if [ -z "$CLIENT_TOKEN" ]; then
+  echo "FAIL: /tmp/ci-token is missing; cannot restart client without its ctld token"
+  exit 1
+fi
 sudo systemd-run --scope --unit=duotunnel-client --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
-  -- ./target/release/client --config ci-helpers/configs/client.yaml >> "$CLIENT_LOG" 2>&1 &
+  -E DUOTUNNEL_CLIENT__AUTH_TOKEN="$CLIENT_TOKEN" \
+  -- ./target/release/duotunnel-client --config ci-helpers/configs/client.yaml >> "$CLIENT_LOG" 2>&1 &
 
 CLIENT_UP=0
 for i in $(seq 1 60); do

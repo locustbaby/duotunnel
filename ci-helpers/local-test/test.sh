@@ -18,19 +18,20 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-export BIN="$REPO/target/release"
-export CFGDIR="$REPO/ci-helpers/local-test"
-export LOG_PREFIX="lt"
+cd "$REPO"
+export DUOTUNNEL_BIN="$REPO/target/release"
+export DUOTUNNEL_CONFIG_DIR="$REPO/ci-helpers/local-test"
+export DUOTUNNEL_LOG_PREFIX="lt"
 
 # Local-test overrides for tunnel-stack.sh
-export CTLD_CONFIG="$CFGDIR/ctld.yaml"
-export SERVER_CONFIG="$CFGDIR/server.yaml"
-export CLIENT_CONFIG="$CFGDIR/client.yaml"
-export CLIENT_GROUP="local-group"
-export CLIENT_HEALTHZ_PORT="9092"
-export LOCAL_HTTP_HOST="wss.localtest.com"
-export LOCAL_WS_HOST="ws.localtest.com"
-export LOCAL_GRPC_HOST="grpc.localtest.com"
+export DUOTUNNEL_CTLD_CONFIG="$DUOTUNNEL_CONFIG_DIR/ctld.yaml"
+export DUOTUNNEL_SERVER_CONFIG="$DUOTUNNEL_CONFIG_DIR/server.yaml"
+export DUOTUNNEL_CLIENT_CONFIG="$DUOTUNNEL_CONFIG_DIR/client.yaml"
+export DUOTUNNEL_CLIENT_GROUP="local-group"
+export DUOTUNNEL_CLIENT_HEALTHZ_PORT="9092"
+export DUOTUNNEL_LOCAL_HTTP_HOST="wss.localtest.com"
+export DUOTUNNEL_LOCAL_WS_HOST="ws.localtest.com"
+export DUOTUNNEL_LOCAL_GRPC_HOST="grpc.localtest.com"
 
 KEEP=0
 ONLY_SECTION="all"
@@ -134,7 +135,7 @@ warn_if_domain_not_loopback() {
 
 # ─── Source shared tunnel-stack functions ────────────────────────────────────
 # shellcheck source=ci-helpers/local-test/tunnel-stack.sh
-source "$CFGDIR/tunnel-stack.sh"
+source "$DUOTUNNEL_CONFIG_DIR/tunnel-stack.sh"
 
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 cleanup() {
@@ -153,16 +154,16 @@ trap cleanup EXIT INT TERM
 log "Running cargo clippy ..."
 cargo clippy --workspace || exit 1
 
-log "Checking binaries in $BIN ..."
-for b in server client tunnel-ctld http-echo-server ws-echo-server grpc-echo-server ci-test-client; do
-  [[ -x "$BIN/$b" ]] || {
-    echo "MISSING: $BIN/$b  →  cargo build --release --workspace"
+log "Checking binaries in $DUOTUNNEL_BIN ..."
+for b in duotunnel-server duotunnel-client duotunnel-ctld http-echo-server ws-echo-server grpc-echo-server ci-test-client; do
+  [[ -x "$DUOTUNNEL_BIN/$b" ]] || {
+    echo "MISSING: $DUOTUNNEL_BIN/$b  →  cargo build --release --workspace"
     exit 1
   }
 done
 
 # ─── Preflight: local-only domain resolution ─────────────────────────────────
-for domain in "$LOCAL_WS_HOST" "$LOCAL_GRPC_HOST"; do
+for domain in "$DUOTUNNEL_LOCAL_WS_HOST" "$DUOTUNNEL_LOCAL_GRPC_HOST"; do
   warn_if_domain_not_loopback "$domain"
 done
 
@@ -170,7 +171,7 @@ done
 pkill -f "http-echo-server 9999"          2>/dev/null || true
 pkill -f "ws-echo-server 8765"            2>/dev/null || true
 pkill -f "grpc-echo-server 50051"         2>/dev/null || true
-pkill -f "tunnel-ctld.*local-test-ctld"   2>/dev/null || true
+pkill -f "duotunnel-ctld.*local-test-ctld"   2>/dev/null || true
 pkill -f "server.*local-test-server"      2>/dev/null || true
 pkill -f "client.*local-test-client"      2>/dev/null || true
 sleep 0.5
@@ -185,9 +186,9 @@ stack_start_server
 stack_create_token
 stack_start_client
 
-log "Tunnel ready  (ingress: $LOCAL_HTTP_HOST/$LOCAL_WS_HOST/$LOCAL_GRPC_HOST on :8081, egress: $LOCAL_HTTP_HOST:8082)"
+log "Tunnel ready  (ingress: $DUOTUNNEL_LOCAL_HTTP_HOST/$DUOTUNNEL_LOCAL_WS_HOST/$DUOTUNNEL_LOCAL_GRPC_HOST on :8081, egress: $DUOTUNNEL_LOCAL_HTTP_HOST:8082)"
 
-CLIENT="$BIN/ci-test-client"
+CLIENT="$DUOTUNNEL_BIN/ci-test-client"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — External backends (continue-on-error)
@@ -204,8 +205,8 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 2; then
 hdr "SECTION 2 — HTTP/1.1"
-H="http://$LOCAL_HTTP_HOST:8081"
-E="http://$LOCAL_HTTP_HOST:8082"
+H="http://$DUOTUNNEL_LOCAL_HTTP_HOST:8081"
+E="http://$DUOTUNNEL_LOCAL_HTTP_HOST:8082"
 
 run "[HTTP] GET ingress"                  "$CLIENT" http "$H/"
 run "[HTTP] POST + body verify ingress"   "$CLIENT" http "$H/" --method POST \
@@ -236,8 +237,8 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 3; then
 hdr "SECTION 3 — HTTP/2 h2c"
-H="http://$LOCAL_HTTP_HOST:8081"
-E="http://$LOCAL_HTTP_HOST:8082"
+H="http://$DUOTUNNEL_LOCAL_HTTP_HOST:8081"
+E="http://$DUOTUNNEL_LOCAL_HTTP_HOST:8082"
 
 run "[HTTP2] GET h2c ingress"             "$CLIENT" http2 "$H/"
 run "[HTTP2] POST h2c + body ingress"     "$CLIENT" http2 "$H/" --method POST \
@@ -255,11 +256,11 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 4; then
 hdr "SECTION 4 — WebSocket"
-run "[WS] Echo ingress"                   "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
+run "[WS] Echo ingress"                   "$CLIENT" ws "ws://$DUOTUNNEL_LOCAL_WS_HOST:8081" \
   --message "hello-ws-tunnel"
-run "[WS] Custom message echo"            "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
+run "[WS] Custom message echo"            "$CLIENT" ws "ws://$DUOTUNNEL_LOCAL_WS_HOST:8081" \
   --message "ci-msg-two"
-run "[WS] Large message (4096 bytes)"     "$CLIENT" ws "ws://$LOCAL_WS_HOST:8081" \
+run "[WS] Large message (4096 bytes)"     "$CLIENT" ws "ws://$DUOTUNNEL_LOCAL_WS_HOST:8081" \
   --message "$(python3 -c "print('x'*4096)")"
 fi
 
@@ -269,7 +270,7 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 if should_run 5; then
 hdr "SECTION 5 — gRPC"
-G5="$LOCAL_GRPC_HOST:8081"
+G5="$DUOTUNNEL_LOCAL_GRPC_HOST:8081"
 
 run "[gRPC] Health/Check SERVING"         "$CLIENT" grpc              "$G5" --service ""
 run "[gRPC] EchoService/Echo body"        "$CLIENT" grpc-echo         "$G5" --ping "ci-local-echo-test"
@@ -286,12 +287,12 @@ fi
 if should_run 6; then
 hdr "SECTION 6 — Mixed-protocol smoke tests"
 
-run "[Mix] H1 GET ingress"            "$CLIENT" http      "http://$LOCAL_HTTP_HOST:8081/"
-run "[Mix] H2 GET ingress"            "$CLIENT" http2     "http://$LOCAL_HTTP_HOST:8081/"
-run "[Mix] H2c prior GET ingress"     "$CLIENT" h2c-prior "http://$LOCAL_HTTP_HOST:8081/"
-run "[Mix] WS echo ingress"           "$CLIENT" ws        "ws://$LOCAL_WS_HOST:8081" --message "mix-ws"
-run "[Mix] gRPC Health ingress"       "$CLIENT" grpc      "$LOCAL_GRPC_HOST:8081" --service ""
-run "[Mix] gRPC Echo ingress"         "$CLIENT" grpc-echo "$LOCAL_GRPC_HOST:8081" --ping "mix-grpc"
-run "[Mix] H1 GET egress"             "$CLIENT" http      "http://$LOCAL_HTTP_HOST:8082/"
-run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://$LOCAL_HTTP_HOST:8082/"
+run "[Mix] H1 GET ingress"            "$CLIENT" http      "http://$DUOTUNNEL_LOCAL_HTTP_HOST:8081/"
+run "[Mix] H2 GET ingress"            "$CLIENT" http2     "http://$DUOTUNNEL_LOCAL_HTTP_HOST:8081/"
+run "[Mix] H2c prior GET ingress"     "$CLIENT" h2c-prior "http://$DUOTUNNEL_LOCAL_HTTP_HOST:8081/"
+run "[Mix] WS echo ingress"           "$CLIENT" ws        "ws://$DUOTUNNEL_LOCAL_WS_HOST:8081" --message "mix-ws"
+run "[Mix] gRPC Health ingress"       "$CLIENT" grpc      "$DUOTUNNEL_LOCAL_GRPC_HOST:8081" --service ""
+run "[Mix] gRPC Echo ingress"         "$CLIENT" grpc-echo "$DUOTUNNEL_LOCAL_GRPC_HOST:8081" --ping "mix-grpc"
+run "[Mix] H1 GET egress"             "$CLIENT" http      "http://$DUOTUNNEL_LOCAL_HTTP_HOST:8082/"
+run "[Mix] H2 GET egress"             "$CLIENT" http2     "http://$DUOTUNNEL_LOCAL_HTTP_HOST:8082/"
 fi

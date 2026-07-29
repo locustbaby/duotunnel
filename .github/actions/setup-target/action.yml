@@ -9,7 +9,7 @@ inputs:
     default: 'target/release'
   binaries:
     description: 'Comma-separated list of binary names to chmod'
-    default: 'server,client,tunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server,ci-test-client'
+    default: 'duotunnel-server,duotunnel-client,duotunnel-ctld,http-echo-server,ws-echo-server,grpc-echo-server,ci-test-client'
 
 runs:
   using: "composite"

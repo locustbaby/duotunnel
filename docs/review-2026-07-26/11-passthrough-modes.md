@@ -51,7 +51,7 @@ sniff 预读的 preface 回放进 QUIC，再双向字节 relay（`copy_quic_to_s
 
 **转发规则（已核实，无二级路由）**：
 `TcpListenerDef { client_group: GroupId, proxy_name: ProxyName }`
-（`tunnel-store/src/config/mod.rs:228-232`）——一个 `mode: tcp` 端口**静态绑定唯一一组
+（`crates/duotunnel-store/src/config/mod.rs:228-232`）——一个 `mode: tcp` 端口**静态绑定唯一一组
 `(group, proxy_name)`**。所以"哪个端口进来的请求全部转发到对端（的同一个 proxy）"这个理解
 **完全正确**：端口即路由键，没有任何二级路由（无 SNI、无 host、无路径）。
 
@@ -106,7 +106,7 @@ client 侧依然会做完整的 L7 解析/重建/重编码**——用户配置�
 - **透明字节级回放**（更接近"L7-aware 透传"）：`H1Handler`（`plugins/h1/mod.rs`）
   识别 H1/WS 后**回放 preface + 字节 relay**，不重编码——server ingress 侧即此。
 - **完整解析/重编码**（终止侧）：`Http1Driver`（`driver/h1.rs`）keep-alive 循环，
-  在做 L7 的一侧（ingress=client/egress=server）完整解析请求、构造、重编码响应。
+  在做 L7 的一侧（ingress=crates/duotunnel-client/egress=server）完整解析请求、构造、重编码响应。
 - **H2c**（`plugins/h2c`，每请求 vhost 解析）、**TLS 终止→H2**（`plugins/tls`，
   MITM 动态签发→serve H2→按请求转发）、**WebSocket**（sniff→`Protocol::WebSocket`
   →TCP relay）。
@@ -141,7 +141,7 @@ L7 filter 承接层。
 
 现有 UDP 链路**只覆盖 client→server 的 egress 方向**：client 侧 `udp_entries` 绑本地 UDP 监听
 → QUIC datagram → server → 外部 upstream。**server 侧不存在 UDP ingress 监听器**：
-`IngressModeDef` 只有 `Http` 与 `Tcp` 两个变体（`tunnel-store/src/config/mod.rs:217-220`），
+`IngressModeDef` 只有 `Http` 与 `Tcp` 两个变体（`crates/duotunnel-store/src/config/mod.rs:217-220`），
 配置层根本无法声明一个 UDP 入口。
 
 | | **ingress**（外部 → server → 隧道 → client → 内网服务） | **egress**（本地 → client → 隧道 → server → 外部） |
@@ -163,7 +163,7 @@ server 侧、只面向外部 upstream）。本文其余缺口（§6.2）全部�
   按 `UdpSessionKey=(proxy_name,client_addr,client_port)` 建 session、每 session 一个
   上游 UDP socket + reply pump（`pump_udp_replies:141`）；**30s 空闲淘汰**（10s tick
   扫描，`:47-72`）。
-- **上游选择**：`resolve_udp_target`→`next_healthy` 轮询（`server/egress/mod.rs:43`）。
+- **上游选择**：`resolve_udp_target`→`next_healthy` 轮询（`crates/duotunnel-server/egress/mod.rs:43`）。
 
 ### 6.2 缺口
 

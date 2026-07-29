@@ -20,7 +20,7 @@ Inspired by [frp](https://github.com/fatedier/frp), but using QUIC's native stre
 
 - **Bidirectional** — ingress (server → client → backend) and egress (client → server → external) on one tunnel
 - **Multi-protocol** — HTTP/1.1, HTTP/2, HTTPS/TLS-SNI, WebSocket, raw TCP
-- **Centralised control plane** — `tunnel-ctld` owns all routing rules and token lifecycle; the server is a pure data-plane process
+- **Centralised control plane** — `duotunnel-ctld` owns all routing rules and token lifecycle; the server is a pure data-plane process
 - **Hot reload** — routing changes pushed to all connected servers and clients without restart
 - **VHost routing** — O(1) host-header dispatch with wildcard support
 - **TLS termination** — dynamic self-signed certificate generation and caching
@@ -31,7 +31,7 @@ Inspired by [frp](https://github.com/fatedier/frp), but using QUIC's native stre
 
 ```
                 ┌─────────────────────────────────────┐
-                │          tunnel-ctld                │
+                │          duotunnel-ctld                │
                 │  ┌─────────────┐  ┌──────────────┐ │
                 │  │  Rule store │  │  Token store │ │
                 │  └─────────────┘  └──────────────┘ │
@@ -40,12 +40,12 @@ Inspired by [frp](https://github.com/fatedier/frp), but using QUIC's native stre
                                │ config push (on connect + change)
                                ▼
 ┌──────────────────────────────────────────────────────┐
-│                  tunnel server                       │
+│              duotunnel-server                       │
 │                                                      │
 │  Ingress listeners (HTTP/TCP/TLS)                    │
 │       │  VHost router  ◄──── routing snapshot        │
 │       │  Client registry                             │
-│       │                          QUIC :10086 ──────────────►  tunnel client
+│       │                          QUIC :10086 ──────────────►  duotunnel-client
 │       ▼                                              │            │
 │  Server egress (forward to external)                 │       Local services
 └──────────────────────────────────────────────────────┘
@@ -65,46 +65,53 @@ Local app → Client HTTP entry → QUIC stream → Server → External service
 
 | Binary | Description |
 |--------|-------------|
-| `tunnel-ctld` | Control daemon — routing rules, token management, watch stream |
-| `server` | Data-plane tunnel server — QUIC endpoint, ingress listeners, egress forwarder |
-| `client` | Tunnel client — connects to server, forwards to local backends |
+| `duotunnel-ctld` | Control daemon — routing rules, token management, watch stream |
+| `duotunnel-server` | Data-plane tunnel server — QUIC endpoint, ingress listeners, egress forwarder |
+| `duotunnel-client` | Tunnel client — connects to server, forwards to local backends |
 
 ## Quick Start
 
-### Recommended: ctld-managed mode
+### Unified control-plane topology
 
-The control daemon owns all routing config and token lifecycle. The server is a stateless data-plane process — it only needs its own tuning parameters.
+The control daemon owns all routing config and token lifecycle. The server is a stateless data-plane process — it only needs its own tuning parameters. Every deployment runs `duotunnel-ctld`, `duotunnel-server`, and `duotunnel-client`.
 
-Point ctld at your `server.yaml` via the `server_config` field. On first boot ctld reads the routing sections from that file and seeds its database. On subsequent boots it uses the database and ignores the file.
+ctld merges the low-priority YAML routing layer with the high-priority SQLite layer. YAML provides defaults; SQLite overrides are managed through the local Unix admin socket and the resulting effective configuration is published to servers.
 
 **`ctld.yaml`:**
 ```yaml
 database_url: "sqlite://./data/duotunnel.db?mode=rwc"
 watch_addr: "0.0.0.0:7788"
-server_config: "config/server.yaml"   # seeded once on first boot
+admin_socket: "./data/duotunnel-ctld.admin.sock"
+config:
+  sources:
+    - type: yaml
+      path: "config/routing.yaml"
+      priority: 10
+    - type: sqlite
+      database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+      priority: 100
 ```
 
 **Step 1 — Start the control daemon:**
 ```bash
-./target/release/tunnel-ctld --config ctld.yaml
-# On first boot: routing seeded from config/server.yaml automatically
+./target/release/duotunnel-ctld --config ctld.yaml
 ```
 
 **Step 2 — Create a token for your client group:**
 ```bash
-./target/release/tunnel-ctld --config ctld.yaml client create-client my-group
+./target/release/duotunnel-ctld --config ctld.yaml client create my-group
 # → Created client 'my-group'
 # → Token: dt_xxxxxxxxxxxxxxxx
 ```
 
 **Step 3 — Start the server pointing at ctld:**
 ```bash
-./target/release/server --config config/server.yaml --ctld-addr 127.0.0.1:7788
+./target/release/duotunnel-server --config config/server.yaml --ctld-addr 127.0.0.1:7788
 ```
 
 **Step 4 — Start the client:**
 ```bash
-./target/release/client --config config/client.yaml
+./target/release/duotunnel-client --config config/client.yaml
 ```
 
 ## Configuration
@@ -115,7 +122,7 @@ server_config: "config/server.yaml"   # seeded once on first boot
 database_url: "sqlite://./data/duotunnel.db?mode=rwc"
 watch_addr: "127.0.0.1:7788"
 log_level: "info"
-admin_socket: "./data/tunnel-ctld.admin.sock"
+admin_socket: "./data/duotunnel-ctld.admin.sock"
 config:
   sources:
     - type: yaml
@@ -230,23 +237,23 @@ reconnect:
 
 ---
 
-## Token management (`tunnel-ctld client ...`)
+## Token management (`duotunnel-ctld client ...`)
 
 ```bash
 # Create a new client group and print its token
-tunnel-ctld client create-client <name>
+duotunnel-ctld client create <name>
 
 # Rotate (invalidate old + issue new)
-tunnel-ctld client rotate-token <name>
+duotunnel-ctld client rotate <name>
 
 # Revoke all tokens for a group
-tunnel-ctld client revoke-client <name>
+duotunnel-ctld client revoke <name>
 
 # List all clients and token status
-tunnel-ctld client list-tokens
+duotunnel-ctld token list
 ```
 
-Routing is managed via the `server_config` field in `ctld.yaml` — ctld reads the routing sections from `server.yaml` automatically on first boot.
+Routing is managed by merging `routing.yaml` with SQLite overrides. Servers receive the effective snapshot from ctld and do not read routing YAML or SQLite directly.
 
 ---
 
@@ -256,7 +263,7 @@ Routing is managed via the `server_config` field in `ctld.yaml` — ctld reads t
 
 ```bash
 cargo build --release
-# Binaries: target/release/{tunnel-ctld,server,client}
+# Binaries: target/release/{duotunnel-ctld,duotunnel-server,duotunnel-client}
 ```
 
 ---
@@ -264,20 +271,13 @@ cargo build --release
 ## Project Structure
 
 ```
-tunnel/
-├── tunnel-lib/          # Core: QUIC transport, protocol detection, proxy engine
-├── tunnel-store/        # Storage traits + SQLite implementations (auth + rules)
-├── tunnel-service/      # tunnel-ctld binary — control daemon + CLI
-├── server/              # server binary — data-plane tunnel server
-│   ├── handlers/        # QUIC, HTTP, TCP ingress handlers
-│   ├── egress.rs        # Server-side egress forwarder
-│   ├── registry.rs      # Lock-free client registry (DashMap)
-│   ├── listener_mgr.rs  # Ingress listener lifecycle management
-│   └── control_client.rs # ctld watch stream consumer
-├── client/              # client binary
-│   ├── app.rs           # LocalProxyMap — client-side routing
-│   ├── proxy.rs         # Stream handler
-│   └── entry.rs         # Local HTTP egress entry listener
+duotunnel/
+├── crates/
+│   ├── duotunnel-core/      # Core: QUIC transport, protocol detection, proxy engine
+│   ├── duotunnel-store/     # Storage traits + SQLite implementations (auth + rules)
+│   ├── duotunnel-ctld/      # duotunnel-ctld binary — control daemon + CLI
+│   ├── duotunnel-server/    # duotunnel-server binary — data-plane tunnel server
+│   └── duotunnel-client/    # duotunnel-client binary
 ├── config/              # Example YAML configs
 └── ci-helpers/          # CI configs and example setups
 ```
@@ -357,12 +357,12 @@ Key settings applied:
 | `SO_REUSEPORT` + backlog=4096 | `transport/listener.rs` | Multi-core accept scaling |
 | BBR congestion control | `transport/quic.rs` | Lower queue, better WAN throughput |
 | 4/32 MB QUIC flow-control windows | `transport/quic.rs` | No stalls on high-BDP links |
-| `ArcSwap` routing snapshot | `server/main.rs` | Lock-free config hot-swap |
-| `DashMap` client registry | `server/registry.rs` | Sharded concurrent access |
-| `CachePadded` counters | `server/registry.rs` | Eliminate false sharing |
+| `ArcSwap` routing snapshot | `crates/duotunnel-server/main.rs` | Lock-free config hot-swap |
+| `DashMap` client registry | `crates/duotunnel-server/registry.rs` | Sharded concurrent access |
+| `CachePadded` counters | `crates/duotunnel-server/registry.rs` | Eliminate false sharing |
 | `PeerKind` enum dispatch | `proxy/peers.rs` | Zero `Box<dyn>` on hot path |
-| Peek-buffer pool | `server/main.rs` | Reuse fixed-size buffers, avoid per-conn alloc |
-| jemalloc global allocator | `server/main.rs`, `client/main.rs` | Lower fragmentation under load |
+| Peek-buffer pool | `crates/duotunnel-server/main.rs` | Reuse fixed-size buffers, avoid per-conn alloc |
+| jemalloc global allocator | `crates/duotunnel-server/main.rs`, `crates/duotunnel-client/main.rs` | Lower fragmentation under load |
 | QUIC GSO/GRO (auto) | `quinn-udp` | Batched UDP I/O on Linux ≥ 5.4 |
 
 ---

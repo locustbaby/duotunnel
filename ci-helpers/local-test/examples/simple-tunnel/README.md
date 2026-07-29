@@ -19,7 +19,7 @@ Local app → Client:8002 → QUIC tunnel → Server → echo.free.beeceptor.com
 ### Automated test
 
 ```bash
-cd ci-helpers/examples/simple-tunnel
+cd ci-helpers/local-test/examples/simple-tunnel
 bash test.sh
 ```
 
@@ -29,30 +29,26 @@ The script builds binaries if needed, starts ctld + server + client, tests both 
 
 **1. Start the control daemon:**
 ```bash
-./target/release/tunnel-ctld --config ci-helpers/examples/simple-tunnel/ctld.yaml
+./target/release/duotunnel-ctld --config ci-helpers/local-test/examples/simple-tunnel/ctld.yaml
 ```
 
-**2. Seed routing and create a token:**
+**2. Create a token:**
 ```bash
-./target/release/tunnel-ctld --config ci-helpers/examples/simple-tunnel/ctld.yaml \
-  client import-routing --from ci-helpers/examples/simple-tunnel/server.yaml
-
-TOKEN=$(./target/release/tunnel-ctld --config ci-helpers/examples/simple-tunnel/ctld.yaml \
-  client create-client test-group | grep '^Token:' | awk '{print $2}')
+TOKEN=$(./target/release/duotunnel-ctld --config ci-helpers/local-test/examples/simple-tunnel/ctld.yaml \
+  client create test-group | grep '^Token:' | awk '{print $2}')
 ```
 
 **3. Start the server:**
 ```bash
-./target/release/server \
-  --config ci-helpers/examples/simple-tunnel/server.yaml \
-  --ctld-addr 127.0.0.1:7788
+./target/release/duotunnel-server \
+  --config ci-helpers/local-test/examples/simple-tunnel/server.yaml \
+  --ctld-addr 127.0.0.1:7799
 ```
 
 **4. Start the client** (in another terminal):
 ```bash
-# Replace the placeholder token in client.yaml first
-sed -i "s/auth_token: .*/auth_token: \"$TOKEN\"/" ci-helpers/examples/simple-tunnel/client.yaml
-./target/release/client --config ci-helpers/examples/simple-tunnel/client.yaml
+DUOTUNNEL_CLIENT__AUTH_TOKEN="$TOKEN" \
+  ./target/release/duotunnel-client --config ci-helpers/local-test/examples/simple-tunnel/client.yaml
 ```
 
 **5. Test ingress** (server → client):
@@ -69,13 +65,13 @@ curl -H "Host: echo.free.beeceptor.com" http://localhost:8002/
 
 ```
 ┌─────────────┐    watch stream    ┌─────────────────┐
-│  tunnel-    │◄──────────────────►│  tunnel server  │
-│  ctld :7788 │  routing + tokens  │  :10086 QUIC    │
+│ duotunnel-ctld │◄──────────────►│ duotunnel-server │
+│  ctld :7799    │ routing+tokens │ :10086 QUIC      │
 └─────────────┘                    │  :8001 ingress  │
                                    └────────┬────────┘
                                             │ QUIC tunnel
                                    ┌────────▼────────┐
-                                   │  tunnel client  │
+                                   │ duotunnel-client │
                                    │  :8002 egress   │
                                    └────────┬────────┘
                                             │
@@ -110,11 +106,12 @@ curl → Client:8002 → QUIC stream → Server → echo.free.beeceptor.com:443
 
 **[server.yaml](server.yaml)** — server tuning only (routing lives in ctld):
 - `server.tunnel_port: 10086` — QUIC port clients connect to
-- `tunnel_management` / `server_egress_upstream` — used for `import-routing` seeding
+
+**[routing.yaml](routing.yaml)** — YAML base layer for ingress and egress routing.
 
 **[client.yaml](client.yaml)** — connects to server, exposes egress on `:8002`
 
-**ctld.yaml** — control daemon (database + watch address)
+**[ctld.yaml](ctld.yaml)** — control daemon (SQLite + YAML source + watch address)
 
 ## Key Observations
 
@@ -127,6 +124,6 @@ curl → Client:8002 → QUIC stream → Server → echo.free.beeceptor.com:443
 ## Troubleshooting
 
 - Ensure ports `7788`, `8001`, `8002`, `10086` are free before starting
-- Check logs: `/tmp/tunnel-ctld.log`, `/tmp/tunnel-server.log`, `/tmp/tunnel-client.log`
+- Check logs: `/tmp/duotunnel-ctld.log`, `/tmp/duotunnel-server.log`, `/tmp/duotunnel-client.log`
 - Ingress test requires `Host: localhost` to match the vhost rule
 - Egress test requires `Host: echo.free.beeceptor.com` to match the server egress rule

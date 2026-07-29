@@ -9,11 +9,11 @@
 #   source ci-helpers/local-test/tunnel-stack.sh
 #
 #   # Required env vars (set defaults before sourcing if needed):
-#   #   BIN        — directory containing compiled binaries (e.g. ./target/release)
-#   #   CFGDIR     — directory containing yaml configs    (e.g. ./ci-helpers/local-test)
-#   #   LOG_PREFIX — prefix for /tmp log files            (default: ci)
-#   #   CLIENT_GROUP — ctld group name                   (default: ci-group)
-#   #   QUIC_CONNECTIONS — value to patch into client.yaml (default: not patched)
+#   #   DUOTUNNEL_BIN        — directory containing compiled binaries (e.g. ./target/release)
+#   #   DUOTUNNEL_CONFIG_DIR     — directory containing yaml configs    (e.g. ./ci-helpers/local-test)
+#   #   DUOTUNNEL_LOG_PREFIX — prefix for /tmp log files            (default: ci)
+#   #   DUOTUNNEL_CLIENT_GROUP — ctld group name                   (default: ci-group)
+#   #   DUOTUNNEL_QUIC_CONNECTIONS — value to patch into client.yaml (default: not patched)
 #
 #   stack_start_backends
 #   stack_start_ctld
@@ -25,10 +25,10 @@
 #   stack_kill_all    # immediate kill (SIGKILL, for use in cleanup traps)
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-: "${BIN:=./target/release}"
-: "${CFGDIR:=./ci-helpers/local-test}"
-: "${LOG_PREFIX:=ci}"
-: "${CLIENT_GROUP:=ci-group}"
+: "${DUOTUNNEL_BIN:=./target/release}"
+: "${DUOTUNNEL_CONFIG_DIR:=./ci-helpers/local-test}"
+: "${DUOTUNNEL_LOG_PREFIX:=ci}"
+: "${DUOTUNNEL_CLIENT_GROUP:=ci-group}"
 
 # ── Colors / logging helpers (only if not already defined) ───────────────────
 if ! declare -f log > /dev/null 2>&1; then
@@ -39,11 +39,11 @@ fi
 # ── Backend servers ───────────────────────────────────────────────────────────
 stack_start_backends() {
   log "Starting backend servers (http-echo:9999  ws-echo:8765  grpc-echo:50051) ..."
-  "$BIN/http-echo-server" 9999  > "/tmp/${LOG_PREFIX}-http-echo.log"  2>&1 &
+  "$DUOTUNNEL_BIN/http-echo-server" 9999  > "/tmp/${DUOTUNNEL_LOG_PREFIX}-http-echo.log"  2>&1 &
   echo $! > /tmp/http-echo.pid
-  "$BIN/ws-echo-server"   8765  > "/tmp/${LOG_PREFIX}-ws-echo.log"    2>&1 &
+  "$DUOTUNNEL_BIN/ws-echo-server"   8765  > "/tmp/${DUOTUNNEL_LOG_PREFIX}-ws-echo.log"    2>&1 &
   echo $! > /tmp/ws-echo.pid
-  "$BIN/grpc-echo-server" 50051 > "/tmp/${LOG_PREFIX}-grpc-echo.log"  2>&1 &
+  "$DUOTUNNEL_BIN/grpc-echo-server" 50051 > "/tmp/${DUOTUNNEL_LOG_PREFIX}-grpc-echo.log"  2>&1 &
   echo $! > /tmp/grpc-echo.pid
 
   # Wait for http-echo to be ready; ws/grpc get a grace period
@@ -55,12 +55,12 @@ stack_start_backends() {
   log "Backends ready"
 }
 
-# ── tunnel-ctld ───────────────────────────────────────────────────────────────
+# ── duotunnel-ctld ───────────────────────────────────────────────────────────────
 stack_start_ctld() {
-  local cfg="${CTLD_CONFIG:-$CFGDIR/ctld.yaml}"
-  log "Starting tunnel-ctld (config: $cfg) ..."
+  local cfg="${DUOTUNNEL_CTLD_CONFIG:-$DUOTUNNEL_CONFIG_DIR/ctld.yaml}"
+  log "Starting duotunnel-ctld (config: $cfg) ..."
   mkdir -p data
-  "$BIN/tunnel-ctld" --config "$cfg" > "/tmp/${LOG_PREFIX}-ctld.log" 2>&1 &
+  "$DUOTUNNEL_BIN/duotunnel-ctld" --config "$cfg" > "/tmp/${DUOTUNNEL_LOG_PREFIX}-ctld.log" 2>&1 &
   echo $! > /tmp/ctld.pid
 
   for i in $(seq 1 60); do
@@ -69,7 +69,7 @@ stack_start_ctld() {
   done
   curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1 || {
     echo "ERROR: ctld healthz never became ready"
-    cat "/tmp/${LOG_PREFIX}-ctld.log"
+    cat "/tmp/${DUOTUNNEL_LOG_PREFIX}-ctld.log"
     return 1
   }
   log "ctld ready"
@@ -77,11 +77,11 @@ stack_start_ctld() {
 
 # ── tunnel server ─────────────────────────────────────────────────────────────
 stack_start_server() {
-  local cfg="${SERVER_CONFIG:-$CFGDIR/server.yaml}"
-  local ctld_addr="${CTLD_ADDR:-127.0.0.1:7788}"
+  local cfg="${DUOTUNNEL_SERVER_CONFIG:-$DUOTUNNEL_CONFIG_DIR/server.yaml}"
+  local ctld_addr="${DUOTUNNEL_CTLD_ADDR:-127.0.0.1:7788}"
   log "Starting tunnel server (config: $cfg, ctld: $ctld_addr) ..."
-  "$BIN/server" --config "$cfg" --ctld-addr "$ctld_addr" \
-    > "/tmp/${LOG_PREFIX}-server.log" 2>&1 &
+  "$DUOTUNNEL_BIN/duotunnel-server" --config "$cfg" --ctld-addr "$ctld_addr" \
+    > "/tmp/${DUOTUNNEL_LOG_PREFIX}-server.log" 2>&1 &
   echo $! > /tmp/server.pid
 
   for i in $(seq 1 60); do
@@ -90,53 +90,45 @@ stack_start_server() {
   done
   curl -sf --max-time 2 http://127.0.0.1:9090/healthz > /dev/null 2>&1 || {
     echo "ERROR: server healthz never became ready"
-    cat "/tmp/${LOG_PREFIX}-server.log"
+    cat "/tmp/${DUOTUNNEL_LOG_PREFIX}-server.log"
     return 1
   }
   log "Tunnel server ready"
 }
 
 # ── Create/rotate token, patch client.yaml ────────────────────────────────────
-# After calling this, TUNNEL_TOKEN is exported.
+# After calling this, DUOTUNNEL_TOKEN is exported.
 stack_create_token() {
-  local cfg="${CTLD_CONFIG:-$CFGDIR/ctld.yaml}"
-  local client_cfg="${CLIENT_CONFIG:-$CFGDIR/client.yaml}"
-  log "Creating/rotating token for group '${CLIENT_GROUP}' ..."
-  TUNNEL_TOKEN=$(
-    "$BIN/tunnel-ctld" --config "$cfg" \
-      client create-client "$CLIENT_GROUP" 2>/dev/null \
+  local cfg="${DUOTUNNEL_CTLD_CONFIG:-$DUOTUNNEL_CONFIG_DIR/ctld.yaml}"
+  log "Creating/rotating token for group '${DUOTUNNEL_CLIENT_GROUP}' ..."
+  DUOTUNNEL_TOKEN=$(
+    "$DUOTUNNEL_BIN/duotunnel-ctld" --config "$cfg" \
+      client create "$DUOTUNNEL_CLIENT_GROUP" 2>/dev/null \
       | grep '^Token:' | awk '{print $2}' \
-    || "$BIN/tunnel-ctld" --config "$cfg" \
-      client rotate-token "$CLIENT_GROUP" 2>/dev/null \
+    || "$DUOTUNNEL_BIN/duotunnel-ctld" --config "$cfg" \
+      client rotate "$DUOTUNNEL_CLIENT_GROUP" 2>/dev/null \
       | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g'
   )
-  TUNNEL_TOKEN=$(echo "$TUNNEL_TOKEN" | tr -cd '[:print:]')
-  [[ -n "$TUNNEL_TOKEN" ]] || { echo "ERROR: failed to get token"; return 1; }
-  export TUNNEL_TOKEN
+  DUOTUNNEL_TOKEN=$(echo "$DUOTUNNEL_TOKEN" | tr -cd '[:print:]')
+  [[ -n "$DUOTUNNEL_TOKEN" ]] || { echo "ERROR: failed to get token"; return 1; }
+  export DUOTUNNEL_TOKEN
 
-  # Patch auth_token in client config
-  python3 -c "
-import re, sys
-f, t = sys.argv[1], sys.argv[2]
-c = open(f).read()
-c = re.sub(r'^auth_token:.*', 'auth_token: \"' + t + '\"', c, flags=re.MULTILINE)
-if sys.argv[3]:
-    n = sys.argv[3]
-    c = re.sub(r'^(\s*connections:)\s*\d+', r'\1 ' + n, c, flags=re.MULTILINE)
-open(f, 'w').write(c)
-" "$client_cfg" "$TUNNEL_TOKEN" "${QUIC_CONNECTIONS:-}"
-
-  # Wait for ctld to push the new token to server (~1500ms poll interval)
+  # Wait for ctld to publish the new token before the client connects.
   sleep 3
   log "Token ready"
 }
 
 # ── tunnel client ─────────────────────────────────────────────────────────────
 stack_start_client() {
-  local cfg="${CLIENT_CONFIG:-$CFGDIR/client.yaml}"
-  local healthz_port="${CLIENT_HEALTHZ_PORT:-9092}"
+  local cfg="${DUOTUNNEL_CLIENT_CONFIG:-$DUOTUNNEL_CONFIG_DIR/client.yaml}"
+  local healthz_port="${DUOTUNNEL_CLIENT_HEALTHZ_PORT:-9092}"
   log "Starting tunnel client (config: $cfg) ..."
-  "$BIN/client" --config "$cfg" > "/tmp/${LOG_PREFIX}-client.log" 2>&1 &
+  local -a client_env=("DUOTUNNEL_CLIENT__AUTH_TOKEN=$DUOTUNNEL_TOKEN")
+  if [[ -n "${DUOTUNNEL_QUIC_CONNECTIONS:-}" ]]; then
+    client_env+=("DUOTUNNEL_CLIENT__QUIC__CONNECTIONS=$DUOTUNNEL_QUIC_CONNECTIONS")
+  fi
+  env "${client_env[@]}" "$DUOTUNNEL_BIN/duotunnel-client" --config "$cfg" \
+    > "/tmp/${DUOTUNNEL_LOG_PREFIX}-client.log" 2>&1 &
   local cli_pid=$!
   echo "$cli_pid" > /tmp/client.pid
 
@@ -153,7 +145,7 @@ stack_start_client() {
   fi
   if ! curl -sf --max-time 2 "http://127.0.0.1:${healthz_port}/healthz" > /dev/null 2>&1; then
     echo "ERROR: client healthz not ready"
-    cat "/tmp/${LOG_PREFIX}-client.log"
+    cat "/tmp/${DUOTUNNEL_LOG_PREFIX}-client.log"
     return 1
   fi
   log "Client connected"
@@ -162,7 +154,7 @@ stack_start_client() {
 # ── Dump logs on failure ──────────────────────────────────────────────────────
 stack_dump_logs() {
   for comp in ctld server client; do
-    local f="/tmp/${LOG_PREFIX}-${comp}.log"
+    local f="/tmp/${DUOTUNNEL_LOG_PREFIX}-${comp}.log"
     [[ -f "$f" ]] && { echo "=== ${comp} ===" && cat "$f"; } || true
   done
 }

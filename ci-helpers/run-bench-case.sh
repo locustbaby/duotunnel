@@ -179,7 +179,7 @@ python3 ci-helpers/bench-tool.py collect 1 > "/tmp/collect-${CASE_NAME}.jsonl" 2
 echo $! > "/tmp/collect-${CASE_NAME}.pid"
 COLLECT_PID="$(cat "/tmp/collect-${CASE_NAME}.pid")"
 COLLECT_ENABLED=1
-if [ "${COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${COLLECT_RESOURCE_METRICS}" = "false" ]; then
+if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
   kill -9 "${COLLECT_PID}" 2>/dev/null || true
   rm -f "/tmp/collect-${CASE_NAME}.jsonl" "/tmp/collect-${CASE_NAME}.pid"
   COLLECT_ENABLED=0

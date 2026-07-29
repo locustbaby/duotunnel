@@ -1,0 +1,32 @@
+server_egress_upstream:
+  upstreams:
+    echo_backend:
+      servers:
+        - address: "echo.free.beeceptor.com:443"
+          resolve: true
+      lb_policy: "round_robin"
+  rules:
+    vhost:
+      - match_host: "echo.free.beeceptor.com"
+        action_upstream: "echo_backend"
+
+tunnel_management:
+  server_ingress_routing:
+    listeners:
+      - port: 8001
+        mode: http
+        vhost:
+          - match_host: "localhost"
+            client_group: "test-group"
+            proxy_name: "echo_service"
+
+  client_configs:
+    groups:
+      test-group:
+        config_version: "v1.0.0"
+        upstreams:
+          echo_service:
+            servers:
+              - address: "echo.free.beeceptor.com:443"
+                resolve: true
+            lb_policy: "round_robin"

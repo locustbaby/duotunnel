@@ -1,0 +1,12 @@
+database_url: "sqlite://./data/duotunnel-example.db?mode=rwc"
+watch_addr: "127.0.0.1:7799"
+log_level: "info"
+admin_socket: "./data/duotunnel-example.admin.sock"
+config:
+  sources:
+    - type: yaml
+      path: "ci-helpers/local-test/examples/simple-tunnel/routing.yaml"
+      priority: 10
+    - type: sqlite
+      database_url: "sqlite://./data/duotunnel-example.db?mode=rwc"
+      priority: 100

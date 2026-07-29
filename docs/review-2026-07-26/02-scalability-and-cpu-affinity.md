@@ -81,7 +81,7 @@ S1/S2/K1 同样应由可信 profile 判定。
 `spawn_single_listener` 创建；后者用**裸 `tokio::spawn`**，因此 accept loop 继承
 **调用方所在的 runtime**——而 `apply_snapshot` 跑在 `BackgroundComponent` 的
 `build_single_thread_runtime("bg-worker")`（`new_current_thread`）上。又因为
-`run_accept_worker`（`tunnel-lib/src/transport/accept.rs`）对每条连接同样用
+`run_accept_worker`（`crates/duotunnel-core/src/transport/accept.rs`）对每条连接同样用
 `tokio::spawn`，**accept + sniff + dispatch + relay 全链条都落在那一个线程上**，
 而 N 个 `proxy-worker` 线程只处理 QUIC 侧、公网侧完全空转。
 
@@ -262,7 +262,7 @@ trait，**不关心自己跑在哪个 runtime 实例上**——在哪个 runtime
 时才启动，不再视为无条件必做。
 client 是发起方——每条 QUIC 连接用独立 UDP socket（独立源端口），内核按四元组
 分流到不同 socket，**没有** server 侧 SO_REUSEPORT+CID 迁移的路由问题。
-改动点：`client/runtime/app.rs:38` 的单 endpoint 构建改为 per-supervisor-slot
+改动点：`crates/duotunnel-client/runtime/app.rs:38` 的单 endpoint 构建改为 per-supervisor-slot
 构建（`pool.rs:21-39` 循环里各建一个，不再 `endpoint.clone()`）。`connections = cores`
 时 client 的 QUIC 收包即随核扩展。
 
@@ -317,7 +317,7 @@ server 单 UDP socket 的 CID 路由问题需要 eBPF `SO_REUSEPORT` steering，
 oversubscribe，使用独立显式开关并告警。另需新增**具体核的枚举**：
 
 ```rust
-// tunnel-lib/src/infra/affinity.rs (新文件, Linux-only, 其它平台 no-op)
+// crates/duotunnel-core/src/infra/affinity.rs (新文件, Linux-only, 其它平台 no-op)
 pub fn allowed_cpus() -> Vec<usize> {
     // SAFETY: 标准 sched_getaffinity 用法，只读内核返回的位图
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
@@ -366,7 +366,7 @@ pub fn build_proxy_runtime_with(pin: PinMode) -> tokio::runtime::Runtime {
 **已知限制（必须写进文档/日志）**：`on_thread_start` 对 blocking pool 线程同样
 触发，靠 "worker 先创建" 的启动顺序把它们排除；这是 tokio 生态的通行做法，但
 若未来 tokio 改变启动顺序需要回归验证（用启动日志打印实际 pin 映射兜底）。
-`dial9` 路径（`server/runtime/mod.rs:63-66`）使用同一 builder 注入，行为一致。
+`dial9` 路径（`crates/duotunnel-server/runtime/mod.rs:63-66`）使用同一 builder 注入，行为一致。
 
 ### 5.3 配置与可观测
 
@@ -421,11 +421,11 @@ alloc_cpusets() {
   esac
 }
 
-# server/client scope（替换现有 CPUQuota 参数）
+# duotunnel-server + duotunnel-client scope（替换现有 CPUQuota 参数）
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  -p AllowedCPUs=$SERVER_CPUS -p MemoryMax=2G ... -- ./target/release/server ...
+  -p AllowedCPUs=$SERVER_CPUS -p MemoryMax=2G ... -- ./target/release/duotunnel-server ...
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  -p AllowedCPUs=$CLIENT_CPUS ... -- ./target/release/client ...
+  -p AllowedCPUs=$CLIENT_CPUS ... -- ./target/release/duotunnel-client ...
 
 # k6 + echo + ctld + collector 全部圈进 load cpuset（关键：把噪声关进笼子）
 sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
@@ -469,7 +469,7 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 | `taskset` 包装 | 物理核 | 优 | ✅ | 与 systemd scope 组合别扭（子进程继承但 systemd 记账丢失） | 备选（非 systemd 环境用） |
 | `nice`/`SCHED_IDLE` 压制噪声进程 | 优先级 | 中（仍有迁移+缓存踩踏） | ❌ | 低 | ❌ 不解决核间干扰 |
 | 直接换 8c/16c runner | 无隔离 | 中 | ✅ | 费用 | 与 cpuset **组合**使用（§6.3），不是替代 |
-| server/client 分离到两台 runner | 机器级 | 优 | ✅ | 需引入真实网络（延迟不再可比）+ 编排复杂 | 远期，做 WAN 场景时再上 |
+| duotunnel-server + duotunnel-client 分离到两台 runner | 机器级 | 优 | ✅ | 需引入真实网络（延迟不再可比）+ 编排复杂 | 远期，做 WAN 场景时再上 |
 
 ### 7.2 进程内绑核手段对比
 
@@ -490,7 +490,7 @@ sudo systemd-run --scope --unit=bench-load -p AllowedCPUs=$LOAD_CPUS --collect \
 | 非 Linux（macOS 开发机） | `affinity` 模块编译为 no-op + debug 日志；`pin_workers: auto` 静默降级 |
 | cpuset 核数 < 配置 workers | resolved 默认取 `min(explicit, affinity/available, quota)`；若保留显式 oversubscribe，必须单独开关并启动 warn，不能暗中取模 |
 | 显式核列表含不允许的核 | `sched_setaffinity` 返回 EINVAL → warn + 不 pin 该线程（不 panic，服务可用性优先） |
-| 超线程 sibling（物理核共享） | 4c CI runner 即 2 物理核 ×2HT：server/client 各占一个 **物理核的两个 HT**（0-1 vs 2-3 按 `lscpu -e` 的 core id 分组）比按逻辑号 0/1 切分更优；`alloc_cpusets` 增加 `--by-physical-core` 选项，GitHub runner 上先用 `lscpu` 探测再分配 |
+| 超线程 sibling（物理核共享） | 4c CI runner 即 2 物理核 ×2HT：duotunnel-server + duotunnel-client 各占一个 **物理核的两个 HT**（0-1 vs 2-3 按 `lscpu -e` 的 core id 分组）比按逻辑号 0/1 切分更优；`alloc_cpusets` 增加 `--by-physical-core` 选项，GitHub runner 上先用 `lscpu` 探测再分配 |
 | cgroup v1 runner | `AllowedCPUs` 由 systemd 落到 cpuset v1 控制器，`available_parallelism` 读 affinity 仍正确；已有 v1 quota 解析（runtime.rs:73-90）不受影响 |
 | 运行期 cpuset 被外部修改 | 不支持动态重绑（tokio worker 不可重启）；文档声明"改核集需重启进程" |
 | blocking pool 线程被误 pin | §5.2 用 `idx < workers` 门槛规避；启动日志打印实际映射作为回归信号 |
@@ -535,7 +535,7 @@ flowchart TD
 
 ## 11. 验收清单
 
-- [ ] CI：server/client/load 三 cpuset 隔离，`cpu.stat` 无 throttle 记录；
+- [ ] CI：duotunnel-server + duotunnel-client/load 三 cpuset 隔离，`cpu.stat` 无 throttle 记录；
 - [ ] baseline/candidate 至少交错 5 次并报告 median、置信区间、错误率与环境噪声；
 - [ ] 启动日志输出 pin 映射与最终并行度（对齐 TODO-140）；
 - [ ] 扩展曲线：1→2→4 核 `QPS(N)/(N×QPS(1)) ≥ 0.8`，p99(4核) ≤ 1.3×p99(1核)@等效单核负载；

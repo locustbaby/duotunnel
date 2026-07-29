@@ -26,7 +26,7 @@ ubuntu-latest`）。本文的目标是让压测结果**可复现、可归因、�
 配置快照）不足以让结果可归因。这不是调优能解决的。
 
 **核心解法三条**：
-1. **cpuset 隔离替代 CPUQuota**：`AllowedCPUs` 把 server/client/负载关进不重叠物理核集，
+1. **cpuset 隔离替代 CPUQuota**：`AllowedCPUs` 把 duotunnel-server + duotunnel-client/负载关进不重叠物理核集，
    移除周期冻结与核间争抢（2.1）。
 2. **8k 数字可信化（目标不变）**：3k 测延迟回归、6k 测容量边界、8k **仍然是测最大 QPS** ——
    缺陷不在用例目标而在隔离缺失，cpuset 到位后数字才可复现；但必须承认
@@ -56,10 +56,10 @@ ubuntu-latest`）。本文的目标是让压测结果**可复现、可归因、�
 ### 1.2 CPUQuota 放大了抖动（不只是不够，还更差）
 
 `run-trace-8k.sh:13-14` 用 `-p CPUQuota=100%`：
-- CFS bandwidth 按 100ms period 记账，server/client 烧完当期配额后**整进程冻结
+- CFS bandwidth 按 100ms period 记账，duotunnel-server + duotunnel-client 烧完当期配额后**整进程冻结
   到下个 period 边界**。8k 突发时每 100ms 一次 up-to-100ms 停顿 → 直接产生
   秒级 p99 与 k6 dropped iterations；
-- server/client 仍可在 4 核间自由迁移，和无约束的 k6/echo/collector 争同一批
+- duotunnel-server + duotunnel-client 仍可在 4 核间自由迁移，和无约束的 k6/echo/collector 争同一批
   物理核、互踩 L1/L2、触发跨核迁移（冷缓存重放）；
 - 结论：`CPUQuota` 在超订环境下**既限死了 SUT 上限、又引入了周期性冻结**，
   是"争抢 + 毛刺"的双重来源。
@@ -82,7 +82,7 @@ ubuntu-latest`）。本文的目标是让压测结果**可复现、可归因、�
 ### 2.1 隔离：cpuset 替代 CPUQuota（详见 02 §6）
 
 **现象/问题 + 证据**
-- server/client 各 `-p CPUQuota=100%`（`run-trace-8k.sh:13-14`，同 `run-bench-case.sh:14-16`），
+- duotunnel-server + duotunnel-client 各 `-p CPUQuota=100%`（`run-trace-8k.sh:13-14`，同 `run-bench-case.sh:14-16`），
   经 systemd scope 启动（`run-trace-8k.sh:77-78`、`:100-101`；`-p CPUWeight=1024` 亦已在用）；
 - k6 负载生成器**裸跑、不在任何 scope 内**（`run-trace-8k.sh:133`），echo/ctld/collector 也无约束；
 - 全局默认 `STRESS_CPU_QUOTA=100%`（`ci.yml:109`，input 定义 `ci.yml:81-84`：`100%`=1 CPU、`400%`≈4 CPUs）。
@@ -109,7 +109,7 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
 
 **场景覆盖 & Corner Cases**
 - **k6 不在 scope 内**（`run-trace-8k.sh:133`、`run-bench-case.sh:198`、`ci.yml:885/913`）：
-  `-p AllowedCPUs` 只覆盖 systemd-run 起的 server/client/frp，**覆盖不到裸跑的 k6**。
+  `-p AllowedCPUs` 只覆盖 systemd-run 起的 duotunnel-server + duotunnel-client/frp，**覆盖不到裸跑的 k6**。
   必须 `taskset -c <load-set>` 或把 k6 单独包一个 scope，否则负载生成器会漂进 SUT 核集，隔离白做。
 - **HT sibling**：`ubuntu-latest` 4 vCPU 的逻辑核不保证映射到不同物理核；`AllowedCPUs=0,1,2,3`
   只隔离 guest 内调度域，**无法防 HT 兄弟线程共享执行端口的争用**。分配器应尽量按 `lscpu -e`
@@ -133,7 +133,7 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
 
 **现象/问题 + 证据**
 8k 用例的目的就是**测最大 QPS**，这个目的**不变、也不该改**。问题不在目标，而在
-**测出来的数不可信**：server/client 与 k6/echo/collector 抢同一批 4 核（§1.1 物理超订），
+**测出来的数不可信**：duotunnel-server + duotunnel-client 与 k6/echo/collector 抢同一批 4 核（§1.1 物理超订），
 量到的是"**争抢条件下的吞吐**"，不是系统能力；叠加 CPUQuota 的 100ms 周期冻结（§1.2），
 同一 commit 多次跑的数字散开，既拦不住退化也证明不了改进（阈值 `p(95)<60000ms` 形同虚设，§1.3）。
 
@@ -142,7 +142,7 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
 "SUT 实际拿到多少核"的函数，而不是引擎能力的函数。
 
 **方案**
-**唯一的修法就是 §2.1 的 cpuset 隔离**：给 server/client 各自的核集，把 k6 + echo + collector
+**唯一的修法就是 §2.1 的 cpuset 隔离**：给 duotunnel-server + duotunnel-client 各自的核集，把 k6 + echo + collector
 关进另一组核集。**8k 这个目标值本身不改**，用例仍是延迟/吞吐基准。
 同时必须明确接受一个事实：**"4c 上测得的上限" ≠ "系统上限"**——隔离后 SUT 只拿到其中一部分核，
 测出的是"**该核数下的最大 QPS**"。要测真实系统最大 QPS，只能换更大的 runner（8c+/nightly 大机），
@@ -168,16 +168,16 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
   扩展成 `stress_cpus`（CPUQuota 参数化 → cpuset 宽度参数化）即可复用同一 job。
 
 **场景覆盖 & Corner Cases**
-- **3k**：SUT server/client 各 1 核充裕——这是可作 p99 绝对断言的层；
+- **3k**：SUT duotunnel-server + duotunnel-client 各 1 核充裕——这是可作 p99 绝对断言的层；
 - **6k**：接近单核容量上限，完成率 + p99 观测（不硬断言绝对值）；
 - **8k**：隔离后产出"该核数下的最大 QPS"，**前提**是 `nr_throttled=0`（2.3.5），
   否则分不清"引擎到顶"与"被 CPUQuota 节流出来的假顶"；报告中必须标注核数，
   不得与大机数字混列；
 - **过载时系统不会"无限等待"**（已验证）：`max_pending_streams` 默认取
-  `max_concurrent_streams / 4`（`tunnel-lib/src/lb/overload.rs:53`，默认配置下 = 250），
-  超过即**快速失败**（`tunnel-lib/src/transport/open_bi.rs:58-62` →
-  `quic_open_rejected_overloaded`，`server/ingress/tunnel_service.rs:39` 归类，H1 侧回 503）；
-  阈值以内的等待由 `open_stream_timeout` 封顶 5s（`server/bootstrap/config.rs:426`）。
+  `max_concurrent_streams / 4`（`crates/duotunnel-core/src/lb/overload.rs:53`，默认配置下 = 250），
+  超过即**快速失败**（`crates/duotunnel-core/src/transport/open_bi.rs:58-62` →
+  `quic_open_rejected_overloaded`，`crates/duotunnel-server/ingress/tunnel_service.rs:39` 归类，H1 侧回 503）；
+  阈值以内的等待由 `open_stream_timeout` 封顶 5s（`crates/duotunnel-server/bootstrap/config.rs:426`）。
   因此 8k 打满时的形态是"**有界排队 + 快失败**"，完成率下降可直接归因到拒绝计数，
   **不需要另设一个过载用例**来验证这件事；
 - **扩展曲线**：`AllowedCPUs`=1/2/4 三档，产出 `QPS(N)/(N·QPS(1))` 线性度（对齐 02、TODO-140）。
@@ -209,7 +209,7 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
 2. **完整分位**：k6 summary 输出 p50/p95/p99/p99.9 + achieved-vs-target rps + dropped iterations + 错误分类；
 3. **阶段延迟**：接 TODO-145（hotpath）在 sniff/route/open_stream/first-byte/relay 打点，
    回答"慢在哪一段"而非只有端到端；
-4. **有效配置快照**：server/client 启动打印最终 workers/accept_workers/shards/connections/QUIC 窗口/
+4. **有效配置快照**：duotunnel-server + duotunnel-client 启动打印最终 workers/accept_workers/shards/connections/QUIC 窗口/
    buffer/pending 上限 + cpuset + pin 映射，写入 artifact（TODO-140 明确要求，当前缺失）；
 5. **资源归因**：`nr_throttled`（确认无节流）、per-core 利用率（确认 SUT 单核是否打满 = 判断是否受限于
    单 endpoint S1）、UDP `RcvbufErrors`/drop。
@@ -282,7 +282,7 @@ frp 对照组 frps + frpc 各自 systemd scope 启动（`run-bench-case.sh:95-11
 重建，frp 是 L4 转发（01 §4.2），两者根本不是同一份活。
 
 **方案**
-- frp 对照组必须走**同一 cpuset 分配**（与 DuoTunnel server/client 逐字一致的 `AllowedCPUs`）；
+- frp 对照组必须走**同一 cpuset 分配**（与 DuoTunnel duotunnel-server + duotunnel-client 逐字一致的 `AllowedCPUs`）；
 - 同台对比时**让 DuoTunnel 也跑 passthrough 模式**，或明确标注"L7 代理 vs L4 转发"是不同工作量，避免误读。
 
 **论证/备选**

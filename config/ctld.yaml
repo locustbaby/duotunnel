@@ -4,7 +4,7 @@ watch_addr: "127.0.0.1:7788"
 # via --ctld-token or DUOTUNNEL_CTLD_TOKEN.
 # watch_token: "replace-with-a-random-secret"
 log_level: "info"
-admin_socket: "./data/tunnel-ctld.admin.sock"
+admin_socket: "./data/duotunnel-ctld.admin.sock"
 config:
   sources:
     - type: yaml
