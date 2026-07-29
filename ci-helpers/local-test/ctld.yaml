@@ -1,5 +1,13 @@
 database_url: "sqlite://./data/duotunnel-local-test.db?mode=rwc"
 watch_addr: "127.0.0.1:7788"
 log_level: "info"
-server_config: "ci-helpers/local-test/server.yaml"
+admin_socket: "./data/tunnel-ctld-local-test.admin.sock"
+config:
+  sources:
+    - type: yaml
+      path: "ci-helpers/local-test/server.yaml"
+      priority: 10
+    - type: sqlite
+      database_url: "sqlite://./data/duotunnel-local-test.db?mode=rwc"
+      priority: 100
 metrics_port: 9091

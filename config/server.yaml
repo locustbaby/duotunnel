@@ -1,143 +1,18 @@
-# ── Server tuning ─────────────────────────────────────────────────────────────
-# Always read by the server binary regardless of mode.
-#
-# In ctld-managed mode (--ctld-addr):
-#   - database_url is not used (no local SQLite)
-#   - tunnel_management / server_egress_upstream are read by ctld at startup
-#     (via ctld.yaml server_config field) to seed its DB on first boot
-#
-# In standalone mode (no --ctld-addr):
-#   - database_url is used for local auth/routing SQLite
-#   - tunnel_management / server_egress_upstream are seeded into SQLite on first boot
 server:
   tunnel_port: 10086
   h2_single_authority: true
   log_level: "debug"
   trace_enabled: false
-  database_url: "sqlite://./data/duotunnel.db?mode=rwc"  # standalone mode only
-
-  # ── TCP socket options (applied to ingress TCP connections) ─────────────────
   tcp:
     nodelay: true
-    # recv_buf_size: 4194304  # Socket receive buffer in bytes (default: 4 MiB)
-    # send_buf_size: 4194304  # Socket send buffer in bytes (default: 4 MiB)
-    # keepalive: true         # Enable TCP keepalive (default: true)
-    # user_timeout_ms: 30000  # TCP user timeout in ms, 0 = disabled (default: 30000)
-
-  # ── QUIC transport (tunnel channel between server and client) ───────────────
   quic:
-    max_concurrent_streams: 1000  # Max concurrent bidi QUIC streams per connection (default: 1000)
-    # shards: 4                 # optional; default = effective_runtime_parallelism
-    keepalive_secs: 20            # QUIC keepalive ping interval in seconds (default: 20)
-    idle_timeout_secs: 180        # Close idle QUIC connections after N seconds (default: 180)
-    # congestion: "bbr"           # Congestion controller: "bbr", "cubic", or "new_reno" (default: "bbr")
-    # stream_window_mb: 4         # Per-stream receive window in MB (default: 4)
-    # connection_window_mb: 32    # Per-connection receive window in MB (default: 32)
-    # udp_recv_buf_mb: 8          # UDP socket SO_RCVBUF in MB; kernel doubles (Linux rmem_max) (default: 8)
-    # udp_send_buf_mb: 8          # UDP socket SO_SNDBUF in MB; enables kernel GSO batching (default: 8)
-
-
-  # ── Outbound HTTP connection pool (egress forward proxy) ───────────────────
+    max_concurrent_streams: 1000
+    keepalive_secs: 20
+    idle_timeout_secs: 180
   http_pool:
-    idle_timeout_secs: 90   # Keep idle connections alive for N seconds (default: 90)
-    max_idle_per_host: 128  # Max idle connections per upstream host (default: 128)
-
-  # ── Protocol detection buffer ───────────────────────────────────────────────
+    idle_timeout_secs: 90
+    max_idle_per_host: 128
   proxy_buffers:
-    peek_buf_size: 16384          # Peek buffer for protocol detection in bytes (default: 16384)
-    # http_header_buf_size: 8192  # Max HTTP header buffer size in bytes (default: 8192)
-    # http_body_chunk_size: 8192  # HTTP body read chunk size in bytes (default: 8192)
-    # sniff_timeout_ms: 2500      # Protocol sniffing timeout in milliseconds (default: 2500)
-
-  # ── TLS / PKI ───────────────────────────────────────────────────────────────
+    peek_buf_size: 16384
   pki:
-    cert_cache_ttl_secs: 3600  # How long to cache generated TLS certs (default: 3600)
-
-  # ── Misc ────────────────────────────────────────────────────────────────────
-  # login_timeout_secs: 10  # Timeout for tunnel client login handshake (default: 10)
-  # max_unauthenticated_connections: 64  # Concurrent QUIC connections allowed before auth completes; excess incomings are refused (default: 64)
-
-# ── Routing config ─────────────────────────────────────────────────────────────
-# In ctld-managed mode: read by ctld on first boot via server_config field
-# In standalone mode:   seeded into SQLite on first boot; hot-reloaded on change
-
-server_egress_upstream:
-  upstreams:
-    backend:
-      servers:
-        - address: "https://www.google.com"
-          resolve: true
-      lb_policy: "round_robin"
-
-  rules:
-    vhost:
-      - match_host: "wss.localtest.com"
-        action_upstream: "backend"
-
-tunnel_management:
-  server_ingress_routing:
-    listeners:
-      - port: 8001
-        mode: http
-        vhost:
-          - match_host: "wss.localtest.com"
-            client_group: "group-a"
-            proxy_name: "grpc_service"
-          - match_host: "harbor.example.com"
-            client_group: "group-a"
-            proxy_name: "google_service"
-          - match_host: "test.local"
-            client_group: "group-a"
-            proxy_name: "http_service"
-          - match_host: "www2.localtest.com"
-            client_group: "group-b"
-            proxy_name: "local_service"
-
-      - port: 50051
-        mode: tcp
-        client_group: "group-a"
-        proxy_name: "grpc_service"
-
-  client_configs:
-    groups:
-      group-a:
-        config_version: "v1.0.0"
-        upstreams:
-          grpc_service:
-            servers:
-              - address: "https://grpc-echo.semior.dev:443"
-                resolve: true
-            lb_policy: "round_robin"
-
-          google_service:
-            servers:
-              - address: "www.google.com:443"
-                resolve: true
-            lb_policy: "round_robin"
-
-          http_service:
-            servers:
-              - address: "127.0.0.1:8080"
-                resolve: false
-            lb_policy: "round_robin"
-
-          echo_beeceptor:
-            servers:
-              - address: "echo.free.beeceptor.com:443"
-                resolve: true
-            lb_policy: "round_robin"
-
-          wss_service:
-            servers:
-              - address: "wss://echo.websocket.org"
-                resolve: false
-            lb_policy: "round_robin"
-
-      group-b:
-        config_version: "v1.0.0"
-        upstreams:
-          local_service:
-            servers:
-              - address: "127.0.0.1:9100"
-                resolve: false
-            lb_policy: "round_robin"
+    cert_cache_ttl_secs: 3600

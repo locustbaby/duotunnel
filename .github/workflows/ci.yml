@@ -255,7 +255,7 @@ jobs:
   #   SECTION 4 — WebSocket local: echo + multi-message
   #   SECTION 5 — gRPC local: Health + EchoService/Echo
   #   SECTION 6 — Bidirectional concurrent + mixed-protocol
-  #   SECTION 7 — Standalone mode: SQLite auto-seed, token CLI, HTTP/WS/gRPC, hot-reload, token rotate
+  #   SECTION 7 — reserved for future control-plane behavior tests; performance CI remains traffic-only
   # ─────────────────────────────────────────────────────────────────────────────
   integration-test:
     name: Integration Test (all protocols)
@@ -274,7 +274,6 @@ jobs:
       - name: Start DuoTunnel infra
         uses: ./.github/actions/start-infra
         with:
-          mode: 'ctld'
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       # ═══════════════════════════════════════════════════════════════════════════
@@ -557,251 +556,7 @@ jobs:
           if [ "$FAIL" -gt 0 ]; then echo "FAIL: $FAIL/3 gRPC concurrent"; exit 1; fi
           echo "PASS: 3/3 gRPC concurrent"
 
-      # ═══════════════════════════════════════════════════════════════════════════
-      #  SECTION 7 — Standalone mode smoke test
-      #
-      #  Verifies the server can run without ctld:
-      #    7-A: first-boot SQLite auto-seed from YAML
-      #    7-B: `server token create` CLI
-      #    7-C: client connects with standalone-issued token
-      #    7-D: HTTP GET ingress
-      #    7-E: HTTP POST + body verify ingress
-      #    7-F: WebSocket ingress
-      #    7-G: gRPC Health ingress
-      #    7-H: gRPC Echo ingress
-      #    7-I: hot-reload (touch config → watcher fires → routing refreshed)
-      #    7-J: token rotate — new token works
-      #
-      #  Uses different ports (QUIC :10087, listener :8180, metrics :9091) and a
-      #  separate SQLite DB to keep standalone state isolated from the ctld run.
-      #  The backend servers (echo :9999, ws :8765, grpc :50051) are reused —
-      #  they are still running from the earlier startup step.
-      # ═══════════════════════════════════════════════════════════════════════════
-
-      - name: "[Standalone] Stop ctld-mode tunnel (keep backends)"
-        run: |
-          sudo systemctl stop duotunnel-client.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL duotunnel-client.scope 2>/dev/null || true
-          sudo systemctl stop duotunnel-server.scope 2>/dev/null || true
-          sudo systemctl kill -s KILL duotunnel-server.scope 2>/dev/null || true
-          kill "$(cat /tmp/ctld.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 1
-          kill -9 "$(cat /tmp/ctld.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 0.5
-
-
-      - name: "[Standalone] 7-A: start server — verify SQLite auto-seed on first boot"
-        timeout-minutes: 1
-        run: |
-          mkdir -p data
-          ./target/release/server --config ci-helpers/configs/server-standalone.yaml \
-            > /tmp/sa-server.log 2>&1 &
-          echo $! > /tmp/sa-server.pid
-          for i in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/sa-server.pid)" 2>/dev/null; then
-              break
-            fi
-            curl -sf --max-time 1 http://127.0.0.1:9091/healthz > /dev/null 2>&1 && break
-            sleep 0.5
-          done
-          if ! kill -0 "$(cat /tmp/sa-server.pid)" 2>/dev/null; then
-            echo "ERROR: standalone server did not start"; cat /tmp/sa-server.log; exit 1
-          fi
-          if ! curl -sf --max-time 2 http://127.0.0.1:9091/healthz > /dev/null 2>&1; then
-            echo "ERROR: standalone server healthz not ready"
-            cat /tmp/sa-server.log; exit 1
-          fi
-          echo "Standalone server ready"
-
-      - name: "[Standalone] 7-B: server token create CLI"
-        run: |
-          SA_TOKEN=$(./target/release/server --config ci-helpers/configs/server-standalone.yaml \
-            token create --name ci-standalone 2>/dev/null | tail -1)
-          if [ -z "$SA_TOKEN" ]; then
-            echo "ERROR: token create returned empty output"; exit 1
-          fi
-          echo "$SA_TOKEN" > /tmp/sa-token.txt
-          echo "Token created: $SA_TOKEN"
-
-      - name: "[Standalone] 7-C: client connects with standalone-issued token"
-        timeout-minutes: 1
-        run: |
-          SA_TOKEN=$(cat /tmp/sa-token.txt)
-          python3 -c "
-          import re, sys
-          f = 'ci-helpers/configs/client.yaml'
-          c = open(f).read()
-          c = re.sub(r'^auth_token:.*', 'auth_token: \"' + sys.argv[1] + '\"', c, flags=re.MULTILINE)
-          c = re.sub(r'^server_port:.*', 'server_port: 10087', c, flags=re.MULTILINE)
-          open(f, 'w').write(c)
-          " "$SA_TOKEN"
-          ./target/release/client --config ci-helpers/configs/client.yaml > /tmp/sa-client.log 2>&1 &
-          echo $! > /tmp/sa-client.pid
-          for i in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
-              break
-            fi
-            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
-            sleep 0.5
-          done
-          if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
-            echo "ERROR: client did not login to standalone server"
-            echo "=== server ===" && cat /tmp/sa-server.log
-            echo "=== client ===" && cat /tmp/sa-client.log
-            exit 1
-          fi
-          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
-            echo "ERROR: standalone client healthz not ready"
-            echo "=== server ===" && cat /tmp/sa-server.log
-            echo "=== client ===" && cat /tmp/sa-client.log
-            exit 1
-          fi
-          # Warmup: wait for QUIC streams to be ready before 7-D fires.
-          for i in $(seq 1 10); do
-            curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1 && break
-            sleep 0.5
-          done
-          echo "Client connected to standalone server"
-
-      - name: "[Standalone] 7-D: HTTP GET ingress — echo.local:8180"
-        run: |
-          ./target/release/ci-test-client http "http://echo.local:8180/"
-
-      - name: "[Standalone] 7-E: HTTP POST + body verify ingress"
-        run: |
-          ./target/release/ci-test-client http "http://echo.local:8180/" \
-            --method POST \
-            --body '{"standalone":"ci","test":"sa-post-body"}' \
-            --expect-body "sa-post-body"
-
-      - name: "[Standalone] 7-F: WebSocket ingress — ws.local:8180"
-        run: |
-          ./target/release/ci-test-client ws "ws://ws.local:8180" --message "standalone-ws-hello"
-
-      - name: "[Standalone] 7-G: gRPC Health ingress — grpc.local:8180"
-        run: |
-          ./target/release/ci-test-client grpc "grpc.local:8180" --service ""
-
-      - name: "[Standalone] 7-H: gRPC Echo ingress — grpc.local:8180"
-        run: |
-          ./target/release/ci-test-client grpc-echo "grpc.local:8180" \
-            --ping "standalone-grpc-echo"
-
-      - name: "[Standalone] 7-I: hot-reload — touch config, verify watcher fires"
-        run: |
-          echo "# ci-hot-reload-trigger" >> ci-helpers/configs/server-standalone.yaml
-          sleep 2
-          if ! kill -0 "$(cat /tmp/sa-server.pid)" 2>/dev/null; then
-            echo "ERROR: standalone server exited after config touch"
-            cat /tmp/sa-server.log; exit 1
-          fi
-          echo "Hot-reload confirmed"
-          ./target/release/ci-test-client http "http://echo.local:8180/"
-
-      - name: "[Standalone] 7-J: token rotate — new token works"
-        run: |
-          dump_rotate_diag() {
-            echo "=== token-rotate diagnostics ==="
-            echo "run_id=${{ github.run_id }} job=${{ github.job }} step=7-J"
-            echo "artifact_hint=ci-logs-${{ github.run_id }}"
-            echo "time=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            echo "=== client pid ==="
-            cat /tmp/sa-client.pid 2>/dev/null || true
-            echo "=== listening ports ==="
-            ss -ltnp '( sport = :8180 or sport = :9091 or sport = :9092 or sport = :10087 )' 2>/dev/null || true
-            echo "=== recent server key events ==="
-            grep -E "registering client|unregistering client|authenticated|connection closed|accept_bi error|open_bi|timed out|no healthy clients|no client for group" /tmp/sa-server.log 2>/dev/null | tail -80 || true
-            echo "=== recent client key events ==="
-            grep -E "Connected to server|Login successful|connection closed|open_bi|timed out|accept_bi failed|work stream error|entry connection error" /tmp/sa-client2.log 2>/dev/null | tail -80 || true
-            echo "=== server tail ==="
-            tail -80 /tmp/sa-server.log 2>/dev/null || true
-            echo "=== client tail ==="
-            tail -80 /tmp/sa-client2.log 2>/dev/null || true
-            echo "=== curl warmup ==="
-            curl -sv --max-time 5 -H "Accept: text/markdown" http://echo.local:8180/ >/tmp/sa-rotate-curl.out 2>/tmp/sa-rotate-curl.err || true
-            cat /tmp/sa-rotate-curl.err 2>/dev/null || true
-            cat /tmp/sa-rotate-curl.out 2>/dev/null || true
-          }
-          NEW_TOKEN=$(./target/release/server --config ci-helpers/configs/server-standalone.yaml \
-            token rotate --name ci-standalone 2>/dev/null | tail -1)
-          if [ -z "$NEW_TOKEN" ]; then
-            echo "ERROR: token rotate returned empty output"; exit 1
-          fi
-          echo "New token after rotate: $NEW_TOKEN"
-          REG_BEFORE=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || true)
-          REG_BEFORE=${REG_BEFORE:-0}
-          PID=$(cat /tmp/sa-client.pid 2>/dev/null)
-          if [ -n "$PID" ]; then
-            kill -9 "$PID" 2>/dev/null || true
-          fi
-          UNREGISTERED=0
-          for i in $(seq 1 60); do
-            REG_NOW=$(grep -c "unregistering client" /tmp/sa-server.log 2>/dev/null || true)
-            REG_NOW=${REG_NOW:-0}
-            if [ "$REG_NOW" -gt "$REG_BEFORE" ]; then
-              UNREGISTERED=1
-              break
-            fi
-            sleep 0.5
-          done
-          if [ "$UNREGISTERED" -ne 1 ]; then
-            echo "ERROR: server did not unregister old client after kill"
-            dump_rotate_diag
-            exit 1
-          fi
-          python3 -c "
-          import re, sys
-          f = 'ci-helpers/configs/client.yaml'
-          c = open(f).read()
-          c = re.sub(r'^auth_token:.*', 'auth_token: \"' + sys.argv[1] + '\"', c, flags=re.MULTILINE)
-          open(f, 'w').write(c)
-          " "$NEW_TOKEN"
-          ./target/release/client --config ci-helpers/configs/client.yaml > /tmp/sa-client2.log 2>&1 &
-          echo $! > /tmp/sa-client.pid
-          for i in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
-              break
-            fi
-            curl -sf --max-time 1 http://127.0.0.1:9092/healthz > /dev/null 2>&1 && break
-            sleep 0.5
-          done
-          if ! kill -0 "$(cat /tmp/sa-client.pid)" 2>/dev/null; then
-            echo "ERROR: client did not reconnect after token rotate"
-            dump_rotate_diag
-            exit 1
-          fi
-          if ! curl -sf --max-time 2 http://127.0.0.1:9092/healthz > /dev/null 2>&1; then
-            echo "ERROR: standalone client healthz not ready after token rotate"
-            dump_rotate_diag
-            exit 1
-          fi
-          WARMUP_OK=0
-          for i in $(seq 1 10); do
-            if curl -sf --max-time 3 http://echo.local:8180/ > /dev/null 2>&1; then
-              WARMUP_OK=1
-              break
-            fi
-            sleep 0.5
-          done
-          if [ "$WARMUP_OK" -ne 1 ]; then
-            echo "ERROR: token rotate warmup failed"
-            dump_rotate_diag
-            exit 1
-          fi
-          FINAL_OK=0
-          for i in $(seq 1 5); do
-            if ./target/release/ci-test-client http "http://echo.local:8180/"; then
-              FINAL_OK=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$FINAL_OK" -ne 1 ]; then
-            echo "ERROR: token rotate final request failed"
-            dump_rotate_diag
-            exit 1
-          fi
-          echo "Token rotate + reconnect OK"
+      # SECTION 7 is intentionally retired: performance CI uses only the unified ctld + server + client topology.
 
       # ─── Diagnostics ─────────────────────────────────────────────────────────
       - name: Upload logs on failure
@@ -814,9 +569,6 @@ jobs:
             /tmp/ci-ctld.log
             /tmp/ci-server.log
             /tmp/ci-client.log
-            /tmp/sa-server.log
-            /tmp/sa-client.log
-            /tmp/sa-client2.log
             /tmp/http-echo.log
             /tmp/ws-echo.log
             /tmp/grpc-echo.log
@@ -866,7 +618,6 @@ jobs:
       - name: Start DuoTunnel infra
         uses: ./.github/actions/start-infra
         with:
-          mode: 'ctld'
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — basic
@@ -997,7 +748,6 @@ jobs:
       - name: Start DuoTunnel infra
         uses: ./.github/actions/start-infra
         with:
-          mode: 'ctld'
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_3000qps
@@ -1097,7 +847,6 @@ jobs:
       - name: Start DuoTunnel infra
         uses: ./.github/actions/start-infra
         with:
-          mode: 'ctld'
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
 
       - name: Bench — ingress_6000qps

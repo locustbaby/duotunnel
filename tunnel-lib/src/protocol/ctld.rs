@@ -12,13 +12,10 @@ use rkyv::{
     Archive, Deserialize, Serialize,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-// The high bit is reserved as a capability flag so the legacy rkyv request
-// layout remains unchanged. Legacy ctld instances ignore the requested version
-// and still send a full v1 Snapshot; V2 peers mask the bit before comparison.
-pub const CONTROL_PROTOCOL_V2_CAPABILITY: u64 = 1 << 63;
-pub const CONTROL_PROTOCOL_LEGACY_VERSION_MASK: u64 = !CONTROL_PROTOCOL_V2_CAPABILITY;
+pub const CURRENT_CONTROL_PROTOCOL_VERSION: u16 = 3;
 
 pub type ProtoIngressListener = IngressListenerDef;
 pub type ProtoIngressListenerMode = IngressListenerModeDef;
@@ -32,44 +29,33 @@ pub type TokenCacheEntry = TokenCacheEntryDef;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WatchRequest {
-    pub resource_version: u64,
     pub token: Option<String>,
+    pub last_applied_revision: Option<ControlRevision>,
+    pub last_applied_hash: Option<String>,
 }
 
-impl WatchRequest {
-    pub fn advertise_v2(mut self) -> Self {
-        self.resource_version = (self.resource_version & CONTROL_PROTOCOL_LEGACY_VERSION_MASK)
-            | CONTROL_PROTOCOL_V2_CAPABILITY;
-        self
-    }
-
-    pub fn supports_v2(&self) -> bool {
-        self.resource_version & CONTROL_PROTOCOL_V2_CAPABILITY != 0
-    }
-
-    pub fn legacy_resource_version(&self) -> u64 {
-        self.resource_version & CONTROL_PROTOCOL_LEGACY_VERSION_MASK
-    }
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-struct WatchRequestV1 {
-    resource_version: u64,
-}
-
-impl From<WatchRequestV1> for WatchRequest {
-    fn from(value: WatchRequestV1) -> Self {
-        Self {
-            resource_version: value.resource_version,
-            token: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ResourceOp<T> {
-    Upsert(T),
-    Delete { key: String },
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ConfigOperation {
+    UpsertIngressListener(ProtoIngressListener),
+    DeleteIngressListener { port: u16 },
+    UpsertClientGroup(ProtoClientGroup),
+    DeleteClientGroup { group_id: String },
+    UpsertEgressUpstream(ProtoEgressUpstreamDef),
+    DeleteEgressUpstream { name: String },
+    UpsertEgressVhostRule(ProtoEgressVhostRule),
+    DeleteEgressVhostRule { match_host: String },
+    UpsertToken(TokenCacheEntry),
+    DeleteToken { hash_hex: String },
 }
 
 #[derive(
@@ -92,20 +78,39 @@ pub struct ConfigSnapshot {
     pub token_cache: Vec<TokenCacheEntry>,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConfigPatch {
-    pub resource_version: u64,
-    pub ingress_listeners: Vec<ResourceOp<ProtoIngressListener>>,
-    pub client_groups: Vec<ResourceOp<ProtoClientGroup>>,
-    pub egress_upstreams: Vec<ResourceOp<ProtoEgressUpstreamDef>>,
-    pub egress_vhost_rules: Vec<ResourceOp<ProtoEgressVhostRule>>,
-    pub token_cache: Vec<ResourceOp<TokenCacheEntry>>,
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ConfigDelta {
+    pub base_revision: ControlRevision,
+    pub base_hash: String,
+    pub target_revision: ControlRevision,
+    pub target_hash: String,
+    pub operations: Vec<ConfigOperation>,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub enum WatchEvent {
-    Snapshot(ConfigSnapshot),
-    Patch(ConfigPatch),
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ConfigEvent {
+    Snapshot(VersionedConfigSnapshot),
+    Delta(ConfigDelta),
 }
 
 #[derive(
@@ -124,7 +129,17 @@ pub struct ControlRevision {
     pub sequence: u64,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct VersionedConfigSnapshot {
     pub revision: ControlRevision,
     pub content_hash: String,
@@ -133,21 +148,11 @@ pub struct VersionedConfigSnapshot {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub enum WatchEventV2 {
-    Snapshot(VersionedConfigSnapshot),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReceivedWatchEvent {
-    Legacy(WatchEvent),
-    V2(WatchEventV2),
-}
-
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApplyStatus {
     Applied,
     Duplicate,
     Rejected,
+    ResyncRequired,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,18 +201,7 @@ pub async fn send_watch_request<W>(writer: &mut W, req: &WatchRequest) -> Result
 where
     W: AsyncWriteExt + Unpin,
 {
-    if req.token.is_some() {
-        send_message(writer, MessageType::ConfigPush, req).await
-    } else {
-        send_message(
-            writer,
-            MessageType::ConfigPush,
-            &WatchRequestV1 {
-                resource_version: req.resource_version,
-            },
-        )
-        .await
-    }
+    send_message(writer, MessageType::ConfigPush, req).await
 }
 
 pub async fn recv_watch_request<R>(reader: &mut R) -> Result<WatchRequest>
@@ -216,17 +210,14 @@ where
 {
     let buf = recv_control_payload(reader).await?;
     decode_rkyv::<WatchRequest>(&buf)
-        .or_else(|_| decode_rkyv::<WatchRequestV1>(&buf).map(Into::into))
 }
 
-pub async fn recv_watch_event<R>(reader: &mut R) -> Result<ReceivedWatchEvent>
+pub async fn recv_config_event<R>(reader: &mut R) -> Result<ConfigEvent>
 where
     R: AsyncReadExt + Unpin,
 {
     let buf = recv_control_payload(reader).await?;
-    decode_rkyv::<WatchEventV2>(&buf)
-        .map(ReceivedWatchEvent::V2)
-        .or_else(|_| decode_rkyv::<WatchEvent>(&buf).map(ReceivedWatchEvent::Legacy))
+    decode_rkyv::<ConfigEvent>(&buf)
 }
 
 pub async fn recv_apply_response<R>(reader: &mut R) -> Result<ApplyResponse>
@@ -235,6 +226,120 @@ where
 {
     let buf = recv_control_payload(reader).await?;
     decode_rkyv::<ApplyResponse>(&buf)
+}
+
+pub fn apply_config_operations(
+    snapshot: &mut ConfigSnapshot,
+    operations: &[ConfigOperation],
+) -> Result<()> {
+    for operation in operations {
+        match operation {
+            ConfigOperation::UpsertIngressListener(item) => {
+                upsert_by_key(&mut snapshot.ingress_listeners, item.clone(), |value| {
+                    value.port
+                })
+            }
+            ConfigOperation::DeleteIngressListener { port } => {
+                snapshot.ingress_listeners.retain(|item| item.port != *port)
+            }
+            ConfigOperation::UpsertClientGroup(item) => {
+                upsert_by_key(&mut snapshot.client_groups, item.clone(), |value| {
+                    value.group_id.as_str().to_owned()
+                })
+            }
+            ConfigOperation::DeleteClientGroup { group_id } => snapshot
+                .client_groups
+                .retain(|item| item.group_id.as_str() != group_id),
+            ConfigOperation::UpsertEgressUpstream(item) => {
+                upsert_by_key(&mut snapshot.egress_upstreams, item.clone(), |value| {
+                    value.name.clone()
+                })
+            }
+            ConfigOperation::DeleteEgressUpstream { name } => {
+                snapshot.egress_upstreams.retain(|item| item.name != *name)
+            }
+            ConfigOperation::UpsertEgressVhostRule(item) => {
+                upsert_by_key(&mut snapshot.egress_vhost_rules, item.clone(), |value| {
+                    value.match_host.clone()
+                })
+            }
+            ConfigOperation::DeleteEgressVhostRule { match_host } => snapshot
+                .egress_vhost_rules
+                .retain(|item| item.match_host != *match_host),
+            ConfigOperation::UpsertToken(item) => {
+                upsert_by_key(&mut snapshot.token_cache, item.clone(), |value| {
+                    value.hash_hex.clone()
+                })
+            }
+            ConfigOperation::DeleteToken { hash_hex } => snapshot
+                .token_cache
+                .retain(|item| item.hash_hex != *hash_hex),
+        }
+    }
+    validate_snapshot(snapshot)
+}
+
+fn upsert_by_key<T, K, F>(items: &mut Vec<T>, item: T, key_of: F)
+where
+    K: Ord,
+    F: Fn(&T) -> K,
+{
+    let key = key_of(&item);
+    if let Some(existing) = items.iter_mut().find(|existing| key_of(existing) == key) {
+        *existing = item;
+    } else {
+        items.push(item);
+    }
+}
+
+fn validate_snapshot(snapshot: &ConfigSnapshot) -> Result<()> {
+    ensure_unique(
+        snapshot.ingress_listeners.iter().map(|item| item.port),
+        "ingress port",
+    )?;
+    ensure_unique(
+        snapshot
+            .client_groups
+            .iter()
+            .map(|item| item.group_id.as_str().to_owned()),
+        "client group",
+    )?;
+    ensure_unique(
+        snapshot
+            .egress_upstreams
+            .iter()
+            .map(|item| item.name.clone()),
+        "egress upstream",
+    )?;
+    ensure_unique(
+        snapshot
+            .egress_vhost_rules
+            .iter()
+            .map(|item| item.match_host.clone()),
+        "egress vhost",
+    )?;
+    ensure_unique(
+        snapshot
+            .token_cache
+            .iter()
+            .map(|item| item.hash_hex.clone()),
+        "token hash",
+    )?;
+    Ok(())
+}
+
+fn ensure_unique<T, I>(values: I, label: &str) -> Result<()>
+where
+    T: Ord,
+    I: IntoIterator<Item = T>,
+{
+    let mut seen = BTreeMap::new();
+    for value in values {
+        if seen.insert(value, ()).is_some() {
+            return Err(anyhow!("duplicate {label}"));
+        }
+    }
+    Ok(())
 }
 
 pub fn snapshot_content_hash(snapshot: &ConfigSnapshot) -> Result<String> {
@@ -282,7 +387,7 @@ pub fn snapshot_content_hash(snapshot: &ConfigSnapshot) -> Result<String> {
 
     let bytes = serde_json::to_vec(&canonical)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"duotunnel-control-protocol-v2\0");
+    hasher.update(b"duotunnel-control-protocol-v3\0");
     hasher.update(bytes);
     let digest = hasher.finalize();
     let mut hash = String::with_capacity(digest.len() * 2);
@@ -297,48 +402,6 @@ pub fn snapshot_content_hash(snapshot: &ConfigSnapshot) -> Result<String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn watch_request_without_token_uses_legacy_wire_format() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-        let req = WatchRequest {
-            resource_version: 42,
-            token: None,
-        };
-
-        send_watch_request(&mut client, &req).await.unwrap();
-        let decoded = recv_watch_request(&mut server).await.unwrap();
-
-        assert_eq!(decoded.resource_version, 42);
-        assert!(decoded.token.is_none());
-    }
-
-    #[tokio::test]
-    async fn watch_request_with_token_uses_current_wire_format() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-        let req = WatchRequest {
-            resource_version: 7,
-            token: Some("secret".to_string()),
-        };
-
-        send_watch_request(&mut client, &req).await.unwrap();
-        let decoded = recv_watch_request(&mut server).await.unwrap();
-
-        assert_eq!(decoded.resource_version, 7);
-        assert_eq!(decoded.token.as_deref(), Some("secret"));
-    }
-
-    #[test]
-    fn v2_capability_preserves_legacy_resource_version() {
-        let req = WatchRequest {
-            resource_version: 42,
-            token: None,
-        }
-        .advertise_v2();
-
-        assert!(req.supports_v2());
-        assert_eq!(req.legacy_resource_version(), 42);
-    }
-
     fn empty_snapshot(resource_version: u64) -> ConfigSnapshot {
         ConfigSnapshot {
             resource_version,
@@ -350,50 +413,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn watch_request_always_uses_canonical_wire_format() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let req = WatchRequest {
+            last_applied_revision: Some(ControlRevision {
+                epoch: "epoch-a".to_string(),
+                sequence: 42,
+            }),
+            last_applied_hash: Some("hash".to_string()),
+            token: None,
+        };
+
+        send_watch_request(&mut client, &req).await.unwrap();
+        assert_eq!(recv_watch_request(&mut server).await.unwrap(), req);
+    }
+
     #[test]
-    fn content_hash_excludes_transport_revision() {
+    fn content_hash_excludes_transport_revision_and_is_order_independent() {
+        let mut first = empty_snapshot(1);
+        let mut second = empty_snapshot(99);
+        first.egress_vhost_rules = vec![
+            EgressVhostRuleDef {
+                match_host: "b.example".into(),
+                action_upstream: "b".into(),
+            },
+            EgressVhostRuleDef {
+                match_host: "a.example".into(),
+                action_upstream: "a".into(),
+            },
+        ];
+        second.egress_vhost_rules = first.egress_vhost_rules.iter().rev().cloned().collect();
         assert_eq!(
-            snapshot_content_hash(&empty_snapshot(1)).unwrap(),
-            snapshot_content_hash(&empty_snapshot(99)).unwrap()
+            snapshot_content_hash(&first).unwrap(),
+            snapshot_content_hash(&second).unwrap()
         );
     }
 
-    #[tokio::test]
-    async fn v2_event_is_distinct_from_legacy_wire_event() {
-        let (mut sender, mut receiver) = tokio::io::duplex(2048);
-        let snapshot = empty_snapshot(3);
-        let event = WatchEventV2::Snapshot(VersionedConfigSnapshot {
-            revision: ControlRevision {
-                epoch: "epoch-a".to_string(),
-                sequence: 3,
-            },
-            content_hash: snapshot_content_hash(&snapshot).unwrap(),
-            generated_at_unix_ms: 10,
-            snapshot,
-        });
-
-        send_message(&mut sender, MessageType::ConfigPush, &event)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            recv_watch_event(&mut receiver).await.unwrap(),
-            ReceivedWatchEvent::V2(WatchEventV2::Snapshot(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn legacy_event_remains_decodable_by_dual_stack_receiver() {
-        let (mut sender, mut receiver) = tokio::io::duplex(2048);
-        let event = WatchEvent::Snapshot(empty_snapshot(2));
-
-        send_message(&mut sender, MessageType::ConfigPush, &event)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            recv_watch_event(&mut receiver).await.unwrap(),
-            ReceivedWatchEvent::Legacy(WatchEvent::Snapshot(_))
-        ));
+    #[test]
+    fn operations_are_applied_as_one_validated_batch() {
+        let mut snapshot = empty_snapshot(1);
+        apply_config_operations(
+            &mut snapshot,
+            &[ConfigOperation::UpsertEgressUpstream(EgressUpstreamDef {
+                name: "api".into(),
+                lb_policy: "round_robin".into(),
+                servers: vec![],
+            })],
+        )
+        .unwrap();
+        assert_eq!(snapshot.egress_upstreams[0].name, "api");
     }
 }

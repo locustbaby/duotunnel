@@ -1,4 +1,4 @@
-use crate::control::proto::{ConfigSnapshot, TokenCacheEntry};
+use crate::control::proto::ConfigSnapshot;
 #[cfg(test)]
 use crate::control::revision::EphemeralControlRevisionStore;
 use crate::control::revision::{ControlRevisionStore, SqliteControlRevisionStore};
@@ -23,6 +23,8 @@ pub struct ControlService {
     revision_epoch: String,
     revision_store: Arc<dyn ControlRevisionStore>,
     snapshot_pool: Option<sqlx::SqlitePool>,
+    yaml_layer: arc_swap::ArcSwap<crate::control::layer::ConfigLayer>,
+    config_mutation_lock: tokio::sync::Mutex<()>,
     watch_tx: watch::Sender<u64>,
     /// Kept alive so the channel never closes while ControlService lives.
     _watch_rx: watch::Receiver<u64>,
@@ -31,6 +33,23 @@ pub struct ControlService {
 }
 
 impl ControlService {
+    pub(crate) async fn apply_yaml_layer(
+        &self,
+        layer: &crate::control::layer::ConfigLayer,
+    ) -> Result<bool> {
+        let _guard = self.config_mutation_lock.lock().await;
+        let Some(pool) = self.snapshot_pool.as_ref() else {
+            anyhow::bail!("layered configuration requires SQLite");
+        };
+        let changed =
+            crate::control::layer::apply_yaml_layer(pool, self.rule_store.as_ref(), layer).await?;
+        self.yaml_layer.store(Arc::new(layer.clone()));
+        if changed {
+            self.publish();
+        }
+        Ok(changed)
+    }
+
     /// Create and initialise the service. Loads initial snapshot from stores.
     #[cfg(test)]
     pub async fn new(
@@ -103,6 +122,11 @@ impl ControlService {
             revision_epoch: revision.epoch,
             revision_store,
             snapshot_pool,
+            yaml_layer: arc_swap::ArcSwap::from_pointee(crate::control::layer::ConfigLayer {
+                source_revision: String::new(),
+                routing: RoutingData::default(),
+            }),
+            config_mutation_lock: tokio::sync::Mutex::new(()),
             watch_tx,
             _watch_rx,
             publish_tx,
@@ -119,12 +143,7 @@ impl ControlService {
             weak.clone(),
             publish_rx,
         ));
-        tokio::spawn(crate::control::reactor::db_poll_task(weak));
         Ok(svc)
-    }
-
-    pub async fn load_token_cache(&self) -> Result<Vec<TokenCacheEntry>> {
-        self.token_cache.load_token_cache().await
     }
 
     /// Subscribe to snapshot-version changes.
@@ -207,6 +226,7 @@ impl ControlService {
     /// Rebuilds the snapshot from DB and signals all watchers.
     /// Called only from the debounce task — not directly from mutation methods.
     pub(crate) async fn do_publish(&self) -> Result<()> {
+        let _guard = self.config_mutation_lock.lock().await;
         let candidate_version = self.resource_version.load(Ordering::Acquire) + 1;
         let (snapshot, revision) = Self::build_and_commit_snapshot(
             &*self.rule_store,
@@ -266,6 +286,48 @@ impl ControlService {
 
     pub async fn list_tokens(&self) -> Result<Vec<TokenListEntry>> {
         self.auth_store.list_tokens().await
+    }
+
+    pub async fn apply_config_override(
+        &self,
+        operation: &tunnel_lib::ctld_proto::ConfigOperation,
+    ) -> Result<()> {
+        let _guard = self.config_mutation_lock.lock().await;
+        let Some(pool) = self.snapshot_pool.as_ref() else {
+            anyhow::bail!("layered configuration requires SQLite");
+        };
+        let yaml_layer = self.yaml_layer.load_full();
+        if crate::control::layer::apply_sqlite_override(
+            pool,
+            self.rule_store.as_ref(),
+            &yaml_layer,
+            operation,
+        )
+        .await?
+        {
+            self.publish();
+        }
+        Ok(())
+    }
+
+    pub async fn clear_config_override(&self, resource: &str, key: &str) -> Result<()> {
+        let _guard = self.config_mutation_lock.lock().await;
+        let Some(pool) = self.snapshot_pool.as_ref() else {
+            anyhow::bail!("layered configuration requires SQLite");
+        };
+        let yaml_layer = self.yaml_layer.load_full();
+        if crate::control::layer::clear_sqlite_override(
+            pool,
+            self.rule_store.as_ref(),
+            &yaml_layer,
+            resource,
+            key,
+        )
+        .await?
+        {
+            self.publish();
+        }
+        Ok(())
     }
 
     // ── Routing CRUD ─────────────────────────────────────────────────────────

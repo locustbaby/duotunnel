@@ -9,17 +9,15 @@ pub(crate) mod config;
 
 use self::cli::Cli;
 use self::config::{
-    ConfigSource, DbSource, FileSource, IngressListener, IngressMode, MergedSource,
-    ServerConfigFile, ServerEgressUpstream, TunnelManagement,
+    IngressListener, IngressMode, ServerConfigFile, ServerEgressUpstream, TunnelManagement,
 };
 use crate::control::local_auth;
-use crate::control::null_stores::{NullConfigSource, NullRuleStore};
 use crate::egress;
 use crate::ingress::listener_mgr;
 use crate::ingress::plugins;
 use crate::ingress::registry::{new_shared_registry, SharedRegistry};
 use tunnel_lib::{HttpClientParams, RouteTarget, VhostRouter};
-use tunnel_store::{AuthResult, AuthStore, RuleStore};
+use tunnel_store::{AuthResult, AuthStore};
 
 pub(crate) struct ServerBootstrap {
     config_path: String,
@@ -29,7 +27,6 @@ pub(crate) struct ServerBootstrap {
 
 #[derive(Clone)]
 pub(crate) enum ServerMode {
-    Standalone,
     Managed {
         ctld_addr: String,
         ctld_token: Option<String>,
@@ -39,12 +36,9 @@ pub(crate) enum ServerMode {
 impl ServerBootstrap {
     pub(crate) fn from_cli(cli: &Cli) -> Result<Self> {
         let config = ServerConfigFile::load(&cli.config)?;
-        let mode = match cli.ctld_addr.clone() {
-            Some(ctld_addr) => ServerMode::Managed {
-                ctld_addr,
-                ctld_token: cli.resolved_ctld_token(),
-            },
-            None => ServerMode::Standalone,
+        let mode = ServerMode::Managed {
+            ctld_addr: cli.ctld_addr.clone(),
+            ctld_token: cli.resolved_ctld_token(),
         };
         Ok(Self {
             config_path: cli.config.clone(),
@@ -82,10 +76,7 @@ impl ServerBootstrap {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.is_ctld_managed() {
-            return Ok(());
-        }
-        self::config::validate_server_config(&self.config)
+        Ok(())
     }
 }
 
@@ -213,8 +204,6 @@ struct ConnectionRuntime {
 
 struct ControlRuntime {
     auth_store: Option<Arc<dyn AuthStore>>,
-    rule_store: Arc<dyn RuleStore>,
-    config_source: Arc<dyn ConfigSource>,
 }
 
 pub(crate) struct ServerState {
@@ -355,14 +344,6 @@ impl ServerState {
         &self.connection.registry
     }
 
-    pub(crate) fn rule_store(&self) -> &Arc<dyn RuleStore> {
-        &self.control.rule_store
-    }
-
-    pub(crate) fn config_source(&self) -> &Arc<dyn ConfigSource> {
-        &self.control.config_source
-    }
-
     pub(crate) fn listeners(&self) -> &listener_mgr::ListenerManager {
         &self.ingress.listeners
     }
@@ -381,41 +362,14 @@ impl ServerState {
 }
 
 pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Arc<ServerState>> {
-    #[allow(clippy::type_complexity)]
-    let (auth_store, rule_store, config_source): (
-        Option<Arc<dyn AuthStore>>,
-        Arc<dyn RuleStore>,
-        Arc<dyn ConfigSource>,
-    ) = if bootstrap.is_ctld_managed() {
-        info!("running in ctld-managed mode; no local SQLite stores");
-        (None, Arc::new(NullRuleStore), Arc::new(NullConfigSource))
-    } else {
-        let (auth_store, rule_store) = build_stores(&bootstrap.config.server.database_url).await?;
-        info!(
-            url = %bootstrap.config.server.database_url,
-            "auth and rule stores initialized (shared pool)"
-        );
-        match rule_store.is_routing_empty().await {
-            Ok(true) => {
-                if let Err(e) =
-                    self::config::sync_file_to_db(&bootstrap.config, rule_store.as_ref()).await
-                {
-                    tracing::warn!(error = %e, "failed to seed routing DB from YAML (non-fatal)");
-                } else {
-                    info!("routing rules seeded into DB from config file (first boot)");
-                }
-            }
-            Ok(false) => info!("routing DB already populated, skipping YAML seed"),
-            Err(e) => {
-                tracing::warn!(error = %e, "could not check routing DB state, skipping YAML seed");
-            }
-        }
-        let cs = build_config_source(&bootstrap.config_path, rule_store.clone());
-        (Some(auth_store), rule_store, cs)
+    let auth_store: Option<Arc<dyn AuthStore>> = {
+        info!("running with resident ctld control plane; no local SQLite stores");
+        None
     };
 
     let http_params = HttpClientParams::from(&bootstrap.config.server.http_pool);
-    let (tm, egress) = config_source.load().await?;
+    let tm = TunnelManagement::default();
+    let egress = ServerEgressUpstream::default();
     let upstream_health = Arc::new(tunnel_lib::proxy::upstream::UpstreamHealthRegistry::default());
     let initial_snapshot =
         build_routing_snapshot_with_health(&tm, &egress, &http_params, upstream_health.clone())?;
@@ -502,11 +456,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         connection: ConnectionRuntime {
             registry: shared_registry,
         },
-        control: ControlRuntime {
-            auth_store,
-            rule_store,
-            config_source,
-        },
+        control: ControlRuntime { auth_store },
         health,
         security_apply_gate: tokio::sync::RwLock::new(()),
         listener_apply_gate: tokio::sync::Mutex::new(()),
@@ -557,20 +507,4 @@ pub(crate) fn build_routing_snapshot_with_health(
         egress_map: Arc::new(egress_map),
         egress_rules,
     })
-}
-
-async fn build_stores(database_url: &str) -> Result<(Arc<dyn AuthStore>, Arc<dyn RuleStore>)> {
-    let pool = tunnel_store::open_sqlite_pool(database_url, 16).await?;
-    let auth_store = tunnel_store::sqlite::SqliteAuthStore::from_pool(pool.clone());
-    auth_store.migrate().await?;
-    let rule_store = tunnel_store::sqlite_rules::SqliteRuleStore::new(pool);
-    rule_store.migrate().await?;
-    Ok((Arc::new(auth_store), Arc::new(rule_store)))
-}
-
-fn build_config_source(config_path: &str, rule_store: Arc<dyn RuleStore>) -> Arc<dyn ConfigSource> {
-    Arc::new(MergedSource::new(
-        Box::new(DbSource::new(rule_store)),
-        Box::new(FileSource::new(config_path)),
-    ))
 }

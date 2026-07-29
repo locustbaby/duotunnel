@@ -16,9 +16,29 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) log_level: Option<String>,
     #[serde(default)]
-    pub(crate) server_config: Option<String>,
+    pub(crate) config: ConfigSources,
+    #[serde(default = "default_admin_socket")]
+    pub(crate) admin_socket: String,
     #[serde(default)]
     pub(crate) metrics_port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct ConfigSources {
+    #[serde(default)]
+    pub(crate) sources: Vec<ConfigSourceSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ConfigSourceSpec {
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    #[serde(default)]
+    pub(crate) database_url: Option<String>,
+    #[serde(default)]
+    pub(crate) priority: i32,
 }
 
 fn default_database_url() -> String {
@@ -27,6 +47,10 @@ fn default_database_url() -> String {
 
 fn default_watch_addr() -> String {
     "127.0.0.1:7788".to_string()
+}
+
+fn default_admin_socket() -> String {
+    "./data/tunnel-ctld.admin.sock".to_string()
 }
 
 impl Config {

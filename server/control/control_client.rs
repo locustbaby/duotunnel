@@ -1,13 +1,6 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-/// ControlClient: connects to tunnel-ctld and maintains the list-watch stream.
-///
-/// On connect:
-///   1. Sends WatchRequest { resource_version: last_known } over ConfigPush framing
-///   2. Receives WatchEvent::Snapshot → applies full state (routing + token cache)
-///   3. Loops receiving WatchEvent::Patch → applies incremental updates
-///   4. On disconnect: exponential back-off, then reconnect
+/// Maintains the canonical ctld watch stream and applies Snapshot/Delta events.
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,10 +10,10 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 use tunnel_lib::ctld_proto::{
-    recv_watch_event, send_watch_request, snapshot_content_hash, ApplyResponse, ApplyStatus,
-    ConfigPatch, ConfigSnapshot, ControlRevision, ProtoClientGroup, ProtoEgressUpstreamDef,
-    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, ReceivedWatchEvent,
-    ResourceOp, VersionedConfigSnapshot, WatchEvent, WatchEventV2, WatchRequest,
+    apply_config_operations, recv_config_event, send_watch_request, snapshot_content_hash,
+    ApplyResponse, ApplyStatus, ConfigEvent, ConfigSnapshot, ControlRevision, ProtoClientGroup,
+    ProtoEgressUpstreamDef, ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode,
+    VersionedConfigSnapshot, WatchRequest, CURRENT_CONTROL_PROTOCOL_VERSION,
 };
 use tunnel_lib::models::msg::{send_message, MessageType};
 
@@ -62,7 +55,7 @@ impl BackgroundService for ControlClientService {
 }
 
 const LKG_FORMAT_VERSION: u32 = 3;
-const LKG_CONTROL_PROTOCOL_VERSION: u32 = 2;
+const LKG_CONTROL_PROTOCOL_VERSION: u32 = CURRENT_CONTROL_PROTOCOL_VERSION as u32;
 const MAX_LKG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LKG_AGE: Duration = crate::runtime::health::CONTROL_SECURITY_STALE_AFTER;
 const MAX_LKG_FUTURE_SKEW: Duration = Duration::from_secs(300);
@@ -86,7 +79,6 @@ struct AppliedControlState {
 
 #[derive(Default)]
 struct WatchState {
-    last_version: u64,
     current_snapshot: Option<ConfigSnapshot>,
     applied: Option<AppliedControlState>,
 }
@@ -336,7 +328,6 @@ async fn watch_loop(
                         let age =
                             validate_lkg_timestamp(lkg.generated_at_unix_ms).unwrap_or(MAX_LKG_AGE);
                         state.health().restore_config_applied(age);
-                        watch_state.last_version = lkg.snapshot.resource_version;
                         watch_state.applied = Some(AppliedControlState {
                             revision: lkg.revision,
                             content_hash: lkg.content_hash,
@@ -405,93 +396,35 @@ async fn connect_and_watch(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // Step 1: send WatchRequest
+    let applied = watch_state.applied.as_ref();
     let req = WatchRequest {
-        resource_version: watch_state.last_version,
         token: auth_token.map(str::to_string),
-    }
-    .advertise_v2();
+        last_applied_revision: applied.and_then(|state| state.revision.clone()),
+        last_applied_hash: applied.map(|state| state.content_hash.clone()),
+    };
     send_watch_request(&mut writer, &req).await?;
-    info!(addr = %addr, resource_version = watch_state.last_version, "sent WatchRequest");
+    info!(addr = %addr, revision = ?req.last_applied_revision, "sent WatchRequest");
 
-    // Step 2+3: receive Snapshot then stream Patches until error/disconnect.
-    // Returns the last seen resource_version so the caller can reconnect with it.
     let err = loop {
-        let event = match recv_watch_event(&mut reader).await {
+        let event = match recv_config_event(&mut reader).await {
             Ok(e) => e,
             Err(e) => break e,
         };
         match event {
-            ReceivedWatchEvent::Legacy(WatchEvent::Snapshot(snap)) => {
-                let v = snap.resource_version;
-                info!(resource_version = v, "received Snapshot from ctld");
-                let content_hash = snapshot_content_hash(&snap)?;
-                state.health().begin_config_apply();
-                if let Err(error) = apply_snapshot(&snap, &content_hash, state).await {
-                    state.health().fail_config_apply();
-                    return Err(error);
-                }
-                state.health().finish_config_apply();
-                watch_state.last_version = v;
-                watch_state.current_snapshot = Some(snap.clone());
-                let lkg = make_lkg(None, content_hash, unix_time_ms(), snap.clone())?;
-                watch_state.applied = Some(AppliedControlState {
-                    revision: None,
-                    content_hash: lkg.content_hash.clone(),
-                });
-                if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
-                    warn!(error = %error, "live snapshot applied but LKG persistence degraded");
-                    metrics::counter!("duotunnel_control_lkg_persist_failures_total").increment(1);
-                }
+            ConfigEvent::Snapshot(versioned) => {
+                handle_snapshot(versioned, state, watch_state, snapshot_path, &mut writer).await?;
             }
-            ReceivedWatchEvent::Legacy(WatchEvent::Patch(patch)) => {
-                let v = patch.resource_version;
-                info!(resource_version = v, "received Patch from ctld");
-                if let Some(current) = watch_state.current_snapshot.as_ref() {
-                    let mut candidate = current.clone();
-                    let affected_ports = apply_patch_to_snapshot(&mut candidate, &patch);
-                    let content_hash = snapshot_content_hash(&candidate)?;
-                    state.health().begin_config_apply();
-                    if let Err(error) = apply_patch_to_runtime(
-                        &candidate,
-                        &content_hash,
-                        &patch,
-                        &affected_ports,
-                        state,
-                    )
-                    .await
-                    {
-                        state.health().fail_config_apply();
-                        return Err(error);
-                    }
-                    state.health().finish_config_apply();
-                    watch_state.last_version = v;
-                    let lkg = make_lkg(None, content_hash, unix_time_ms(), candidate.clone())?;
-                    watch_state.applied = Some(AppliedControlState {
-                        revision: None,
-                        content_hash: lkg.content_hash.clone(),
-                    });
-                    watch_state.current_snapshot = Some(candidate);
-                    if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
-                        warn!(error = %error, "live snapshot applied but LKG persistence degraded");
-                        metrics::counter!("duotunnel_control_lkg_persist_failures_total")
-                            .increment(1);
-                    }
-                } else {
-                    anyhow::bail!("received Patch before Snapshot at version {v}");
-                }
-            }
-            ReceivedWatchEvent::V2(WatchEventV2::Snapshot(versioned)) => {
-                handle_v2_snapshot(versioned, state, watch_state, snapshot_path, &mut writer)
-                    .await?;
+            ConfigEvent::Delta(delta) => {
+                handle_delta(delta, state, watch_state, snapshot_path, &mut writer).await?;
             }
         }
     };
-    // Return the last version we successfully applied so the reconnect sends
-    // resource_version=N instead of 0, allowing future delta optimisation.
     Err(err.context(format!(
-        "ctld disconnected at version {}",
-        watch_state.last_version
+        "ctld disconnected at revision {:?}",
+        watch_state
+            .applied
+            .as_ref()
+            .and_then(|state| state.revision.as_ref())
     )))
 }
 
@@ -513,10 +446,7 @@ fn classify_revision(
         return RevisionDecision::Apply;
     };
     if current.epoch != incoming.epoch {
-        return RevisionDecision::Reject(format!(
-            "control epoch mismatch requires an explicit authority reset: incoming={} current={}",
-            incoming.epoch, current.epoch
-        ));
+        return RevisionDecision::Apply;
     }
     if incoming.sequence < current.sequence {
         return RevisionDecision::Reject(format!(
@@ -535,7 +465,7 @@ fn classify_revision(
     RevisionDecision::Apply
 }
 
-async fn handle_v2_snapshot<W>(
+async fn handle_snapshot<W>(
     versioned: VersionedConfigSnapshot,
     state: &Arc<ServerState>,
     watch_state: &mut WatchState,
@@ -569,7 +499,6 @@ where
         &versioned.content_hash,
     ) {
         RevisionDecision::Duplicate => {
-            watch_state.last_version = versioned.revision.sequence;
             state.health().confirm_control_freshness();
             send_apply_response(
                 writer,
@@ -610,7 +539,6 @@ where
         return Err(error);
     }
     state.health().finish_config_apply();
-    watch_state.last_version = versioned.revision.sequence;
     watch_state.current_snapshot = Some(versioned.snapshot.clone());
     watch_state.applied = Some(AppliedControlState {
         revision: Some(versioned.revision.clone()),
@@ -632,6 +560,121 @@ where
         writer,
         &versioned.revision,
         &versioned.content_hash,
+        ApplyStatus::Applied,
+        None,
+    )
+    .await
+}
+
+async fn handle_delta<W>(
+    delta: tunnel_lib::ctld_proto::ConfigDelta,
+    state: &Arc<ServerState>,
+    watch_state: &mut WatchState,
+    snapshot_path: &Path,
+    writer: &mut W,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let Some(current) = watch_state.current_snapshot.as_ref() else {
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::ResyncRequired,
+            Some("no base snapshot is applied".to_string()),
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(applied) = watch_state.applied.as_ref() else {
+        anyhow::bail!("current snapshot has no applied control state");
+    };
+    let Some(base_revision) = applied.revision.as_ref() else {
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::ResyncRequired,
+            Some("base snapshot has no control revision".to_string()),
+        )
+        .await?;
+        return Ok(());
+    };
+    if base_revision != &delta.base_revision || applied.content_hash != delta.base_hash {
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::ResyncRequired,
+            Some("delta base revision or hash does not match".to_string()),
+        )
+        .await?;
+        return Ok(());
+    }
+    if delta.target_revision.epoch != delta.base_revision.epoch
+        || delta.target_revision.sequence <= delta.base_revision.sequence
+    {
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::ResyncRequired,
+            Some("delta target revision is not newer than its base".to_string()),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut candidate = current.clone();
+    apply_config_operations(&mut candidate, &delta.operations)?;
+    candidate.resource_version = delta.target_revision.sequence;
+    let actual_hash = snapshot_content_hash(&candidate)?;
+    if actual_hash != delta.target_hash {
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::Rejected,
+            Some("delta target content hash mismatch".to_string()),
+        )
+        .await?;
+        anyhow::bail!("delta target content hash mismatch");
+    }
+
+    state.health().begin_config_apply();
+    if let Err(error) = apply_snapshot(&candidate, &actual_hash, state).await {
+        state.health().fail_config_apply();
+        send_apply_response(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            ApplyStatus::Rejected,
+            Some(format!("runtime apply failed: {error}")),
+        )
+        .await?;
+        return Err(error);
+    }
+    state.health().finish_config_apply();
+    watch_state.current_snapshot = Some(candidate.clone());
+    watch_state.applied = Some(AppliedControlState {
+        revision: Some(delta.target_revision.clone()),
+        content_hash: delta.target_hash.clone(),
+    });
+    let lkg = make_lkg(
+        Some(delta.target_revision.clone()),
+        delta.target_hash.clone(),
+        unix_time_ms(),
+        candidate,
+    )?;
+    if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
+        warn!(error = %error, "live delta applied but LKG persistence degraded");
+        metrics::counter!("duotunnel_control_lkg_persist_failures_total").increment(1);
+    }
+    send_apply_response(
+        writer,
+        &delta.target_revision,
+        &delta.target_hash,
         ApplyStatus::Applied,
         None,
     )
@@ -673,15 +716,22 @@ async fn apply_snapshot(
     state: &Arc<ServerState>,
 ) -> anyhow::Result<()> {
     let (listeners, generation) = build_runtime_generation(snap, content_hash, state)?;
+    let previous = state.runtime_generation();
+    let previous_listeners = previous.routing().ingress_listeners().to_vec();
     let _security_commit = state.security_apply_gate().write().await;
-    fence_revoked_sessions(
-        state,
-        state.runtime_generation().token_map(),
-        generation.token_map(),
-    )
-    .await?;
     if let Err(error) = crate::ingress::sync_all_listeners(state, &listeners).await {
         state.health().hold_config_apply_fence();
+        return Err(error);
+    }
+    if let Err(error) =
+        fence_revoked_sessions(state, previous.token_map(), generation.token_map()).await
+    {
+        state.health().hold_config_apply_fence();
+        if let Err(rollback_error) =
+            crate::ingress::sync_all_listeners(state, &previous_listeners).await
+        {
+            tracing::error!(error = %rollback_error, "failed to roll back listeners after token fence failure");
+        }
         return Err(error);
     }
     state.publish_generation(generation);
@@ -766,71 +816,6 @@ async fn fence_revoked_sessions(
         info!(fenced, "fenced sessions authenticated by revoked tokens");
     }
     Ok(())
-}
-
-async fn apply_patch_to_runtime(
-    snapshot: &ConfigSnapshot,
-    content_hash: &str,
-    patch: &ConfigPatch,
-    affected_ports: &HashSet<u16>,
-    state: &Arc<ServerState>,
-) -> anyhow::Result<()> {
-    let _ = (patch, affected_ports);
-    apply_snapshot(snapshot, content_hash, state).await
-}
-
-fn apply_patch_to_snapshot(snapshot: &mut ConfigSnapshot, patch: &ConfigPatch) -> HashSet<u16> {
-    snapshot.resource_version = patch.resource_version;
-    let affected_ports = patch
-        .ingress_listeners
-        .iter()
-        .filter_map(|op| match op {
-            ResourceOp::Upsert(item) => Some(item.port),
-            ResourceOp::Delete { key } => key.parse().ok(),
-        })
-        .collect();
-    apply_ops(
-        &mut snapshot.ingress_listeners,
-        &patch.ingress_listeners,
-        |item| item.port.to_string(),
-    );
-    apply_ops(&mut snapshot.client_groups, &patch.client_groups, |item| {
-        item.group_id.to_string()
-    });
-    apply_ops(
-        &mut snapshot.egress_upstreams,
-        &patch.egress_upstreams,
-        |item| item.name.clone(),
-    );
-    apply_ops(
-        &mut snapshot.egress_vhost_rules,
-        &patch.egress_vhost_rules,
-        |item| item.match_host.clone(),
-    );
-    apply_ops(&mut snapshot.token_cache, &patch.token_cache, |item| {
-        item.hash_hex.clone()
-    });
-    affected_ports
-}
-
-fn apply_ops<T, F>(items: &mut Vec<T>, ops: &[ResourceOp<T>], key_of: F)
-where
-    T: Clone,
-    F: Fn(&T) -> String,
-{
-    let mut map: std::collections::BTreeMap<String, T> =
-        items.drain(..).map(|item| (key_of(&item), item)).collect();
-    for op in ops {
-        match op {
-            ResourceOp::Upsert(item) => {
-                map.insert(key_of(item), item.clone());
-            }
-            ResourceOp::Delete { key } => {
-                map.remove(key);
-            }
-        }
-    }
-    *items = map.into_values().collect();
 }
 
 // ── Type conversions: tunnel_store routing types → server config types ────────
@@ -979,6 +964,8 @@ mod tests {
             RevisionDecision::Reject(_)
         ));
         assert!(matches!(
+            // A full Snapshot from a new control epoch is an authority reset;
+            // only Delta events require the existing epoch as their base.
             classify_revision(
                 Some(&current),
                 &ControlRevision {
@@ -1009,7 +996,7 @@ mod tests {
                 },
                 "hash-a"
             ),
-            RevisionDecision::Reject(_)
+            RevisionDecision::Apply
         ));
         assert!(matches!(
             classify_revision(
@@ -1020,7 +1007,7 @@ mod tests {
                 },
                 "hash-b"
             ),
-            RevisionDecision::Reject(_)
+            RevisionDecision::Apply
         ));
     }
 
