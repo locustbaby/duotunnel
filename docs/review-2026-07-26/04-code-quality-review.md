@@ -61,7 +61,7 @@
 
 ### 2.1 `forward_http` 是死代码（175 行）`[新发现]`
 
-- **现象与证据**：`crates/duotunnel-core/src/egress/http.rs:91-266` 在全仓库**无任何调用方**（仅 `lib.rs:16` 重导出）；真实 egress H1 路径走 `Http1Driver`（01 §1.2）。此外 `egress/http.rs:21-33` 的 `read_into_bytes_mut` 与 `driver/h1.rs:81-93` 完全重复。
+- **现象与证据**：`duotunnel-lib/src/egress/http.rs:91-266` 在全仓库**无任何调用方**（仅 `lib.rs:16` 重导出）；真实 egress H1 路径走 `Http1Driver`（01 §1.2）。此外 `egress/http.rs:21-33` 的 `read_into_bytes_mut` 与 `driver/h1.rs:81-93` 完全重复。
 - **根因/为什么是问题**：不只是体积——**`todo.md` 的 TODO-137 还在追踪对它的优化**。在死代码上规划优化任务，说明“文档跟踪对象”与“实际热路径”已脱节（印证“不要信文档、以代码为准”）。
 - **方案**：删除 `forward_http` 及其重导出与重复的 `read_into_bytes_mut`；**把 TODO-137 的对象改指向 `Http1Driver::write_response`**。
 - **论证/备选**：不保留“以备将来复用”——死代码持续误导跟踪与 review 成本，真需要时从 git 历史取回即可；重复 helper 保留哪一份取决于 `h1.rs` 为真实路径，故删 `egress/http.rs` 侧。
@@ -71,17 +71,17 @@
 
 ### 2.2 Overload 配置三重复制
 
-- **现象与证据**：`OverloadMode`/`OverloadConfig`/`resolve()` 在 `crates/duotunnel-store/src/config/mod.rs:35-123` 与 `crates/duotunnel-client/bootstrap/config.rs:86-174` **逐字重复（连注释一致）**；server 经 duotunnel-store 用第一份，另有 duotunnel-core 的 `OverloadLimits::resolve` 第三处。
-- **根因/为什么是问题**：任何阈值语义调整须同步改两处 serde 定义 + duotunnel-core 的 resolve，**漂移是已知类型的风险**（三份手工同步早晚失配）。
-- **方案**：serde 结构挪进 `duotunnel-core::config`（或独立 `tunnel-config` 模块），两个二进制引用同一定义。
-- **论证/备选**：下沉到公共 crate 而非“加注释提醒同步”——注释挡不住漂移；独立 `tunnel-config` 模块可避免 store/client 反向依赖 duotunnel-core 引入不必要耦合，若耦合可接受则直接进 `duotunnel-core::config` 更省。
+- **现象与证据**：`OverloadMode`/`OverloadConfig`/`resolve()` 在 `duotunnel-lib/src/config/file.rs:35-123` 与 `duotunnel-client/bootstrap/config.rs:86-174` **逐字重复（连注释一致）**；server 与 ctld 共享前者，另有 duotunnel-lib 的 `OverloadLimits::resolve` 第三处。
+- **根因/为什么是问题**：任何阈值语义调整须同步改两处 serde 定义 + duotunnel-lib 的 resolve，**漂移是已知类型的风险**（三份手工同步早晚失配）。
+- **方案**：serde 结构挪进 `duotunnel-lib::config`（或独立 `tunnel-config` 模块），两个二进制引用同一定义。
+- **论证/备选**：下沉到公共 crate 而非“加注释提醒同步”——注释挡不住漂移；独立 `tunnel-config` 模块可避免 store/client 反向依赖 duotunnel-lib 引入不必要耦合，若耦合可接受则直接进 `duotunnel-lib::config` 更省。
 - **场景覆盖 & Corner Cases**：确认 server（经 store）与 client 两侧 serde 默认值与字段名在合并前**逐字段等价**，否则合并会静默改变某侧默认；`resolve()` 语义须保持一份权威。
 - **取舍**：一次搬移引入跨 crate 依赖方向决策，但换来单一事实源。
 - **收益 / 改动量 / 影响面**：消除双份 serde 漂移；~1 小时纯搬移；影响面为配置解析，回滚 = revert 搬移 commit。
 
 ### 2.3 duotunnel-server + duotunnel-client bootstrap 平行结构（§2.2 同向）
 
-- **现象与证据**：`crates/duotunnel-server/bootstrap/config.rs`（609 行）与 `crates/duotunnel-client/bootstrap/config.rs`（601 行）存在大量同构段（quic/tcp/http_pool/proxy_buffers/overload/timeout 的解析与默认值）。
+- **现象与证据**：`duotunnel-server/bootstrap/config.rs`（609 行）与 `duotunnel-client/bootstrap/config.rs`（601 行）存在大量同构段（quic/tcp/http_pool/proxy_buffers/overload/timeout 的解析与默认值）。
 - **根因/为什么是问题**：与 §2.2 同一漂移风险，且**是 TODO-CR-AUDIT-6（统一参数校验边界）的实施前提**——校验逻辑只能在合并后写一份。
 - **方案**：公共段下沉，二进制侧只留各自差异（listener/entry 等）。与 §2.2 共用同一下沉方向。
 - **论证/备选**：先合并再统一校验，避免在两份平行结构上各写一遍校验又要保持一致。
@@ -106,7 +106,7 @@
 | A3 | `PeerKind::Http/H2` 仍 Box | `proxy/peers.rs:54-58` | TODO-36；内联进 enum，~20 行 |
 | A4 | `Http1Driver` recv 所有权用 oneshot “reclaim” 往返 | `driver/h1.rs:56-78,200-207` | 维持现状，作为 TODO-77 输入 |
 | A5 | `hint.clone()` 在 dispatch 阶段 3 次深拷贝（含 `authority: Option<String>`） | `dispatcher.rs:85,89,157` | 字段改 `Arc<str>`/`Bytes` 或传引用；~40 行 |
-| A6 | `duotunnel-core` 单 crate 承载 proto+engine+plugin+infra（21 个模块） | 全库 | TODO-83；先拆 `tunnel-proto` |
+| A6 | `duotunnel-lib` 单 crate 承载 proto+engine+plugin+infra（21 个模块） | 全库 | TODO-83；先拆 `tunnel-proto` |
 
 **A1 · TLS sender 缓存锁+哈希白付**
 - **现象/证据**：`plugins/tls/mod.rs:93-107`，per-connection `Mutex<HashMap<RouteTarget, CachedSender>>`。
@@ -147,8 +147,8 @@
 - **Corner**：确认三处 clone 均在同一 dispatch 生命周期内，改 `Arc` 后语义等价。
 - **取舍 · 收益 · 改动量**：`Arc` 引入原子 refcount，换掉 3 次含堆 `String` 的深拷；~40 行。
 
-**A6 · duotunnel-core 单 crate 过载（21 模块）**
-- **现象/证据**：`duotunnel-core` 单 crate 承载 proto+engine+plugin+infra 共 21 个模块（TODO-83）。
+**A6 · duotunnel-lib 单 crate 过载（21 模块）**
+- **现象/证据**：`duotunnel-lib` 单 crate 承载 proto+engine+plugin+infra 共 21 个模块（TODO-83）。
 - **根因**：编译不可并行、层次耦合、难以对纯协议层独立 fuzz/测试。
 - **方案**：**先拆 `tunnel-proto`**（msg/id/error，无 tokio 依赖、可独立 fuzz），engine/plugins 后置。
 - **论证/备选**：先拆无 tokio 依赖的 proto 层风险最小、且立即解锁独立 fuzz（呼应 TODO-CR-AUDIT-20）；engine/plugins 依赖面广，后置。
@@ -159,10 +159,10 @@
 
 | # | 问题 | 证据 | 说明 |
 | --- | --- | --- | --- |
-| S1 | `select!` 被压成数行长串，与全仓风格断裂 | `crates/duotunnel-client/tunnel/supervisor.rs:72-87` | fmt + 补 CI 门禁 |
+| S1 | `select!` 被压成数行长串，与全仓风格断裂 | `duotunnel-client/tunnel/supervisor.rs:72-87` | fmt + 补 CI 门禁 |
 | S2 | magic number 未常量化 | 见 §S2 | 常量化 + 归 CR-AUDIT-6 |
 | S3 | README 与实现漂移 | `README.md` | 纠偏 |
-| S4 | healthz 手写 HTTP 单读即判 | `crates/duotunnel-client/runtime/app.rs:155-158`（server 同构） | 低危，读全再判 |
+| S4 | healthz 手写 HTTP 单读即判 | `duotunnel-client/runtime/app.rs:155-158`（server 同构） | 低危，读全再判 |
 | S5 | 注释语言/密度克制、意图注释质量高 ✅ | — | 保持 |
 
 **S1 · fmt 破坏 + 缺 fmt 门禁**
@@ -181,14 +181,14 @@
 - **收益 · 影响面**：可调、防漂移；与 §2.2/§2.3 共同喂 CR-AUDIT-6。
 
 **S3 · README 与实现漂移**
-- **现象/证据**：README 声称 jemalloc（`README:377`）实为 mimalloc（`crates/duotunnel-server/main.rs:2`）；“项目结构”段列的 `crates/duotunnel-server/handlers/`、`registry.rs` 等路径早已重构。
+- **现象/证据**：README 声称 jemalloc（`README:377`）实为 mimalloc（`duotunnel-server/main.rs:2`）；“项目结构”段列的 `duotunnel-server/handlers/`、`registry.rs` 等路径早已重构。
 - **根因/为什么是问题**：文档失真会误导后续优化判断，allocator 选型讨论首当其冲。
 - **方案**：纠正 README 的 allocator 与结构段。
 - **收益 · 改动量 · 影响面**：~1 小时；纯文档，回滚无风险。
 
 **S4 · healthz 手写 HTTP 单读即判**
-- **现象/证据**：`crates/duotunnel-client/runtime/app.rs:155-158`（server 同构）单次 `read(256B)` 即响应，长 header 或分包请求会误判 400。
-- **根因**（结合同构实现 `crates/duotunnel-ctld/src/runtime/app.rs:142-164`）：`read(&mut [0u8;256]).unwrap_or(0)` + `from_utf8(..).unwrap_or("")` + `starts_with` 判定——任何不在首个 256B 段内完整到达的请求行都会误判。
+- **现象/证据**：`duotunnel-client/runtime/app.rs:155-158`（server 同构）单次 `read(256B)` 即响应，长 header 或分包请求会误判 400。
+- **根因**（结合同构实现 `duotunnel-ctld/src/runtime/app.rs:142-164`）：`read(&mut [0u8;256]).unwrap_or(0)` + `from_utf8(..).unwrap_or("")` + `starts_with` 判定——任何不在首个 256B 段内完整到达的请求行都会误判。
 - **方案**：读到 `\r\n\r\n` 或 EOF 再判定（带总量上限防滥用）。
 - **场景覆盖 & Corner Cases**：
   - **分包**：`GET /healthz` 跨 TCP 段，首段仅 `GET /heal` → `starts_with` 失败；

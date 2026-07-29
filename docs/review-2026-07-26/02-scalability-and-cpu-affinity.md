@@ -81,7 +81,7 @@ S1/S2/K1 同样应由可信 profile 判定。
 `spawn_single_listener` 创建；后者用**裸 `tokio::spawn`**，因此 accept loop 继承
 **调用方所在的 runtime**——而 `apply_snapshot` 跑在 `BackgroundComponent` 的
 `build_single_thread_runtime("bg-worker")`（`new_current_thread`）上。又因为
-`run_accept_worker`（`crates/duotunnel-core/src/transport/accept.rs`）对每条连接同样用
+`run_accept_worker`（`duotunnel-lib/src/transport/accept.rs`）对每条连接同样用
 `tokio::spawn`，**accept + sniff + dispatch + relay 全链条都落在那一个线程上**，
 而 N 个 `proxy-worker` 线程只处理 QUIC 侧、公网侧完全空转。
 
@@ -262,7 +262,7 @@ trait，**不关心自己跑在哪个 runtime 实例上**——在哪个 runtime
 时才启动，不再视为无条件必做。
 client 是发起方——每条 QUIC 连接用独立 UDP socket（独立源端口），内核按四元组
 分流到不同 socket，**没有** server 侧 SO_REUSEPORT+CID 迁移的路由问题。
-改动点：`crates/duotunnel-client/runtime/app.rs:38` 的单 endpoint 构建改为 per-supervisor-slot
+改动点：`duotunnel-client/runtime/app.rs:38` 的单 endpoint 构建改为 per-supervisor-slot
 构建（`pool.rs:21-39` 循环里各建一个，不再 `endpoint.clone()`）。`connections = cores`
 时 client 的 QUIC 收包即随核扩展。
 
@@ -317,7 +317,7 @@ server 单 UDP socket 的 CID 路由问题需要 eBPF `SO_REUSEPORT` steering，
 oversubscribe，使用独立显式开关并告警。另需新增**具体核的枚举**：
 
 ```rust
-// crates/duotunnel-core/src/infra/affinity.rs (新文件, Linux-only, 其它平台 no-op)
+// duotunnel-lib/src/infra/affinity.rs (新文件, Linux-only, 其它平台 no-op)
 pub fn allowed_cpus() -> Vec<usize> {
     // SAFETY: 标准 sched_getaffinity 用法，只读内核返回的位图
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
@@ -366,7 +366,7 @@ pub fn build_proxy_runtime_with(pin: PinMode) -> tokio::runtime::Runtime {
 **已知限制（必须写进文档/日志）**：`on_thread_start` 对 blocking pool 线程同样
 触发，靠 "worker 先创建" 的启动顺序把它们排除；这是 tokio 生态的通行做法，但
 若未来 tokio 改变启动顺序需要回归验证（用启动日志打印实际 pin 映射兜底）。
-`dial9` 路径（`crates/duotunnel-server/runtime/mod.rs:63-66`）使用同一 builder 注入，行为一致。
+`dial9` 路径（`duotunnel-server/runtime/mod.rs:63-66`）使用同一 builder 注入，行为一致。
 
 ### 5.3 配置与可观测
 

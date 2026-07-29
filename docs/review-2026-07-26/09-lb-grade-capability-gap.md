@@ -130,7 +130,7 @@ metrics label 扩展，~1-2 天；影响所有 HTTP 转发路径，需回归 hea
 
 ### 4.2 A/B — Egress upstream LB 是"轮询 + 仅连接级健康"，缺 LB 质量要素 `[新发现]`
 
-**现象与证据**（`crates/duotunnel-core/src/proxy/upstream.rs`）：
+**现象与证据**（`duotunnel-lib/src/proxy/upstream.rs`）：
 - **算法 = 轮询**：`next_healthy()`（:90-109）用 `counter.fetch_add` 做 round-robin，
   跳过不健康项；**非** P2C、**非**最少连接、**无权重**。（对比：client 选择用的是
   P2C，两条 LB 路径算法不一致。）
@@ -178,7 +178,7 @@ metrics label 扩展，~1-2 天；影响所有 HTTP 转发路径，需回归 hea
 - **DNS 变化**：探测用的地址在 DNS 轮换后可能过期；恢复探测应重解析（现 :51-52 有
   lookup 分支）。
 - **健康状态跨 snapshot 重建丢失**：`ServerEgressMap` 在路由热重载时重建
-  `UpstreamGroup`（`crates/duotunnel-server/egress/mod.rs:26`）→ **unhealthy 状态被清空**，坏后端
+  `UpstreamGroup`（`duotunnel-server/egress/mod.rs:26`）→ **unhealthy 状态被清空**，坏后端
   热重载后短暂重新接流。需在重建时迁移健康状态或接受一次探测窗口。
 
 **取舍**：outlier + 退避 + 慢启动增加状态与复杂度；换取对 brownout 的真实防护。

@@ -53,7 +53,7 @@ completion 模型不兼容，桥接层会抵消大部分收益；而 DuoTunnel �
   （`pingora-runtime/src/lib.rs:15-24` 明确说明动机——「第三种 flavor：无
   work stealing 的多线程运行时，效率等同单线程运行时又能吃满多核」），配置面
   只有 `threads` + `work_stealing` 两个开关
-  （`pingora-core/src/crates/duotunnel-server/configuration/mod.rs:74-82`）。
+  （`pingora-core/src/duotunnel-server/configuration/mod.rs:74-82`）。
 - pingora **也没有做绑核**（全仓库无 `sched_setaffinity`/`core_affinity`）。
 
 结论：Cloudflare 生产级代理在 epoll(tokio) 上达成其性能目标，靠的是

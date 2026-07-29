@@ -65,7 +65,7 @@ Reverse Proxy (Egress):   Internal Request → Client → Server → External Se
 
 ```
 tunnel/
-├── duotunnel-core/                    # Core library
+├── duotunnel-lib/                    # Core library
 │   └── src/
 │       ├── config/                # Startup-time config types (QuicConfig, TcpConfig, ...)
 │       ├── models/msg.rs          # Message protocol definitions
@@ -103,7 +103,7 @@ tunnel/
 │           ├── peek_buf.rs        # PeekBufPool thread-local cache
 │           └── observability.rs   # Logging and tracing
 │
-├── crates/duotunnel-server/                        # Server
+├── duotunnel-server/                        # Server
 │   ├── main.rs                    # Thin binary entry
 │   ├── lib.rs                     # Server runtime facade
 │   ├── bootstrap/
@@ -138,7 +138,7 @@ tunnel/
 │   └── egress/
 │       └── mod.rs                 # Outbound routing (HttpConnector wrapper)
 │
-├── crates/duotunnel-ctld/                # Control service
+├── duotunnel-ctld/                # Control service
 │   └── src/
 │       ├── main.rs                # Thin binary entry
 │       ├── lib.rs                 # Ctld runtime facade
@@ -157,7 +157,7 @@ tunnel/
 │           └── token/
 │               └── cache.rs       # Token cache provider
 │
-└── crates/duotunnel-client/                        # Client
+└── duotunnel-client/                        # Client
     ├── main.rs                    # Thin binary entry
     ├── lib.rs                     # Client runtime facade
     ├── bootstrap/
@@ -246,7 +246,7 @@ pub struct RoutingInfo {
 }
 ```
 
-Implementation: `crates/duotunnel-core/src/models/msg.rs`.
+Implementation: `duotunnel-lib/src/models/msg.rs`.
 
 ---
 
@@ -284,7 +284,7 @@ Implementation: `crates/duotunnel-core/src/models/msg.rs`.
 
 ### 4.2 Client Reconnection Mechanism
 
-Implemented in `crates/duotunnel-client/tunnel/supervisor.rs`:
+Implemented in `duotunnel-client/tunnel/supervisor.rs`:
 
 - `JitterBackoff` over `reconnect.initial_delay_ms` … `max_delay_ms` (doubling with jitter per step).
 - `startup_jitter_ms` before first connect (thundering herd avoidance).
@@ -624,7 +624,7 @@ duotunnel_requests_total{type,status} # Total requests (tcp/http, success/error)
 ### 11.1 Transport Security
 
 - **QUIC TLS 1.3**: All tunnel traffic encrypted
-- **ALPN**: `tunnel-quic/v1` protocol identifier (generation-scoped; a breaking wire change takes a new generation so incompatible peers fail at the QUIC handshake). Handshake additionally negotiates `protocol_version` + capability bits — see `crates/duotunnel-core/src/models/msg.rs`.
+- **ALPN**: `tunnel-quic/v1` protocol identifier (generation-scoped; a breaking wire change takes a new generation so incompatible peers fail at the QUIC handshake). Handshake additionally negotiates `protocol_version` + capability bits — see `duotunnel-lib/src/models/msg.rs`.
 - **Certificate Verification**: Supports custom CA or system certificates
 
 ### 11.2 Authentication Mechanism

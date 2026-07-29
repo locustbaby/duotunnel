@@ -3,11 +3,10 @@ on:
   push:
     branches: [main, "fix/**", "feat/**"]
     paths:
-      - "crates/duotunnel-core/**"
-      - "crates/duotunnel-ctld/**"
-      - "crates/duotunnel-server/**"
-      - "crates/duotunnel-client/**"
-      - "crates/duotunnel-store/**"
+      - "duotunnel-lib/**"
+      - "duotunnel-ctld/**"
+      - "duotunnel-server/**"
+      - "duotunnel-client/**"
       - "ci-helpers/*.py"
       - "ci-helpers/*.sh"
       - "ci-helpers/*.toml"
@@ -28,11 +27,10 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "crates/duotunnel-core/**"
-      - "crates/duotunnel-ctld/**"
-      - "crates/duotunnel-server/**"
-      - "crates/duotunnel-client/**"
-      - "crates/duotunnel-store/**"
+      - "duotunnel-lib/**"
+      - "duotunnel-ctld/**"
+      - "duotunnel-server/**"
+      - "duotunnel-client/**"
       - "ci-helpers/*.py"
       - "ci-helpers/*.sh"
       - "ci-helpers/*.toml"

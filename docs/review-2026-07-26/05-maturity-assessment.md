@@ -32,7 +32,7 @@
 | --- | --- | --- | --- |
 | **架构设计** | **3.5** | 强：控制面/数据面分离、ctld 集中路由 + 热重载、QUIC 原生多路复用、双向 ingress/egress 同引擎复用、6-phase 可扩展 dispatcher。短：单 endpoint 限制多核扩展、L7 每请求重建无旁路 | 02 S1（单 endpoint 限多核）、01 §4.2（L7 每请求重建） |
 | **代码质量** | **3** | 强：newtype ID、ProxyError 分类、无锁读路径、注释克制且到位。短：1 处 UB、1 处无收益 unsafe、175 行死代码、配置三重复制、局部 fmt 破坏、缺 fmt 门禁 | 01 §3.1（UB）、04（死代码 / 配置三重复制 / fmt 门禁） |
-| **抽象/组合** | **3.5** | 强：UpstreamResolver/PeerSpec/IngressProtocolHandler trait 边界清晰，静态分发。短：H1 body 的 oneshot-reclaim 是缺 Session 抽象的症状、duotunnel-core 过大 | TODO-77（oneshot-reclaim / 缺 Session）、TODO-83（duotunnel-core 过大） |
+| **抽象/组合** | **3.5** | 强：UpstreamResolver/PeerSpec/IngressProtocolHandler trait 边界清晰，静态分发。短：H1 body 的 oneshot-reclaim 是缺 Session 抽象的症状、duotunnel-lib 过大 | TODO-77（oneshot-reclaim / 缺 Session）、TODO-83（duotunnel-lib 过大） |
 | **性能工程** | **3** | 强：零拷贝 read_chunk、池化、P2C、BBR、GSO/GRO、PGO 脚本、target-cpu=native+LTO。短：线性扩展未达成、CI 不可信基线、benchmark-gated 项因缺 microbench/基线停在 research | 06（CI 基线 / microbench 缺失 / benchmark-gated 停 research） |
 | **稳定性/HA** | **2.5** | 强：重连退避+jitter、健康检查、过载快失败框架、证书/快照本地 fallback。短：优雅停机不完整（drain 只看 TCP+pending，漏 QUIC/stream/UDP/H2）、孤儿 spawn 无 JoinSet、pending 上限竞态 | TODO-CR-AUDIT-21（drain 不完整）、TODO-96（孤儿 spawn 无 JoinSet）、TODO-80（pending 上限竞态） |
 | **安全性** | **2.5** | 强：token 只存摘要、日志脱敏、sniff/login 超时、egress 双层防御、CheckBytes 反序列化。短：未认证连接无限流、CA 私钥落盘无权限、认证错误边界未闭合、无 fuzz | 07 §3.1（未认证限流）、07 §3.3（CA 私钥权限）、CR-AUDIT-22（认证错误边界）、CR-AUDIT-20（无 fuzz） |
@@ -133,12 +133,12 @@ evidence-driven 原则）；其内部第一步 CI cpuset 隔离基线（06 §2.1
 > 目标：收敛核心抽象、降低维护成本，为长期演进与生态扩展铺路。
 
 **前置依赖**：M1（动核心抽象需测试网防功能回归，否则重构无网）；M2 可信基线
-（Session 统一 / duotunnel-core 拆分等重构须能被证明无性能回归）。
+（Session 统一 / duotunnel-lib 拆分等重构须能被证明无性能回归）。
 
 **动作**：
 1. 统一 Session 抽象（TODO-77，含 H1 keep-alive、body reclaim 简化）
 2. 配置去重 + 统一参数校验（04 §2.2-2.3 / CR-AUDIT-6）
-3. duotunnel-core 拆分（先 tunnel-proto，TODO-83）
+3. duotunnel-lib 拆分（先 tunnel-proto，TODO-83）
 4. passthrough vhost 模式（01 §4.2，L4 快路径）
 5. 文档纠偏、fmt 门禁、README 与实现对齐（04 S3/S1）
 6. 事件驱动控制面同步（TODO-84）
@@ -192,7 +192,7 @@ bus factor 与长期安全响应的结构性风险。即便 M1–M3 全数达成
 4. **机会成本**：M1 不依赖压测、不依赖架构改造，可立即启动；M2 多项需先有可信基线
    （06 §2.1-2.3）。故先做 M1 无等待成本。
 
-**M3 靠后**：M3 动核心抽象（Session 统一、duotunnel-core 拆分），必须站在 M1 的测试网
+**M3 靠后**：M3 动核心抽象（Session 统一、duotunnel-lib 拆分），必须站在 M1 的测试网
 （防功能回归）与 M2 的可信基线（防性能回归）之上；且其收益是长期可维护性而非上线
 阻塞，优先级最低。**M2 内部亦有序**——CI 可信基线（06 §2.1-2.3）是其余所有优化项
 的前置。

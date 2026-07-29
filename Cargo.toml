@@ -1,11 +1,10 @@
 [workspace]
 
 members = [
-    "crates/duotunnel-core",
-    "crates/duotunnel-store",
-    "crates/duotunnel-ctld",
-    "crates/duotunnel-server",
-    "crates/duotunnel-client",
+    "duotunnel-lib",
+    "duotunnel-ctld",
+    "duotunnel-server",
+    "duotunnel-client",
     "ci-helpers",
 ]
 

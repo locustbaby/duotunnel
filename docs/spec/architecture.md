@@ -10,7 +10,7 @@ For parameter defaults see [parameters.md](./parameters.md). For per-crate runti
 
 ```
                     ┌─────────────────┐
-                    │  crates/duotunnel-ctld │  (ctld — control plane only)
+                    │  duotunnel-ctld │  (ctld — control plane only)
                     └────────┬────────┘
                              │ watch TCP + SQLite
               ┌──────────────┬──────────────┐
@@ -22,19 +22,19 @@ For parameter defaults see [parameters.md](./parameters.md). For per-crate runti
               └──────┬───────┘
                      ▼
               ┌──────────────┐
-              │duotunnel-core│  (shared protocol, transport, proxy, plugin core)
+              │duotunnel-lib│  (shared protocol, transport, proxy, plugin core)
               └──────────────┘
 ```
 
 | Crate | Role | Public entry |
 | :--- | :--- | :--- |
-| `duotunnel-core` | Shared types, wire codec, QUIC/TCP transport, `ProxyEngine`, plugin traits, overload | library crate |
-| `duotunnel-store` | SQLite auth + routing persistence, server YAML parsing adapter | library crate |
+| `duotunnel-lib` | Shared types, wire codec, QUIC/TCP transport, `ProxyEngine`, plugin traits, overload | library crate |
+| `duotunnel-ctld` | Control service, watch protocol, admin API, internal SQLite storage | `duotunnel_ctld::run()` |
 | `duotunnel-server` | QUIC tunnel listener, ingress listeners, client registry, server egress | `duotunnel_server::run()` |
 | `duotunnel-client` | QUIC tunnel client, optional local entry, upstream proxy to private services | `duotunnel_client::run()` |
 | `duotunnel-ctld` | ctld: routing DB, token admin, watch server | `duotunnel_ctld::run()` |
 
-Dependency rule: binaries depend on `duotunnel-core` + `duotunnel-store`; `duotunnel-core` does not depend on binaries.
+Dependency rule: server and client depend on `duotunnel-lib`; only ctld owns SQLite and storage adapters. `duotunnel-lib` does not depend on binaries.
 
 ---
 
@@ -57,7 +57,7 @@ SQLite directly.
 - Upstream map and egress allowlist come from `LoginResp.config` at login — not from local YAML.
 - Optional `entry.port` exposes a local forward-proxy entry; optional `udp_entries[]` for UDP.
 
-### ctld (`crates/duotunnel-ctld`)
+### ctld (`duotunnel-ctld`)
 
 - Owns canonical routing + token DB.
 - Exposes watch TCP (`watch_addr`, default `127.0.0.1:7788`).
@@ -67,7 +67,7 @@ SQLite directly.
 
 ## 3. Server Runtime State
 
-`ServerState` (`crates/duotunnel-server/bootstrap/mod.rs`) is the capability surface for all request-time code. Internal subdivisions stay private:
+`ServerState` (`duotunnel-server/bootstrap/mod.rs`) is the capability surface for all request-time code. Internal subdivisions stay private:
 
 | Sub-runtime | Owns | Key types |
 | :--- | :--- | :--- |
@@ -77,7 +77,7 @@ SQLite directly.
 
 `RoutingSnapshot` is immutable per version: HTTP vhost routers per listener port, `TunnelManagement`, `ServerEgressMap`, egress vhost allowlist. Hot reload **replaces the whole snapshot** via `ArcSwap::store`.
 
-Client selection: `ClientRegistry::select_healthy(preferred_shard)` → P2C over inflight load per shard (`crates/duotunnel-server/ingress/registry.rs`).
+Client selection: `ClientRegistry::select_healthy(preferred_shard)` → P2C over inflight load per shard (`duotunnel-server/ingress/registry.rs`).
 
 ---
 
@@ -103,8 +103,8 @@ External client → private upstream through the tunnel.
 
 ```
 External TCP
-  → crates/duotunnel-server/ingress/handlers/{http,tcp}.rs  (SO_REUSEPORT accept workers)
-  → IngressDispatcher::dispatch            (duotunnel-core/plugin/dispatcher.rs)
+  → duotunnel-server/ingress/handlers/{http,tcp}.rs  (SO_REUSEPORT accept workers)
+  → IngressDispatcher::dispatch            (duotunnel-lib/plugin/dispatcher.rs)
       Phase 1: sniff → ProtocolHint
       Phase 2: ConnectionModule::pre_admission
       Phase 3: TunnelService::admission
@@ -112,12 +112,12 @@ External TCP
       Phase 5: IngressProtocolHandler (h1/h2c/tls/tcp_pass)
       Phase 6: logging
   → ClientRegistry::select_healthy → ConnectionHandle
-  → open_bi_guarded + send RoutingInfo     (duotunnel-core/transport/open_bi.rs)
+  → open_bi_guarded + send RoutingInfo     (duotunnel-lib/transport/open_bi.rs)
   → QUIC bidi stream
-  → duotunnel-client: conn.accept_bi() loop (crates/duotunnel-client/tunnel/client.rs)
-  → handle_work_stream                     (crates/duotunnel-client/ingress/handler.rs)
+  → duotunnel-client: conn.accept_bi() loop (duotunnel-client/tunnel/client.rs)
+  → handle_work_stream                     (duotunnel-client/ingress/handler.rs)
       recv_routing_info → ProxyEngine
-  → IngressClientApp / LocalProxyMap       (crates/duotunnel-client/ingress/app.rs)
+  → IngressClientApp / LocalProxyMap       (duotunnel-client/ingress/app.rs)
       LB pick upstream → TCP/HTTP connect to local service
 ```
 
@@ -130,12 +130,12 @@ TCP passthrough sends `RoutingInfo` once then relays bytes.
 Local app → internet via server egress.
 
 ```
-Local TCP → crates/duotunnel-client/egress/listener.rs
+Local TCP → duotunnel-client/egress/listener.rs
   → sniff (client detectors) + egress allowlist check (LoginResp.egress_rules)
   → EntryConnPool::next_conn_for_shard_excluding (P2C)
   → maybe_slow_path → ConnectionHandle::open_stream
   → send RoutingInfo { proxy_name: "entry", host, protocol, src_* }
-  → QUIC → crates/duotunnel-server/ingress/tunnel_handler.rs (on accept_bi from client-initiated stream)
+  → QUIC → duotunnel-server/ingress/tunnel_handler.rs (on accept_bi from client-initiated stream)
   → recv_routing_info → ProxyEngine(ServerEgressMap)
   → vhost rule lookup → external upstream (HTTP connector or TCP relay)
 ```
@@ -157,7 +157,7 @@ Login uses a separate one-shot bidi stream: `Login` → `LoginResp`, then connec
 
 ## 6. Ingress Plugin Pipeline
 
-Registered at bootstrap (`crates/duotunnel-server/bootstrap/mod.rs`):
+Registered at bootstrap (`duotunnel-server/bootstrap/mod.rs`):
 
 | Handler | `ProtocolKind` | Notes |
 | :--- | :--- | :--- |
@@ -177,7 +177,7 @@ Registered at bootstrap (`crates/duotunnel-server/bootstrap/mod.rs`):
 ### Config distribution path
 
 ```
-crates/duotunnel-ctld ControlService (YAML + SQLite merge)
+duotunnel-ctld ControlService (YAML + SQLite merge)
   → WatchServer: Snapshot / Delta
   → duotunnel-server ControlClient
   → build_routing_snapshot()
@@ -194,7 +194,7 @@ Client config is **not** pushed over watch; it is embedded in `LoginResp.config`
 
 ---
 
-## 8. Shared Primitives (`duotunnel-core`)
+## 8. Shared Primitives (`duotunnel-lib`)
 
 | Area | Module | Responsibility |
 | :--- | :--- | :--- |
@@ -211,7 +211,7 @@ Client config is **not** pushed over watch; it is embedded in `LoginResp.config`
 
 ## 9. Module Maps
 
-### `crates/duotunnel-server/`
+### `duotunnel-server/`
 
 ```
 bootstrap/     composition root, ServerState, RoutingSnapshot, ConfigSource
@@ -226,7 +226,7 @@ egress/        ServerEgressMap (UpstreamResolver for external targets)
 control/       control_client, local_auth, null_stores
 ```
 
-### `crates/duotunnel-client/`
+### `duotunnel-client/`
 
 ```
 bootstrap/     ClientConfigFile load/validate
@@ -237,7 +237,7 @@ egress/        entry TCP listener, UDP listener
 plugins/       CachedResolver, RoundRobinLb
 ```
 
-### `crates/duotunnel-ctld/`
+### `duotunnel-ctld/`
 
 ```
 bootstrap/     ctld config
@@ -274,6 +274,6 @@ control/       ControlService, WatchServer, proto (snapshot/delta), reactor (deb
 | [client-runtime.md](./client-runtime.md) | Client startup layers and services |
 | [server-runtime.md](./server-runtime.md) | Server startup layers, supervisor, shutdown |
 | [duotunnel-ctld-runtime.md](./duotunnel-ctld-runtime.md) | ctld startup and control modules |
-| [duotunnel-core.md](./duotunnel-core.md) | Shared library module layout |
-| [duotunnel-store.md](./duotunnel-store.md) | Persistence layer and feature flags |
+| [duotunnel-lib.md](./duotunnel-lib.md) | Shared library module layout |
+| [duotunnel-ctld-storage.md](./duotunnel-ctld-storage.md) | Persistence layer and feature flags |
 | [DESIGN.md](./DESIGN.md) | Product goals, wire format detail, config examples |

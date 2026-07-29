@@ -37,7 +37,7 @@ brownout(可连但持续 5xx/超时)无感;连接选择仅 `close_reason()`。
 ### 3.1 Candidate 视图与 LoadBalancer(增强)
 
 ```rust
-// crates/duotunnel-core/src/lb/mod.rs
+// duotunnel-lib/src/lb/mod.rs
 pub struct Candidate {
     pub healthy: bool,
     pub inflight: usize,   // 无状态上游填 0

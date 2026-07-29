@@ -102,7 +102,7 @@ unused… reserve the name"）；(b) 死代码 `forward_http` 里有个 `Rewrite
 由 L7 handler 在**请求构造后、发上游前**与**收到响应后、写下游前**调用：
 
 ```rust
-// crates/duotunnel-core/src/plugin/http_filter.rs (新)
+// duotunnel-lib/src/plugin/http_filter.rs (新)
 #[async_trait]
 pub trait HttpFilter: Send + Sync + 'static {
     /// 发往上游前改写请求（注入 XFF/请求ID、path 改写、镜像分叉…）

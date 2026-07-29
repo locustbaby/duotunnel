@@ -30,7 +30,7 @@
 - **登录握手无版本字段**：`Login { token: String }`（`msg.rs:41-42`）、
   `LoginResp { success, config, client_group, error }`（`msg.rs:56-`）——**均无
   protocol/handshake version**。client 发 `Login` → server 回 `LoginResp`
-  （`crates/duotunnel-client/tunnel/client.rs:34-65`、`crates/duotunnel-server/ingress/handlers/quic.rs:101-190`），
+  （`duotunnel-client/tunnel/client.rs:34-65`、`duotunnel-server/ingress/handlers/quic.rs:101-190`），
   中间**无能力/版本协商**。
 - **帧格式无版本**：wire frame = `[MessageType u8][len u32][rkyv payload]`
   （`msg.rs:119-137`）；`MessageType`（`msg.rs:19`）是无版本的枚举。

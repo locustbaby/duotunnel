@@ -22,7 +22,7 @@ The `duotunnel-client` crate is organized into four runtime layers.
 
 ### 1. CLI
 
-`crates/duotunnel-client/bootstrap/cli.rs`
+`duotunnel-client/bootstrap/cli.rs`
 
 Owns:
 
@@ -37,8 +37,8 @@ Must not own:
 
 ### 2. Bootstrap
 
-`crates/duotunnel-client/bootstrap/mod.rs`
-`crates/duotunnel-client/bootstrap/config.rs`
+`duotunnel-client/bootstrap/mod.rs`
+`duotunnel-client/bootstrap/config.rs`
 
 Owns:
 
@@ -56,9 +56,9 @@ Bootstrap is the composition root for client runtime dependencies.
 
 ### 3. App / Runtime
 
-`crates/duotunnel-client/runtime/app.rs`
-`crates/duotunnel-client/runtime/mod.rs`
-`crates/duotunnel-client/runtime/engine.rs`
+`duotunnel-client/runtime/app.rs`
+`duotunnel-client/runtime/mod.rs`
+`duotunnel-client/runtime/engine.rs`
 
 Owns:
 
@@ -87,15 +87,15 @@ These values are logged once at startup (`client QUIC ownership topology resolve
 
 ### Service Engine
 
-`crates/duotunnel-client/runtime/engine.rs` defines `RuntimeEngine` and the `ClientService` trait.
+`duotunnel-client/runtime/engine.rs` defines `RuntimeEngine` and the `ClientService` trait.
 
 `ClientApp` registers process-lifetime services and runs them concurrently until shutdown:
 
 | Service | Module | When registered |
 |---|---|---|
-| `EgressListenerService` | `crates/duotunnel-client/egress/listener.rs` | `entry.port` is set |
-| `UdpEgressListenerService` | `crates/duotunnel-client/egress/udp_listener.rs` | one per `udp_entries[]` item |
-| `TunnelPoolService` | `crates/duotunnel-client/tunnel/mod.rs` | always |
+| `EgressListenerService` | `duotunnel-client/egress/listener.rs` | `entry.port` is set |
+| `UdpEgressListenerService` | `duotunnel-client/egress/udp_listener.rs` | one per `udp_entries[]` item |
+| `TunnelPoolService` | `duotunnel-client/tunnel/mod.rs` | always |
 
 Rules:
 
@@ -105,13 +105,13 @@ Rules:
 
 ### 4. Tunnel / Services
 
-`crates/duotunnel-client/tunnel/endpoint.rs`
-`crates/duotunnel-client/tunnel/client.rs`
-`crates/duotunnel-client/tunnel/pool.rs`
-`crates/duotunnel-client/tunnel/supervisor.rs`
-`crates/duotunnel-client/tunnel/conn_pool.rs`
-`crates/duotunnel-client/egress/listener.rs`
-`crates/duotunnel-client/egress/udp_listener.rs`
+`duotunnel-client/tunnel/endpoint.rs`
+`duotunnel-client/tunnel/client.rs`
+`duotunnel-client/tunnel/pool.rs`
+`duotunnel-client/tunnel/supervisor.rs`
+`duotunnel-client/tunnel/conn_pool.rs`
+`duotunnel-client/egress/listener.rs`
+`duotunnel-client/egress/udp_listener.rs`
 
 Owns:
 
@@ -134,37 +134,37 @@ Boundary rule: `endpoint.rs` is startup-time only; `client.rs` is request-time o
 
 ### Session Establishment
 
-`establish_session` (`crates/duotunnel-client/tunnel/client.rs:129`) owns connect plus the whole login handshake and returns `(Connection, LoginResp, NegotiatedProtocol)`.
+`establish_session` (`duotunnel-client/tunnel/client.rs:129`) owns connect plus the whole login handshake and returns `(Connection, LoginResp, NegotiatedProtocol)`.
 
-`run_client` races that phase against shutdown with `tokio::select!` (`crates/duotunnel-client/tunnel/client.rs:38`). Nothing is in flight before the connection joins the pool, so dropping the future loses nothing that needs draining — and the race is necessary, because connect walks every resolved address and login spans several timeouts, which a sequential await would add to the stop latency. Everything after `entry_pool.push` (`crates/duotunnel-client/tunnel/client.rs:58`) is awaited sequentially instead, so the drain cannot be interrupted.
+`run_client` races that phase against shutdown with `tokio::select!` (`duotunnel-client/tunnel/client.rs:38`). Nothing is in flight before the connection joins the pool, so dropping the future loses nothing that needs draining — and the race is necessary, because connect walks every resolved address and login spans several timeouts, which a sequential await would add to the stop latency. Everything after `entry_pool.push` (`duotunnel-client/tunnel/client.rs:58`) is awaited sequentially instead, so the drain cannot be interrupted.
 
-Retry classification reads the wire flag, never the error text: `classify_login_failure(resp.retryable, resp.error.as_deref())` (`crates/duotunnel-client/tunnel/supervisor.rs:165`, called at `crates/duotunnel-client/tunnel/client.rs:170`) maps `retryable` to `ConnectError::transient` and everything else to `ConnectError::fatal`. Server error strings for unauthenticated peers are deliberately generic and must not be pattern-matched, or a transient backing-store fault would be read as a rejected token and stop the client for good.
+Retry classification reads the wire flag, never the error text: `classify_login_failure(resp.retryable, resp.error.as_deref())` (`duotunnel-client/tunnel/supervisor.rs:165`, called at `duotunnel-client/tunnel/client.rs:170`) maps `retryable` to `ConnectError::transient` and everything else to `ConnectError::fatal`. Server error strings for unauthenticated peers are deliberately generic and must not be pattern-matched, or a transient backing-store fault would be read as a rejected token and stop the client for good.
 
 Rules:
 
-- `run_supervisor` does not race `run_client` against the cancel token; `run_client` observes it itself so it can drain in-flight streams and close gracefully (`crates/duotunnel-client/tunnel/supervisor.rs:77`-`80`)
+- `run_supervisor` does not race `run_client` against the cancel token; `run_client` observes it itself so it can drain in-flight streams and close gracefully (`duotunnel-client/tunnel/supervisor.rs:77`-`80`)
 - only `FailureClass::Fatal` ends the supervisor loop; transient failures go through `JitterBackoff`
 
 ### Protocol Negotiation
 
-The client advertises `PROTOCOL_VERSION` and `SUPPORTED_CAPABILITIES` in `Login` (`crates/duotunnel-client/tunnel/client.rs:140`) and validates the server's answer:
+The client advertises `PROTOCOL_VERSION` and `SUPPORTED_CAPABILITIES` in `Login` (`duotunnel-client/tunnel/client.rs:140`) and validates the server's answer:
 
-- a `negotiated_version` outside `MIN_SUPPORTED_VERSION..=PROTOCOL_VERSION` is fatal, not retryable: the server negotiates `min(its max, ours)`, so anything else means a broken or hostile peer (`crates/duotunnel-client/tunnel/client.rs:178`)
-- capabilities are re-masked with `SUPPORTED_CAPABILITIES` so a capability this build never advertised cannot be enabled by an echo (`crates/duotunnel-client/tunnel/client.rs:192`)
+- a `negotiated_version` outside `MIN_SUPPORTED_VERSION..=PROTOCOL_VERSION` is fatal, not retryable: the server negotiates `min(its max, ours)`, so anything else means a broken or hostile peer (`duotunnel-client/tunnel/client.rs:178`)
+- capabilities are re-masked with `SUPPORTED_CAPABILITIES` so a capability this build never advertised cannot be enabled by an echo (`duotunnel-client/tunnel/client.rs:192`)
 
-The resulting `NegotiatedProtocol` is stored on the pool entry (`PooledConnection`, `crates/duotunnel-client/tunnel/conn_pool.rs:13`, set via `EntryConnPool::push`, `crates/duotunnel-client/tunnel/conn_pool.rs:181`) for future capability gating at the connection-selection site.
+The resulting `NegotiatedProtocol` is stored on the pool entry (`PooledConnection`, `duotunnel-client/tunnel/conn_pool.rs:13`, set via `EntryConnPool::push`, `duotunnel-client/tunnel/conn_pool.rs:181`) for future capability gating at the connection-selection site.
 
-ALPN pins the wire generation: `TUNNEL_ALPN` is `tunnel-quic/v1` (`crates/duotunnel-core/src/transport/quic.rs:17`), so an incompatible peer fails in the TLS handshake rather than at login.
+ALPN pins the wire generation: `TUNNEL_ALPN` is `tunnel-quic/v1` (`duotunnel-lib/src/transport/quic.rs:17`), so an incompatible peer fails in the TLS handshake rather than at login.
 
 ### Stream Admission
 
-Reverse streams are opened through `ConnectionHandle::open_stream` (`crates/duotunnel-core/src/transport/connection_handle.rs:75`). Both the concurrency limit and the pending limit are per-connection semaphores on the handle (`crates/duotunnel-core/src/transport/connection_handle.rs:39`-`42`), sized from `quic.max_concurrent_streams` and the resolved `OverloadLimits::max_pending_streams` (`crates/duotunnel-core/src/lb/overload.rs:25`) when the pool is built (`crates/duotunnel-client/runtime/app.rs:77`-`82`).
+Reverse streams are opened through `ConnectionHandle::open_stream` (`duotunnel-lib/src/transport/connection_handle.rs:75`). Both the concurrency limit and the pending limit are per-connection semaphores on the handle (`duotunnel-lib/src/transport/connection_handle.rs:39`-`42`), sized from `quic.max_concurrent_streams` and the resolved `OverloadLimits::max_pending_streams` (`duotunnel-lib/src/lb/overload.rs:25`) when the pool is built (`duotunnel-client/runtime/app.rs:77`-`82`).
 
-Waiting streams are admitted against that per-connection `pending_semaphore` (`crates/duotunnel-core/src/transport/open_bi.rs:90`) rather than a global check-then-act counter; the process-wide `stream_pending_queue_depth` gauge is a pure metric that gates nothing (`crates/duotunnel-core/src/transport/open_bi.rs:88`).
+Waiting streams are admitted against that per-connection `pending_semaphore` (`duotunnel-lib/src/transport/open_bi.rs:90`) rather than a global check-then-act counter; the process-wide `stream_pending_queue_depth` gauge is a pure metric that gates nothing (`duotunnel-lib/src/transport/open_bi.rs:88`).
 
 ## Shutdown
 
-On SIGINT/SIGTERM, `ClientApp` cancels the shared token (`crates/duotunnel-client/runtime/app.rs:41`-`45`). The sequence mirrors the server's — stop accepting, drain, then close:
+On SIGINT/SIGTERM, `ClientApp` cancels the shared token (`duotunnel-client/runtime/app.rs:41`-`45`). The sequence mirrors the server's — stop accepting, drain, then close:
 
 1. entry listeners stop accepting: every `ClientService` gets the same token, so the TCP entry accept loop and the UDP listeners return on cancellation
 2. `run_client` removes the connection from `EntryConnPool` immediately after its main session
@@ -184,10 +184,10 @@ Request handling belongs below the startup layers.
 
 Main ingress/runtime modules:
 
-- `crates/duotunnel-client/ingress/app.rs`
-- `crates/duotunnel-client/ingress/handler.rs`
-- `crates/duotunnel-client/egress/listener.rs`
-- `crates/duotunnel-client/plugins/*`
+- `duotunnel-client/ingress/app.rs`
+- `duotunnel-client/ingress/handler.rs`
+- `duotunnel-client/egress/listener.rs`
+- `duotunnel-client/plugins/*`
 
 These modules consume runtime capabilities from config and tunnel services and should not perform top-level runtime assembly.
 
@@ -211,9 +211,9 @@ Login path: `establish_session` → `connect_to_server` → `open_bi` → `Login
 
 - there is one public runtime entry
 - startup assembly is centralized
-- reconnect and pool lifecycle stay in `crates/duotunnel-client/tunnel`
-- listener accept loops stay in `crates/duotunnel-client/egress`
-- local service handling stays in `crates/duotunnel-client/ingress`
+- reconnect and pool lifecycle stay in `duotunnel-client/tunnel`
+- listener accept loops stay in `duotunnel-client/egress`
+- local service handling stays in `duotunnel-client/ingress`
 - long-running tasks are owned by `ClientService` implementations, not free-floating spawns
 - runtime internals are private by default
 
@@ -223,4 +223,4 @@ This spec does not define:
 
 - wire protocol details
 - metrics schema
-- plugin contracts inside `duotunnel-core`
+- plugin contracts inside `duotunnel-lib`

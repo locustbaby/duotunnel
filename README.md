@@ -272,12 +272,10 @@ cargo build --release
 
 ```
 duotunnel/
-├── crates/
-│   ├── duotunnel-core/      # Core: QUIC transport, protocol detection, proxy engine
-│   ├── duotunnel-store/     # Storage traits + SQLite implementations (auth + rules)
-│   ├── duotunnel-ctld/      # duotunnel-ctld binary — control daemon + CLI
-│   ├── duotunnel-server/    # duotunnel-server binary — data-plane tunnel server
-│   └── duotunnel-client/    # duotunnel-client binary
+├── duotunnel-lib/       # Shared QUIC transport, protocol, proxy, and config types
+├── duotunnel-ctld/      # Control daemon, CLI, watch, and internal SQLite storage
+├── duotunnel-server/    # duotunnel-server binary — data-plane tunnel server
+├── duotunnel-client/    # duotunnel-client binary
 ├── config/              # Example YAML configs
 └── ci-helpers/          # CI configs and example setups
 ```
@@ -357,12 +355,12 @@ Key settings applied:
 | `SO_REUSEPORT` + backlog=4096 | `transport/listener.rs` | Multi-core accept scaling |
 | BBR congestion control | `transport/quic.rs` | Lower queue, better WAN throughput |
 | 4/32 MB QUIC flow-control windows | `transport/quic.rs` | No stalls on high-BDP links |
-| `ArcSwap` routing snapshot | `crates/duotunnel-server/main.rs` | Lock-free config hot-swap |
-| `DashMap` client registry | `crates/duotunnel-server/registry.rs` | Sharded concurrent access |
-| `CachePadded` counters | `crates/duotunnel-server/registry.rs` | Eliminate false sharing |
+| `ArcSwap` routing snapshot | `duotunnel-server/main.rs` | Lock-free config hot-swap |
+| `DashMap` client registry | `duotunnel-server/registry.rs` | Sharded concurrent access |
+| `CachePadded` counters | `duotunnel-server/registry.rs` | Eliminate false sharing |
 | `PeerKind` enum dispatch | `proxy/peers.rs` | Zero `Box<dyn>` on hot path |
-| Peek-buffer pool | `crates/duotunnel-server/main.rs` | Reuse fixed-size buffers, avoid per-conn alloc |
-| jemalloc global allocator | `crates/duotunnel-server/main.rs`, `crates/duotunnel-client/main.rs` | Lower fragmentation under load |
+| Peek-buffer pool | `duotunnel-server/main.rs` | Reuse fixed-size buffers, avoid per-conn alloc |
+| jemalloc global allocator | `duotunnel-server/main.rs`, `duotunnel-client/main.rs` | Lower fragmentation under load |
 | QUIC GSO/GRO (auto) | `quinn-udp` | Batched UDP I/O on Linux ≥ 5.4 |
 
 ---

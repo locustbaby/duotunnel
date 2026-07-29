@@ -16,7 +16,7 @@
 **关键区分**:当前自签逻辑服务两个**不同**用途,不要混:
 - **ingress 对外 TLS**(本文):server 面向公网客户端出示的证书——需可信;
 - **egress MITM**(保留):duotunnel-client + duotunnel-server 为拦截解密上游 TLS 动态签发的证书——自签即可
-  (`crates/duotunnel-client/ingress/app.rs` MitmH2、`plugins/tls` 内部)。
+  (`duotunnel-client/ingress/app.rs` MitmH2、`plugins/tls` 内部)。
 
 本文只改 ingress 对外证书源。
 
@@ -25,7 +25,7 @@
 ### 2.1 证书源抽象
 
 ```rust
-// crates/duotunnel-core/src/infra/tls_cert.rs (新)
+// duotunnel-lib/src/infra/tls_cert.rs (新)
 #[async_trait]
 pub trait CertSource: Send + Sync + 'static {
     /// 按 SNI 返回可信 ServerConfig(可缓存)。

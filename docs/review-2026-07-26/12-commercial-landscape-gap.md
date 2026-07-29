@@ -101,7 +101,7 @@ frp/rathole（自托管 OSS）时传输更强、控制面更集中；对标 clou
 | **请求/响应 Header 改写** | ✅ | ✅ | 🟡 | ❌（仅 host 改写；无 filter seam，10§6.1） | 中 |
 | **流量检查 / 回放**（开发 UX） | 🟡 | ✅(inspector) | 🟡(dashboard) | ❌（仅 Prometheus） | 中 |
 | 后端 LB + 健康检查 | ✅ | ✅ | ✅(group) | 🟡 有但**08 选择缺陷 + 弱健康**（09§4.2） | 高 |
-| 多副本 / 隧道 HA | ✅(replicas) | ✅ | ✅ | 🟡（多 crates/duotunnel-client/group，受 08 影响） | 中 |
+| 多副本 / 隧道 HA | ✅(replicas) | ✅ | ✅ | 🟡（多 duotunnel-client/group，受 08 影响） | 中 |
 | **全球边缘 / Anycast / DDoS** | ✅ | ✅ | ❌ | ❌（自托管单点，形态差异） | 形态 |
 | **L3 私有网络 / 子网路由（VPN 式）** | ✅(WARP) | 🟡 | 🟡(p2p) | ❌（仅 L4/L7 按服务） | 中 |
 | 协议广度 | HTTP/TCP/UDP/SSH/RDP/SMB/L3 | HTTP/TCP/TLS/SSH | TCP/UDP/HTTP/STCP/XTCP | HTTP/H2/WS/TCP/UDP（11） | — |

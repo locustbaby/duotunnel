@@ -80,10 +80,10 @@ k6 (N 个 keep-alive TCP 连接)
 
 ### 1.2 Egress（k6 → client:8082 → QUIC → server → 外部 upstream）
 
-与 ingress **完全对称**：client 侧是轻的字节转发（`crates/duotunnel-client/egress/listener.rs:95-253`
+与 ingress **完全对称**：client 侧是轻的字节转发（`duotunnel-client/egress/listener.rs:95-253`
 每连接 sniff → allowlist → P2C 选连接 → `open_stream` → `relay_quic_to_tcp`），
 **每请求的 L7 全解析落在 server 侧**（`tunnel_handler.rs:6-29` → `ProxyEngine` →
-`ServerEgressMap::upstream_peer`（`crates/duotunnel-server/egress/mod.rs:84-152`，每 stream 一次 vhost 查找 +
+`ServerEgressMap::upstream_peer`（`duotunnel-server/egress/mod.rs:84-152`，每 stream 一次 vhost 查找 +
 `next_healthy`）→ 同一个 `HttpPeer::connect_inner` / `Http1Driver` 循环）。
 
 **关键结构性结论**：QUIC stream 与下游 TCP 连接是 1:1 映射（两个方向都是），
@@ -91,7 +91,7 @@ RoutingInfo 只在 stream 建立时发一次；k6 keep-alive 下**每请求的�
 一侧纯字节转发 + 另一侧完整 L7 解析/重编码**。做 L7 的那一侧（ingress 为 client、
 egress 为 server）是 8k QPS 的 CPU 瓶颈所在。
 
-> 注：`crates/duotunnel-core/src/egress/http.rs:91 forward_http` 并不在这条链路上——它已是
+> 注：`duotunnel-lib/src/egress/http.rs:91 forward_http` 并不在这条链路上——它已是
 > **死代码**（全仓库仅 lib.rs:16 重导出，无调用方），详见 04 文档 §2.1。
 
 ---
@@ -126,7 +126,7 @@ L7 侧（ingress=client / egress=server）每请求成本估算（x86 现代核�
 
 ### 3.1 relay buffer 未初始化内存 UB —— 确认仍在产线路径 `[已追踪 TODO-97（reopened）]`
 
-**现象与证据**：`crates/duotunnel-core/src/engine/copy.rs:17-44` `take_buffer` 三条路径（thread-local
+**现象与证据**：`duotunnel-lib/src/engine/copy.rs:17-44` `take_buffer` 三条路径（thread-local
 复用 / global 复用 / 新分配）全部以 `unsafe set_len(buffer_size)` 暴露未初始化字节，随后
 `copy_buffered`（:127）把 `&mut [u8]` 交给 `AsyncReadExt::read`。该函数覆盖 **TCP→QUIC 方向
 的所有 relay**（ingress/egress/TLS，经 `relay()` / `copy_buffered_then_finish`）。
@@ -351,9 +351,9 @@ client_configs:
           servers: [{ address: "127.0.0.1:9090" }]
 ```
 
-落点：`IngressClientApp::upstream_peer`（`crates/duotunnel-client/ingress/app.rs:104`）读取该 upstream 的 `mode`——
+落点：`IngressClientApp::upstream_peer`（`duotunnel-client/ingress/app.rs:104`）读取该 upstream 的 `mode`——
 `l4` 直接返回 `PeerSpec::Tcp`（**忽略 sniff 出的 protocol**），`l7` 维持现有行为；egress 侧
-`ServerEgressMap::upstream_peer`（`crates/duotunnel-server/egress/mod.rs:84`）同构。
+`ServerEgressMap::upstream_peer`（`duotunnel-server/egress/mod.rs:84`）同构。
 
 **论证/备选**：
 - **vhost 级 flag**（初版）：标识只存在于 server 一侧，client 侧无从获知同一转发目标该走 L4 还是
@@ -507,7 +507,7 @@ cpuset 隔离 → 重测建立可信基线 → 按 profile 挑目标，而不是
 - 每连接 4 次 `metrics::counter!/gauge!` 宏（registry 哈希查找）`[已追踪 TODO-CR4]`；
 - `hint.clone()` 在 dispatch 阶段发生 3 次（dispatcher.rs:85,89,157），每次克隆
   `authority: Option<String>`——合并为 Arc 或借用可省 2-3 allocs/连接 `[新发现，微]`；
-- 慢路径参数默认 yield=80%、sleep=95%（duotunnel-store config/mod.rs:98-103）：
+- 慢路径参数默认 yield=80%、sleep=95%（duotunnel-lib/src/config/file.rs:98-103）：
   CI `connections=1` 时 800 inflight 才触发，8k 用例 maxVUs≤2000 且短请求，
   正常不会命中——**排除了它作为 CI 噪声源的嫌疑**，但 8k 突发排队时
   `max_concurrent_streams=1000` + pending=250 会成为硬闸（表现为 503/`Retry-After`），

@@ -55,11 +55,11 @@
 ### 3.1 增量 Patch 可以被静默跳过 `[P0]`
 
 `ControlService` 使用 `tokio::sync::watch` 保存单个最新 `WatchEvent`
-（`crates/duotunnel-ctld/src/control/service.rs:17-24`），每次发布的是 previous→next 的相对
+（`duotunnel-ctld/src/control/service.rs:17-24`），每次发布的是 previous→next 的相对
 Patch（`:98-109`）。`watch` 只保证消费者看到“有变化”和最新值，**不保证交付每个
 中间值**；但 `watch.rs:96-126` 的注释和实现按“每个 Patch 都会到达”使用。
 
-server 在 `crates/duotunnel-server/control/control_client.rs:195-220,300-331` 直接应用收到的 Patch，
+server 在 `duotunnel-server/control/control_client.rs:195-220,300-331` 直接应用收到的 Patch，
 没有验证 `base_revision == applied_revision`，也没有 gap/重复/回滚处理。慢消费者若从
 v1 跳过 v2、直接收到 v2→v3 Patch，会把 v1 当成 v2 应用，最终版本号写成 v3，但内容
 永久不完整。
@@ -72,10 +72,10 @@ revision 还必须跨 ctld 重启持久化，否则 server 拒绝回退后会永
 
 ### 3.2 token 撤销没有闭合到现有会话 `[P0]`
 
-`crates/duotunnel-server/bootstrap/mod.rs:319` 创建 `revocation_tx`，QUIC handler 在
-`crates/duotunnel-server/ingress/handlers/quic.rs:346,398-421` 订阅，但全库没有对应 `send`。
-ctld revoke/rotate 仅发布配置（`crates/duotunnel-ctld/src/control/service.rs:130-141`），
-server 仅替换本地 token cache（`crates/duotunnel-server/control/control_client.rs:236-264`）。
+`duotunnel-server/bootstrap/mod.rs:319` 创建 `revocation_tx`，QUIC handler 在
+`duotunnel-server/ingress/handlers/quic.rs:346,398-421` 订阅，但全库没有对应 `send`。
+ctld revoke/rotate 仅发布配置（`duotunnel-ctld/src/control/service.rs:130-141`），
+server 仅替换本地 token cache（`duotunnel-server/control/control_client.rs:236-264`）。
 
 结果是新登录会失败，但已经认证的连接会持续工作到自然断开。修复不能只按 group 粗暴
 关闭：registry 应保存稳定 token identity/hash 与认证 revision，在新运行代提交后 diff
@@ -84,9 +84,9 @@ server 仅替换本地 token cache（`crates/duotunnel-server/control/control_cl
 ### 3.3 snapshot 构建、应用和落盘均非事务 `[P1]`
 
 - ctld 分别读取 routing 与 token provider，未证明来自同一数据库 revision
-  （`crates/duotunnel-ctld/src/control/service.rs:77-93`）；
+  （`duotunnel-ctld/src/control/service.rs:77-93`）；
 - server 依次更新 token、routing、listener，期间存在混合状态窗口
-  （`crates/duotunnel-server/control/control_client.rs:228-234,279-298`）；
+  （`duotunnel-server/control/control_client.rs:228-234,279-298`）；
 - `local_snapshot.json` 使用直接覆盖写（`:72-84`），进程或磁盘故障可留下半文件；
 - fallback 没有 hash、生成时间或最大陈旧时间，旧 token 可无限期 fail-open。
 
@@ -99,11 +99,11 @@ server 仅替换本地 token cache（`crates/duotunnel-server/control/control_cl
 ### 4.1 inflight slot 存在 ABA 生命周期错误 `[P1]`
 
 registry/client pool 在连接从当前 map 移除时立即 `free_slot`
-（`crates/duotunnel-server/ingress/registry.rs:199-215,226-247`；
-`crates/duotunnel-client/tunnel/conn_pool.rs:138-149`）。但旧 `SelectedConnection`、`ConnectionHandle`、
+（`duotunnel-server/ingress/registry.rs:199-215,226-247`；
+`duotunnel-client/tunnel/conn_pool.rs:138-149`）。但旧 `SelectedConnection`、`ConnectionHandle`、
 `OpenedStream` 和 `InflightGuard` 都可能仍被旧快照或正在运行的请求持有。
 `InflightGuard::drop` 只保存裸 `slot_id` 并修改当前槽位
-（`crates/duotunnel-core/src/lb/inflight.rs:60-63,75-122`）。
+（`duotunnel-lib/src/lb/inflight.rs:60-63,75-122`）。
 
 槽位分配给新连接后，旧 guard 的 promote/drop 会修改新连接 pending/active，造成
 P2C、过载、通知和 drain 计数失真。跨 shard P2C 会延长被选对象的生命周期，未修复
@@ -116,7 +116,7 @@ ownership 前不应先扩展选择逻辑。
 ### 4.2 listener 热更新可能产生孤儿 worker `[P0/P1]`
 
 `sync_listeners_inner` 发现端口不在 map 时只异步 spawn，未同步放入 `Starting` 占位
-（`crates/duotunnel-server/ingress/listener_mgr.rs:250-261`）；bind 完成后
+（`duotunnel-server/ingress/listener_mgr.rs:250-261`）；bind 完成后
 `activate()` 才直接 `HashMap::insert`（`:55-70`）。
 
 快速 A→B→C 更新可能同时 bind 同一 SO_REUSEPORT 端口，后完成的任务覆盖 map 中句柄，
@@ -133,9 +133,9 @@ revision，stale completion 必须自行关闭，不能直接覆盖新 generatio
 ### 4.3 client readiness 是 last-writer-wins `[P1]`
 
 多个 supervisor 共享一个 `AtomicBool`。每条连接成功后写 true
-（`crates/duotunnel-client/tunnel/client.rs:58-60`），任一连接退出后写 false（`:107-110`）。
+（`duotunnel-client/tunnel/client.rs:58-60`），任一连接退出后写 false（`:107-110`）。
 所以 N>1 时仍有健康 tunnel 也可能返回 503。`EntryConnPool::push()` 又吞掉 channel/
-actor 失败并返回 `()`（`crates/duotunnel-client/tunnel/conn_pool.rs:181-194`），连接未真正入池也会
+actor 失败并返回 `()`（`duotunnel-client/tunnel/conn_pool.rs:181-194`），连接未真正入池也会
 随后写 true。
 
 readiness 应由 actor 成功提交后的 `active_tunnels` 派生：
@@ -146,8 +146,8 @@ readiness 应由 actor 成功提交后的 `active_tunnels` 派生：
 ### 4.4 重连退避不会在健康 session 后正确复位 `[P1]`
 
 普通 `conn.closed()/accept_bi/read_datagram` 都返回 transient Err
-（`crates/duotunnel-client/tunnel/client.rs:66-101`），而 `backoff.reset()` 仅在 `run_client` 返回 Ok
-时执行（`crates/duotunnel-client/tunnel/supervisor.rs:94-104`）；正常 shutdown 又在进入 match 前返回。
+（`duotunnel-client/tunnel/client.rs:66-101`），而 `backoff.reset()` 仅在 `run_client` 返回 Ok
+时执行（`duotunnel-client/tunnel/supervisor.rs:94-104`）；正常 shutdown 又在进入 match 前返回。
 因此多次相隔数小时的正常断线仍会把 backoff 累积到最大值。
 
 应在登录成功后记录 `session_started`，session 存活超过 `stable_window` 或成功处理一次
@@ -174,9 +174,9 @@ reverse QUIC stream、UDP pump。既有 Hyper keepalive 未收到 quiesce/GOAWAY
 ### 5.1 空 body 不等于可安全重试 `[P0/P1]`
 
 TLS/H2c 仅用 `req.body().is_end_stream()` 生成重试模板
-（`crates/duotunnel-server/ingress/plugins/tls/mod.rs:130-226`；
-`crates/duotunnel-server/ingress/plugins/h2c/mod.rs:270-361`）。`forward_h2_request` 的错误可能发生在
-`send_request(...).await` 等待响应期间（`crates/duotunnel-core/src/proxy/h2_proxy.rs:107-132`），
+（`duotunnel-server/ingress/plugins/tls/mod.rs:130-226`；
+`duotunnel-server/ingress/plugins/h2c/mod.rs:270-361`）。`forward_h2_request` 的错误可能发生在
+`send_request(...).await` 等待响应期间（`duotunnel-lib/src/proxy/h2_proxy.rs:107-132`），
 此时上游可能已经执行请求。
 
 RetryPolicy 必须同时判断：
@@ -193,7 +193,7 @@ RetryPolicy 必须同时判断：
 ### 5.2 upstream health 状态机会失效 `[P1]`
 
 `is_healthy` 在 TTL 到期后返回 true，但不删除 entry
-（`crates/duotunnel-core/src/proxy/upstream.rs:81-88`）；后续 `mark_unhealthy` 看到
+（`duotunnel-lib/src/proxy/upstream.rs:81-88`）；后续 `mark_unhealthy` 看到
 `contains_key` 就直接 return（`:23-28`）。如果主动探测一直失败，过期 entry 永久留在
 map，后续失败无法刷新剔除时间。
 
@@ -208,9 +208,9 @@ map，后续失败无法刷新剔除时间。
 
 `EntryConnPool::new` 的容量为
 `max_concurrent_streams × connections × 2`，最少 1024
-（`crates/duotunnel-client/tunnel/conn_pool.rs:80-87`），但 slot 实际按 connection 分配。每个 slot 又是
+（`duotunnel-client/tunnel/conn_pool.rs:80-87`），但 slot 实际按 connection 分配。每个 slot 又是
 `CachePadded<InflightSlot>` 并单独持 `Arc<Notify>`
-（`crates/duotunnel-core/src/lb/inflight.rs:12-52`）。
+（`duotunnel-lib/src/lb/inflight.rs:12-52`）。
 
 这不是预留 stream credit，而是实存对象；配置放大时会造成数量级不必要的内存。采用
 owned `ConnectionState` 可同时解决 ABA 与预分配。
@@ -219,8 +219,8 @@ owned `ConnectionState` 可同时解决 ABA 与预分配。
 
 duotunnel-server + duotunnel-client 都在承载 stream accept 的 `select!` 分支内直接 await UDP 转发。
 server 新 session 还会执行 DNS、bind、connect
-（`crates/duotunnel-server/ingress/handlers/quic.rs:364-390`；
-`crates/duotunnel-server/ingress/handlers/udp_datagram.rs:114-131`）。一个慢 DNS/socket send 可阻塞同一
+（`duotunnel-server/ingress/handlers/quic.rs:364-390`；
+`duotunnel-server/ingress/handlers/udp_datagram.rs:114-131`）。一个慢 DNS/socket send 可阻塞同一
 QUIC connection 的 reverse stream accept，形成跨协议 HOL。
 
 推荐专用 datagram reader + **有界队列** + 固定数量、按 session hash 分片的 worker。
@@ -229,9 +229,9 @@ QUIC connection 的 reverse stream accept，形成跨协议 HOL。
 ### 6.3 UDP 每包分配与字符串地址
 
 client 发送路径每包做 IP `to_string`、payload `to_vec`、动态尝试集合和重试复制
-（`crates/duotunnel-client/egress/udp_listener.rs:71-102`）；回包路径还有字符串 IP parse 与 registry
+（`duotunnel-client/egress/udp_listener.rs:71-102`）；回包路径还有字符串 IP parse 与 registry
 读锁（`:27-42`）。server reply 同样 `to_vec` 后再次 `Bytes::copy_from_slice`
-（`crates/duotunnel-server/ingress/handlers/udp_datagram.rs:190-201`）。
+（`duotunnel-server/ingress/handlers/udp_datagram.rs:190-201`）。
 
 wire/session key 应改成二进制 `IpAddr/SocketAddr`；编码直接产出 `Bytes`，重试只 clone
 引用；小尝试集合使用栈数组/SmallVec。
@@ -239,8 +239,8 @@ wire/session key 应改成二进制 `IpAddr/SocketAddr`；编码直接产出 `By
 ### 6.4 高基数指标先于指标微优化
 
 外部可控 Host 被直接复制进 Prometheus label
-（`crates/duotunnel-client/egress/listener.rs:134-137` →
-`crates/duotunnel-client/metrics.rs:28-34`）。不同 Host 会持续创建 time series，既有每次 String 分配，
+（`duotunnel-client/egress/listener.rs:134-137` →
+`duotunnel-client/metrics.rs:28-34`）。不同 Host 会持续创建 time series，既有每次 String 分配，
 又有长期内存放大。
 
 应删除原始 Host label，只保留有限 reason/配置定义 route ID。MetricsSink 的 Vec/label
@@ -264,16 +264,16 @@ poll 次数。
 代码还能直接证明三组健壮性问题：
 
 - QUIC transport 对 receive window 和 idle timeout 使用
-  `try_into().unwrap()`（`crates/duotunnel-core/src/transport/quic.rs:49-56`），极端但可解析的配置
+  `try_into().unwrap()`（`duotunnel-lib/src/transport/quic.rs:49-56`），极端但可解析的配置
   会 panic；HTTPS client 的 `.with_native_roots().unwrap()`
-  （`crates/duotunnel-core/src/egress/http.rs:59-60`）也把主机证书加载失败升级为进程 panic。
+  （`duotunnel-lib/src/egress/http.rs:59-60`）也把主机证书加载失败升级为进程 panic。
 - client inflight capacity 直接计算
   `max_concurrent_streams × connections × 2`
-  （`crates/duotunnel-client/tunnel/conn_pool.rs:86`），缺少 checked multiplication、hard max 和全局内存
+  （`duotunnel-client/tunnel/conn_pool.rs:86`），缺少 checked multiplication、hard max 和全局内存
   预算；server 又固定 `new_inflight_table(4096)`
-  （`crates/duotunnel-server/ingress/registry.rs:100`），形成未配置化的连接天花板。
+  （`duotunnel-server/ingress/registry.rs:100`），形成未配置化的连接天花板。
 - UDP listener registry 用 `proxy_name` 直接 `insert`
-  （`crates/duotunnel-client/egress/udp_listener.rs:19-21,54-57`）；两个 entry 重名时后者静默覆盖回包
+  （`duotunnel-client/egress/udp_listener.rs:19-21,54-57`）；两个 entry 重名时后者静默覆盖回包
   socket，旧 listener 仍收包但 reply 会发向错误端口。
 
 方案统一为：启动/prepare 阶段做 checked conversion/multiplication 和 hard max 校验；

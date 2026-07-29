@@ -9,8 +9,8 @@
 > （每条发现）现象与证据 → 根因 → 方案 → 论证/备选对比 → 场景覆盖 & Corner
 > Cases → 取舍 → 收益/改动量/影响面 → 实施顺序与依赖**。
 
-审阅覆盖：`duotunnel-core` / `duotunnel-store` / `server` / `client` /
-`crates/duotunnel-ctld` / `ci-helpers`（~21k 行 Rust）+ `../pingora` 实证对照 + CI 编排。
+审阅覆盖：`duotunnel-lib` / `duotunnel-ctld` / `server` / `client` /
+`duotunnel-ctld` / `ci-helpers`（~21k 行 Rust）+ `../pingora` 实证对照 + CI 编排。
 
 ---
 
@@ -177,7 +177,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | upstream 级 L4/L7 开关（原 passthrough vhost）**⏸️ 已搁置**（D-7） | 01 §4.2 | 仅记录需求 |
 | 统一 Session 抽象（简化 H1 body reclaim） | 04 §3.2 A4 | TODO-77 |
 | 配置去重下沉 + 统一参数校验 | 04 §2.2-2.3 | CR-AUDIT-6 |
-| duotunnel-core 拆分（先 tunnel-proto，利于 fuzz） | 04 §3.2 A6 | TODO-83 |
+| duotunnel-lib 拆分（先 tunnel-proto，利于 fuzz） | 04 §3.2 A6 | TODO-83 |
 | sniff/codec/udp fuzz 靶 | 07 §4.5 | CR-AUDIT-20（建议升优先级） |
 | client 多 Endpoint | 02 Phase B / D7 / D10 §5 | **降为 profile-gated P2** |
 | server 多 endpoint（eBPF CID steering） | 02 Phase D | TODO-24（维持研究门槛） |

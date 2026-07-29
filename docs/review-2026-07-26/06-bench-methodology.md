@@ -174,10 +174,10 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
   否则分不清"引擎到顶"与"被 CPUQuota 节流出来的假顶"；报告中必须标注核数，
   不得与大机数字混列；
 - **过载时系统不会"无限等待"**（已验证）：`max_pending_streams` 默认取
-  `max_concurrent_streams / 4`（`crates/duotunnel-core/src/lb/overload.rs:53`，默认配置下 = 250），
-  超过即**快速失败**（`crates/duotunnel-core/src/transport/open_bi.rs:58-62` →
-  `quic_open_rejected_overloaded`，`crates/duotunnel-server/ingress/tunnel_service.rs:39` 归类，H1 侧回 503）；
-  阈值以内的等待由 `open_stream_timeout` 封顶 5s（`crates/duotunnel-server/bootstrap/config.rs:426`）。
+  `max_concurrent_streams / 4`（`duotunnel-lib/src/lb/overload.rs:53`，默认配置下 = 250），
+  超过即**快速失败**（`duotunnel-lib/src/transport/open_bi.rs:58-62` →
+  `quic_open_rejected_overloaded`，`duotunnel-server/ingress/tunnel_service.rs:39` 归类，H1 侧回 503）；
+  阈值以内的等待由 `open_stream_timeout` 封顶 5s（`duotunnel-server/bootstrap/config.rs:426`）。
   因此 8k 打满时的形态是"**有界排队 + 快失败**"，完成率下降可直接归因到拒绝计数，
   **不需要另设一个过载用例**来验证这件事；
 - **扩展曲线**：`AllowedCPUs`=1/2/4 三档，产出 `QPS(N)/(N·QPS(1))` 线性度（对齐 02、TODO-140）。

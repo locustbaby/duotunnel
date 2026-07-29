@@ -2,7 +2,7 @@
 
 ## Scope
 
-This spec defines the `crates/duotunnel-ctld` crate runtime shape after the startup and boundary refactor.
+This spec defines the `duotunnel-ctld` crate runtime shape after the startup and boundary refactor.
 
 ## Public Entry
 
@@ -19,11 +19,11 @@ The binary target should not orchestrate startup directly.
 
 ## Runtime Layers
 
-The `crates/duotunnel-ctld` crate is organized into four runtime layers.
+The `duotunnel-ctld` crate is organized into four runtime layers.
 
 ### 1. CLI
 
-`crates/duotunnel-ctld/src/bootstrap/cli.rs`
+`duotunnel-ctld/src/bootstrap/cli.rs`
 
 Owns:
 
@@ -39,8 +39,8 @@ Must not own:
 
 ### 2. Bootstrap
 
-`crates/duotunnel-ctld/src/bootstrap/config.rs`
-`crates/duotunnel-ctld/src/bootstrap/mod.rs`
+`duotunnel-ctld/src/bootstrap/config.rs`
+`duotunnel-ctld/src/bootstrap/mod.rs`
 
 Owns:
 
@@ -58,8 +58,8 @@ Bootstrap is the composition root for runtime inputs.
 
 ### 3. App / Runtime
 
-`crates/duotunnel-ctld/src/runtime/app.rs`
-`crates/duotunnel-ctld/src/runtime/mod.rs`
+`duotunnel-ctld/src/runtime/app.rs`
+`duotunnel-ctld/src/runtime/mod.rs`
 
 Owns:
 
@@ -81,7 +81,7 @@ Must not own:
 
 ### 4. Control Plane
 
-`crates/duotunnel-ctld/src/control/*`
+`duotunnel-ctld/src/control/*`
 
 Owns:
 
@@ -110,7 +110,7 @@ CtldApp::run
 
 The control connection sends an initial full snapshot. Ongoing configuration changes (either from YAML reload or SQLite admin API override) are computed as a list of `ConfigOperation`s. The connection sends a `ConfigEvent::Delta` if it is smaller than a full snapshot, otherwise it falls back to `ConfigEvent::Snapshot`.
 
-The server consumes snapshots and deltas via `crates/duotunnel-server/control/control_client.rs`, validates the target hash, builds a complete runtime generation, fences revoked sessions, reconciles listeners behind the application admission fence, and atomically publishes the generation pointer. If listener or session fence setup fails, it rolls back listener synchronization to keep the system in the last-known-good state.
+The server consumes snapshots and deltas via `duotunnel-server/control/control_client.rs`, validates the target hash, builds a complete runtime generation, fences revoked sessions, reconciles listeners behind the application admission fence, and atomically publishes the generation pointer. If listener or session fence setup fails, it rolls back listener synchronization to keep the system in the last-known-good state.
 
 ## Invariants
 
