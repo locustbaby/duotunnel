@@ -107,49 +107,33 @@ server_config: "config/server.yaml"   # seeded once on first boot
 ./target/release/client --config config/client.yaml
 ```
 
----
-
-### Standalone mode (single machine / dev)
-
-The server reads routing config from its own SQLite database (seeded from `server.yaml` on first boot). No ctld required.
-
-```bash
-# Start server (self-contained — manages its own DB)
-./target/release/server --config config/server.yaml
-
-# Create a token
-./target/release/server --config config/server.yaml token create --name my-group
-
-# Start client
-./target/release/client --config config/client.yaml
-```
-
----
-
 ## Configuration
 
 ### `ctld.yaml` — control daemon
 
 ```yaml
 database_url: "sqlite://./data/duotunnel.db?mode=rwc"
-watch_addr: "0.0.0.0:7788"
+watch_addr: "127.0.0.1:7788"
 log_level: "info"
-# Routing sections from this file are seeded into the DB on first boot only.
-server_config: "config/server.yaml"
+admin_socket: "./data/tunnel-ctld.admin.sock"
+config:
+  sources:
+    - type: yaml
+      path: "config/routing.yaml"
+      priority: 10
+    - type: sqlite
+      database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+      priority: 100
 ```
 
-### `config/server.yaml` — server + routing config
+### `config/server.yaml` — server configuration
 
-The `server.*` block is always read by the server. The `tunnel_management` and `server_egress_upstream` blocks are:
-- **ctld-managed mode**: read by ctld on first boot (via `server_config`) to seed its database. Ignored by the server at runtime — routing comes from ctld's watch stream.
-- **Standalone mode**: seeded into the server's own SQLite on first boot; hot-reloaded on file change.
+The `server.*` block is read by the server to configure its runtime parameters.
 
 ```yaml
 server:
   tunnel_port: 10086          # QUIC tunnel port (clients connect here)
   log_level: "info"
-  # database_url only needed in standalone mode
-  database_url: "sqlite://./data/duotunnel.db?mode=rwc"
 
   # Optional tuning
   quic:
@@ -165,9 +149,13 @@ server:
     peek_buf_size: 16384
   pki:
     cert_cache_ttl_secs: 3600
+```
 
-# ── Routing sections (ctld: seeded on first boot; standalone: seeded + hot-reloaded) ─
+### `config/routing.yaml` — routing bootstrap config
 
+This file defines the routing entries loaded as a YAML base source by the control daemon (`ctld`).
+
+```yaml
 server_egress_upstream:
   upstreams:
     ext_api:
