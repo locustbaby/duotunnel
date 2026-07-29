@@ -340,3 +340,26 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
 - [x] **[TODO-CR-AUDIT-12] Tracing Span Instrument for Blocked Futures in open_bi**: 已在 `tunnel-lib/src/open_bi.rs` 的 `open_bi_guarded` 中，对 `conn.open_bi()` 的等待期注入了 `waiting_for_stream_credit` 的 tracing debug span，使外部工具如 `tokio-console` 能清晰观测挂起协程。
 - [x] **[TODO-CR-AUDIT-13] Asymmetric Window Coupling in QUIC Configuration**: 已在 `tunnel-lib/src/config/quic.rs` 和 `client/config.rs` 中移除了 `send_window_bytes` 向 `connection_window_mb` 的强制回退对齐，完全解耦了两端的滑动窗口大小。
 - [x] **[TODO-CR-AUDIT-14] TokenListEntry String Heap Allocation & Type Safety**: 已在 `tunnel-store/src/sqlite.rs` 进行了重构，通过 zero-copy 的 `&str` 代替 `String` 堆分配读取 SQLite 状态。
+
+---
+
+## 🌐 统一控制面、配置权威拆分与增量 Watch 协议 (2026-07-29) ✅
+
+在 `codex/unified-control-plane` 分支中，我们对控制面架构、配置持久化逻辑、Watch/Sync 协议以及相关的并发稳定性和网络边界进行了全面硬化与收尾：
+
+- **单一部署拓扑收拢**：删除了 Server 侧 Standalone 运行模式以及本地 SQLite 存储相关的多套配置来源（MergedSource/DbSource/FileSource 等），使 Server 成为纯粹的配置接收端，实现“部署拓扑”与“配置权威”的物理拆分。
+- **YAML 基础层 + SQLite 动态覆盖层 (Tombstones)**：在 `tunnel-ctld` 内部引入了配置合并层 `layer.rs`。以 YAML 文件为 Base，通过对 SQLite 中 `config_layers` 与 `config_state` 的读写合并，成功表达了“YAML 包含但 SQLite 覆盖”及“YAML 包含但 SQLite 已删除 (Tombstone)”的动态逻辑，保留了一型 Bootstrap 的干净语义。
+- **规范的 Config Snapshot / Delta 增量 Watch 协议**：
+  - 弃用了 Legacy/V1/V2 等冗余协议类型，完全收敛为 canonical `WatchRequest` 与 `ConfigEvent` (Snapshot/Delta)。
+  - 当配置发生变更时，自动进行 keyed diff 并对比 Delta 报文与 Full Snapshot 大小，动态选用最优包大小传输。
+  - 支持 Client 校验不符时返回 `ResyncRequired` 回弹，重置 Watch 序列。
+- **并发写锁与原子性防御 (P1 Race Condition)**：
+  - 在 `ControlService` 中引入了 `config_mutation_lock: tokio::sync::Mutex<()>`，对 YAML 热重载与 Admin CLI 的 SQLite 读写-修改-合并操作进行了强串行化保护。
+  - 重排了 `apply_snapshot` 动作顺序，先应用 listener 后进行 token 变更。若应用或 session fence 发生故障，触发对 Ingress listeners 的回滚机制，防止服务不可用。
+- **Admin Server Socket 请求解析硬化**：
+  - 将 `tunnel-ctld` 用于 CLI 交互的本地 Unix Admin Socket 升级为带超时的流式长报文接收，支持 `Content-Length` 解析，限制上限为 256KB，彻底解决了大配置被截断导致的异常。
+- **UDP session 转换原子化与建连 Task 退出防逃逸**：
+  - 将 UDP 连接阶段重构为基于单 Entry 的原子状态机转换（Connecting/Draining/Connected/Failed），消除了 Vacant 竞态。
+  - UDP 建连 Task 受 session permit 限制并被收纳进 `TaskTracker`，且在 await 阶段及 Shutdown 时能够 race 并响应 `root_cancel` 的 Cancellation 信号，消除了孤儿协程泄漏。
+- **Registry 管道溢出安全**：
+  - 针对 unregister 的断线风暴风险，设计了去重合并的 `pending_unregisters`（`HashSet` 形式并加锁），在达到 4096 容量上限后优雅主动 `fail_closed()`，不再出现无限制内存积压。

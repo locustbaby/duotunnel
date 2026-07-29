@@ -132,9 +132,8 @@ Client → Server QUIC 建连与登录握手的时间预算。`initial_delay_ms 
 
 | 参数 (Parameter) | 消费者 / 逻辑位置 | 默认值 | YAML 路径 | 阈值影响 | 排查手段 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **tunnel_port** | `server/ingress/handlers/quic.rs` | 必填 | `server.tunnel_port` | QUIC 监听端口 | 两层 validate：`ServerConfigFile::validate` (`tunnel-store/src/config/mod.rs:298`) 与 standalone 模式的 `validate_server_config` (`server/bootstrap/config.rs:226`)；ctld-managed 模式跳过后者 (`server/bootstrap/mod.rs:84-89`) |
+| **tunnel_port** | `server/ingress/handlers/quic.rs` | 必填 | `server.tunnel_port` | QUIC 监听端口 | 由 `ServerConfigFile::load` 自动校验端口合法性 |
 | **h2_single_authority** | `server/bootstrap/mod.rs` | true | `server.h2_single_authority` | H2 跨 vhost 共用 authority；关闭后每 host 独立池 | — |
-| **database_url** | standalone 模式 SQLite 路径 | (empty) | `server.database_url` | ctld 模式下不使用；standalone 模式必填 | — |
 | **TOKIO_WORKER_THREADS** | `tunnel-lib/src/infra/runtime.rs` `effective_runtime_parallelism` | 未设置 → `available_parallelism()` | ❌ (环境变量) | Tokio worker 线程数；与 cgroup `CPUQuota` 取 min | 启动日志: `effective_parallelism` |
 
 ---

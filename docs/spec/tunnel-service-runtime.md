@@ -66,13 +66,14 @@ Owns:
 - startup flow
 - logging init
 - sqlite store startup
-- routing seed on first boot
+- YAML config layer loading and SQLite override initialization
+- admin server socket startup
 - healthz endpoint startup
 - watch server handoff
 
 Must not own:
 
-- patch diff logic
+- delta diff logic
 - token cache query logic
 - long-running control-plane internals
 
@@ -84,9 +85,9 @@ Must not own:
 
 Owns:
 
-- snapshot and patch shaping
+- snapshot and delta/operation shaping
 - control service state
-- publish debounce
+- config override layering and merge
 - token cache polling
 - watch server protocol loop
 
@@ -96,30 +97,20 @@ These modules are for process-lifetime control-plane work, not bootstrap concern
 
 ```
 CtldApp::run
-  → open SQLite (auth + routing)
-  → seed routing from server_config YAML on first boot (if configured)
+  → open SQLite (auth + routing) and initialize config tables
+  → load and apply YamlConfigSource (if configured)
+  → run admin socket listener (Unix socket)
   → ControlService::new (SQLite-consistent snapshot + latest-state watch signal)
   → WatchServer::run (TCP watch_addr)
-       client connects → WatchRequest(version/capabilities)
-       → V1 Full Snapshot, or V2 Versioned Full Snapshot
-       → loop: latest full state on DB mutation (debounced via reactor)
-       ← V2 Applied ACK(epoch, sequence, canonical hash)
+       client connects → WatchRequest(last_applied_revision, last_applied_hash, token)
+       → ConfigEvent::Snapshot (initial)
+       → loop: ConfigEvent::Delta (or Snapshot if delta is too large or resync is requested)
+       ← ACK(Applied / ResyncRequired)
 ```
 
-The V1 path always sends a complete snapshot, so coalescing intermediate watch notifications cannot
-lose relative patches. The V2 path adds a durable `{epoch, sequence}`, canonical content hash and
-Applied ACK. Snapshot rows, content hash and revision advancement are produced in one SQLite
-transaction.
+The control connection sends an initial full snapshot. Ongoing configuration changes (either from YAML reload or SQLite admin API override) are computed as a list of `ConfigOperation`s. The connection sends a `ConfigEvent::Delta` if it is smaller than a full snapshot, otherwise it falls back to `ConfigEvent::Snapshot`.
 
-Managed server consumes snapshots via `server/control/control_client.rs`, builds a complete runtime
-generation, fences revoked sessions, reconciles listeners behind the application admission fence
-and atomically publishes the generation pointer. Listener/socket transition is quiesced for business
-work but is not an OS-level rollback transaction. Legacy patch messages remain decodable during the
-transition but are normalized through full-snapshot apply.
-
-Standalone server uses `hot_reload.rs` (file notify + `ConfigSource::load`) instead of watch TCP.
-
-Wire types: `tunnel-lib/protocol/ctld.rs`, events wrapped in `MessageType::ConfigPush`.
+Managed server consumes snapshots and deltas via `server/control/control_client.rs`, validates the target hash, builds a complete runtime generation, fences revoked sessions, reconciles listeners behind the application admission fence, and atomically publishes the generation pointer. If listener or session fence setup fails, it rolls back listener synchronization to keep the system in the last-known-good state.
 
 ## Invariants
 
@@ -128,7 +119,7 @@ Wire types: `tunnel-lib/protocol/ctld.rs`, events wrapped in `MessageType::Confi
 - control-plane tasks stay under `control/`
 - watch protocol handling stays out of bootstrap and main
 - runtime internals are private by default
-- a watch notification means “read the latest complete state”, never “apply this relative delta”
+- watch events are either a full Snapshot or a relative Delta, validated by the target content hash
 - one epoch/sequence maps to exactly one canonical hash
 - ACK means applied and security-fenced, not merely received
 

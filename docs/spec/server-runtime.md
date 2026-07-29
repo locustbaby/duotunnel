@@ -238,25 +238,21 @@ Server-initiated streams go through `ConnectionHandle::open_stream` (`tunnel-lib
 
 The pending limit is per-connection, not a global check-then-act: `open_bi_guarded` admits through the connection's semaphore (`tunnel-lib/src/transport/open_bi.rs:90`), and the process-wide `stream_pending_queue_depth` gauge is a pure metric that gates nothing (`tunnel-lib/src/transport/open_bi.rs:88`). Rejections surface as `quic_open_rejected_overloaded` carrying the per-connection limit.
 
-## Background Modes
+## Background Mode
 
-The server supports two background modes.
+The server runs exclusively in managed mode, receiving its routing and token configuration from `tunnel-ctld`.
 
-- standalone: file watch and db-backed config source
-- managed: ctld watch stream and local token cache
-
-Mode selection belongs to bootstrap and supervisor wiring, not handlers.
+Mode selection and connection parameters are initialized during bootstrap.
 
 ## Managed Control Apply
 
-Managed control supports legacy full snapshots and versioned V2 snapshots. A V2 apply:
+Managed control receives and processes both `ConfigEvent::Snapshot` and `ConfigEvent::Delta` events. The apply flow is as follows:
 
-1. validates epoch/sequence/hash and builds a complete `RuntimeGeneration`
-2. raises the config-apply admission fence
-3. takes the security publication write gate and fences sessions authenticated by tokens revoked
-   in the new generation
-4. pre-binds and commits the listener set on the proxy runtime
-5. publishes the generation, lowers the admission fence and returns an Applied ACK
+1. Validates the incoming target revision and target hash. If a Delta is received, the operations are applied to a candidate copy of the last applied snapshot and validated against the target hash.
+2. Raises the config-apply admission fence.
+3. Pre-binds and commits the listener set on the proxy runtime. If any listener synchronization fails, the apply is aborted.
+4. Takes the security publication write gate and fences sessions authenticated by tokens revoked in the new generation. If session fencing fails, the listeners are rolled back to the previous listener configuration.
+5. Publishes the generation, lowers the admission fence, and returns an Applied ACK.
 
 Authentication holds the matching read gate through auth and registry registration, then releases
 it before writing the login response. This prevents a login from escaping between revoke fencing
@@ -277,11 +273,7 @@ the admitted generation's egress map into the task. Every new UDP session loads 
 generation, resolves through that egress map and then retains the fixed connected target until
 eviction; new sessions are rejected while apply/stale policy fences admission.
 
-A failed apply is fail-closed, not rollback-transactional. If candidate-revoked sessions were
-retired before a later listener failure, config/security admission remains fenced until a later
-complete apply succeeds; the old token cannot re-enter during that recovery window. Listener
-lifecycle failures publish unhealthy facts and require retry/forward-fix. The old generation
-pointer remains intact, but availability side effects are not claimed to be reversible.
+If listener synchronization or session fencing fails during apply, the server rolls back the listeners to their previous state and retains the existing generation, ensuring availability remains intact.
 
 Control freshness is based on the last confirmation from the authority, including an idempotent
 confirmation of the current revision/hash; the last successful apply is tracked separately for
