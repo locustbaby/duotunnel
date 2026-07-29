@@ -32,6 +32,20 @@ pub struct ServerConfigFile {
     pub tunnel_management: TunnelManagement,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RoutingConfigFile {
+    #[serde(default)]
+    pub server_egress_upstream: ServerEgressUpstream,
+    #[serde(default)]
+    pub tunnel_management: TunnelManagement,
+}
+
+impl RoutingConfigFile {
+    pub fn load(path: &str) -> Result<Self> {
+        Ok(Figment::new().merge(Yaml::file(path)).extract()?)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum OverloadMode {
@@ -347,9 +361,14 @@ impl ServerConfigFile {
 /// Convert the routing sections of a parsed [`ServerConfigFile`] into a
 /// [`RoutingData`] suitable for saving to any [`RuleStore`].
 pub fn routing_data_from_server_config(cfg: &ServerConfigFile) -> RoutingData {
-    let tm = &cfg.tunnel_management;
-    let eg = &cfg.server_egress_upstream;
+    routing_data_from_parts(&cfg.tunnel_management, &cfg.server_egress_upstream)
+}
 
+pub fn routing_data_from_routing_config(cfg: &RoutingConfigFile) -> RoutingData {
+    routing_data_from_parts(&cfg.tunnel_management, &cfg.server_egress_upstream)
+}
+
+fn routing_data_from_parts(tm: &TunnelManagement, eg: &ServerEgressUpstream) -> RoutingData {
     let ingress_listeners = tm
         .server_ingress_routing
         .listeners

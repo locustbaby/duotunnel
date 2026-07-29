@@ -67,11 +67,12 @@ if [ ! -f /tmp/trace-8k-initialized ]; then
     || ./target/release/tunnel-ctld --config ci-helpers/configs/ctld.yaml \
     client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
   TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
-
-  python3 -c "import re,sys; f='ci-helpers/configs/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
+  printf '%s' "$TOKEN" > /tmp/trace-8k-token
 
   touch /tmp/trace-8k-initialized
 fi
+
+TOKEN=$(cat /tmp/trace-8k-token)
 
 # 3. Start Server
 sudo systemd-run --scope --unit=duotunnel-server --collect \
@@ -101,6 +102,7 @@ sudo systemd-run --scope --unit=duotunnel-client --collect \
   "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
   -E DIAL9_TRACE_PATH=/tmp/client-trace.bin \
   "${TOKIO_ENV[@]}" \
+  -E TUNNEL_CLIENT__AUTH_TOKEN="$TOKEN" \
   -- ./target/release/client --config ci-helpers/configs/client.yaml >> "/tmp/ci-client-${SUFFIX}.log" 2>&1 &
 
 CLIENT_UP=0

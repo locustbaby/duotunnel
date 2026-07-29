@@ -1,30 +1,27 @@
-use crate::control::proto::WatchEvent;
+use crate::control::proto::{diff_snapshots, ConfigDelta, ConfigEvent, ConfigSnapshot};
 use crate::control::service::ControlService;
 use anyhow::Result;
-/// WatchServer: TCP listener that implements the ctld-side of the list-watch protocol.
-///
-/// Protocol flow per connection:
-///   1. Read WatchRequest from the server
-///   2. Send WatchEvent::Snapshot (full current state)
-///   3. Loop: await ControlService change signal → send the latest full Snapshot
-///   4. On peer disconnect or error, drop the connection silently
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 use tunnel_lib::ctld_proto::{
-    recv_apply_response, recv_watch_request, snapshot_content_hash, ApplyStatus,
-    VersionedConfigSnapshot, WatchEventV2,
+    recv_apply_response, recv_watch_request, snapshot_content_hash, ApplyStatus, ControlRevision,
+    VersionedConfigSnapshot, WatchRequest,
 };
 use tunnel_lib::models::msg::{send_message, MessageType};
-
-const SNAPSHOT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct WatchServer {
     svc: Arc<ControlService>,
     bind_addr: SocketAddr,
     auth_token: Option<String>,
+}
+
+struct WatchConnectionState {
+    last_acked_snapshot: Arc<ConfigSnapshot>,
+    last_acked_revision: ControlRevision,
+    last_acked_hash: String,
 }
 
 impl WatchServer {
@@ -35,11 +32,7 @@ impl WatchServer {
     ) -> Self {
         let auth_token = auth_token.and_then(|t| {
             let t = t.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            (!t.is_empty()).then_some(t)
         });
         Self {
             svc,
@@ -62,15 +55,14 @@ impl WatchServer {
                     let svc = Arc::clone(&self.svc);
                     let auth_token = auth_token.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_watch_connection(stream, peer, svc, auth_token).await
+                        if let Err(error) =
+                            handle_watch_connection(stream, peer, svc, auth_token).await
                         {
-                            debug!(peer = %peer, error = %e, "watch connection ended");
+                            debug!(peer = %peer, error = %error, "watch connection ended");
                         }
                     });
                 }
-                Err(e) => {
-                    error!(error = %e, "WatchServer accept error");
-                }
+                Err(error) => error!(error = %error, "WatchServer accept error"),
             }
         }
     }
@@ -87,122 +79,182 @@ async fn handle_watch_connection(
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
 
-    // Step 1: read the WatchRequest
-    let req = recv_watch_request(&mut reader).await?;
-    if let Some(expected) = auth_token.as_ref() {
-        let provided = req.token.as_deref().unwrap_or("");
+    let request = recv_watch_request(&mut reader).await?;
+    authorize(&request, auth_token.as_ref())?;
+    debug!(
+        peer = %peer,
+        last_applied_revision = ?request.last_applied_revision,
+        "received canonical WatchRequest"
+    );
+
+    let mut changes = svc.subscribe();
+    let initial = svc.snapshot();
+    let initial_revision = svc.revision_for_snapshot(initial.as_ref());
+    let initial_hash = snapshot_content_hash(initial.as_ref())?;
+    let mut state = WatchConnectionState {
+        last_acked_snapshot: initial.clone(),
+        last_acked_revision: initial_revision.clone(),
+        last_acked_hash: initial_hash.clone(),
+    };
+
+    let initial_event = ConfigEvent::Snapshot(versioned_snapshot(
+        initial_revision,
+        initial_hash,
+        initial.as_ref().clone(),
+    ));
+    if matches!(
+        send_and_ack(&mut reader, &mut writer, &initial_event, &mut state).await?,
+        AckOutcome::Resync
+    ) {
+        anyhow::bail!("server requested resync for initial snapshot");
+    }
+
+    loop {
+        if changes.changed().await.is_err() {
+            warn!(peer = %peer, "ControlService watch channel closed");
+            return Ok(());
+        }
+        let current = svc.snapshot();
+        let current_revision = svc.revision_for_snapshot(current.as_ref());
+        let current_hash = snapshot_content_hash(current.as_ref())?;
+        if current_hash == state.last_acked_hash {
+            continue;
+        }
+
+        let operations = diff_snapshots(state.last_acked_snapshot.as_ref(), current.as_ref());
+        let delta = ConfigDelta {
+            base_revision: state.last_acked_revision.clone(),
+            base_hash: state.last_acked_hash.clone(),
+            target_revision: current_revision.clone(),
+            target_hash: current_hash.clone(),
+            operations,
+        };
+        let delta_size = serde_json::to_vec(&delta)?.len();
+        let snapshot_event = ConfigEvent::Snapshot(versioned_snapshot(
+            current_revision.clone(),
+            current_hash.clone(),
+            current.as_ref().clone(),
+        ));
+        let snapshot_size = serde_json::to_vec(&snapshot_event)?.len();
+        let event = if delta_size < snapshot_size {
+            ConfigEvent::Delta(delta)
+        } else {
+            snapshot_event
+        };
+
+        if matches!(
+            send_and_ack(&mut reader, &mut writer, &event, &mut state).await?,
+            AckOutcome::Resync
+        ) {
+            let snapshot_event = ConfigEvent::Snapshot(versioned_snapshot(
+                current_revision,
+                current_hash,
+                current.as_ref().clone(),
+            ));
+            send_and_ack(&mut reader, &mut writer, &snapshot_event, &mut state).await?;
+        }
+    }
+}
+
+fn authorize(request: &WatchRequest, auth_token: &Option<String>) -> Result<()> {
+    if let Some(expected) = auth_token {
+        let provided = request.token.as_deref().unwrap_or("");
         if !tokens_equal(provided, expected) {
-            warn!(peer = %peer, "unauthorized watch request");
             anyhow::bail!("unauthorized watch request");
         }
     }
-    let use_v2 = req.supports_v2();
-    debug!(
-        peer = %peer,
-        resource_version = req.legacy_resource_version(),
-        protocol = if use_v2 { "v2" } else { "legacy" },
-        "received WatchRequest"
-    );
-
-    // Subscribe before reading current state so a concurrent publish either
-    // appears in this snapshot or leaves a pending change signal.
-    let mut rx = svc.subscribe();
-
-    let current = svc.snapshot();
-    send_snapshot(&mut reader, &mut writer, current.as_ref(), &svc, use_v2).await?;
-    info!(
-        peer = %peer,
-        resource_version = current.resource_version,
-        "sent initial Snapshot"
-    );
-    let mut heartbeat = tokio::time::interval(SNAPSHOT_HEARTBEAT_INTERVAL);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    heartbeat.tick().await;
-    loop {
-        tokio::select! {
-            changed = rx.changed() => {
-                if changed.is_err() {
-                    warn!(peer = %peer, "ControlService watch channel closed, dropping connection");
-                    break;
-                }
-            }
-            _ = heartbeat.tick() => {}
-        }
-        let current = svc.snapshot();
-        if let Err(e) =
-            send_snapshot(&mut reader, &mut writer, current.as_ref(), &svc, use_v2).await
-        {
-            debug!(peer = %peer, error = %e, "failed to send Snapshot, closing connection");
-            break;
-        }
-        debug!(
-            peer = %peer,
-            resource_version = current.resource_version,
-            "sent Snapshot event"
-        );
-    }
-
     Ok(())
 }
 
-async fn send_snapshot<R, W>(
+fn versioned_snapshot(
+    revision: ControlRevision,
+    content_hash: String,
+    snapshot: ConfigSnapshot,
+) -> VersionedConfigSnapshot {
+    VersionedConfigSnapshot {
+        revision,
+        content_hash,
+        generated_at_unix_ms: unix_time_ms(),
+        snapshot,
+    }
+}
+
+enum AckOutcome {
+    Applied,
+    Resync,
+}
+
+async fn send_and_ack<R, W>(
     reader: &mut R,
     writer: &mut W,
-    snapshot: &crate::control::proto::ConfigSnapshot,
-    svc: &ControlService,
-    use_v2: bool,
-) -> Result<()>
+    event: &ConfigEvent,
+    state: &mut WatchConnectionState,
+) -> Result<AckOutcome>
 where
-    R: tokio::io::AsyncReadExt + Unpin,
+    R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    if !use_v2 {
-        send_message(
-            writer,
-            MessageType::ConfigPush,
-            &WatchEvent::Snapshot(snapshot.clone()),
-        )
-        .await?;
-        writer.flush().await?;
-        return Ok(());
-    }
-
-    let revision = svc.revision_for_snapshot(snapshot);
-    let content_hash = snapshot_content_hash(snapshot)?;
-    let generated_at_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
-    let event = WatchEventV2::Snapshot(VersionedConfigSnapshot {
-        revision: revision.clone(),
-        content_hash: content_hash.clone(),
-        generated_at_unix_ms,
-        snapshot: snapshot.clone(),
-    });
-    send_message(writer, MessageType::ConfigPush, &event).await?;
+    let (revision, hash) = event_target(event);
+    send_message(writer, MessageType::ConfigPush, event).await?;
     writer.flush().await?;
-
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         recv_apply_response(reader),
     )
     .await
     .map_err(|_| anyhow::anyhow!("timed out waiting for config apply response"))??;
-    if response.revision != revision || response.content_hash != content_hash {
-        anyhow::bail!("config apply response does not match the sent revision");
+
+    if response.status == ApplyStatus::ResyncRequired {
+        return Ok(AckOutcome::Resync);
+    }
+    if response.revision != *revision || response.content_hash != hash {
+        anyhow::bail!("config apply response does not match the sent event");
     }
     match response.status {
-        ApplyStatus::Applied | ApplyStatus::Duplicate => Ok(()),
-        ApplyStatus::Rejected => anyhow::bail!(
-            "server rejected revision: {}",
+        ApplyStatus::Applied | ApplyStatus::Duplicate => {
+            let target = match event {
+                ConfigEvent::Snapshot(snapshot) => &snapshot.snapshot,
+                ConfigEvent::Delta(delta) => {
+                    let mut candidate = state.last_acked_snapshot.as_ref().clone();
+                    tunnel_lib::ctld_proto::apply_config_operations(
+                        &mut candidate,
+                        &delta.operations,
+                    )?;
+                    candidate.resource_version = delta.target_revision.sequence;
+                    state.last_acked_snapshot = Arc::new(candidate);
+                    state.last_acked_revision = delta.target_revision.clone();
+                    state.last_acked_hash = delta.target_hash.clone();
+                    return Ok(AckOutcome::Applied);
+                }
+            };
+            state.last_acked_snapshot = Arc::new(target.clone());
+            state.last_acked_revision = revision.clone();
+            state.last_acked_hash = hash.to_string();
+            Ok(AckOutcome::Applied)
+        }
+        ApplyStatus::Rejected => Err(anyhow::anyhow!(
+            "server rejected config: {}",
             response.reason.as_deref().unwrap_or("unspecified")
-        ),
+        )),
+        ApplyStatus::ResyncRequired => unreachable!(),
     }
+}
+
+fn event_target(event: &ConfigEvent) -> (&ControlRevision, &str) {
+    match event {
+        ConfigEvent::Snapshot(snapshot) => (&snapshot.revision, &snapshot.content_hash),
+        ConfigEvent::Delta(delta) => (&delta.target_revision, &delta.target_hash),
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn tokens_equal(provided: &str, expected: &str) -> bool {
     use subtle::ConstantTimeEq;
-
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }

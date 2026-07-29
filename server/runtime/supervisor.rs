@@ -1,6 +1,5 @@
 use crate::bootstrap::{ServerBootstrap, ServerState};
 use crate::control::control_client;
-use crate::control::hot_reload;
 use crate::control::service::BackgroundService;
 use crate::ingress::handlers;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -274,9 +273,6 @@ async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
                 anyhow::bail!("invalid ctld_addr: {}", e);
             }
         },
-        crate::bootstrap::ServerMode::Standalone => Box::new(hot_reload::HotReloadService {
-            config_path: ctx.bootstrap.config_path().to_string(),
-        }),
     };
 
     let registry = ctx.state.registry().clone();

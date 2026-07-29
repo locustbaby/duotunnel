@@ -4,6 +4,12 @@ watch_addr: "127.0.0.1:7788"
 # via --ctld-token or DUOTUNNEL_CTLD_TOKEN.
 # watch_token: "replace-with-a-random-secret"
 log_level: "info"
-# Path to server.yaml — routing sections are seeded into the DB on first boot.
-# On subsequent boots this is ignored (routing lives in the DB).
-server_config: "config/server.yaml"
+admin_socket: "./data/tunnel-ctld.admin.sock"
+config:
+  sources:
+    - type: yaml
+      path: "config/routing.yaml"
+      priority: 10
+    - type: sqlite
+      database_url: "sqlite://./data/duotunnel.db?mode=rwc"
+      priority: 100

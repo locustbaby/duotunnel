@@ -7,7 +7,7 @@ pub use tunnel_lib::{
     ProxyName, UpstreamServerDef as UpstreamServer,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RoutingData {
     pub ingress_listeners: Vec<IngressListener>,
     pub client_groups: Vec<ClientGroup>,

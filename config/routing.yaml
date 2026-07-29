@@ -1,0 +1,51 @@
+server_egress_upstream:
+  upstreams:
+    backend:
+      servers:
+        - address: "https://www.google.com"
+          resolve: true
+      lb_policy: "round_robin"
+  rules:
+    vhost:
+      - match_host: "wss.localtest.com"
+        action_upstream: "backend"
+
+tunnel_management:
+  server_ingress_routing:
+    listeners:
+      - port: 8001
+        mode: http
+        vhost:
+          - match_host: "wss.localtest.com"
+            client_group: "group-a"
+            proxy_name: "grpc_service"
+          - match_host: "harbor.example.com"
+            client_group: "group-a"
+            proxy_name: "google_service"
+          - match_host: "test.local"
+            client_group: "group-a"
+            proxy_name: "http_service"
+      - port: 50051
+        mode: tcp
+        client_group: "group-a"
+        proxy_name: "grpc_service"
+  client_configs:
+    groups:
+      group-a:
+        config_version: "v1.0.0"
+        upstreams:
+          grpc_service:
+            servers:
+              - address: "https://grpc-echo.semior.dev:443"
+                resolve: true
+            lb_policy: "round_robin"
+          google_service:
+            servers:
+              - address: "www.google.com:443"
+                resolve: true
+            lb_policy: "round_robin"
+          http_service:
+            servers:
+              - address: "127.0.0.1:8080"
+                resolve: false
+            lb_policy: "round_robin"

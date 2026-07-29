@@ -57,8 +57,7 @@ fn return_buffer(buf: BytesMut, buffer_size: usize) {
         } else {
             if let Some(ref returned_buf) = maybe_buf {
                 let returned_cap = returned_buf.capacity();
-                if let Some((index, _)) =
-                    pool.iter().enumerate().min_by_key(|(_, b)| b.capacity())
+                if let Some((index, _)) = pool.iter().enumerate().min_by_key(|(_, b)| b.capacity())
                 {
                     if pool[index].capacity() < returned_cap {
                         let _old_small_buf =

@@ -1,9 +1,6 @@
 name: 'Start DuoTunnel Infrastructure'
 description: 'Initialize /etc/hosts, echo backends, and full tunnel system'
 inputs:
-  mode:
-    description: 'ctld or standalone'
-    default: 'ctld'
   worker_threads:
     description: 'Parallelism anchor. 0 = auto (cgroup CPUQuota caps derived values). N>0 sets TOKIO_WORKER_THREADS request. Runtime resolves accept_workers/shards/connections from effective_runtime_parallelism().'
     default: '0'
@@ -45,8 +42,7 @@ runs:
         sleep 0.5
         echo "Backends ready"
 
-    - name: Start Tunnel (ctld mode)
-      if: ${{ inputs.mode == 'ctld' }}
+    - name: Start Tunnel control plane
       shell: bash
       run: |
         mkdir -p data
@@ -88,13 +84,13 @@ runs:
           client rotate-token ci-group 2>/dev/null | awk '{print $NF}' | sed 's/\x1b\[[0-9;]*m//g')
         TOKEN=$(echo "$TOKEN" | tr -cd '[:print:]')
 
-        python3 -c "import re,sys; f='${{ inputs.tun_config_dir }}/client.yaml'; t=sys.argv[1]; c=open(f).read(); c=re.sub(r'^auth_token:.*','auth_token: \"'+t+'\"',c,flags=re.MULTILINE); open(f,'w').write(c)" "$TOKEN"
         sleep 3
 
         CLIENT_TOKIO_ENV=()
         if [ -n "${{ inputs.worker_threads }}" ] && [ "${{ inputs.worker_threads }}" != "0" ]; then
           CLIENT_TOKIO_ENV=(-E TOKIO_WORKER_THREADS="${{ inputs.worker_threads }}")
         fi
+        CLIENT_TOKIO_ENV+=(-E TUNNEL_CLIENT__AUTH_TOKEN="$TOKEN")
 
         sudo systemd-run --scope --unit=duotunnel-client --collect \
           "${QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
@@ -109,6 +105,6 @@ runs:
     - name: Warmup Verification
       shell: bash
       run: |
-        WARMUP_PORT=${{ inputs.mode == 'ctld' && '8080' || '8180' }}
+        WARMUP_PORT=8080
         chmod +x ci-helpers/warmup.sh
-        ./ci-helpers/warmup.sh "${{ inputs.mode }}" "$WARMUP_PORT"
+        ./ci-helpers/warmup.sh ctld "$WARMUP_PORT"

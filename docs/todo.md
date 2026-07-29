@@ -754,3 +754,10 @@ flowchart TD
 * **Priority**: Medium | **Status**: TODO | **Track**: Performance Tuning
 * **Fix**:
   在 Linux 生产环境下，禁用显式的 4MB TCP 缓冲大小，启用 Linux 的自适应 Autotuning，同时调优 QUIC 发送/接收窗口上限与流控制门限。
+
+### [TODO-151] Tenant-scoped server configuration
+* **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
+* **Problem**:
+  当前 ctld 向每个 server 下发同一份完整的全局配置；server 本地通过 Snapshot/Delta 维护完整配置状态。尚不支持按租户、区域或 server identity 过滤配置，因此所有 server 最终看到的 routing 配置相同。
+* **Design direction**:
+  为 server 建立稳定 identity，并在配置资源上增加 tenant/scope 关联。ctld 根据 server 注册信息生成目标 server 专属的 Snapshot/Delta；server 只应用属于自身作用域的配置，同时保持 base revision、content hash、ACK 和重同步语义正确。需要明确租户与 server 的绑定、跨租户资源引用、默认配置、迁移/解绑行为，以及多 server 场景下的权限隔离和测试矩阵。

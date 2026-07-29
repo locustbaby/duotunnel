@@ -98,6 +98,22 @@ impl SqliteControlRevisionStore {
         )
         .execute(&pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS config_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                yaml_source_revision TEXT NOT NULL DEFAULT '',
+                sqlite_source_revision TEXT NOT NULL DEFAULT '',
+                effective_revision INTEGER NOT NULL DEFAULT 0,
+                effective_hash TEXT NOT NULL DEFAULT '',
+                initialized INTEGER NOT NULL DEFAULT 0,
+                degraded INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("INSERT OR IGNORE INTO config_state(singleton) VALUES (1)")
+            .execute(&pool)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -131,6 +147,14 @@ impl SqliteControlRevisionStore {
         .fetch_one(&mut *conn)
         .await?;
         let sequence: i64 = row.try_get("sequence")?;
+        sqlx::query(
+            "UPDATE config_state SET effective_revision = ?1, effective_hash = ?2
+             WHERE singleton = 1",
+        )
+        .bind(sequence)
+        .bind(content_hash)
+        .execute(&mut *conn)
+        .await?;
         Ok(ControlRevision {
             epoch: row.try_get("epoch")?,
             sequence: u64::try_from(sequence)
