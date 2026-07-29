@@ -32,9 +32,9 @@ pub const MAX_LOGIN_BYTES: usize = 64 * 1024;
 pub const MAX_ROUTING_INFO_BYTES: usize = 8 * 1024;
 
 /// Highest wire-protocol version this build speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Oldest client version this build still accepts at login.
-pub const MIN_SUPPORTED_VERSION: u16 = 1;
+pub const MIN_SUPPORTED_VERSION: u16 = 2;
 /// Capability bits exchanged in the login handshake. Plain u64 masks with
 /// named constants (bitflags semantics without the dependency); no bits are
 /// defined yet.
@@ -185,7 +185,7 @@ pub struct UpstreamServer {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct RoutingInfo {
     pub proxy_name: ProxyName,
-    pub src_addr: String,
+    pub src_addr: std::net::IpAddr,
     pub src_port: u16,
     pub protocol: Protocol,
     pub host: Option<String>,
@@ -194,7 +194,7 @@ pub struct RoutingInfo {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UdpSessionKey {
     pub proxy_name: ProxyName,
-    pub client_addr: String,
+    pub client_addr: std::net::IpAddr,
     pub client_port: u16,
 }
 
@@ -360,7 +360,7 @@ mod tests {
     fn test_routing_info_serialize() {
         let info = RoutingInfo {
             proxy_name: "web".into(),
-            src_addr: "192.168.1.1".to_string(),
+            src_addr: "192.168.1.1".parse().unwrap(),
             src_port: 12345,
             protocol: Protocol::H1,
             host: Some("example.com".to_string()),
@@ -399,7 +399,7 @@ mod tests {
     fn test_routing_info_host_none() {
         let info = RoutingInfo {
             proxy_name: "tcp-proxy".into(),
-            src_addr: "10.0.0.1".to_string(),
+            src_addr: "10.0.0.1".parse().unwrap(),
             src_port: 9000,
             protocol: Protocol::Tcp,
             host: None,
@@ -479,7 +479,7 @@ mod tests {
     async fn test_send_recv_routing_info_full_frame() {
         let info = RoutingInfo {
             proxy_name: "web".into(),
-            src_addr: "192.168.0.1".to_string(),
+            src_addr: "192.168.0.1".parse().unwrap(),
             src_port: 54321,
             protocol: Protocol::H2,
             host: Some("example.com".to_string()),
@@ -498,7 +498,7 @@ mod tests {
     async fn test_send_recv_routing_info_no_host() {
         let info = RoutingInfo {
             proxy_name: "tcp-svc".into(),
-            src_addr: "::1".to_string(),
+            src_addr: "::1".parse().unwrap(),
             src_port: 22,
             protocol: Protocol::Tcp,
             host: None,
@@ -556,7 +556,7 @@ mod tests {
         };
         let info = RoutingInfo {
             proxy_name: "p".into(),
-            src_addr: "1.2.3.4".to_string(),
+            src_addr: "1.2.3.4".parse().unwrap(),
             src_port: 80,
             protocol: Protocol::H1,
             host: Some("foo.com".to_string()),
@@ -601,7 +601,7 @@ mod tests {
         let envelope = UdpDatagramEnvelope {
             session: UdpSessionKey {
                 proxy_name: "dns".into(),
-                client_addr: "127.0.0.1".to_string(),
+                client_addr: "127.0.0.1".parse().unwrap(),
                 client_port: 5353,
             },
             payload: vec![1, 2, 3, 4, 5],

@@ -4,7 +4,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,16 +157,17 @@ impl IngressProtocolHandler for H2cHandler {
         ctx: &ServerCtx,
     ) -> Result<()> {
         debug!("plaintext H2 detected, using L7 proxy");
-        let src_addr = ctx.peer_addr.ip().to_string();
+        let src_addr = ctx.peer_addr.ip();
         let src_port = ctx.peer_addr.port();
         let listener_port = ctx.listener_port;
         let single_authority = self.single_authority;
         let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
-        let first_authority: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let route_cache: Arc<Mutex<HashMap<(u64, String), Option<RouteTarget>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let first_authority: Arc<std::sync::OnceLock<String>> =
+            Arc::new(std::sync::OnceLock::new());
+        let route_cache: Arc<RwLock<HashMap<(u64, String), Option<RouteTarget>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
         let sender_cache: Arc<RwLock<HashMap<SenderCacheKey, CachedSender>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
@@ -183,7 +184,7 @@ impl IngressProtocolHandler for H2cHandler {
             let generation = generation.clone();
             let health = health.clone();
             let metrics = metrics.clone();
-            let src_addr = src_addr.clone();
+            let src_addr = src_addr;
             let overload = overload.clone();
             async move {
                 let _tracked = tunnel_lib::track_resource(tunnel_lib::TrackedResource::HttpRequest);
@@ -211,35 +212,35 @@ impl IngressProtocolHandler for H2cHandler {
                 let runtime_generation = runtime.sequence();
 
                 if single_authority {
-                    let mut fa = first_authority.lock();
-                    match fa.as_ref() {
-                        None => *fa = Some(route_host.clone()),
-                        Some(pinned) if pinned != &route_host => {
-                            let err = ProxyError::h2c_misdirected(route_host.clone());
-                            observe_h2c_error(&metrics, &err);
-                            return Ok(error_response(&err));
-                        }
-                        Some(_) => {}
+                    let pinned = first_authority.get_or_init(|| route_host.clone());
+                    if pinned != &route_host {
+                        let err = ProxyError::h2c_misdirected(route_host.clone());
+                        observe_h2c_error(&metrics, &err);
+                        return Ok(error_response(&err));
                     }
                 }
 
                 let route_cache_key = (runtime_generation, route_host.clone());
-                let cached_route = { route_cache.lock().get(&route_cache_key).cloned() };
+                let cached_route = { route_cache.read().get(&route_cache_key).cloned() };
                 let route_target = match cached_route {
                     Some(route) => route,
                     None => {
                         let resolved = runtime.routing().route_target(listener_port, &route_host);
-                        let mut cache = route_cache.lock();
-                        cache.retain(|(cached_generation, _), _| {
-                            *cached_generation >= runtime_generation.saturating_sub(1)
-                        });
-                        if cache.len() >= MAX_ROUTE_CACHE_ENTRIES {
-                            if let Some(oldest) = cache.keys().next().cloned() {
-                                cache.remove(&oldest);
+                        let mut cache = route_cache.write();
+                        if let Some(route) = cache.get(&route_cache_key) {
+                            route.clone()
+                        } else {
+                            cache.retain(|(cached_generation, _), _| {
+                                *cached_generation >= runtime_generation.saturating_sub(1)
+                            });
+                            if cache.len() >= MAX_ROUTE_CACHE_ENTRIES {
+                                if let Some(oldest) = cache.keys().next().cloned() {
+                                    cache.remove(&oldest);
+                                }
                             }
+                            cache.insert(route_cache_key, resolved.clone());
+                            resolved
                         }
-                        cache.insert(route_cache_key, resolved.clone());
-                        resolved
                     }
                 };
                 let route_target = match route_target {

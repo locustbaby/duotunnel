@@ -215,7 +215,7 @@ async fn handle_entry_connection(
         maybe_slow_path(conn.handle.connection_state(), overload).await;
         let routing_info = RoutingInfo {
             proxy_name: "entry".into(),
-            src_addr: peer_addr.ip().to_string(),
+            src_addr: peer_addr.ip(),
             src_port: peer_addr.port(),
             protocol,
             host: host.clone(),

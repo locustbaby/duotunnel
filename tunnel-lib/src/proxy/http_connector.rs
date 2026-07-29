@@ -7,9 +7,9 @@ use crate::egress::http::{H2cClient, HttpsClient};
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use parking_lot::Mutex;
 use quinn::{RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub type SharedHttpConnector = Arc<HttpConnector>;
 pub struct HttpConnector {
     https_client: HttpsClient,
     h2c_client: H2cClient,
-    prefer_h1: Mutex<HashMap<String, Instant>>,
+    prefer_h1: ArcSwap<HashMap<String, Instant>>,
 }
 
 impl HttpConnector {
@@ -33,7 +33,7 @@ impl HttpConnector {
         Arc::new(Self {
             https_client,
             h2c_client,
-            prefer_h1: Mutex::new(HashMap::new()),
+            prefer_h1: ArcSwap::from_pointee(HashMap::new()),
         })
     }
 
@@ -54,33 +54,43 @@ impl HttpConnector {
     }
 
     fn gc_prefer_h1(&self, key: &str) -> bool {
-        let mut prefer_h1 = self.prefer_h1.lock();
-        match prefer_h1.get(key) {
-            Some(timestamp) if timestamp.elapsed() <= PREFER_H1_TTL => true,
-            Some(_) => {
-                prefer_h1.remove(key);
-                false
+        let prefer_h1 = self.prefer_h1.load();
+        if let Some(timestamp) = prefer_h1.get(key) {
+            if timestamp.elapsed() <= PREFER_H1_TTL {
+                return true;
             }
-            None => false,
         }
+        false
     }
 
     fn mark_prefer_h1(&self, spec: &HttpPeerSpec) {
         let key = Self::cache_key(spec);
-        let mut prefer_h1 = self.prefer_h1.lock();
-        if !prefer_h1.contains_key(&key) && prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
-            prefer_h1.retain(|_, timestamp| timestamp.elapsed() <= PREFER_H1_TTL);
-            if prefer_h1.len() >= MAX_PREFER_H1_ENTRIES {
-                if let Some(oldest) = prefer_h1
-                    .iter()
-                    .min_by_key(|(_, timestamp)| **timestamp)
-                    .map(|(key, _)| key.clone())
-                {
-                    prefer_h1.remove(&oldest);
+        loop {
+            let current = self.prefer_h1.load();
+            if let Some(timestamp) = current.get(&key) {
+                if timestamp.elapsed() <= PREFER_H1_TTL {
+                    return;
                 }
             }
+            let mut new_map = (**current).clone();
+            if !new_map.contains_key(&key) && new_map.len() >= MAX_PREFER_H1_ENTRIES {
+                new_map.retain(|_, timestamp| timestamp.elapsed() <= PREFER_H1_TTL);
+                if new_map.len() >= MAX_PREFER_H1_ENTRIES {
+                    if let Some(oldest) = new_map
+                        .iter()
+                        .min_by_key(|(_, timestamp)| **timestamp)
+                        .map(|(key, _)| key.clone())
+                    {
+                        new_map.remove(&oldest);
+                    }
+                }
+            }
+            new_map.insert(key.clone(), Instant::now());
+            let previous = self.prefer_h1.compare_and_swap(&current, Arc::new(new_map));
+            if Arc::ptr_eq(&previous, &current) {
+                return;
+            }
         }
-        prefer_h1.insert(key, Instant::now());
     }
 
     fn box_response<RespBody>(

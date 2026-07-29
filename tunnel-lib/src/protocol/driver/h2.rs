@@ -48,8 +48,7 @@ fn decode_hpack_authority(data: &[u8]) -> Option<String> {
     let mut decoder = Decoder::new();
     if let Ok(headers) = decoder.decode(data) {
         for (name, value) in headers {
-            let name_str = String::from_utf8_lossy(&name);
-            if name_str == ":authority" {
+            if name == b":authority" {
                 return String::from_utf8(value).ok();
             }
         }

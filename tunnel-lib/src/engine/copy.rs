@@ -27,23 +27,23 @@ fn take_buffer(buffer_size: usize) -> BytesMut {
         return buf;
     }
     let global = global_pool();
-    let scan_limit = global.len();
-    for _ in 0..scan_limit {
-        let Some(buf) = global.pop() else {
-            break;
-        };
-        if buf.capacity() >= buffer_size {
-            return buf;
+    for _ in 0..3 {
+        if let Some(buf) = global.pop() {
+            if buf.capacity() >= buffer_size {
+                return buf;
+            }
         } else {
-            let _ = global.push(buf);
+            break;
         }
     }
     BytesMut::with_capacity(buffer_size)
 }
 
-fn return_buffer(mut buf: BytesMut, buffer_size: usize) {
+fn return_buffer(buf: BytesMut, buffer_size: usize) {
+    let mut buf = buf;
     buf.clear();
-    if buf.capacity() < buffer_size {
+    let max_capacity = buffer_size.saturating_mul(4);
+    if buf.capacity() < buffer_size || buf.capacity() > max_capacity {
         return;
     }
     let mut maybe_buf = Some(buf);
@@ -55,6 +55,18 @@ fn return_buffer(mut buf: BytesMut, buffer_size: usize) {
             }
             true
         } else {
+            if let Some(ref returned_buf) = maybe_buf {
+                let returned_cap = returned_buf.capacity();
+                if let Some((index, _)) =
+                    pool.iter().enumerate().min_by_key(|(_, b)| b.capacity())
+                {
+                    if pool[index].capacity() < returned_cap {
+                        let _old_small_buf =
+                            std::mem::replace(&mut pool[index], maybe_buf.take().unwrap());
+                        return true;
+                    }
+                }
+            }
             false
         }
     });
@@ -139,7 +151,6 @@ where
     let _ = writer.shutdown().await;
     Ok(bytes)
 }
-
 pub async fn copy_buffered_then_finish<R>(
     reader: R,
     mut writer: SendStream,

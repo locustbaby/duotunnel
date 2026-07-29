@@ -22,7 +22,29 @@ fn process_start_instant() -> Instant {
 }
 
 pub fn current_monotonic_deciseconds() -> u32 {
-    process_start_instant().elapsed().as_millis().div_ceil(100) as u32
+    use std::sync::atomic::AtomicU32;
+    static SPAWN_ONCE: std::sync::Once = std::sync::Once::new();
+    static CACHED_DECISECONDS: AtomicU32 = AtomicU32::new(0);
+
+    SPAWN_ONCE.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("time-updater".to_string())
+            .spawn(|| {
+                let start = process_start_instant();
+                loop {
+                    let deciseconds = start.elapsed().as_millis().div_ceil(100);
+                    CACHED_DECISECONDS.store(deciseconds as u32, Ordering::Release);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+    });
+
+    let val = CACHED_DECISECONDS.load(Ordering::Acquire);
+    if val == 0 {
+        process_start_instant().elapsed().as_millis().div_ceil(100) as u32
+    } else {
+        val
+    }
 }
 
 #[repr(u8)]
@@ -569,7 +591,8 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     if let Some(probe_token) = entry.state.mark_failure(observed_epoch) {
-                        self.has_ejections.store(true, std::sync::atomic::Ordering::Release);
+                        self.has_ejections
+                            .store(true, std::sync::atomic::Ordering::Release);
                         self.health.spawn_probe_by_token(entry.clone(), probe_token);
                     }
                 }

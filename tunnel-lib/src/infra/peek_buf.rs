@@ -41,19 +41,19 @@ impl PeekBufPool {
     }
 
     /// Return a buffer to the pool. Drops it if undersized or the pool is full.
-    pub fn put(&self, mut buf: Vec<u8>) {
-        if buf.capacity() < self.buf_size {
+    pub fn put(&self, mut _buf: Vec<u8>) {
+        if _buf.capacity() < self.buf_size {
             return; // undersized — drop
         }
         // Maintain the length up to buf_size so we don't have to resize it later.
-        buf.truncate(self.buf_size);
-        if buf.len() < self.buf_size {
-            buf.resize(self.buf_size, 0);
+        _buf.truncate(self.buf_size);
+        if _buf.len() < self.buf_size {
+            _buf.resize(self.buf_size, 0);
         }
         PEEK_BUF_POOL.with(|cell| {
             let mut pool = cell.borrow_mut();
             if pool.len() < Self::MAX_IDLE_PER_THREAD {
-                pool.push(buf);
+                pool.push(_buf);
             }
         });
     }

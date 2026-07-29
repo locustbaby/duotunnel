@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quinn::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -11,6 +11,8 @@ use tunnel_lib::{
     stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, NegotiatedProtocol,
     ProxyError,
 };
+
+const MAX_PENDING_UNREGISTERS: usize = 65_536;
 
 struct ClientInfo {
     group_id: GroupId,
@@ -104,10 +106,13 @@ enum RegistryMsg {
 
 pub struct ClientRegistry {
     groups: Arc<DashMap<GroupId, Arc<ClientGroup>>>,
+    client_to_group: Arc<DashMap<ClientId, (GroupId, usize)>>,
     actor_alive: Arc<AtomicBool>,
     shard_count: usize,
     next_register_shard: AtomicUsize,
     tx: mpsc::Sender<RegistryMsg>,
+    pending_unregisters: Arc<parking_lot::Mutex<HashSet<ClientId>>>,
+    pending_notify: Arc<tokio::sync::Notify>,
 }
 
 impl ClientRegistry {
@@ -117,11 +122,18 @@ impl ClientRegistry {
         max_pending_streams: usize,
     ) -> Self {
         let shard_count = shard_count.max(1);
-        let groups = Arc::new(DashMap::new());
+        let groups = Arc::new(DashMap::<GroupId, Arc<ClientGroup>>::new());
+        let client_to_group = Arc::new(DashMap::<ClientId, (GroupId, usize)>::new());
         let inflight_table = new_inflight_table(4096);
         let (tx, mut rx) = mpsc::channel(1024);
         let groups_clone = groups.clone();
+        let client_to_group_clone = client_to_group.clone();
         let actor_alive = Arc::new(AtomicBool::new(true));
+        let pending_unregisters = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let pending_unregisters_clone = pending_unregisters.clone();
+        let pending_notify = Arc::new(tokio::sync::Notify::new());
+        let pending_notify_clone = pending_notify.clone();
+        let actor_alive_for_actor = actor_alive.clone();
 
         let actor = tokio::spawn(async move {
             let mut clients: HashMap<ClientId, ClientInfo> = HashMap::new();
@@ -140,8 +152,32 @@ impl ClientRegistry {
                     .collect::<Vec<_>>()
             };
 
-            while let Some(msg) = rx.recv().await {
-                match msg {
+            let pending_notify_clone2 = pending_notify_clone.clone();
+            loop {
+                if !actor_alive_for_actor.load(Ordering::Acquire) {
+                    break;
+                }
+                // Drain pending unregisters
+                let pending = {
+                    let mut guard = pending_unregisters_clone.lock();
+                    std::mem::take(&mut *guard)
+                };
+                for cid in pending {
+                    actor_unregister(
+                        &cid,
+                        &mut clients,
+                        &mut group_conns,
+                        &client_to_group_clone,
+                        &groups_clone,
+                        shard_count,
+                    );
+                }
+
+                tokio::select! {
+                    _ = pending_notify_clone2.notified() => {}
+                    msg = rx.recv() => {
+                        let Some(msg) = msg else { break; };
+                        match msg {
                     RegistryMsg::Register {
                         client_id,
                         group_id,
@@ -151,6 +187,10 @@ impl ClientRegistry {
                         token_hash,
                         reply,
                     } => {
+                        if clients.contains_key(&client_id) {
+                            let _ = reply.send(Err("client id already registered"));
+                            continue;
+                        }
                         info!(
                             client_id = %client_id,
                             group_id = %group_id,
@@ -159,15 +199,11 @@ impl ClientRegistry {
                             capabilities = negotiated.capabilities,
                             "registering client"
                         );
-                        if let Some(old_info) = clients.get(&client_id) {
-                            if let Some(old_shards) = group_conns.get(&old_info.group_id) {
-                                if let Some(existing) =
-                                    old_shards[old_info.shard_id].get(&client_id)
-                                {
-                                    existing.handle.retire();
-                                }
-                            }
-                        }
+                        let predecessor = clients.get(&client_id).and_then(|info| {
+                            group_conns.get(&info.group_id)
+                                .and_then(|shards| shards[info.shard_id].get(&client_id))
+                                .map(|rc| rc.handle.clone())
+                        });
                         let Some(connection_state) = inflight_table.allocate() else {
                             let _ = reply.send(Err("connection state capacity exhausted"));
                             continue;
@@ -190,7 +226,8 @@ impl ClientRegistry {
                             max_concurrent_streams,
                             max_pending_streams,
                         );
-                        idx.insert(
+
+                        let mut replaced = idx.insert(
                             client_id.clone(),
                             RegisteredConn {
                                 handle,
@@ -213,7 +250,7 @@ impl ClientRegistry {
                                 if let Some(old_shards) = group_conns.get_mut(&old_info.group_id) {
                                     let old_idx = &mut old_shards[old_info.shard_id];
                                     if let Some(existing) = old_idx.remove(&client_id) {
-                                        existing.handle.retire();
+                                        replaced = Some(existing);
                                     }
                                     if let Some(old_group) = groups_clone.get(&old_info.group_id) {
                                         old_group.shards[old_info.shard_id]
@@ -227,34 +264,31 @@ impl ClientRegistry {
                                 }
                             }
                         }
+
+                        // Publish to public index during Actor commit phase
+                        client_to_group_clone.insert(
+                            client_id.clone(),
+                            (group_id.clone(), shard_id % shard_count),
+                        );
+
+                        // Retire the predecessor after successful commit
+                        if let Some(existing) = replaced {
+                            existing.handle.retire();
+                        } else if let Some(existing_handle) = predecessor {
+                            existing_handle.retire();
+                        }
+
                         let _ = reply.send(Ok(()));
                     }
                     RegistryMsg::Unregister { client_id } => {
-                        if let Some(info) = clients.remove(&client_id) {
-                            info!(
-                                client_id = %client_id,
-                                group_id = %info.group_id,
-                                shard_id = info.shard_id,
-                                "unregistering client"
-                            );
-                            if let Some(shards) = group_conns.get_mut(&info.group_id) {
-                                let idx = &mut shards[info.shard_id];
-                                if let Some(existing) = idx.remove(&client_id) {
-                                    existing.handle.retire();
-                                }
-                                let should_remove =
-                                    if let Some(group) = groups_clone.get(&info.group_id) {
-                                        group.shards[info.shard_id]
-                                            .store(Arc::new(build_snapshot(idx)));
-                                        group.is_empty()
-                                    } else {
-                                        false
-                                    };
-                                if should_remove {
-                                    groups_clone.remove_if(&info.group_id, |_, g| g.is_empty());
-                                }
-                            }
-                        }
+                        actor_unregister(
+                            &client_id,
+                            &mut clients,
+                            &mut group_conns,
+                            &client_to_group_clone,
+                            &groups_clone,
+                            shard_count,
+                        );
                     }
                     RegistryMsg::PurgeDead { reply } => {
                         let mut dead_count = 0;
@@ -284,14 +318,14 @@ impl ClientRegistry {
                         }
 
                         for cid in dead_clients {
-                            if let Some(info) = clients.remove(&cid) {
-                                info!(
-                                    client_id = %cid,
-                                    group_id = %info.group_id,
-                                    shard_id = info.shard_id,
-                                    "unregistering client"
-                                );
-                            }
+                            actor_unregister(
+                                &cid,
+                                &mut clients,
+                                &mut group_conns,
+                                &client_to_group_clone,
+                                &groups_clone,
+                                shard_count,
+                            );
                         }
 
                         let empty_gids: Vec<GroupId> = groups_clone
@@ -325,6 +359,8 @@ impl ClientRegistry {
                         let _ = reply.send(revoked);
                     }
                 }
+                    }
+                }
             }
         });
         let monitor_groups = groups.clone();
@@ -341,10 +377,13 @@ impl ClientRegistry {
 
         Self {
             groups,
+            client_to_group,
             actor_alive,
             shard_count,
             next_register_shard: AtomicUsize::new(0),
             tx,
+            pending_unregisters,
+            pending_notify,
         }
     }
 
@@ -360,13 +399,16 @@ impl ClientRegistry {
         negotiated: NegotiatedProtocol,
         token_hash: [u8; 32],
     ) -> Result<(), &'static str> {
+        if !self.actor_alive.load(Ordering::Acquire) {
+            return Err("registry unavailable");
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         let shard_id = self.next_register_shard.fetch_add(1, Ordering::Relaxed) % self.shard_count;
         if self
             .tx
             .send(RegistryMsg::Register {
-                client_id,
-                group_id,
+                client_id: client_id.clone(),
+                group_id: group_id.clone(),
                 conn,
                 shard_id,
                 negotiated,
@@ -389,13 +431,38 @@ impl ClientRegistry {
     }
 
     pub fn unregister(&self, client_id: &ClientId) {
+        if !self.actor_alive.load(Ordering::Acquire) {
+            return;
+        }
         self.retire_visible_client(client_id);
         let message = RegistryMsg::Unregister {
             client_id: client_id.clone(),
         };
         match self.tx.try_send(message) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => self.fail_closed(),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let (inserted, overflowed) = {
+                    let mut guard = self.pending_unregisters.lock();
+                    if guard.contains(client_id) {
+                        (false, false)
+                    } else if guard.len() >= MAX_PENDING_UNREGISTERS {
+                        (false, true)
+                    } else {
+                        guard.insert(client_id.clone());
+                        (true, false)
+                    }
+                };
+                if overflowed {
+                    error!(
+                        client_id = %client_id,
+                        limit = MAX_PENDING_UNREGISTERS,
+                        "registry unregister reconcile overflowed; failing closed"
+                    );
+                    self.fail_closed();
+                } else if inserted {
+                    self.pending_notify.notify_one();
+                }
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => self.fail_closed(),
         }
     }
@@ -404,11 +471,14 @@ impl ClientRegistry {
         if !self.actor_alive.load(Ordering::Acquire) {
             return None;
         }
-        let group = self.groups.get(group_id)?;
+        let group = self.groups.get(group_id).map(|r| r.value().clone())?;
         group.select_healthy(self.preferred_shard_for_group(group_id))
     }
 
     pub async fn purge_dead(&self) -> Result<usize, &'static str> {
+        if !self.actor_alive.load(Ordering::Acquire) {
+            return Err("registry unavailable");
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .tx
@@ -432,6 +502,9 @@ impl ClientRegistry {
         if token_hashes.is_empty() {
             return Ok(0);
         }
+        if !self.actor_alive.load(Ordering::Acquire) {
+            return Err("registry unavailable");
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RegistryMsg::RevokeTokens {
@@ -452,15 +525,20 @@ impl ClientRegistry {
     fn fail_closed(&self) {
         self.actor_alive.store(false, Ordering::Release);
         fail_closed_registry(&self.groups);
+        self.client_to_group.clear();
+        self.pending_unregisters.lock().clear();
     }
 
     fn retire_visible_client(&self, client_id: &ClientId) {
-        for group in self.groups.iter() {
-            for shard in &group.shards {
-                let snapshot = shard.load();
-                if let Some(selected) = snapshot.iter().find(|entry| &entry.conn_id == client_id) {
-                    selected.handle.retire();
-                    return;
+        if let Some((_, (group_id, shard_id))) = self.client_to_group.remove(client_id) {
+            if let Some(group) = self.groups.get(&group_id) {
+                if shard_id < group.shards.len() {
+                    let snapshot = group.shards[shard_id].load();
+                    if let Some(selected) =
+                        snapshot.iter().find(|entry| &entry.conn_id == client_id)
+                    {
+                        selected.handle.retire();
+                    }
                 }
             }
         }
@@ -500,5 +578,51 @@ pub fn unregister_if_connection_lost(
     });
     if selected.handle.close_reason().is_some() || fatal_proxy_error {
         registry.unregister(&selected.conn_id);
+    }
+}
+
+fn actor_unregister(
+    client_id: &ClientId,
+    clients: &mut HashMap<ClientId, ClientInfo>,
+    group_conns: &mut HashMap<GroupId, Vec<HashMap<ClientId, RegisteredConn>>>,
+    client_to_group: &DashMap<ClientId, (GroupId, usize)>,
+    groups: &DashMap<GroupId, Arc<ClientGroup>>,
+    _shard_count: usize,
+) {
+    client_to_group.remove_if(client_id, |_, _| true);
+    if let Some(info) = clients.remove(client_id) {
+        tracing::info!(
+            client_id = %client_id,
+            group_id = %info.group_id,
+            shard_id = info.shard_id,
+            "unregistering client"
+        );
+        if let Some(shards) = group_conns.get_mut(&info.group_id) {
+            let idx = &mut shards[info.shard_id];
+            if let Some(existing) = idx.remove(client_id) {
+                existing.handle.retire();
+            }
+
+            let snapshot = idx
+                .iter()
+                .map(|(cid, registered)| {
+                    Arc::new(SelectedConnection {
+                        conn_id: cid.clone(),
+                        handle: registered.handle.clone(),
+                        negotiated: registered.negotiated,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let should_remove = if let Some(group) = groups.get(&info.group_id) {
+                group.shards[info.shard_id].store(Arc::new(snapshot));
+                group.is_empty()
+            } else {
+                false
+            };
+            if should_remove {
+                groups.remove_if(&info.group_id, |_, g| g.is_empty());
+            }
+        }
     }
 }

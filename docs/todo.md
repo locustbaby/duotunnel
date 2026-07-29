@@ -247,7 +247,7 @@ flowchart TD
   目前缺乏 UDP 代理的支持。虽然 Quinn 支持底层的不可靠 Datagram (RFC 9221)，但 DuoTunnel 尚未实现客户端 UDP 监听解包与服务端 UDP 会话保持与老化淘汰。
 * **Fix**:
   现在已经补上最小可用运行时：客户端可按 `udp_entries` 绑定本地 UDP listener，把数据包封装成 `UdpDatagramEnvelope` 通过 QUIC datagram 发送；服务端收到后按 `proxy_name` 解析 upstream、建立按 `UdpSessionKey` 分组的 UDP socket，并把回包继续通过 QUIC datagram 送回客户端 listener。基础协议模型 `UdpSessionKey`/`UdpDatagramEnvelope` 与独立的 `encode/decode` helper 也已接入这条路径。
-  UDP 代理生产级收尾工作已完成：实现了基于最后活动时间戳的 UDP 会话定时清理与老化淘汰，避免连接内存无限增长。
+  UDP 代理基础会话清理、容量控制和非阻塞建连已完成：实现了基于最后活动时间戳的 UDP 会话定时清理与老化淘汰，增加了 per-connection/global session budget，并将 DNS 解析/socket connect 剥离至可取消的后台 task；Connecting 状态暂存首包并立即返回。仍需补充生产级指标、压测门槛和故障注入验证，当前不宣称完整生产收尾。
 
 ### [TODO-32] Root CA signing mode for generated certs
 * **Priority**: High | **Status**: ✅ Done (Phase 1) | **Track**: Transport & Performance
@@ -739,3 +739,18 @@ flowchart TD
 
 ### [TODO-15] egress_http_post phase boundary annotation
 * **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+
+### [TODO-148] Coarse-grained shared Tick Timer (Pingora Fast-Timeout style)
+* **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
+* **Fix**:
+  实现 10ms 或 50ms 粗粒度的定时器轮（Timer Wheel），支持多 Future Waker 的共享 tick 唤醒，避免在高并发连接下频繁增删 Tokio 计时堆的 CPU 锁争用。
+
+### [TODO-149] DDoS-Resistant Count-Min Sketch Ingress Rate Limiter
+* **Priority**: Medium | **Status**: TODO | **Track**: Ingress Security
+* **Fix**:
+  在 Ingress Listener 阶段引入内存有界的 Count-Min Sketch 限流矩阵。对 Peer IP 进行快速多重 Hash 映射，避免在大流量防刷时因维护海量 IP Session Map 导致 OOM（内存溢出）。
+
+### [TODO-150] In-depth TCP Autotuning & QUIC Buffer Tuning
+* **Priority**: Medium | **Status**: TODO | **Track**: Performance Tuning
+* **Fix**:
+  在 Linux 生产环境下，禁用显式的 4MB TCP 缓冲大小，启用 Linux 的自适应 Autotuning，同时调优 QUIC 发送/接收窗口上限与流控制门限。

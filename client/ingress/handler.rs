@@ -21,11 +21,7 @@ pub async fn handle_work_stream<L: LoadBalancer, R: Resolver>(
         src = format!("{}:{}", routing_info.src_addr, routing_info.src_port),
         "received work stream"
     );
-    let ip = routing_info
-        .src_addr
-        .parse::<std::net::IpAddr>()
-        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-    let client_addr = std::net::SocketAddr::new(ip, routing_info.src_port);
+    let client_addr = std::net::SocketAddr::new(routing_info.src_addr, routing_info.src_port);
     let app = IngressClientApp::new(proxy_map, tcp_params);
     let engine = ProxyEngine::new(app);
     engine
