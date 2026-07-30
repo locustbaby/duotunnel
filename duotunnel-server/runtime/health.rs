@@ -33,7 +33,7 @@ struct MutableFacts {
 }
 
 pub(crate) struct ServerHealthFacts {
-    managed_control: bool,
+    control_plane_required: bool,
     quic_bound: AtomicBool,
     config_valid: AtomicBool,
     config_applying: AtomicBool,
@@ -46,9 +46,9 @@ pub(crate) struct ServerHealthFacts {
 }
 
 impl ServerHealthFacts {
-    pub(crate) fn new(managed_control: bool) -> Self {
+    pub(crate) fn new(control_plane_required: bool) -> Self {
         Self::with_thresholds(
-            managed_control,
+            control_plane_required,
             CONTROL_DEGRADED_AFTER,
             CONTROL_SECURITY_STALE_AFTER,
             CONTROL_STALE_AFTER,
@@ -56,15 +56,15 @@ impl ServerHealthFacts {
     }
 
     fn with_thresholds(
-        managed_control: bool,
+        control_plane_required: bool,
         degraded_after: Duration,
         security_stale_after: Duration,
         stale_after: Duration,
     ) -> Self {
         Self {
-            managed_control,
+            control_plane_required,
             quic_bound: AtomicBool::new(false),
-            config_valid: AtomicBool::new(!managed_control),
+            config_valid: AtomicBool::new(!control_plane_required),
             config_applying: AtomicBool::new(false),
             security_fence_held: AtomicBool::new(false),
             mutable: RwLock::new(MutableFacts::default()),
@@ -179,7 +179,7 @@ impl ServerHealthFacts {
     }
 
     pub(crate) fn control_freshness(&self) -> ControlFreshness {
-        if !self.managed_control {
+        if !self.control_plane_required {
             return ControlFreshness::Fresh;
         }
         let Some(last_confirmed) = self.mutable.read().last_control_confirmed else {
@@ -220,7 +220,7 @@ impl ServerHealthFacts {
         if self.config_applying.load(Ordering::Acquire) {
             return false;
         }
-        if !self.managed_control {
+        if !self.control_plane_required {
             return self.config_valid.load(Ordering::Acquire);
         }
         self.config_valid.load(Ordering::Acquire)

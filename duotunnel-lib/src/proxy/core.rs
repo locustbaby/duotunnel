@@ -2,12 +2,12 @@ use super::peers::PeerSpec;
 use crate::infra::peek_buf::PeekBufPool;
 use crate::models::msg::RoutingInfo;
 use crate::protocol::sniff::{default_proxyengine_detectors, SniffPolicy, SniffRuntime};
+use crate::proxy::buffer_params::ProxyBufferParams;
 use crate::ProxyError;
 use anyhow::Result;
 use bytes::Bytes;
 use quinn::{RecvStream, SendStream};
 use std::net::SocketAddr;
-use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Protocol {
     H1,
@@ -39,16 +39,29 @@ pub trait UpstreamResolver: Send + Sync {
 }
 pub struct ProxyEngine<A: UpstreamResolver> {
     app: A,
-}
-
-static STREAM_PEEK_POOL: OnceLock<PeekBufPool> = OnceLock::new();
-fn stream_peek_pool() -> &'static PeekBufPool {
-    STREAM_PEEK_POOL.get_or_init(|| PeekBufPool::new(4096))
+    peek_buf_pool: PeekBufPool,
 }
 
 impl<A: UpstreamResolver> ProxyEngine<A> {
     pub fn new(app: A) -> Self {
-        Self { app }
+        Self {
+            app,
+            peek_buf_pool: PeekBufPool::new(ProxyBufferParams::default().peek_buf_size),
+        }
+    }
+
+    pub fn new_with_peek_buf_size(app: A, peek_buf_size: usize) -> Self {
+        Self {
+            app,
+            peek_buf_pool: PeekBufPool::new(peek_buf_size),
+        }
+    }
+
+    pub fn new_with_buffer_params(
+        app: A,
+        buffer_params: crate::proxy::buffer_params::ProxyBufferParams,
+    ) -> Self {
+        Self::new_with_peek_buf_size(app, buffer_params.peek_buf_size)
     }
     pub async fn run_stream(
         &self,
@@ -64,12 +77,11 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         {
             (p, None)
         } else {
-            let pool = stream_peek_pool();
             let runtime =
                 SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
             let sniffed = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                runtime.sniff(&mut recv, pool),
+                runtime.sniff(&mut recv, &self.peek_buf_pool),
             )
             .await
             {

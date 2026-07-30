@@ -66,7 +66,7 @@ v1 跳过 v2、直接收到 v2→v3 Patch，会把 v1 当成 v2 应用，最终�
 
 **推荐分两步止血**：先让 `watch` 只作“changed”信号，每次仍按现有 rkyv 旧线协议发送
 完整 Snapshot，允许 ctld-first 升级且立即获得最终收敛。revision/hash/applied ACK 需要
-明确 ControlProtocolV2 capability 和双栈 rollout，不能直接扩充旧固定布局。V2 的
+（历史方案）曾建议明确 ControlProtocolV2 capability 和双栈 rollout，不能直接扩充旧固定布局。当前实现已统一为 numeric wire version，V2 的
 revision 还必须跨 ctld 重启持久化，否则 server 拒绝回退后会永久拒绝从 1 重新计数的
 合法配置。若未来确需 delta，再增加 base/new revision、ACK/NACK 与 replay log。
 
@@ -299,7 +299,7 @@ poll 次数。
 
 ```text
 M0a-0 旧 wire 完整快照止血
- └─ M0a-1 持久 revision + V2 双栈/hash/ACK + crash-safe LKG + client active count
+ └─ M0a-1 持久 revision + Snapshot/Delta hash/ACK + crash-safe LKG + client active count
      └─ M0b 稳定 acceptor/listener actor + server readiness + backoff reset
          └─ M0c RuntimeGeneration + revocation + security stale policy
              └─ M0d owned ConnectionState + reliable unregister + typed drain
@@ -308,7 +308,7 @@ M0a-0 旧 wire 完整快照止血
                          └─ P2 profile-gated 多 Endpoint / runtime / pool 分片
 ```
 
-截至 2026-07-27，watch 的当前实现已改为发送完整 Snapshot，V2 已带 revision/hash/ACK，
+截至 2026-07-27，watch 的当前实现已改为发送完整 Snapshot，当前 numeric wire envelope 已带 revision/hash/ACK，
 token revoke、readiness 聚合、稳定 session backoff、inflight ownership 和 listener
 generation fencing 也已有代码闭环。本批仍不覆盖增量 Patch 的 replay 语义、listener actor
 彻底拆分、UDP 跨 session 调度等后续设计；跨版本/多 leader、大规模并发、故障注入与长稳
@@ -373,8 +373,8 @@ generation fencing 也已有代码闭环。本批仍不覆盖增量 Patch 的 re
 
 ### 当前剩余优先级
 
-1. P1：当前 watch 发送完整 Snapshot，V2 ACK/hash 已闭环；只有未来重新启用增量 Patch 时，
-   才需要增加 base/new revision、NACK/replay 和旧客户端双栈策略。listener 的 reservation
+1. P1：当前 watch 已闭合 Snapshot/Delta、ACK/hash、Resync 和 Duplicate 语义；不引入
+   change-log/replay 或旧业务 V1/V2 双栈。listener 的 reservation
    与 generation fence 已生效，但稳定 acceptor/actor 的彻底拆分仍是后续任务。
 2. P1：UDP per-session singleflight 与跨 session 公平调度、`proxy_name` 唯一性/稳定 entry
    ID、健康/metrics/watch 入站预算、typed drain，以及 reload 双代的统一资源预算。

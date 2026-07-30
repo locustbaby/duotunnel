@@ -7,9 +7,23 @@ SERVER_LOG=${3:-/tmp/ci-server.log}
 CLIENT_LOG=${4:-/tmp/ci-client.log}
 RETRIES=10
 
-CPU_QUOTA_ARG=()
-if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
-  CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
+source ci-helpers/cpu-contract.sh
+cpu_contract_resolve "${DUOTUNNEL_BENCH_CPU_MODE:-isolate}" "${WORKER_THREADS:-0}" "${STRESS_CPU_QUOTA:-100%}"
+mapfile -t SERVER_CPU_ARGS < <(cpu_contract_scope_args server)
+mapfile -t CLIENT_CPU_ARGS < <(cpu_contract_scope_args client)
+
+TOKIO_ENV=()
+if [ "${WORKER_THREADS:-0}" != "0" ]; then
+  TOKIO_ENV=(-E TOKIO_WORKER_THREADS="${WORKER_THREADS}")
+fi
+
+SERVER_TRACE_ENV=()
+CLIENT_TRACE_ENV=()
+if [ -n "${DIAL9_SERVER_TRACE_PATH:-}" ]; then
+  SERVER_TRACE_ENV=(-E DIAL9_TRACE_PATH="${DIAL9_SERVER_TRACE_PATH}")
+fi
+if [ -n "${DIAL9_CLIENT_TRACE_PATH:-}" ]; then
+  CLIENT_TRACE_ENV=(-E DIAL9_TRACE_PATH="${DIAL9_CLIENT_TRACE_PATH}")
 fi
 
 wait_unit_gone() {
@@ -64,7 +78,9 @@ wait_unit_gone
 
 echo "Restarting server..."
 sudo systemd-run --scope --unit=duotunnel-server --collect \
-  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${SERVER_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${TOKIO_ENV[@]}" \
+  "${SERVER_TRACE_ENV[@]}" \
   -- ./target/release/duotunnel-server --config ci-helpers/configs/server.yaml \
   --ctld-addr 127.0.0.1:7788 >> "$SERVER_LOG" 2>&1 &
 
@@ -86,7 +102,9 @@ if [ -z "$CLIENT_TOKEN" ]; then
   exit 1
 fi
 sudo systemd-run --scope --unit=duotunnel-client --collect \
-  "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${CLIENT_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+  "${TOKIO_ENV[@]}" \
+  "${CLIENT_TRACE_ENV[@]}" \
   -E DUOTUNNEL_CLIENT__AUTH_TOKEN="$CLIENT_TOKEN" \
   -- ./target/release/duotunnel-client --config ci-helpers/configs/client.yaml >> "$CLIENT_LOG" 2>&1 &
 

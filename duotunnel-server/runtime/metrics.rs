@@ -1,6 +1,7 @@
 use crate::ingress::plugins::prometheus::PrometheusSink;
 use duotunnel_lib::ProxyError;
 use metrics_exporter_prometheus::PrometheusHandle;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -100,6 +101,36 @@ pub fn client_registered(_group_id: &str) {
 
 pub fn client_unregistered(_group_id: &str) {
     metrics::gauge!("duotunnel_clients_active").decrement(1.0);
+}
+
+pub(crate) fn registry_capacity_observe(active: usize, capacity: usize) {
+    static HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
+    let mut high_water = HIGH_WATER.load(Ordering::Relaxed);
+    while active > high_water {
+        match HIGH_WATER.compare_exchange_weak(
+            high_water,
+            active,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                high_water = active;
+                break;
+            }
+            Err(observed) => high_water = observed,
+        }
+    }
+    let available = capacity.saturating_sub(active);
+    metrics::gauge!("duotunnel_registry_connections_capacity").set(capacity as f64);
+    metrics::gauge!("duotunnel_registry_connections_active").set(active as f64);
+    metrics::gauge!("duotunnel_registry_connections_available").set(available as f64);
+    metrics::gauge!("duotunnel_registry_connections_high_water").set(high_water as f64);
+    metrics::gauge!("duotunnel_registry_connections_exhausted")
+        .set(f64::from((active >= capacity) as u8));
+}
+
+pub(crate) fn registry_capacity_exhausted() {
+    metrics::counter!("duotunnel_registry_capacity_exhaustions_total").increment(1);
 }
 
 pub fn request_completed(protocol: &'static str, status: &'static str) {

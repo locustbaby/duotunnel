@@ -1,4 +1,4 @@
-use crate::engine::{bridge, relay::relay_with_initial};
+use crate::engine::bridge;
 use crate::transport::addr::parse_upstream;
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -145,6 +145,22 @@ impl TcpPeer {
         recv: RecvStream,
         initial_data: Option<Bytes>,
     ) -> Result<()> {
+        self.connect_inner_with_buffer_size(
+            send,
+            recv,
+            initial_data,
+            crate::proxy::buffer_params::DEFAULT_RELAY_BUF_SIZE,
+        )
+        .await
+    }
+
+    pub async fn connect_inner_with_buffer_size(
+        self,
+        send: SendStream,
+        recv: RecvStream,
+        initial_data: Option<Bytes>,
+        relay_buf_size: usize,
+    ) -> Result<()> {
         debug!("connecting to tcp upstream: {}", self.target_addr);
         let tcp_stream = TcpStream::connect(self.target_addr)
             .await
@@ -156,8 +172,14 @@ impl TcpPeer {
         match self.tls {
             None => {
                 info!(target = %self.target_addr, "starting bidirectional relay (raw tcp)");
-                bridge::relay_with_first_data(recv, send, tcp_stream, initial_data.as_deref())
-                    .await?;
+                bridge::relay_with_first_data_and_buffer_size(
+                    recv,
+                    send,
+                    tcp_stream,
+                    initial_data.as_deref(),
+                    relay_buf_size,
+                )
+                .await?;
             }
             Some(tls) => {
                 debug!("TLS upstream: {} (SNI: {})", self.target_addr, tls.host);
@@ -169,11 +191,12 @@ impl TcpPeer {
                     .await
                     .context("TLS handshake failed")?;
                 info!(target = %self.target_addr, tls_host = %tls.host, "starting TLS bidirectional relay");
-                relay_with_initial(
+                crate::engine::relay::relay_with_initial_and_buffer_size(
                     recv,
                     send,
                     tls_stream,
                     initial_data.as_deref().unwrap_or(&[]),
+                    relay_buf_size,
                 )
                 .await?;
             }

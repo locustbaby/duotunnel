@@ -110,8 +110,8 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
   - **登录前挂起放大持有时间**：`idle_timeout` 默认 180s（`quic.rs:28`）——停在登录前的连接
     在 QUIC 层最长可赖 180s 才被回收；`login_timeout` 仅约束"已进入登录步骤"的耗时，
     连接/task 本身在此之前已存在。入口 semaphore 需覆盖这段窗口。
-  - **分离/托管部署**：ctld 只下发路由/token，**不介入 QUIC accept**；managed 模式同样裸奔，
-    限流必须落在 server 入口。
+  - **统一控制面部署**：ctld 只下发路由/token，**不介入 QUIC accept**；限流必须落在
+    server 入口。这里不再区分 standalone/managed 拓扑。
   - **多租户**：4096 是全局值，跨租户耗尽是隔离缺口，per-group 配额可作为二级防护。
 - **取舍**：入口限流会在极端过载下拒绝**部分合法新连接**（fail-closed）——这是正确取舍：
   牺牲尾部可用性换取不被打垮。阈值需可配并给指标，避免误伤正常突发。
@@ -210,10 +210,10 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
 - **风险等级**：**中-高**（todo 已跟踪，属**应尽快关闭**项）。
 - **方案**：对端一律回泛化文案（如 "authentication failed"），完整错误仅服务端 `error!` 记录。
 - **论证 / 备选**：泛化对端信息是标准做法；保留服务端日志不损可观测性。
-- **场景覆盖 & Corner Cases**：**泄露面主要在 standalone SQLite 模式**——managed 模式下
-  `LocalTokenCache::authenticate` 只返回 `InvalidToken/ClientDisabled/TokenRevoked`
-  （`duotunnel-server/control/local_auth.rs`），不产生带 DB 细节的 `Internal`；SqliteAuthStore
-  才会把 DB 错误升成 `Internal`。修复应覆盖两种 store 的返回映射，别只改一处。
+- **场景覆盖 & Corner Cases**：当前统一拓扑中 server 只使用从 ctld 同步的
+  `LocalTokenCache::authenticate`，只返回 `InvalidToken/ClientDisabled/TokenRevoked`
+  （`duotunnel-server/control/local_auth.rs`），不会把 SQLite 细节暴露给 peer；SQLite
+  错误仍需在 ctld/admin 边界统一映射，不能回传给未认证连接。
 - **取舍**：对端拿不到细粒度失败原因，客户端排障略难——可用错误码（非文本）弥补。
 - **改动量 / 影响面**：~0.5 天。改 `handlers/quic.rs:152-157` 登录失败返回映射一处。**独立项。**
 
@@ -283,7 +283,7 @@ ctld watch 的 token 鉴权 + 常量时间比较）已合格，
   - **配置项已存在**：`config/ctld.yaml` 的 `watch_token`（当前注释掉，:3-5 注释明写
     "Set when exposing watch_addr beyond localhost. Server must pass the same value"）；
   - **默认绑回环**：`watch_addr: "127.0.0.1:7788"`（`config/ctld.yaml:2`），
-    server 侧 managed 模式携带 `ctld_token`（`ServerMode::Managed { ctld_token }`，
+  server 侧统一 control-plane 连接携带 `ctld_token`（当前类型为 `ServerMode::ControlPlane { ctld_token }`，
     `duotunnel-server/bootstrap/mod.rs:35,45` 由 `resolved_ctld_token()` 注入）与之对应。
 - **架构说明（值得记录的实际数据流）**：ctld **轮询 SQLite** 感知变更
   （`duotunnel-ctld/src/control/reactor.rs:43` `db_poll_task`），server 作为 watch 客户端

@@ -191,4 +191,90 @@ mod tests {
         applied.resource_version = target.resource_version;
         assert_eq!(applied, target);
     }
+
+    #[test]
+    fn diff_and_apply_covers_resource_add_update_delete() {
+        let base = ConfigSnapshot {
+            resource_version: 1,
+            ingress_listeners: vec![duotunnel_lib::IngressListenerDef {
+                id: 1,
+                port: 8080,
+                mode: duotunnel_lib::IngressListenerModeDef::Tcp {
+                    group_id: "base".into(),
+                    proxy_name: "old".into(),
+                },
+            }],
+            client_groups: vec![duotunnel_lib::ClientGroupDef {
+                group_id: "base".into(),
+                config_version: "1".into(),
+                upstreams: vec![duotunnel_lib::ClientUpstreamDef {
+                    name: "default".into(),
+                    lb_policy: "round_robin".into(),
+                    servers: vec![duotunnel_lib::UpstreamServerDef {
+                        address: "127.0.0.1:8080".into(),
+                        resolve: false,
+                    }],
+                }],
+            }],
+            egress_upstreams: vec![duotunnel_lib::EgressUpstreamDef {
+                name: "retired".into(),
+                lb_policy: "round_robin".into(),
+                servers: vec![],
+            }],
+            egress_vhost_rules: vec![duotunnel_lib::EgressVhostRuleDef {
+                match_host: "old.example".into(),
+                action_upstream: "retired".into(),
+            }],
+            token_cache: vec![duotunnel_lib::TokenCacheEntryDef {
+                hash_hex: "old-token".into(),
+                client_group: "base".into(),
+                client_status: duotunnel_lib::ClientStatus::Active,
+                token_status: duotunnel_lib::TokenStatus::Active,
+            }],
+        };
+        let target = ConfigSnapshot {
+            resource_version: 2,
+            ingress_listeners: vec![duotunnel_lib::IngressListenerDef {
+                id: 2,
+                port: 8081,
+                mode: duotunnel_lib::IngressListenerModeDef::Tcp {
+                    group_id: "base".into(),
+                    proxy_name: "new".into(),
+                },
+            }],
+            client_groups: vec![duotunnel_lib::ClientGroupDef {
+                group_id: "base".into(),
+                config_version: "2".into(),
+                upstreams: vec![duotunnel_lib::ClientUpstreamDef {
+                    name: "default".into(),
+                    lb_policy: "round_robin".into(),
+                    servers: vec![duotunnel_lib::UpstreamServerDef {
+                        address: "127.0.0.1:8081".into(),
+                        resolve: false,
+                    }],
+                }],
+            }],
+            egress_upstreams: vec![duotunnel_lib::EgressUpstreamDef {
+                name: "new-upstream".into(),
+                lb_policy: "round_robin".into(),
+                servers: vec![],
+            }],
+            egress_vhost_rules: vec![duotunnel_lib::EgressVhostRuleDef {
+                match_host: "new.example".into(),
+                action_upstream: "new-upstream".into(),
+            }],
+            token_cache: vec![duotunnel_lib::TokenCacheEntryDef {
+                hash_hex: "new-token".into(),
+                client_group: "base".into(),
+                client_status: duotunnel_lib::ClientStatus::Active,
+                token_status: duotunnel_lib::TokenStatus::Active,
+            }],
+        };
+
+        let operations = diff_snapshots(&base, &target);
+        let mut applied = base;
+        apply_config_operations(&mut applied, &operations).unwrap();
+        applied.resource_version = target.resource_version;
+        assert_eq!(applied, target);
+    }
 }

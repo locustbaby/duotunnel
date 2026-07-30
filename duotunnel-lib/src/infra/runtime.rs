@@ -36,15 +36,50 @@ pub fn cgroup_cpu_limit() -> Option<usize> {
 fn cgroup_cpu_limit_inner() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
-        if let Some(cpus) = read_cgroup_v2_cpu_max() {
-            return Some(cpus);
+        let quota = read_cgroup_v2_cpu_max().or_else(read_cgroup_v1_cpu_quota);
+        let affinity = read_process_cpu_set_limit();
+        match (quota, affinity) {
+            (Some(quota), Some(affinity)) => Some(quota.min(affinity)),
+            (Some(quota), None) => Some(quota),
+            (None, Some(affinity)) => Some(affinity),
+            (None, None) => None,
         }
-        read_cgroup_v1_cpu_quota()
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_cpu_set_limit() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))?;
+    parse_cpu_list_contents(value)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn parse_cpu_list_contents(contents: &str) -> Option<usize> {
+    let mut total = 0usize;
+    for part in contents.trim().split(',') {
+        if part.is_empty() {
+            return None;
+        }
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?),
+            None => {
+                let cpu = part.parse::<usize>().ok()?;
+                (cpu, cpu)
+            }
+        };
+        if start > end {
+            return None;
+        }
+        total = total.checked_add(end - start + 1)?;
+    }
+    (total > 0).then_some(total)
 }
 
 #[cfg(target_os = "linux")]
@@ -173,8 +208,8 @@ pub fn build_single_thread_runtime(name: &str) -> tokio::runtime::Runtime {
 mod tests {
     use super::{
         cpu_count_from_quota_period, effective_runtime_parallelism, parse_cfs_quota_contents,
-        parse_cpu_max_contents, parse_worker_threads, resolve_accept_workers,
-        resolve_connection_count,
+        parse_cpu_list_contents, parse_cpu_max_contents, parse_worker_threads,
+        resolve_accept_workers, resolve_connection_count,
     };
 
     #[test]
@@ -239,6 +274,13 @@ mod tests {
     #[test]
     fn parse_cpu_max_four_cpus() {
         assert_eq!(parse_cpu_max_contents("400000 100000"), Some(4));
+    }
+
+    #[test]
+    fn parse_cpu_list_counts_ranges() {
+        assert_eq!(parse_cpu_list_contents("0-1,4,6-7"), Some(5));
+        assert_eq!(parse_cpu_list_contents(""), None);
+        assert_eq!(parse_cpu_list_contents("3-2"), None);
     }
 
     #[test]

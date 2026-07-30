@@ -64,6 +64,80 @@ pub struct SqliteControlRevisionStore {
 }
 
 impl SqliteControlRevisionStore {
+    pub async fn record_migration_on(
+        conn: &mut sqlx::SqliteConnection,
+        migration: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO schema_migrations(migration)
+             VALUES (?1)",
+        )
+        .bind(migration)
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn ensure_config_state_schema(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS config_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                yaml_source_revision TEXT NOT NULL DEFAULT '',
+                sqlite_source_revision TEXT NOT NULL DEFAULT '',
+                effective_revision INTEGER NOT NULL DEFAULT 0,
+                effective_hash TEXT NOT NULL DEFAULT '',
+                initialized INTEGER NOT NULL DEFAULT 0,
+                degraded INTEGER NOT NULL DEFAULT 0,
+                yaml_degraded INTEGER NOT NULL DEFAULT 0,
+                sqlite_degraded INTEGER NOT NULL DEFAULT 0,
+                coordinator_degraded INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(pool)
+        .await?;
+        let columns = sqlx::query("PRAGMA table_info(config_state)")
+            .fetch_all(pool)
+            .await?;
+        for (name, definition) in [
+            ("singleton", "INTEGER NOT NULL DEFAULT 1"),
+            ("yaml_source_revision", "TEXT NOT NULL DEFAULT ''"),
+            ("sqlite_source_revision", "TEXT NOT NULL DEFAULT ''"),
+            ("effective_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("effective_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("initialized", "INTEGER NOT NULL DEFAULT 0"),
+            ("degraded", "INTEGER NOT NULL DEFAULT 0"),
+            ("yaml_degraded", "INTEGER NOT NULL DEFAULT 0"),
+            ("sqlite_degraded", "INTEGER NOT NULL DEFAULT 0"),
+            ("coordinator_degraded", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let exists = columns.iter().any(|row| {
+                row.try_get::<String, _>("name")
+                    .is_ok_and(|column| column == name)
+            });
+            if !exists {
+                sqlx::query(&format!(
+                    "ALTER TABLE config_state ADD COLUMN {name} {definition}"
+                ))
+                .execute(pool)
+                .await?;
+            }
+        }
+        sqlx::query("INSERT OR IGNORE INTO config_state(singleton) VALUES (1)")
+            .execute(pool)
+            .await?;
+        let mut conn = pool.acquire().await?;
+        Self::record_migration_on(&mut conn, "effective-config-state-v1").await?;
+        Ok(())
+    }
+
     pub async fn initialize(pool: SqlitePool) -> Result<Self> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS control_revision (
@@ -98,22 +172,7 @@ impl SqliteControlRevisionStore {
         )
         .execute(&pool)
         .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS config_state (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                yaml_source_revision TEXT NOT NULL DEFAULT '',
-                sqlite_source_revision TEXT NOT NULL DEFAULT '',
-                effective_revision INTEGER NOT NULL DEFAULT 0,
-                effective_hash TEXT NOT NULL DEFAULT '',
-                initialized INTEGER NOT NULL DEFAULT 0,
-                degraded INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query("INSERT OR IGNORE INTO config_state(singleton) VALUES (1)")
-            .execute(&pool)
-            .await?;
+        Self::ensure_config_state_schema(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -133,19 +192,53 @@ impl SqliteControlRevisionStore {
         conn: &mut sqlx::SqliteConnection,
         content_hash: &str,
     ) -> Result<ControlRevision> {
-        let row = sqlx::query(
-            "UPDATE control_revision
-             SET sequence = CASE
-                     WHEN content_hash IS NULL OR content_hash = ?1 THEN sequence
-                     ELSE sequence + 1
-                 END,
-                 content_hash = ?1
-             WHERE singleton = 1
-             RETURNING epoch, sequence",
-        )
-        .bind(content_hash)
-        .fetch_one(&mut *conn)
-        .await?;
+        Self::commit_snapshot_hash_on_impl(conn, content_hash, None).await
+    }
+
+    pub async fn commit_snapshot_hash_on_for_epoch(
+        conn: &mut sqlx::SqliteConnection,
+        content_hash: &str,
+        expected_epoch: &str,
+    ) -> Result<ControlRevision> {
+        Self::commit_snapshot_hash_on_impl(conn, content_hash, Some(expected_epoch)).await
+    }
+
+    async fn commit_snapshot_hash_on_impl(
+        conn: &mut sqlx::SqliteConnection,
+        content_hash: &str,
+        expected_epoch: Option<&str>,
+    ) -> Result<ControlRevision> {
+        let row = if let Some(expected_epoch) = expected_epoch {
+            sqlx::query(
+                "UPDATE control_revision
+                 SET sequence = CASE
+                         WHEN content_hash IS NULL OR content_hash = ?1 THEN sequence
+                         ELSE sequence + 1
+                     END,
+                     content_hash = ?1
+                 WHERE singleton = 1 AND epoch = ?2
+                 RETURNING epoch, sequence",
+            )
+            .bind(content_hash)
+            .bind(expected_epoch)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or_else(|| anyhow!("control revision epoch changed while committing snapshot"))?
+        } else {
+            sqlx::query(
+                "UPDATE control_revision
+                 SET sequence = CASE
+                         WHEN content_hash IS NULL OR content_hash = ?1 THEN sequence
+                         ELSE sequence + 1
+                     END,
+                     content_hash = ?1
+                 WHERE singleton = 1
+                 RETURNING epoch, sequence",
+            )
+            .bind(content_hash)
+            .fetch_one(&mut *conn)
+            .await?
+        };
         let sequence: i64 = row.try_get("sequence")?;
         sqlx::query(
             "UPDATE config_state SET effective_revision = ?1, effective_hash = ?2
@@ -170,8 +263,10 @@ impl ControlRevisionStore for SqliteControlRevisionStore {
     }
 
     async fn commit_snapshot_hash(&self, content_hash: &str) -> Result<ControlRevision> {
-        let mut conn = self.pool.acquire().await?;
-        Self::commit_snapshot_hash_on(&mut conn, content_hash).await
+        let mut tx = self.pool.begin().await?;
+        let revision = Self::commit_snapshot_hash_on(&mut tx, content_hash).await?;
+        tx.commit().await?;
+        Ok(revision)
     }
 }
 

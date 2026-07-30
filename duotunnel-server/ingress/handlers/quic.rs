@@ -425,6 +425,7 @@ async fn handle_quic_connection(
                             let _ = recv.stop(0u32.into());
                             continue;
                         };
+                        let peek_buf_size = state.proxy_buffer_params().peek_buf_size;
                         debug!("accepted reverse stream from client");
                         let egress_map = generation.routing().egress_map();
                         reverse_tasks.spawn(async move {
@@ -433,7 +434,14 @@ async fn handle_quic_connection(
                             let _tracked = duotunnel_lib::track_resource(
                                 duotunnel_lib::TrackedResource::ReverseStream,
                             );
-                            if let Err(e) = tunnel_handler::handle_tunnel_stream(send, recv, EgressProxy(egress_map)).await {
+                            if let Err(e) = tunnel_handler::handle_tunnel_stream(
+                                send,
+                                recv,
+                                EgressProxy(egress_map),
+                                peek_buf_size,
+                            )
+                            .await
+                            {
                                 debug!(error = %e, "egress stream error");
                             }
                         });

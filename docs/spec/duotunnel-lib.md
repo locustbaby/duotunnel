@@ -27,7 +27,7 @@ duotunnel-lib/src/
   lb/                  (load-balancing and backpressure)
     inflight.rs        (InflightTable, InflightGuard, pick_least_inflight, pick_p2c_inflight)
     overload.rs        (OverloadLimits, maybe_slow_path, BackoffStrategy)
-    shard.rs           (pick_from_preferred_shards, pick_p2c_inflight_owned, stable_shard_index)
+    shard.rs           (shard-local candidate selection and stable_shard_index)
   models/              (domain data types and wire messages)
     defs.rs            (ClientGroupDef, IngressListenerDef, TokenCacheEntryDef, ...)
     id.rs              (GroupId, ProxyName, ClientId newtypes)

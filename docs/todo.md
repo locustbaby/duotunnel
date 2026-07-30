@@ -5,6 +5,64 @@
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
+## 2026-07-30 implementation status
+
+The current control-plane implementation has landed on the review branch:
+
+- YAML/SQLite merge, override/tombstone/clear semantics, schema initialization,
+  transactional effective-state commit, and canonical Snapshot hash are in
+  place.
+- `ConfigSource` now has an associated layer type. YAML remains the default
+  file source, while `SqliteConfigSource` is a read-only polling subscriber;
+  SQLite writes remain confined to ctld admin mutation transactions. Legacy
+  `server_config` is accepted as the YAML base when no explicit YAML source is
+  configured, and old normalized routing tables are preserved as SQLite
+  overrides with repeatable migration markers. The current coordinator supports
+  one YAML source plus one SQLite source; future Etcd-like sources need explicit
+  coordinator registration and merge/error-state policy.
+- The control wire uses one canonical envelope with a numeric wire version;
+  Snapshot/Delta ACK, Resync, target-hash validation, LKG preflight, and server
+  runtime-generation publication are implemented. Legacy business V1/V2
+  branches are not being reintroduced.
+- `duotunnel-ctld` owns the local admin Unix socket. CLI mutations go through
+  ctld and do not edit SQLite directly. The server remains a pure watch
+  consumer and never reads YAML or SQLite.
+- Admin mutations require an idempotency key and commit the key/fingerprint in
+  the same SQLite transaction. Configuration/revoke responses are replayable;
+  create/rotate bearer tokens use a redacted durable marker plus a bounded
+  process-local cache, so restart returns 410 instead of replaying or repeating
+  a token mutation.
+- CI 8K remains a performance-only case. It does not mutate YAML/SQLite or
+  claim to validate Delta consistency; those behaviors belong to control-plane
+  tests.
+- Admin socket framing still needs a focused hardening pass for duplicate or
+  missing `Content-Length`, declared-length/body mismatches, and handler-level
+  status tests. The current bounded `0600` Unix socket and request timeout keep
+  this as follow-up hardening rather than a current correctness blocker.
+
+The remaining performance-related work is deliberately separated by nature:
+
+| Task | Nature | Current decision |
+| --- | --- | --- |
+| TODO-140/T5 | Measurement and latency baseline | CI-side CPU contract/cpuset attempt, effective-config snapshot, absolute timing window, dropped iterations and fail-closed gate landed; real runner permission/repeatability and baseline artifacts remain. |
+| TODO-141/T6 | Real buffer parameter wiring | Implemented for relay, HTTP header/body, and QUIC stream sniff consumers; performance before/after evidence remains separate from this wiring task. |
+| TODO-145/T7 | Profile-guided hot-path optimization | dial9 is observation only; no optimization is accepted without before/after evidence. |
+| TODO-146/T8 | Capacity and cross-shard correctness | Capacity validation, exhaustion/high-water metrics, and rotating cross-shard selection landed; fairness/cross-shard acceptance evidence remains. |
+| TODO-142/T9 | Overload tail-latency control | Partial: UDP session production admission is wired with an owner-held RAII permit; HTTP/raw/reverse/queue domains remain separate and deferred pending lifecycle and threshold evidence. |
+
+Clarification for the 726 performance review: dial9 remains enabled only for the
+existing 8K trace cases. Basic, 3K, and 6K continue to use the release path and
+resource sampling without dial9. The recent CI changes improved CPU-role
+isolation, absolute sampling windows, collector cleanup, and gates; they did
+not expand dial9 coverage. FRPS is assigned the server CPU set and FRPC the
+client CPU set in isolate mode.
+
+The existing proven data-plane optimizations remain the baseline: `BytesMut`
+with `read_buf`, QUIC `read_chunk`, and TCP-specific owned split. Do not start
+io_uring, multi-endpoint, custom runtime, H2 sender-pool, or UDP wire-format
+changes without a dial9/Criterion profile showing that the relevant path is a
+measured bottleneck.
+
 ---
 
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
@@ -53,7 +111,7 @@
 | --- | --- | --- |
 | `max_pending_streams` 使用 load/check 后再 `fetch_add`，并发突发可越过配置上限 | TODO-80 | ✅ 已修复（2026-07-26）。改为 per-connection semaphore；同时纠正"单连接阈值套全局计数"的语义错配。进程级总量兜底转入 TODO-142。 |
 | shutdown drain 只观察 accepted TCP 与 pending `open_bi`，未等待 QUIC connection、活跃 stream/relay、UDP session 或 H2 driver | TODO-CR-AUDIT-21、TODO-96 | ✅ 已修复（2026-07-26），残留缺口见条目内 Residual gaps（无应用层 GOAWAY、反向 stream 无计数）。 |
-| Server `ClientRegistry` 的 inflight slot table 固定为 4096 | TODO-146 | ⏳ 新增容量治理任务：配置/推导或安全增长、usage/exhaustion 指标及边界测试。 |
+| Server `ClientRegistry` 的 inflight slot table 固定为 4096 | TODO-146 | ✅ 已由显式容量、usage/exhaustion/high-water 指标和边界测试覆盖；跨 shard 公平性验收仍待完成。 |
 | 未认证客户端会收到 `AuthError::Internal` 的底层错误文本 | TODO-CR-AUDIT-22 | ✅ 已修复（2026-07-26）。回传泛化文案；重试判定改用 `LoginResp.retryable` 字段，避免泛化后把可恢复故障误判为致命。 |
 | QUIC window 转换存在 `try_into().unwrap()`，连接池容量存在未检查乘法，且相关参数无合理上界 | TODO-CR-AUDIT-5、TODO-CR-AUDIT-6 | ⏳ 具体化现有健壮性任务：checked arithmetic、无 panic 转换、静态上界与内存预算。 |
 
@@ -262,7 +320,10 @@ flowchart TD
 * **Problem**:
   阶段 A-C 已经完成。剩余阶段 D 需要清理并彻底移除 server 配置中遗留的静态 token map。
 * **Fix**:
-  当前 server 运行时鉴权路径已只剩两种：Standalone 模式走 `SqliteAuthStore`，ctld-managed 模式走 `LocalTokenCache` 的只读快照缓存；配置 schema 与 bootstrap 路径中也不再存在 `auth_tokens`/静态 token map 的生产入口。该条目已由现有实现收口，文档此前状态滞后。
+  当前正式部署拓扑统一为常驻 `duotunnel-ctld → duotunnel-server → duotunnel-client`。
+  server 只消费 ctld 下发的只读 `LocalTokenCache` 快照，不再存在 Standalone server
+  或 server 本地 SQLite authority；配置 schema 与 bootstrap 路径中也不再存在
+  `auth_tokens`/静态 token map 的生产入口。该条目已由现有实现收口，文档此前状态滞后。
 
 ### [TODO-80] Active Load-Shedding & Fast-Fail (Shedding / Fast-Fail)
 * **Priority**: High | **Status**: ✅ Residual race closed (2026-07-26, PR #58); tiered budget remains with TODO-142 | **Track**: HA, Overload & Observability
@@ -373,18 +434,20 @@ flowchart TD
   Treat external hotpath guides as practice references, not exact API contracts. Prefer current 0.21.x names (`HOTPATH_OUTPUT_FORMAT`, `HOTPATH_OUTPUT_PATH`, `HOTPATH_REPORT`, `HOTPATH_ALLOC_METRIC`, `HOTPATH_ALLOC_CUMULATIVE`) over older names such as `HOTPATH_OUTPUT` or `HOTPATH_MEMORY_MODE`. Do not add a custom Prometheus reporter unless the current crate API explicitly supports that integration; the first production-grade output path should remain static JSON artifacts plus existing DuoTunnel metrics. CI should compare controlled head/base artifacts and post a report before it becomes a blocking gate.
 
 ### [TODO-141] Propagate relay and HTTP body buffer configuration end-to-end
-* **Priority**: High | **Status**: Ready after TODO-97 | **Track**: Transport & Performance
+* **Priority**: High | **Status**: ✅ Implemented | **Track**: Transport & Performance
 * **Problem**:
-  `ProxyBufferParams` 已提供 relay/body 参数，但 `bridge::relay_with_first_data`、`relay_quic_to_tcp` 和通用 relay 仍直接使用 `DEFAULT_RELAY_BUF_SIZE`，`forward_http` body chunk 也固定为 8 KiB。配置在部分调用链没有实际生效，导致调参和压测结论不可预测。
-* **Implementation plan**:
-  在不改变默认值的前提下，将 relay size 和 HTTP body chunk 显式传过 bridge、client entry/server ingress 与 HTTP egress callsites；保留默认 wrapper 仅供测试/兼容。以 16/32/64/128 KiB 与并发上限组合测试吞吐、P99、CPU/GB 和 RSS，避免把更大的 buffer 作为默认答案。完成 TODO-97 后使用同一安全 buffer 抽象实现 relay 方向。
+  `ProxyBufferParams` 已提供 relay/header/body 参数，但部分 bridge、generic TCP/TLS relay、client entry、server egress 和 H1 reader 仍使用固定值，调参无法覆盖完整数据路径。
+* **Implementation**:
+  已在不改变默认值的前提下增加带参数 relay API，并将其接入 client entry、server ingress/server egress、generic TCP/TLS relay 和 ProxyEngine QUIC stream sniff；`HttpConnector`、`HttpPeer`、`Http1Driver` 和 `forward_http` 现在消费 header/body 参数。旧无参数函数保留为默认 wrapper。focused unit tests 验证非默认 relay capacity、H1 buffer configuration 和 sniff pool 配置的贯通。16/32/64/128 KiB 的吞吐、P99、CPU/GB 和 RSS 对比仍由 T5 性能基线单独执行。
 
 ### [TODO-142] Add global and group-level active-stream admission control
-* **Priority**: High | **Status**: Design and benchmark gated | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: Partial / UDP session integrated, other domains deferred | **Track**: HA, Overload & Observability
 * **Problem**:
   当前 `open_bi` 有每 connection semaphore、pending queue 上限和 slowpath，但没有跨 connection 的 global active-relay 预算或按 client group 的公平预算。慢后端/慢客户端可在多个连接上同时占用 task 与 buffer，直到局部限制才生效。
 * **Implementation plan**:
-  分层区分入口前的全局连接预算、路由后可识别 group 的 active-stream/relay budget、以及既有 per-connection 限制；permit 覆盖 sniff 后的实际 proxy/relay 生命周期，退出时 RAII 归还。H1 拒绝返回 503，其他协议按可观测的关闭/错误策略快速失败，并记录 reject、queue wait、permit-held duration。先以 TODO-140 的慢客户端/慢后端测试选择阈值，避免对所有协议施加同一静态上限。
+  当前已完成可复用 global/group RAII controller、显式 Global/Group rejection scope 和并发 invariant 测试，并将 controller 接入一个边界清晰的资源域：每个 QUIC client connection 的 UDP session。`UdpSessionManager` 的 `SessionEntry` 持有 permit，覆盖创建排队、三秒 session operation timeout、连接/空闲淘汰、失败、QUIC shutdown 和 reply pump 结束；原进程级 UDP semaphore 与 UDP queue semaphore 保持独立。HTTP request、raw relay、reverse stream 和 UDP queue 不共享该计数器。
+
+  其他域只有在明确 owner、路由/认证 group identity、拒绝语义、取消/超时释放和完整测试后接入：HTTP permit 必须覆盖 response body 完成，raw relay 必须覆盖双向 relay task，reverse stream 必须覆盖 drain/cancel，queue budget 必须覆盖 queued envelope 的消费或丢弃。H1 可返回 503，其他协议需定义可观测的关闭/错误策略，并记录 reject、queue wait、permit-held duration。阈值仍以 TODO-140 慢客户端/慢后端基线为依据，不能把 `max_pending_streams` 当 active relay 上限，也不能把本次 UDP session 接入误标为全协议完成。
 
 ### [TODO-143] Evaluate adaptive small H2 sender pools per route
 * **Priority**: Medium | **Status**: Research / H2-gated | **Track**: Core Proxy & Protocol
@@ -567,11 +630,11 @@ flowchart TD
   将 slot free-list 的所有权移到各 Actor 的私有状态，或抽成只暴露给 actor 的 allocator；不要仅删除 `Mutex` 后继续让通用 `InflightTable` 暴露可并发的 alloc/free API。若 TODO-106 获批，每 shard actor 还必须拥有独立 slot allocator/table，避免把当前全局锁竞争扩散到多个 actor。
 
 ### [TODO-146] Make Server ClientRegistry slot capacity explicit and observable
-* **Priority**: High | **Status**: Ready for design and implementation | **Track**: Code Quality, Safety, and Registry
+* **Priority**: High | **Status**: Partially implemented; cross-shard acceptance pending | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
   `ClientRegistry::new` currently creates `new_inflight_table(4096)` regardless of configured QUIC stream limits, runtime parallelism, expected client connection count, shard count, or deployment size. Every registered client connection consumes one slot; after 4096 live registrations, authentication succeeds but registration fails with `inflight slot table exhausted`. The limit is absent from configuration, startup telemetry, capacity documentation and `/metrics`.
 * **Implementation plan**:
-  Choose one explicit model: a validated `max_client_connections` capacity, a capacity derived from a documented connection budget, or a safely segmented/growing slot table whose existing slot references remain stable. Expose capacity, allocated slots, high-water mark and exhaustion count; log the resolved value at startup. Add boundary tests for exactly-at-capacity, one-over-capacity, unregister/reuse, duplicate registration, purge, actor shutdown and inflight guards that outlive connection removal. Coordinate allocator ownership changes with TODO-111, but do not make correctness depend on the benchmark-gated EntryConnPool actor sharding in TODO-106.
+  Choose one explicit model: a validated `max_client_connections` capacity, a capacity derived from a documented connection budget, or a safely segmented/growing slot table whose existing slot references remain stable. The current implementation uses a validated explicit capacity and exposes capacity, active, available, high-water mark and exhaustion count at startup/metrics. Boundary tests cover exactly-at-capacity, one-over-capacity and unregister/reuse; cross-shard fairness and broader actor lifecycle acceptance remain pending. Coordinate allocator ownership changes with TODO-111, but do not make correctness depend on the benchmark-gated EntryConnPool actor sharding in TODO-106.
 
 ### [TODO-134] Fix spurious notify_one in open_bi_guarded fast-path error branch
 * **Priority**: Low | **Status**: ❌ Discarded after code review | **Track**: Transport & Performance

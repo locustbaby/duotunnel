@@ -7,7 +7,7 @@ use duotunnel_lib::proxy::peers::{
     BasicPeerSpec, HttpPeerSpec, MitmPeerSpec, PeerSpec, TlsPeerSpec,
 };
 use duotunnel_lib::proxy::tcp::UpstreamScheme;
-use duotunnel_lib::{ClientConfig, HttpClientParams, ProxyError};
+use duotunnel_lib::{ClientConfig, HttpClientParams, ProxyBufferParams, ProxyError};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,11 +26,28 @@ pub struct LocalProxyMap<L, R> {
 }
 
 impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
+    #[allow(dead_code)]
     pub fn from_config(
         config: &ClientConfig,
         http_params: &HttpClientParams,
         lb: Arc<L>,
         resolver: Arc<R>,
+    ) -> Result<Self> {
+        Self::from_config_with_buffer_params(
+            config,
+            http_params,
+            lb,
+            resolver,
+            &ProxyBufferParams::default(),
+        )
+    }
+
+    pub fn from_config_with_buffer_params(
+        config: &ClientConfig,
+        http_params: &HttpClientParams,
+        lb: Arc<L>,
+        resolver: Arc<R>,
+        buffer_params: &ProxyBufferParams,
     ) -> Result<Self> {
         let mut upstreams = HashMap::new();
         for upstream in &config.upstreams {
@@ -59,7 +76,11 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         let https_client = duotunnel_lib::create_https_client_with(http_params)?;
         let h2c_client = duotunnel_lib::create_h2c_client_with(http_params);
         let http_connector =
-            duotunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
+            duotunnel_lib::proxy::http_connector::HttpConnector::new_with_buffer_params(
+                https_client,
+                h2c_client,
+                buffer_params.clone(),
+            );
         Ok(Self {
             upstreams,
             resolver,
@@ -94,11 +115,25 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
 pub struct IngressClientApp<L, R> {
     map: Arc<LocalProxyMap<L, R>>,
     tcp_params: duotunnel_lib::TcpParams,
+    buffer_params: ProxyBufferParams,
 }
 
 impl<L, R> IngressClientApp<L, R> {
+    #[allow(dead_code)]
     pub fn new(map: Arc<LocalProxyMap<L, R>>, tcp_params: duotunnel_lib::TcpParams) -> Self {
-        Self { map, tcp_params }
+        Self::new_with_buffer_params(map, tcp_params, ProxyBufferParams::default())
+    }
+
+    pub fn new_with_buffer_params(
+        map: Arc<LocalProxyMap<L, R>>,
+        tcp_params: duotunnel_lib::TcpParams,
+        buffer_params: ProxyBufferParams,
+    ) -> Self {
+        Self {
+            map,
+            tcp_params,
+            buffer_params,
+        }
     }
 }
 
@@ -217,7 +252,12 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
             PeerSpec::Tcp(spec) => spec
                 .into_tcp_peer(self.tcp_params.clone())
                 .map_err(|e| ProxyError::upstream_connect(e.to_string()))?
-                .connect_inner(send, recv, initial_data)
+                .connect_inner_with_buffer_size(
+                    send,
+                    recv,
+                    initial_data,
+                    self.buffer_params.relay_buf_size,
+                )
                 .await
                 .map_err(|e| ProxyError::upstream_forward(e.to_string())),
             PeerSpec::Http(spec) => self

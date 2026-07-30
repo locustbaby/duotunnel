@@ -3,6 +3,9 @@ use crate::protocol::http_utils::{
     content_length_from_headers, is_forwardable_trailer, parse_content_length,
     sanitize_request_headers, sanitize_response_headers,
 };
+use crate::proxy::buffer_params::{
+    normalize_http_body_chunk_size, normalize_http_header_buf_size, ProxyBufferParams,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -25,6 +28,25 @@ pub struct Http1Driver {
     pub should_close: bool,
     last_method: Option<Method>,
     last_http_minor: u8,
+    header_buf_size: usize,
+    body_chunk_size: usize,
+}
+
+const DEFAULT_HTTP_HEADER_BUF_SIZE: usize = 8192;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferSizes {
+    header: usize,
+    body_chunk: usize,
+}
+
+impl BufferSizes {
+    fn new(header: usize, body_chunk: usize) -> Self {
+        Self {
+            header: normalize_http_header_buf_size(header),
+            body_chunk: normalize_http_body_chunk_size(body_chunk),
+        }
+    }
 }
 impl Http1Driver {
     pub fn new(
@@ -34,7 +56,47 @@ impl Http1Driver {
         authority: http::uri::Authority,
         initial_bytes: Option<Bytes>,
     ) -> Self {
-        let mut read_buf = BytesMut::with_capacity(8192);
+        Self::new_with_buffer_sizes(
+            send,
+            recv,
+            scheme,
+            authority,
+            initial_bytes,
+            DEFAULT_HTTP_HEADER_BUF_SIZE,
+            DEFAULT_HTTP_HEADER_BUF_SIZE,
+        )
+    }
+
+    pub fn new_with_buffer_params(
+        send: SendStream,
+        recv: RecvStream,
+        scheme: http::uri::Scheme,
+        authority: http::uri::Authority,
+        initial_bytes: Option<Bytes>,
+        params: &ProxyBufferParams,
+    ) -> Self {
+        Self::new_with_buffer_sizes(
+            send,
+            recv,
+            scheme,
+            authority,
+            initial_bytes,
+            params.http_header_buf_size,
+            params.http_body_chunk_size,
+        )
+    }
+
+    pub fn new_with_buffer_sizes(
+        send: SendStream,
+        recv: RecvStream,
+        scheme: http::uri::Scheme,
+        authority: http::uri::Authority,
+        initial_bytes: Option<Bytes>,
+        header_buf_size: usize,
+        body_chunk_size: usize,
+    ) -> Self {
+        let buffer_sizes = BufferSizes::new(header_buf_size, body_chunk_size);
+        let mut read_buf = BytesMut::with_capacity(buffer_sizes.header);
         if let Some(data) = initial_bytes {
             read_buf.extend_from_slice(&data);
         }
@@ -48,6 +110,8 @@ impl Http1Driver {
             should_close: false,
             last_method: None,
             last_http_minor: 1,
+            header_buf_size: buffer_sizes.header,
+            body_chunk_size: buffer_sizes.body_chunk,
         }
     }
     pub async fn finish(&mut self) -> Result<()> {
@@ -259,11 +323,11 @@ impl ProtocolDriver for Http1Driver {
                     });
                 }
                 Ok(httparse::Status::Partial) => {
-                    if self.read_buf.len() >= 8192 {
+                    if self.read_buf.len() >= self.header_buf_size {
                         break Err((RESP_431, "request header fields too large".to_string()));
                     }
                     let old_len = self.read_buf.len();
-                    let spare = 8192 - old_len;
+                    let spare = (self.header_buf_size - old_len).min(self.header_buf_size);
                     match read_into_bytes_mut(&mut recv, &mut self.read_buf, spare).await? {
                         Some(_) => {}
                         None => {
@@ -330,6 +394,7 @@ impl ProtocolDriver for Http1Driver {
         let body_prefix_len = available.min(content_length);
         let body_prefix = self.read_buf.split_to(body_prefix_len).freeze();
         let body_remaining = content_length.saturating_sub(body_prefix_len);
+        let body_chunk_size = self.body_chunk_size;
         let body = if content_length == 0 {
             self.recv = Some(recv);
             http_body_util::Empty::new().map_err(|e| match e {}).boxed()
@@ -355,7 +420,7 @@ impl ProtocolDriver for Http1Driver {
                     remaining: body_remaining,
                     reclaim_tx: Some(reclaim_tx),
                 },
-                |mut state| async move {
+                move |mut state| async move {
                     if let Some(prefix) = state.body_prefix.take() {
                         if !prefix.is_empty() {
                             return Ok(Some((hyper::body::Frame::data(prefix), state)));
@@ -375,7 +440,7 @@ impl ProtocolDriver for Http1Driver {
                         Some(r) => r,
                         None => return Ok(None),
                     };
-                    let to_read = state.remaining.min(8192);
+                    let to_read = state.remaining.min(body_chunk_size);
                     match recv.read_chunk(to_read, true).await {
                         Ok(Some(chunk)) => {
                             let n = chunk.bytes.len();
@@ -623,6 +688,25 @@ struct BodyState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::buffer_params::{MIN_HTTP_BODY_CHUNK_SIZE, MIN_HTTP_HEADER_BUF_SIZE};
+
+    #[test]
+    fn non_default_http_buffer_sizes_reach_driver_configuration() {
+        assert_eq!(
+            BufferSizes::new(24 * 1024, 3 * 1024),
+            BufferSizes {
+                header: 24 * 1024,
+                body_chunk: 3 * 1024,
+            }
+        );
+        assert_eq!(
+            BufferSizes::new(0, 0),
+            BufferSizes {
+                header: MIN_HTTP_HEADER_BUF_SIZE,
+                body_chunk: MIN_HTTP_BODY_CHUNK_SIZE,
+            }
+        );
+    }
 
     fn decide(headers: &[(&str, &[u8])]) -> FramingDecision {
         let parsed: Vec<httparse::Header<'_>> = headers

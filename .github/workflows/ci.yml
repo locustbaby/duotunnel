@@ -79,7 +79,7 @@ on:
         default: true
       # ── Runtime tuning (bench + integration on manual runs; see BENCHMARK_SPEC.md) ─
       worker_threads:
-        description: 'Parallelism anchor for server AND client. 0 = auto (min of host CPUs and cgroup CPUQuota). N>0 sets TOKIO_WORKER_THREADS request, still capped by quota. Derives accept_workers, shards, connections (yaml 0). Push to main uses 0. See stress_cpu_quota.'
+        description: 'Parallelism anchor for server AND client. 0 = auto (runtime quota and process CPU affinity). N>0 sets TOKIO_WORKER_THREADS request, still capped by runtime limits. Derives accept_workers, shards, connections (yaml 0). Push to main uses 0. See stress_cpu_quota.'
         type: number
         default: 0
       stress_core_target_rate:
@@ -87,9 +87,14 @@ on:
         type: number
         default: 0
       stress_cpu_quota:
-        description: 'systemd CPUQuota per scope (server, client, frp). 100% = 1 CPU (CI default → derived threads/connections/shards = 1). 400% ≈ 4 CPUs. none | unlimited | 0 = no cap (use host CPU count).'
+        description: 'CPU contract for benchmark scopes. isolate shares the service CPU set between server/client and reserves three load CPUs; observe preserves this systemd CPUQuota for quota experiments. 100% ≈ 1 CPU, 400% ≈ 4 CPUs in observe mode. none | unlimited | 0 = no quota cap.'
         type: string
         default: '100%'
+      stress_cpu_mode:
+        description: 'CPU placement mode for benchmark services. isolate shares service CPUs between server/client and reserves three load CPUs; observe keeps services on the runner and applies CPUQuota.'
+        type: choice
+        options: [isolate, observe]
+        default: isolate
       # ── Observability ─────────────────────────────────────────────────────────
       collect_resource_metrics:
         description: 'Run bench-tool.py collect during k6 (CPU, memory, net, TCP, ctx switches). Disabling skips resource panels on the dashboard for this run.'
@@ -115,8 +120,10 @@ env:
   # varying CPU micro-architectures so we must build portable binaries.
   CARGO_ENCODED_RUSTFLAGS: "-Copt-level=3"
   STRESS_CPU_QUOTA: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
+  DUOTUNNEL_BENCH_CPU_MODE: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_mode || 'isolate' }}"
   K6_CORE_STRESS_RATE: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_core_target_rate > 0 && inputs.stress_core_target_rate || '' }}"
   DUOTUNNEL_COLLECT_RESOURCE_METRICS: "${{ (github.event_name != 'workflow_dispatch' || inputs.collect_resource_metrics != false) && '1' || '0' }}"
+  DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS: "3000"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -283,6 +290,8 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
+          cpu_mode: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_mode || 'isolate' }}"
+          cpu_quota: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
 
       # ═══════════════════════════════════════════════════════════════════════════
       #  SECTION 1 — External backends (continue-on-error: real internet services)
@@ -627,27 +636,47 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
+          cpu_mode: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_mode || 'isolate' }}"
+          cpu_quota: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
 
       - name: Bench — basic
         run: |
+          bash ci-helpers/benchmark-env.sh configure basic /tmp/ci-server.log /tmp/ci-client.log
+          COLLECT_PID=""
+          cleanup_collector() {
+            if [ -n "${COLLECT_PID:-}" ]; then
+              kill -9 "$COLLECT_PID" 2>/dev/null || true
+              wait "$COLLECT_PID" 2>/dev/null || true
+              COLLECT_PID=""
+            fi
+          }
+          trap cleanup_collector EXIT
           COLLECT=1
           if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
             COLLECT=0
           fi
           if [ "$COLLECT" = "1" ]; then
             python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-basic.jsonl 2>/dev/null &
-            echo $! > /tmp/collect-basic.pid
-            date +%s > /tmp/basic_sampling_start
+            COLLECT_PID=$!
+            echo "$COLLECT_PID" > /tmp/collect-basic.pid
+            bash ci-helpers/benchmark-env.sh pin-pid basic "$COLLECT_PID"
           fi
-          date +%s > /tmp/basic_k6_start
-          cd ci-helpers/k6
-          k6 run -e BENCH_PROFILE=basic -e BENCH_RESULT_PATH=/tmp/bench-results-basic.json bench.js
-          cd "${{ github.workspace }}"
+          K6_START_MS=$(date +%s%3N)
+          set +e
+          bash ci-helpers/benchmark-env.sh run-load basic k6 run \
+            -e BENCH_PROFILE=basic -e BENCH_RESULT_PATH=/tmp/bench-results-basic.json \
+            ci-helpers/k6/bench.js
+          K6_STATUS=$?
+          set -e
+          K6_END_MS=$(date +%s%3N)
+          python3 ci-helpers/bench-tool.py attach \
+            --result /tmp/bench-results-basic.json \
+            --metadata /tmp/benchmark-snapshot-basic.json \
+            --case-name all
           if [ "$COLLECT" = "1" ]; then
-            kill -9 "$(cat /tmp/collect-basic.pid 2>/dev/null)" 2>/dev/null || true
-            S=$(cat /tmp/basic_sampling_start); K=$(cat /tmp/basic_k6_start)
+            cleanup_collector
             python3 ci-helpers/bench-tool.py parse \
-              --input /tmp/collect-basic.jsonl --k6-offset $(( K - S )) \
+              --input /tmp/collect-basic.jsonl --k6-start-ms "$K6_START_MS" --k6-end-ms "$K6_END_MS" \
               --output /tmp/resource-basic.json || true
             if [ -s /tmp/resource-basic.json ] && [ -s /tmp/bench-results-basic.json ]; then
               python3 ci-helpers/bench-tool.py inject \
@@ -655,27 +684,46 @@ jobs:
                 --resources /tmp/resource-basic.json --case-name basic
             fi
           fi
+          exit "$K6_STATUS"
 
       - name: Bench — body_size
         run: |
+          bash ci-helpers/benchmark-env.sh configure body_size /tmp/ci-server.log /tmp/ci-client.log
+          COLLECT_PID=""
+          cleanup_collector() {
+            if [ -n "${COLLECT_PID:-}" ]; then
+              kill -9 "$COLLECT_PID" 2>/dev/null || true
+              wait "$COLLECT_PID" 2>/dev/null || true
+              COLLECT_PID=""
+            fi
+          }
+          trap cleanup_collector EXIT
           COLLECT=1
           if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS}" = "false" ]; then
             COLLECT=0
           fi
           if [ "$COLLECT" = "1" ]; then
             python3 ci-helpers/bench-tool.py collect 1 > /tmp/collect-body.jsonl 2>/dev/null &
-            echo $! > /tmp/collect-body.pid
-            date +%s > /tmp/body_sampling_start
+            COLLECT_PID=$!
+            echo "$COLLECT_PID" > /tmp/collect-body.pid
+            bash ci-helpers/benchmark-env.sh pin-pid body_size "$COLLECT_PID"
           fi
-          date +%s > /tmp/body_k6_start
-          cd ci-helpers/k6
-          k6 run -e BENCH_PROFILE=body_size -e BENCH_RESULT_PATH=/tmp/bench-results-body.json bench.js
-          cd "${{ github.workspace }}"
+          K6_START_MS=$(date +%s%3N)
+          set +e
+          bash ci-helpers/benchmark-env.sh run-load body_size k6 run \
+            -e BENCH_PROFILE=body_size -e BENCH_RESULT_PATH=/tmp/bench-results-body.json \
+            ci-helpers/k6/bench.js
+          K6_STATUS=$?
+          set -e
+          K6_END_MS=$(date +%s%3N)
+          python3 ci-helpers/bench-tool.py attach \
+            --result /tmp/bench-results-body.json \
+            --metadata /tmp/benchmark-snapshot-body_size.json \
+            --case-name all
           if [ "$COLLECT" = "1" ]; then
-            kill -9 "$(cat /tmp/collect-body.pid 2>/dev/null)" 2>/dev/null || true
-            S=$(cat /tmp/body_sampling_start); K=$(cat /tmp/body_k6_start)
+            cleanup_collector
             python3 ci-helpers/bench-tool.py parse \
-              --input /tmp/collect-body.jsonl --k6-offset $(( K - S )) \
+              --input /tmp/collect-body.jsonl --k6-start-ms "$K6_START_MS" --k6-end-ms "$K6_END_MS" \
               --output /tmp/resource-body.json || true
             if [ -s /tmp/resource-body.json ] && [ -s /tmp/bench-results-body.json ]; then
               python3 ci-helpers/bench-tool.py inject \
@@ -683,6 +731,7 @@ jobs:
                 --resources /tmp/resource-body.json --case-name body_size
             fi
           fi
+          exit "$K6_STATUS"
 
       - name: Merge basic + body results
         run: |
@@ -692,6 +741,21 @@ jobs:
             /tmp/bench-results-body.json || \
           cp /tmp/bench-results-basic.json /tmp/bench-results-basic-merged.json
 
+      - name: Gate benchmark result
+        run: |
+          GATE_ARGS=(
+            --result /tmp/bench-results-basic-merged.json
+            --output /tmp/benchmark-gate-basic.json
+          )
+          if [ "${DUOTUNNEL_BENCHMARK_REQUIRE_COMPARABLE:-1}" = "1" ]; then
+            GATE_ARGS+=(--require-comparable)
+          fi
+          MAX_DROPPED_ITERATIONS="${DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS:-3000}"
+          if [ "$MAX_DROPPED_ITERATIONS" != "-1" ]; then
+            GATE_ARGS+=(--max-dropped-iterations "$MAX_DROPPED_ITERATIONS")
+          fi
+          python3 ci-helpers/bench-tool.py gate "${GATE_ARGS[@]}"
+
       - name: Upload benchmark outputs (basic)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -699,7 +763,9 @@ jobs:
           name: bench-basic-results-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
-          path: /tmp/bench-results-basic-merged.json
+          path: |
+            /tmp/bench-results-basic-merged.json
+            /tmp/benchmark-gate-basic.json
 
       - name: Dump error logs
         if: always()
@@ -729,6 +795,8 @@ jobs:
     if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
       contents: read
+    env:
+      DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS: "-1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -757,6 +825,8 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
+          cpu_mode: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_mode || 'isolate' }}"
+          cpu_quota: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
 
       - name: Bench — ingress_3000qps
         run: bash ci-helpers/run-bench-case.sh ingress_3000qps "${{ github.sha }}"
@@ -824,6 +894,8 @@ jobs:
   bench-6k:
     name: Bench — 6K stress
     runs-on: ubuntu-latest
+    env:
+      DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS: "-1"
     needs: [build]
     if: always() && needs.build.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
@@ -856,6 +928,8 @@ jobs:
         uses: ./.github/actions/start-infra
         with:
           worker_threads: "${{ github.event_name == 'workflow_dispatch' && inputs.worker_threads || '0' }}"
+          cpu_mode: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_mode || 'isolate' }}"
+          cpu_quota: "${{ github.event_name == 'workflow_dispatch' && inputs.stress_cpu_quota || '100%' }}"
 
       - name: Bench — ingress_6000qps
         run: bash ci-helpers/run-bench-case.sh ingress_6000qps "${{ github.sha }}"
@@ -918,6 +992,8 @@ jobs:
   bench-8k:
     name: Bench — 8K stress + dial9 trace
     runs-on: ubuntu-latest
+    env:
+      DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS: "-1"
     needs: [build, build-dial9]
     if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-dial9.result == 'success' || needs.build-dial9.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && inputs.run_stress != false) || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     permissions:
@@ -1045,7 +1121,7 @@ jobs:
         with:
           name: dial9-trace-8k-ingress_8000qps-server-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-ingress_8000qps/server-trace.bin.gz
 
       - name: Upload dial9 trace (8k ingress client)
@@ -1055,7 +1131,7 @@ jobs:
         with:
           name: dial9-trace-8k-ingress_8000qps-client-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-ingress_8000qps/client-trace.bin.gz
 
       - name: Upload dial9 trace (8k egress server)
@@ -1065,7 +1141,7 @@ jobs:
         with:
           name: dial9-trace-8k-egress_8000qps-server-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-egress_8000qps/server-trace.bin.gz
 
       - name: Upload dial9 trace (8k egress client)
@@ -1075,7 +1151,7 @@ jobs:
         with:
           name: dial9-trace-8k-egress_8000qps-client-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-egress_8000qps/client-trace.bin.gz
 
       - name: Upload dial9 trace (8k ingress multihost server)
@@ -1085,7 +1161,7 @@ jobs:
         with:
           name: dial9-trace-8k-ingress_multihost_8000qps-server-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-ingress_multihost_8000qps/server-trace.bin.gz
 
       - name: Upload dial9 trace (8k ingress multihost client)
@@ -1095,7 +1171,7 @@ jobs:
         with:
           name: dial9-trace-8k-ingress_multihost_8000qps-client-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-ingress_multihost_8000qps/client-trace.bin.gz
 
       - name: Upload dial9 trace (8k egress multihost server)
@@ -1105,7 +1181,7 @@ jobs:
         with:
           name: dial9-trace-8k-egress_multihost_8000qps-server-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-egress_multihost_8000qps/server-trace.bin.gz
 
       - name: Upload dial9 trace (8k egress multihost client)
@@ -1115,7 +1191,7 @@ jobs:
         with:
           name: dial9-trace-8k-egress_multihost_8000qps-client-${{ github.run_id }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: /tmp/trace-egress_multihost_8000qps/client-trace.bin.gz
 
       - name: Upload logs
@@ -1131,6 +1207,12 @@ jobs:
             /tmp/trace-egress_multihost_8000qps/
             /tmp/ci-server.log
             /tmp/ci-client.log
+            /tmp/ci-server-*.log
+            /tmp/ci-client-*.log
+            /tmp/ci-ctld.log
+            /tmp/http-echo.log
+            /tmp/ws-echo.log
+            /tmp/grpc-echo.log
             /tmp/frps.log
             /tmp/frpc.log
 

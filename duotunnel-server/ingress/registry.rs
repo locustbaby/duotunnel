@@ -1,9 +1,8 @@
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use duotunnel_lib::{
-    inflight_load, new_inflight_table, pick_from_preferred_shards, pick_p2c_inflight_owned,
-    stable_shard_index, ClientId, ConnectionHandle, ErrorKind, GroupId, NegotiatedProtocol,
-    ProxyError,
+    inflight_load, new_inflight_table, pick_p2c_inflight_owned, stable_shard_index, ClientId,
+    ConnectionHandle, ErrorKind, GroupId, InflightTable, NegotiatedProtocol, ProxyError,
 };
 use quinn::Connection;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +12,71 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
 const MAX_PENDING_UNREGISTERS: usize = 65_536;
+const DEFAULT_CONNECTION_REGISTRY_CAPACITY: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RegistryCapacitySnapshot {
+    pub(crate) capacity: usize,
+    pub(crate) active: usize,
+    pub(crate) available: usize,
+    pub(crate) exhausted: bool,
+}
+
+impl RegistryCapacitySnapshot {
+    fn from_table(table: &InflightTable) -> Self {
+        let capacity = table.capacity();
+        let active = table.registered_connections();
+        Self {
+            capacity,
+            active,
+            available: capacity.saturating_sub(active),
+            exhausted: active >= capacity,
+        }
+    }
+}
+
+fn selection_start(shard_count: usize, preferred_shard: usize, cursor: usize) -> usize {
+    preferred_shard
+        .wrapping_add(cursor)
+        .wrapping_rem(shard_count.max(1))
+}
+
+fn select_across_shards<S, T, P, I>(
+    shards: &[S],
+    preferred_shard: usize,
+    cursor: usize,
+    mut pick: P,
+    inflight: I,
+) -> Option<T>
+where
+    T: Clone,
+    P: FnMut(&S) -> Option<T>,
+    I: Fn(&T) -> usize,
+{
+    if shards.is_empty() {
+        return None;
+    }
+    let start = selection_start(shards.len(), preferred_shard, cursor);
+    let mut selected = None;
+    for offset in 0..shards.len() {
+        let shard = &shards[(start + offset) % shards.len()];
+        let Some(candidate) = pick(shard) else {
+            continue;
+        };
+        if selected
+            .as_ref()
+            .is_none_or(|current| inflight(&candidate) < inflight(current))
+        {
+            selected = Some(candidate);
+        }
+    }
+    selected
+}
+
+fn observe_registry_capacity(table: &Arc<InflightTable>) {
+    let snapshot = RegistryCapacitySnapshot::from_table(table);
+    crate::runtime::metrics::registry_capacity_observe(snapshot.active, snapshot.capacity);
+}
 
 struct ClientInfo {
     group_id: GroupId,
@@ -51,6 +115,7 @@ pub struct SelectedConnection {
 
 pub struct ClientGroup {
     shards: Vec<ArcSwap<Vec<Arc<SelectedConnection>>>>,
+    selection_cursor: AtomicUsize,
 }
 
 impl ClientGroup {
@@ -59,6 +124,7 @@ impl ClientGroup {
             shards: (0..shard_count)
                 .map(|_| ArcSwap::from_pointee(Vec::new()))
                 .collect(),
+            selection_cursor: AtomicUsize::new(0),
         }
     }
 
@@ -69,16 +135,29 @@ impl ClientGroup {
     }
 
     pub fn select_healthy(&self, preferred_shard: usize) -> Option<Arc<SelectedConnection>> {
-        pick_from_preferred_shards(self.shards.as_slice(), preferred_shard, |shard| {
-            let snapshot = shard.load();
-            pick_p2c_inflight_owned(
-                snapshot.as_slice(),
-                |c| {
-                    c.handle.connection_state().is_selectable() && c.handle.close_reason().is_none()
-                },
-                |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
-            )
-        })
+        if self.shards.is_empty() {
+            return None;
+        }
+        let cursor = self.selection_cursor.fetch_add(1, Ordering::Relaxed);
+        select_across_shards(
+            &self.shards,
+            preferred_shard,
+            cursor,
+            |shard| {
+                let snapshot = shard.load();
+                pick_p2c_inflight_owned(
+                    snapshot.as_slice(),
+                    |c| {
+                        c.handle.connection_state().is_selectable()
+                            && c.handle.close_reason().is_none()
+                    },
+                    |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
+                )
+            },
+            |candidate: &Arc<SelectedConnection>| {
+                inflight_load(candidate.handle.connection_state(), Ordering::Relaxed)
+            },
+        )
     }
 }
 
@@ -113,6 +192,7 @@ pub struct ClientRegistry {
     tx: mpsc::Sender<RegistryMsg>,
     pending_unregisters: Arc<parking_lot::Mutex<HashSet<ClientId>>>,
     pending_notify: Arc<tokio::sync::Notify>,
+    inflight_table: Arc<InflightTable>,
 }
 
 impl ClientRegistry {
@@ -120,11 +200,14 @@ impl ClientRegistry {
         shard_count: usize,
         max_concurrent_streams: u32,
         max_pending_streams: usize,
+        connection_registry_capacity: usize,
     ) -> Self {
         let shard_count = shard_count.max(1);
         let groups = Arc::new(DashMap::<GroupId, Arc<ClientGroup>>::new());
         let client_to_group = Arc::new(DashMap::<ClientId, (GroupId, usize)>::new());
-        let inflight_table = new_inflight_table(4096);
+        let inflight_table = new_inflight_table(connection_registry_capacity);
+        observe_registry_capacity(&inflight_table);
+        let inflight_table_for_actor = inflight_table.clone();
         let (tx, mut rx) = mpsc::channel(1024);
         let groups_clone = groups.clone();
         let client_to_group_clone = client_to_group.clone();
@@ -172,6 +255,7 @@ impl ClientRegistry {
                         shard_count,
                     );
                 }
+                observe_registry_capacity(&inflight_table_for_actor);
 
                 tokio::select! {
                     _ = pending_notify_clone2.notified() => {}
@@ -204,7 +288,9 @@ impl ClientRegistry {
                                 .and_then(|shards| shards[info.shard_id].get(&client_id))
                                 .map(|rc| rc.handle.clone())
                         });
-                        let Some(connection_state) = inflight_table.allocate() else {
+                        let Some(connection_state) = inflight_table_for_actor.allocate() else {
+                            crate::runtime::metrics::registry_capacity_exhausted();
+                            observe_registry_capacity(&inflight_table_for_actor);
                             let _ = reply.send(Err("connection state capacity exhausted"));
                             continue;
                         };
@@ -278,6 +364,7 @@ impl ClientRegistry {
                             existing_handle.retire();
                         }
 
+                        observe_registry_capacity(&inflight_table_for_actor);
                         let _ = reply.send(Ok(()));
                     }
                     RegistryMsg::Unregister { client_id } => {
@@ -289,6 +376,7 @@ impl ClientRegistry {
                             &groups_clone,
                             shard_count,
                         );
+                        observe_registry_capacity(&inflight_table_for_actor);
                     }
                     RegistryMsg::PurgeDead { reply } => {
                         let mut dead_count = 0;
@@ -337,6 +425,7 @@ impl ClientRegistry {
                             groups_clone.remove_if(&gid, |_, group| group.is_empty());
                         }
 
+                        observe_registry_capacity(&inflight_table_for_actor);
                         let _ = reply.send(dead_count);
                     }
                     RegistryMsg::RevokeTokens {
@@ -356,6 +445,7 @@ impl ClientRegistry {
                                 }
                             }
                         }
+                        observe_registry_capacity(&inflight_table_for_actor);
                         let _ = reply.send(revoked);
                     }
                 }
@@ -365,6 +455,7 @@ impl ClientRegistry {
         });
         let monitor_groups = groups.clone();
         let monitor_alive = actor_alive.clone();
+        let monitor_inflight_table = inflight_table.clone();
         tokio::spawn(async move {
             if let Err(join_error) = actor.await {
                 error!(error = %join_error, "registry actor failed");
@@ -373,6 +464,7 @@ impl ClientRegistry {
             }
             monitor_alive.store(false, Ordering::Release);
             fail_closed_registry(&monitor_groups);
+            observe_registry_capacity(&monitor_inflight_table);
         });
 
         Self {
@@ -384,11 +476,16 @@ impl ClientRegistry {
             tx,
             pending_unregisters,
             pending_notify,
+            inflight_table,
         }
     }
 
     pub fn preferred_shard_for_group(&self, group_id: &str) -> usize {
         stable_shard_index(group_id, self.shard_count)
+    }
+
+    pub(crate) fn capacity_snapshot(&self) -> RegistryCapacitySnapshot {
+        RegistryCapacitySnapshot::from_table(&self.inflight_table)
     }
 
     pub async fn register(
@@ -527,6 +624,7 @@ impl ClientRegistry {
         fail_closed_registry(&self.groups);
         self.client_to_group.clear();
         self.pending_unregisters.lock().clear();
+        observe_registry_capacity(&self.inflight_table);
     }
 
     fn retire_visible_client(&self, client_id: &ClientId) {
@@ -542,12 +640,13 @@ impl ClientRegistry {
                 }
             }
         }
+        observe_registry_capacity(&self.inflight_table);
     }
 }
 
 impl Default for ClientRegistry {
     fn default() -> Self {
-        Self::new(1, 1000, 250)
+        Self::new(1, 1000, 250, DEFAULT_CONNECTION_REGISTRY_CAPACITY)
     }
 }
 
@@ -557,11 +656,13 @@ pub fn new_shared_registry(
     shard_count: usize,
     max_concurrent_streams: u32,
     max_pending_streams: usize,
+    connection_registry_capacity: usize,
 ) -> SharedRegistry {
     Arc::new(ClientRegistry::new(
         shard_count,
         max_concurrent_streams,
         max_pending_streams,
+        connection_registry_capacity,
     ))
 }
 
@@ -624,5 +725,100 @@ fn actor_unregister(
                 groups.remove_if(&info.group_id, |_, g| g.is_empty());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        new_inflight_table, select_across_shards, selection_start, RegistryCapacitySnapshot,
+    };
+
+    #[derive(Clone)]
+    struct Candidate {
+        id: usize,
+        load: usize,
+    }
+
+    #[test]
+    fn selection_start_rotates_across_shards() {
+        assert_eq!(selection_start(3, 1, 0), 1);
+        assert_eq!(selection_start(3, 1, 1), 2);
+        assert_eq!(selection_start(3, 1, 2), 0);
+        assert_eq!(selection_start(0, 1, usize::MAX), 0);
+    }
+
+    #[test]
+    fn cross_shard_selection_balances_dynamic_load() {
+        let shards = vec![vec![0usize], vec![1usize], vec![2usize]];
+        let mut loads = [0usize; 3];
+        let mut selections = [0usize; 3];
+
+        for cursor in 0..300 {
+            let selected = select_across_shards(
+                &shards,
+                1,
+                cursor,
+                |shard| {
+                    shard.first().map(|id| Candidate {
+                        id: *id,
+                        load: loads[*id],
+                    })
+                },
+                |candidate: &Candidate| candidate.load,
+            )
+            .expect("at least one shard should have a candidate");
+            loads[selected.id] += 1;
+            selections[selected.id] += 1;
+        }
+
+        assert_eq!(selections, [100, 100, 100]);
+    }
+
+    #[test]
+    fn registry_capacity_boundary_is_checked() {
+        let table = new_inflight_table(2);
+        let first = table.allocate().expect("first slot should be available");
+        let second = table.allocate().expect("second slot should be available");
+
+        let snapshot = RegistryCapacitySnapshot::from_table(&table);
+        assert_eq!(snapshot.capacity, 2);
+        assert_eq!(snapshot.active, 2);
+        assert_eq!(snapshot.available, 0);
+        assert!(snapshot.exhausted);
+        assert!(table.allocate().is_none());
+        assert!(first.is_selectable());
+        assert!(second.is_selectable());
+    }
+
+    #[test]
+    fn registry_capacity_release_allows_reuse_exactly_once() {
+        let table = new_inflight_table(1);
+        let first = table.allocate().expect("slot should be available");
+
+        assert!(first.retire());
+        assert!(!first.retire());
+        assert_eq!(table.registered_connections(), 0);
+
+        let replacement = table.allocate().expect("released slot should be reusable");
+        assert_eq!(table.registered_connections(), 1);
+        assert!(replacement.retire());
+        assert_eq!(table.registered_connections(), 0);
+    }
+
+    #[test]
+    fn registry_capacity_exhaustion_does_not_evict_live_entries() {
+        let table = new_inflight_table(2);
+        let first = table.allocate().expect("first slot should be available");
+        let second = table.allocate().expect("second slot should be available");
+
+        assert!(table.allocate().is_none());
+        assert_eq!(table.registered_connections(), 2);
+        assert!(first.is_selectable());
+        assert!(second.is_selectable());
+
+        assert!(first.retire());
+        assert!(second.is_selectable());
+        assert_eq!(table.registered_connections(), 1);
     }
 }

@@ -365,6 +365,9 @@ impl ClientConfigFile {
                 duotunnel_lib::proxy::buffer_params::MIN_RELAY_BUF_SIZE
             ));
         }
+        if let Err(error) = self.proxy_buffers.validate() {
+            errors.push(format!("proxy_buffers: {error}"));
+        }
         if let Some(name) = self.tls_server_name.as_ref() {
             if name.trim().is_empty() {
                 errors.push("tls_server_name must not be empty when set".into());

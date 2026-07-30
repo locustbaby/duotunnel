@@ -112,6 +112,34 @@ function metricByName(metrics, base, name) {
   return null;
 }
 
+function metricByScenario(metrics, base, name) {
+  const needles = [`scenario:${name}`, `name:${name}`];
+  for (const [key, value] of Object.entries(metrics || {})) {
+    if (!key.startsWith(`${base}{`)) continue;
+    if (needles.some(needle => key.includes(needle))) return value;
+  }
+  return null;
+}
+
+function metricCount(metric) {
+  const count = metric && metric.values && metric.values.count;
+  return count == null ? null : count;
+}
+
+function aggregateMetricCount(metrics, base) {
+  if (metrics && metrics[base]) return metricCount(metrics[base]);
+  let total = 0;
+  let found = false;
+  for (const [key, value] of Object.entries(metrics || {})) {
+    if (!key.startsWith(`${base}{`)) continue;
+    const count = metricCount(value);
+    if (count == null) continue;
+    total += count;
+    found = true;
+  }
+  return found ? total : null;
+}
+
 function resolveCategories(caseDefs) {
   const seen = new Set();
   const cats = [];
@@ -131,6 +159,8 @@ export function buildSummaryOutput(data, caseDefs, extras = {}) {
   let totalRPS = 0;
   let totalRequests = 0;
   let totalErrors = 0;
+  const totalIterations = aggregateMetricCount(metrics, 'iterations') || 0;
+  const totalDroppedIterations = aggregateMetricCount(metrics, 'dropped_iterations') || 0;
 
   const tunnel = extras.tunnel || 'duotunnel';
 
@@ -144,8 +174,17 @@ export function buildSummaryOutput(data, caseDefs, extras = {}) {
     const errMetric = metrics[`c_err_${c.name}`];
     const requests = reqMetric?.values?.count || 0;
     const errors = errMetric?.values?.count || 0;
+    const scenarioDropped = metricCount(metricByScenario(metrics, 'dropped_iterations', c.name));
+    const droppedIterations = scenarioDropped != null
+      ? scenarioDropped
+      : (caseDefs.length === 1 ? totalDroppedIterations : 0);
+    const scenarioIterations = metricCount(metricByScenario(metrics, 'iterations', c.name));
+    const completedIterations = scenarioIterations != null
+      ? scenarioIterations
+      : (caseDefs.length === 1 ? totalIterations : 0);
     const rps = c.durationSec ? Math.round((requests / c.durationSec) * 100) / 100 : 0;
     const err = requests > 0 ? Math.round((errors / requests) * 10000) / 100 : 0;
+    const roundMetric = (value) => value == null ? null : Math.round(value * 100) / 100;
 
     totalRequests += requests;
     totalErrors += errors;
@@ -159,8 +198,12 @@ export function buildSummaryOutput(data, caseDefs, extras = {}) {
       tunnel,
       perf: {
         rps, err, requests,
-        p50: Math.round((values.med || 0) * 100) / 100,
-        p95: Math.round((values['p(95)'] || 0) * 100) / 100,
+        completedIterations,
+        droppedIterations,
+        p50: roundMetric(values.med),
+        p95: roundMetric(values['p(95)']),
+        p99: roundMetric(values['p(99)']),
+        p99_9: roundMetric(values['p(99.9)']),
         targetRate: c.targetRate != null ? c.targetRate : (c.scenario?.rate || null),
         thresholdSpec: c.thresholdSpec,
         includeInTotalRps: !!c.includeInTotalRps,
@@ -179,6 +222,13 @@ export function buildSummaryOutput(data, caseDefs, extras = {}) {
       totalRPS: Math.round(totalRPS * 100) / 100,
       totalErr: totalRequests > 0 ? Math.round((totalErrors / totalRequests) * 10000) / 100 : 0,
       totalRequests
+    },
+    load: {
+      iterations: totalIterations,
+      droppedIterations: totalDroppedIterations,
+      droppedIterationRate: totalIterations + totalDroppedIterations === 0
+        ? 0
+        : Math.round((totalDroppedIterations / (totalIterations + totalDroppedIterations)) * 10000) / 100,
     },
     catalog: { categories: resolveCategories(caseDefs) },
     ...restExtras

@@ -1,5 +1,11 @@
 # CI 压测方法论评审与改进（2026-07-26）
 
+> **当前状态（2026-07-30）**：本文保留改造前的问题分析和方案推导。当前实现以
+> [BENCHMARK_SPEC](../../ci-helpers/BENCHMARK_SPEC.md) 和
+> [任务拆分](./15-task-breakdown.md) 为准：isolate 模式已按 server/client/load
+> 分配 `AllowedCPUs`，FRPS/FRPC 分别跟随 server/client CPU 集合，K6/echo/ctld/
+> collector 使用 load 集合；8K 保留原有 dial9 trace，basic/3K/6K 不启用 dial9。
+
 ## 背景
 
 用户反馈"CI GitHub Actions 4c 不够测 8000 QPS，会争抢"。CI 压测跑在 GitHub-hosted
@@ -66,9 +72,10 @@ ubuntu-latest`）。本文的目标是让压测结果**可复现、可归因、�
 
 ### 1.3 度量对齐缺陷（结果不可比）
 
-- `run-trace-8k.sh:142`、`run-bench-case.sh` 用 `--k6-offset 0`，而资源采样
-  (`bench-tool.py collect`) 早于 k6 启动 → **资源曲线与延迟窗口错位**
-  （BENCHMARK_SPEC §3.3 已自陈此 gap）；只有 `bench-basic` 正确传了 offset。
+- 资源采样 (`bench-tool.py collect`) 早于 k6 启动，旧实现用 `--k6-offset 0` 会造成
+  **资源曲线与延迟窗口错位**。当前 `run-trace-8k.sh` 与 `run-bench-case.sh` 已记录
+  `K6_START_MS/K6_END_MS` 并按绝对时间窗口过滤；本节其余关于 cpuset、阈值和配置
+  artifact 的缺口仍然有效。
 - 阈值宽松：`defaults.json` `p(95)<60000ms`、`http_req_failed<0.05`——60s p95
   形同虚设，等于"只要不大面积失败就算过"。**CI 实际上没有在守护延迟**，
   所以退化不会被拦住（BENCHMARK_SPEC §2.2 也承认不 enforce p99）。
@@ -193,24 +200,28 @@ CPUQuota 走 CFS bandwidth（100ms period）记账，超额即整进程冻结到
 ### 2.3 度量口径修正（对齐 TODO-140）
 
 **现象/问题 + 证据**
-- **offset 错位**：`run-trace-8k.sh:142`、`run-bench-case.sh:206` 硬编码 `--k6-offset 0`，
-  资源采样早于 k6 启动 → 资源曲线与延迟窗口错位（BENCHMARK_SPEC §3.3 自陈）。正确做法见
-  `bench-basic`/`bench-body`：`--k6-offset $(( K - S ))`，K=k6_start、S=sampling_start（`ci.yml:889-891`、`:917-919`）；
+- **offset 错位**：旧实现曾在 `run-trace-8k.sh`、`run-bench-case.sh` 硬编码
+  `--k6-offset 0`。当前两者已改为传递 k6 的绝对开始/结束时间，解析器只保留采样窗口内的
+  资源样本；不再依赖秒级 offset。`bench-basic` 也已统一使用该窗口；
 - **阈值宽松**：`defaults.json` `p(95)<60000ms`、`http_req_failed<0.05` → CI 不守护延迟
   （BENCHMARK_SPEC §2.2 承认不 enforce p99）；
-- **配置不透明**：TODO-140 要求快照有效配置，当前 artifact 缺失。
+- **配置不透明**：TODO-140 要求快照有效配置，当前已由 `benchmark-env.sh` 和
+  `bench-tool.py snapshot/attach` 生成脱敏配置/CPU contract artifact；真实 runner
+  权限和重复运行证据仍待验收。
 
 **根因**
 采样窗口与负载窗口无共同时间原点；断言口径宽到无区分力；生效配置不落盘。三者叠加 → 结果**不可归因、不可比**。
 
 **方案**
-1. **修 offset**：`run-trace-8k.sh`/`run-bench-case.sh` 记录 `k6_start - sampling_start` 传给 `parse`
-   （照抄 `bench-basic` 已有做法 `ci.yml:889-891`；解析侧 `bench-tool.py:312/450` 已支持 `k6_offset`，只是没传真值）；
+1. **修 offset**：已由 `run-trace-8k.sh`/`run-bench-case.sh` 记录 k6 的绝对开始/结束时间，
+   由 `parse` 在绝对时间窗口内过滤资源样本；`k6_offset` 仅保留为旧 artifact 字段，不再作为
+   当前脚本的时间对齐依据；
 2. **完整分位**：k6 summary 输出 p50/p95/p99/p99.9 + achieved-vs-target rps + dropped iterations + 错误分类；
 3. **阶段延迟**：接 TODO-145（hotpath）在 sniff/route/open_stream/first-byte/relay 打点，
    回答"慢在哪一段"而非只有端到端；
-4. **有效配置快照**：duotunnel-server + duotunnel-client 启动打印最终 workers/accept_workers/shards/connections/QUIC 窗口/
-   buffer/pending 上限 + cpuset + pin 映射，写入 artifact（TODO-140 明确要求，当前缺失）；
+4. **有效配置快照**：`benchmark-env.sh` 记录 duotunnel-server/client、echo、load、collector
+   的 cpuset/cgroup/环境和配置文件脱敏 hash；进程日志中的最终 workers/accept_workers/shards/
+   connections/QUIC 窗口/buffer/pending 上限由 snapshot evidence 收集，真实 runner 仍需确认日志覆盖率；
 5. **资源归因**：`nr_throttled`（确认无节流）、per-core 利用率（确认 SUT 单核是否打满 = 判断是否受限于
    单 endpoint S1）、UDP `RcvbufErrors`/drop。
 
@@ -332,16 +343,16 @@ flowchart TD
 
 | 项 | 预期收益 | 改动量 | 影响 |
 | --- | --- | --- | --- |
-| cpuset 隔离 | 消除周期性冻结与核间争抢；3k p99 CoV <10% | 3 脚本 + 1 lib，~100 行 | 仅 CI，可回滚 |
-| offset/配置快照/分位 | 结果可归因、可比较 | ~50 行 python/shell + 启动日志 | 仅 CI |
+| cpuset 隔离 | 消除周期性冻结与核间争抢；CoV 需 runner 验证 | benchmark-env + scope 配置 | 仅 CI，可回滚 |
+| offset/配置快照/分位/gate | 结果可归因、可比较；baseline 回归可 fail-closed | Python/shell + artifact | 仅 CI |
 | 8k 可信化 + 断言分层 | 8k（仍测最大 QPS）数字可复现；系统上限数字迁大机 | 复用 cpuset 分配 + k6 阈值配置 + workflow 参数 | 用例目的不变；dashboard 需标注数字对应核数 |
 | microbench | 解锁一批 research TODO 的决策 | ~1-2 天，新 bench crate | 新增，不影响产线 |
 
 ## 5. 验收
 
 - [ ] 同 commit ×3 的 3k 用例：p99 变异系数 <10%，`nr_throttled=0`；
-- [ ] 资源曲线与延迟窗口对齐（offset 正确）；
-- [ ] artifact 含最终生效配置 + cpuset/pin 映射；
+- [x] 资源曲线与延迟窗口对齐（绝对时间窗口）；
+- [x] artifact 含配置 hash + cpuset/CPU contract 映射；最终运行时日志覆盖率仍需 runner 验收；
 - [ ] 8k 用例（目标仍为最大 QPS）在 cpuset 隔离下同 commit ×3 的达成 QPS 变异系数 <10%，
   且 artifact/dashboard 明确标注"该核数下的上限，非系统上限"；
 - [ ] 扩展曲线数据可产出 `QPS(N)/(N·QPS(1))`；

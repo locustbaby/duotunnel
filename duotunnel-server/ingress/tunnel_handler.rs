@@ -9,6 +9,7 @@ pub async fn handle_tunnel_stream<A: UpstreamResolver>(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     app: A,
+    peek_buf_size: usize,
 ) -> Result<()> {
     let routing_info =
         tokio::time::timeout(ROUTING_INFO_TIMEOUT, recv_routing_info_bounded(&mut recv))
@@ -20,7 +21,7 @@ pub async fn handle_tunnel_stream<A: UpstreamResolver>(
     );
     let ip = routing_info.src_addr;
     let client_addr = std::net::SocketAddr::new(ip, routing_info.src_port);
-    ProxyEngine::new(app)
+    ProxyEngine::new_with_peek_buf_size(app, peek_buf_size)
         .run_stream(send, recv, client_addr, Some(routing_info))
         .await?;
     debug!("egress stream completed");

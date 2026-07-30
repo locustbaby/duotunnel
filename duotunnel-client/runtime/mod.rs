@@ -57,10 +57,18 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
     use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 
+    let max_file_size = std::env::var("DIAL9_MAX_FILE_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(512 * 1024 * 1024);
+    let max_total_size = std::env::var("DIAL9_MAX_TOTAL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(2 * 1024 * 1024 * 1024);
     let writer = RotatingWriter::builder()
         .base_path(&trace_path)
-        .max_file_size(512 * 1024 * 1024)
-        .max_total_size(512 * 1024 * 1024)
+        .max_file_size(max_file_size)
+        .max_total_size(max_total_size)
         .build()?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();

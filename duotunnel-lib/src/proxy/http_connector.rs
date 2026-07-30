@@ -4,6 +4,7 @@ use super::h2_proxy::EmptyBodyRetryTemplate;
 use super::http::HttpPeer;
 use super::peers::HttpPeerSpec;
 use crate::egress::http::{H2cClient, HttpsClient};
+use crate::proxy::buffer_params::ProxyBufferParams;
 use crate::transport::quinn_io::{PrefixedReadWrite, QuinnStream};
 use crate::ProxyError;
 use anyhow::Result;
@@ -26,14 +27,24 @@ pub struct HttpConnector {
     https_client: HttpsClient,
     h2c_client: H2cClient,
     prefer_h1: ArcSwap<HashMap<String, Instant>>,
+    buffer_params: ProxyBufferParams,
 }
 
 impl HttpConnector {
     pub fn new(https_client: HttpsClient, h2c_client: H2cClient) -> SharedHttpConnector {
+        Self::new_with_buffer_params(https_client, h2c_client, ProxyBufferParams::default())
+    }
+
+    pub fn new_with_buffer_params(
+        https_client: HttpsClient,
+        h2c_client: H2cClient,
+        buffer_params: ProxyBufferParams,
+    ) -> SharedHttpConnector {
         Arc::new(Self {
             https_client,
             h2c_client,
             prefer_h1: ArcSwap::from_pointee(HashMap::new()),
+            buffer_params,
         })
     }
 
@@ -134,6 +145,7 @@ impl HttpConnector {
         HttpPeer {
             connector: self.clone(),
             spec,
+            buffer_params: self.buffer_params.clone(),
         }
         .connect_inner(send, recv, initial_data)
         .await

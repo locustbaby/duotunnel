@@ -2,10 +2,13 @@ name: 'Start DuoTunnel Infrastructure'
 description: 'Initialize /etc/hosts, echo backends, and full tunnel system'
 inputs:
   worker_threads:
-    description: 'Parallelism anchor. 0 = auto (cgroup CPUQuota caps derived values). N>0 sets TOKIO_WORKER_THREADS request. Runtime resolves accept_workers/shards/connections from effective_runtime_parallelism().'
+    description: 'Parallelism anchor. 0 = auto from runtime quota and process CPU affinity. N>0 sets TOKIO_WORKER_THREADS request. Runtime resolves accept_workers/shards/connections from effective_runtime_parallelism().'
     default: '0'
   cpu_quota:
-    description: 'systemd CPUQuota for server/client scopes. Empty → STRESS_CPU_QUOTA env (default 100% = 1 CPU). none/unlimited/0 = no cap.'
+    description: 'systemd CPUQuota for server/client scopes. Empty → STRESS_CPU_QUOTA env. benchmark-env isolate mode clears this after assigning AllowedCPUs; observe mode preserves it.'
+    default: ''
+  cpu_mode:
+    description: 'Benchmark CPU mode. isolate shares one service CPU set between server/client and reserves three load CPUs; observe preserves CPUQuota.'
     default: ''
   tun_config_dir:
     description: 'Directory for configs'
@@ -45,6 +48,7 @@ runs:
     - name: Start Tunnel control plane
       shell: bash
       run: |
+        source ci-helpers/cpu-contract.sh
         mkdir -p data
         ./target/release/duotunnel-ctld --config ${{ inputs.tun_config_dir }}/ctld.yaml > /tmp/ci-ctld.log 2>&1 &
         echo $! > /tmp/ctld.pid
@@ -57,11 +61,18 @@ runs:
         if [ -z "$CPU_QUOTA" ]; then
           CPU_QUOTA="${STRESS_CPU_QUOTA:-100%}"
         fi
-
-        QUOTA_ARG=()
-        if [ -n "$CPU_QUOTA" ] && [ "$CPU_QUOTA" != "none" ] && [ "$CPU_QUOTA" != "unlimited" ] && [ "$CPU_QUOTA" != "0" ] && [ "$CPU_QUOTA" != "0%" ]; then
-          QUOTA_ARG=(-p "CPUQuota=${CPU_QUOTA}")
+        CPU_MODE="${{ inputs.cpu_mode }}"
+        if [ -z "$CPU_MODE" ]; then
+          CPU_MODE="${DUOTUNNEL_BENCH_CPU_MODE:-isolate}"
         fi
+        WORKER_THREADS="${{ inputs.worker_threads }}"
+        export CPU_MODE WORKER_THREADS STRESS_CPU_QUOTA="$CPU_QUOTA" DUOTUNNEL_BENCH_CPU_MODE="$CPU_MODE"
+        echo "STRESS_CPU_QUOTA=$CPU_QUOTA" >> "$GITHUB_ENV"
+        echo "DUOTUNNEL_BENCH_CPU_MODE=$CPU_MODE" >> "$GITHUB_ENV"
+        echo "WORKER_THREADS=$WORKER_THREADS" >> "$GITHUB_ENV"
+        cpu_contract_resolve "$CPU_MODE" "$WORKER_THREADS" "$CPU_QUOTA"
+
+        mapfile -t SERVER_CPU_ARGS < <(cpu_contract_scope_args server)
 
         SERVER_TOKIO_ENV=()
         if [ -n "${{ inputs.worker_threads }}" ] && [ "${{ inputs.worker_threads }}" != "0" ]; then
@@ -69,7 +80,7 @@ runs:
         fi
 
         sudo systemd-run --scope --unit=duotunnel-server --collect \
-          "${QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
+          "${SERVER_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           "${SERVER_TOKIO_ENV[@]}" \
           -- ./target/release/duotunnel-server --config ${{ inputs.tun_config_dir }}/server.yaml \
           --ctld-addr 127.0.0.1:7788 >> /tmp/ci-server.log 2>&1 &
@@ -93,8 +104,10 @@ runs:
         fi
         CLIENT_TOKIO_ENV+=(-E DUOTUNNEL_CLIENT__AUTH_TOKEN="$TOKEN")
 
+        mapfile -t CLIENT_CPU_ARGS < <(cpu_contract_scope_args client)
+
         sudo systemd-run --scope --unit=duotunnel-client --collect \
-          "${QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
+          "${CLIENT_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G \
           "${CLIENT_TOKIO_ENV[@]}" \
           -- ./target/release/duotunnel-client --config ${{ inputs.tun_config_dir }}/client.yaml >> /tmp/ci-client.log 2>&1 &
         for i in $(seq 1 60); do

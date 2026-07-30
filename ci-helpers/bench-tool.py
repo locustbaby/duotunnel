@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
+import math
 import os
-import sys
-import time
+import pathlib
 import platform
 import re
+import subprocess
+import sys
+import time
 from datetime import datetime
 
 # --- Unified Configuration (Loaded from schema.json) ---
@@ -22,11 +26,449 @@ except Exception as e:
 PROC_GROUPS = [(m["prefix"], m["group"]) for m in SCHEMA.get("process_mapping", [])]
 ALL_GROUPS = [g["id"] for g in SCHEMA.get("groups", [])] + ["other"]
 
+SNAPSHOT_SCHEMA_VERSION = 1
+BENCHMARK_SCHEMA_VERSION = 1
+
 def get_group(name):
     for prefix, g in PROC_GROUPS:
         if name == prefix or name.startswith(prefix):
             return g
     return "other"
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _sha256_bytes(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def _redact_text(value):
+    if value is None:
+        return None
+    lines = []
+    secret_line = re.compile(
+        r"^(\s*(?:auth_token|token|password|secret|private_key|client_secret)\s*:\s*).*$",
+        re.IGNORECASE,
+    )
+    secret_assignment = re.compile(
+        r"(DUOTUNNEL_[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD)\s*[=:]\s*)[^\s]+",
+        re.IGNORECASE,
+    )
+    for line in value.splitlines():
+        line = secret_line.sub(r"\1<redacted>", line)
+        line = secret_assignment.sub(r"\1<redacted>", line)
+        lines.append(line)
+    suffix = "\n" if value.endswith("\n") else ""
+    return "\n".join(lines) + suffix
+
+
+def _run_capture(command):
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+        )
+        return {"status": completed.returncode, "output": completed.stdout.strip()}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": None, "output": str(exc)}
+
+
+def _cgroup_value(name):
+    for root in ("/sys/fs/cgroup", "/sys/fs/cgroup/unified"):
+        value = _read_text(os.path.join(root, name))
+        if value is not None:
+            return value.strip()
+    return None
+
+
+def _parse_pid_file_spec(spec):
+    if "=" in spec:
+        label, path = spec.split("=", 1)
+    else:
+        label, path = pathlib.Path(spec).stem, spec
+    return label, path
+
+
+def _proc_environ(pid):
+    selected = {
+        "TOKIO_WORKER_THREADS",
+        "DUOTUNNEL_CLIENT__AUTH_TOKEN",
+        "STRESS_CPU_QUOTA",
+        "DUOTUNNEL_BENCH_CPU_MODE",
+        "DUOTUNNEL_BENCH_CPUSET",
+    }
+    try:
+        raw = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    result = {}
+    for field in raw.split(b"\0"):
+        if b"=" not in field:
+            continue
+        key, value = field.split(b"=", 1)
+        key = key.decode("utf-8", "replace")
+        if key not in selected:
+            continue
+        result[key] = "<redacted>" if "TOKEN" in key else value.decode("utf-8", "replace")
+    return result
+
+
+def _process_snapshot(pid):
+    status = _read_text(f"/proc/{pid}/status") or ""
+    allowed = None
+    for line in status.splitlines():
+        if line.startswith("Cpus_allowed_list:"):
+            allowed = line.split(":", 1)[1].strip()
+            break
+    cmdline = _read_text(f"/proc/{pid}/cmdline")
+    return {
+        "pid": pid,
+        "cmdline": cmdline.replace("\0", " ").strip() if cmdline else None,
+        "cpus_allowed_list": allowed,
+        "cgroup": _read_text(f"/proc/{pid}/cgroup"),
+        "environment": _proc_environ(pid),
+    }
+
+
+def _systemd_scope_snapshot(scope):
+    result = _run_capture(
+        [
+            "systemctl",
+            "show",
+            scope,
+            "--property=ControlGroup,AllowedCPUs,CPUQuotaPerSecUSec,CPUUsageNSec,TasksCurrent",
+            "--no-pager",
+        ]
+    )
+    properties = {}
+    for line in result.get("output", "").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            properties[key] = value
+    return {"scope": scope, "status": result.get("status"), "properties": properties}
+
+
+def _config_snapshot(path):
+    absolute = os.path.abspath(path)
+    raw = _read_text(absolute)
+    if raw is None:
+        return {"path": path, "exists": False}
+    raw_bytes = raw.encode("utf-8", "replace")
+    redacted = _redact_text(raw)
+    return {
+        "path": os.path.relpath(absolute, os.getcwd()),
+        "exists": True,
+        "sha256": _sha256_bytes(raw_bytes),
+        "redacted_sha256": _sha256_bytes((redacted or "").encode("utf-8")),
+        "content": redacted,
+    }
+
+
+def _log_evidence(path):
+    absolute = os.path.abspath(path)
+    raw = _read_text(absolute)
+    if raw is None:
+        return {"path": path, "exists": False}
+    patterns = re.compile(
+        r"effective|resolved|worker|shard|connection|buffer|pending|admission|parallel|config",
+        re.IGNORECASE,
+    )
+    matched = [line for line in raw.splitlines() if patterns.search(line)]
+    return {
+        "path": os.path.relpath(absolute, os.getcwd()),
+        "exists": True,
+        "sha256": _sha256_bytes(raw.encode("utf-8", "replace")),
+        "matched_lines": [_redact_text(line) for line in matched[-200:]],
+        "complete": False,
+    }
+
+
+def run_snapshot(args):
+    plan = {}
+    if args.plan:
+        try:
+            with open(args.plan, "r", encoding="utf-8") as f:
+                plan = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"failed to read benchmark CPU plan: {exc}", file=sys.stderr)
+            return 2
+
+    configs = [_config_snapshot(path) for path in args.config]
+    env_names = [
+        "BENCH_PROFILE",
+        "BENCH_CASE",
+        "WORKER_THREADS",
+        "TOKIO_WORKER_THREADS",
+        "STRESS_CPU_QUOTA",
+        "DUOTUNNEL_BENCH_CPU_MODE",
+        "DUOTUNNEL_BENCH_CPUSET",
+        "K6_CORE_STRESS_RATE",
+        "DUOTUNNEL_COLLECT_RESOURCE_METRICS",
+    ]
+    environment = {name: os.environ[name] for name in env_names if name in os.environ}
+
+    pid_entries = {}
+    for spec in args.pid_file:
+        label, path = _parse_pid_file_spec(spec)
+        value = _read_text(path)
+        try:
+            pid = int((value or "").strip())
+        except ValueError:
+            pid = None
+        pid_entries[label] = {
+            "pid_file": path,
+            "pid": _process_snapshot(pid) if pid and os.path.exists(f"/proc/{pid}") else None,
+        }
+
+    scopes = [_systemd_scope_snapshot(scope) for scope in args.scope]
+    log_evidence = [_log_evidence(path) for path in args.log_file]
+    cgroup_type = _run_capture(["stat", "-fc", "%T", "/sys/fs/cgroup"])
+    affinity = None
+    try:
+        affinity = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+
+    config_fingerprint_payload = {
+        "configs": [
+            {
+                "path": item.get("path"),
+                "sha256": item.get("sha256"),
+                "redacted_sha256": item.get("redacted_sha256"),
+            }
+            for item in configs
+        ],
+        "plan": plan.get("cpu_contract", plan),
+        "environment": environment,
+    }
+    config_fingerprint = _sha256_bytes(
+        json.dumps(config_fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
+    )
+    cpu_contract = plan.get("cpu_contract", {})
+    cpu_fingerprint = _sha256_bytes(
+        json.dumps(cpu_contract, sort_keys=True, separators=(",", ":")).encode()
+    )
+    comparable = bool(cpu_contract.get("enforced") and cpu_contract.get("cgroup_v2"))
+    snapshot = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "case": args.case_name,
+        "created_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "git_sha": os.environ.get("GITHUB_SHA"),
+        "config": {
+            "files": configs,
+            "fingerprint": config_fingerprint,
+            "runtime_log_evidence": log_evidence,
+            "runtime_values_complete": any(item.get("matched_lines") for item in log_evidence),
+        },
+        "cpu": {
+            "platform": platform.platform(),
+            "logical_cpus": os.cpu_count(),
+            "process_affinity": affinity,
+            "cgroup_filesystem": cgroup_type.get("output"),
+            "cpuset_cpus_effective": _cgroup_value("cpuset.cpus.effective"),
+            "cpuset_cpus": _cgroup_value("cpuset.cpus"),
+            "cpu_max": _cgroup_value("cpu.max"),
+            "cpu_stat": _cgroup_value("cpu.stat"),
+        },
+        "cpu_contract": {
+            **cpu_contract,
+            "fingerprint": cpu_fingerprint,
+            "comparable": comparable,
+        },
+        "environment": environment,
+        "processes": pid_entries,
+        "scopes": scopes,
+    }
+    with open(args.output, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    print(f"Wrote benchmark snapshot: {args.output}")
+
+
+def run_attach(args):
+    with open(args.result, "r", encoding="utf-8") as f:
+        entry = json.load(f)
+    with open(args.metadata, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+    cases = entry.get("cases") or {}
+    if args.case_name == "all":
+        for name, case in cases.items():
+            case["benchmark"] = metadata
+        print(f"Attached benchmark snapshot to all cases in {args.result}")
+    elif args.case_name not in cases:
+        print(f"benchmark result has no case {args.case_name!r}", file=sys.stderr)
+        return 2
+    else:
+        cases[args.case_name]["benchmark"] = metadata
+        print(f"Attached benchmark snapshot to {args.result} case[{args.case_name!r}]")
+    with open(args.result, "w", encoding="utf-8") as f:
+        json.dump(entry, f, ensure_ascii=False, indent=2)
+
+
+def _number(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _case_dropped_iterations(case, root_load):
+    perf = case.get("perf") or {}
+    if perf.get("droppedIterations") is not None:
+        return _number(perf["droppedIterations"])
+    return _number((root_load or {}).get("droppedIterations"))
+
+
+def _validate_benchmark_result(result, require_comparable=False):
+    failures = []
+    cases = result.get("cases") or {}
+    if not cases:
+        failures.append("result has no cases")
+    load = result.get("load") or {}
+    for field in ("droppedIterations", "iterations"):
+        value = _number(load.get(field))
+        if value is None:
+            failures.append(f"result.load.{field} is missing or not a finite number")
+        elif value < 0:
+            failures.append(f"result.load.{field} must be non-negative")
+    for name, case in cases.items():
+        perf = case.get("perf") or {}
+        if not perf:
+            continue
+        for field in ("p50", "p95", "p99", "p99_9", "rps", "err", "requests", "droppedIterations"):
+            if field not in perf:
+                failures.append(f"case {name}: perf.{field} is missing")
+                continue
+            value = _number(perf.get(field))
+            if value is None:
+                failures.append(f"case {name}: perf.{field} is not a finite number")
+            elif value < 0:
+                failures.append(f"case {name}: perf.{field} must be non-negative")
+        err = _number(perf.get("err"))
+        if err is not None and err > 100:
+            failures.append(f"case {name}: perf.err must be at most 100")
+        benchmark = case.get("benchmark") or {}
+        if benchmark.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+            failures.append(f"case {name}: benchmark snapshot schema is missing or unsupported")
+        if not benchmark.get("config", {}).get("fingerprint"):
+            failures.append(f"case {name}: effective config fingerprint is missing")
+        contract = benchmark.get("cpu_contract") or {}
+        if not contract.get("fingerprint"):
+            failures.append(f"case {name}: CPU contract fingerprint is missing")
+        if require_comparable and not contract.get("comparable"):
+            failures.append(f"case {name}: CPU contract is not comparable")
+    return failures
+
+
+def _compare_benchmark_results(current, baseline, args):
+    failures = []
+    comparisons = []
+    current_cases = current.get("cases") or {}
+    baseline_cases = baseline.get("cases") or {}
+    for name, case in current_cases.items():
+        current_perf = case.get("perf") or {}
+        if not current_perf:
+            continue
+        if name not in baseline_cases:
+            failures.append(f"baseline is missing case {name}")
+            continue
+        old = baseline_cases[name]
+        current_benchmark = case.get("benchmark") or {}
+        baseline_benchmark = old.get("benchmark") or {}
+        if current_benchmark.get("config", {}).get("fingerprint") != baseline_benchmark.get("config", {}).get("fingerprint"):
+            failures.append(f"case {name}: effective config fingerprint changed")
+        if current_benchmark.get("cpu_contract", {}).get("fingerprint") != baseline_benchmark.get("cpu_contract", {}).get("fingerprint"):
+            failures.append(f"case {name}: CPU contract fingerprint changed")
+        baseline_perf = old.get("perf") or {}
+        row = {"case": name, "checks": []}
+        for metric, limit in (("p95", args.max_p95_regression_pct), ("p99", args.max_p99_regression_pct), ("p99_9", args.max_p99_9_regression_pct)):
+            now = _number(current_perf.get(metric))
+            old_value = _number(baseline_perf.get(metric))
+            if now is None or old_value is None or old_value <= 0:
+                failures.append(f"case {name}: cannot compare {metric}")
+                continue
+            allowed = old_value * (1 + limit / 100.0)
+            row["checks"].append({"metric": metric, "current": now, "baseline": old_value, "allowed": allowed})
+            if now > allowed:
+                failures.append(f"case {name}: {metric} regression {now:.2f} > {allowed:.2f}")
+        now_rps = _number(current_perf.get("rps"))
+        old_rps = _number(baseline_perf.get("rps"))
+        if now_rps is None or old_rps is None or old_rps <= 0:
+            failures.append(f"case {name}: cannot compare rps")
+        else:
+            allowed = old_rps * (1 - args.max_rps_drop_pct / 100.0)
+            row["checks"].append({"metric": "rps", "current": now_rps, "baseline": old_rps, "allowed": allowed})
+            if now_rps < allowed:
+                failures.append(f"case {name}: rps regression {now_rps:.2f} < {allowed:.2f}")
+        now_err = _number(current_perf.get("err"))
+        old_err = _number(baseline_perf.get("err"))
+        if now_err is None or old_err is None:
+            failures.append(f"case {name}: cannot compare err")
+        elif now_err > old_err + args.max_error_increase_pct_points:
+            failures.append(f"case {name}: error rate {now_err:.2f}% > {old_err + args.max_error_increase_pct_points:.2f}%")
+        current_drop = _case_dropped_iterations(case, current.get("load"))
+        baseline_drop = _case_dropped_iterations(old, baseline.get("load"))
+        if current_drop is None or baseline_drop is None:
+            failures.append(f"case {name}: cannot compare dropped iterations")
+        elif current_drop > baseline_drop + args.max_dropped_increase:
+            failures.append(f"case {name}: dropped iterations {current_drop:g} > {baseline_drop + args.max_dropped_increase:g}")
+        comparisons.append(row)
+    return failures, comparisons
+
+
+def run_gate(args):
+    with open(args.result, "r", encoding="utf-8") as f:
+        result = json.load(f)
+    failures = _validate_benchmark_result(result, args.require_comparable)
+    load = result.get("load") or {}
+    if args.max_dropped_iterations is not None:
+        dropped = _number(load.get("droppedIterations"))
+        if dropped is None:
+            failures.append("cannot enforce dropped-iterations limit without result.load.droppedIterations")
+        elif dropped > args.max_dropped_iterations:
+            failures.append(f"dropped iterations {dropped:g} exceed limit {args.max_dropped_iterations:g}")
+
+    comparisons = []
+    if args.baseline:
+        if not os.path.isfile(args.baseline):
+            failures.append(f"baseline file does not exist: {args.baseline}")
+        else:
+            with open(args.baseline, "r", encoding="utf-8") as f:
+                baseline = json.load(f)
+            baseline_failures = _validate_benchmark_result(baseline, args.require_comparable)
+            failures.extend(f"baseline: {failure}" for failure in baseline_failures)
+            if not baseline_failures:
+                compare_failures, comparisons = _compare_benchmark_results(result, baseline, args)
+                failures.extend(compare_failures)
+
+    report = {
+        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "status": "fail" if failures else "pass",
+        "result": args.result,
+        "baseline": args.baseline or None,
+        "failures": failures,
+        "comparisons": comparisons,
+    }
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    if failures:
+        print(json.dumps(report, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
 
 # --- Subcommand: Collect (Resource Monitoring) ---
 
@@ -252,7 +694,12 @@ def run_collect(args):
             if entry:
                 procs_out[g] = entry
 
-        out = {"t": now_t, "sys": sys_out, "procs": procs_out}
+        out = {
+            "t": now_t,
+            "timestamp_ms": time.time_ns() // 1_000_000,
+            "sys": sys_out,
+            "procs": procs_out,
+        }
         if pid_cpu: out["top_cpu"] = sorted(pid_cpu, key=lambda x: x["cpu"], reverse=True)[:10]
         if pid_rss: out["top_rss"] = sorted(pid_rss, key=lambda x: x["rss"], reverse=True)[:10]
         print(json.dumps(out, separators=(",", ":")), flush=True)
@@ -267,13 +714,27 @@ _PROC_FIELDS = {"cpu", "rss", "vms", "read_kbs", "write_kbs", "cswch", "nvcswch"
 def run_parse(args):
     result = {"processes": {}, "system": {}, "top_cpu": {}, "top_rss": {}}
     cpu_per_core_series = []
+    selected_samples = 0
+    total_samples = 0
 
     if os.path.exists(args.input):
         with open(args.input) as f:
             for line in f:
                 try:
                     row = json.loads(line)
-                    t = row["t"]
+                    total_samples += 1
+                    timestamp_ms = row.get("timestamp_ms")
+                    if args.k6_start_ms is not None or args.k6_end_ms is not None:
+                        if timestamp_ms is None:
+                            continue
+                        if args.k6_start_ms is not None and timestamp_ms < args.k6_start_ms:
+                            continue
+                        if args.k6_end_ms is not None and timestamp_ms > args.k6_end_ms:
+                            continue
+                        t = round((timestamp_ms - (args.k6_start_ms or timestamp_ms)) / 1000, 2)
+                    else:
+                        t = row["t"]
+                    selected_samples += 1
                     sys_d = row.get("sys", {})
                     for k, v in sys_d.items():
                         if k == "cpu_per_core":
@@ -310,6 +771,17 @@ def run_parse(args):
         result["system"]["cpu_per_core"] = cpu_per_core_series
 
     result["k6_offset"] = args.k6_offset
+    result["sampling_window"] = {
+        "start_ms": args.k6_start_ms,
+        "end_ms": args.k6_end_ms,
+        "duration_ms": (
+            args.k6_end_ms - args.k6_start_ms
+            if args.k6_start_ms is not None and args.k6_end_ms is not None
+            else None
+        ),
+        "samples": selected_samples,
+        "total_samples": total_samples,
+    }
     result["processes"] = {g: v for g, v in result["processes"].items() if any(v.values())}
     if not result["top_cpu"]: del result["top_cpu"]
     if not result["top_rss"]: del result["top_rss"]
@@ -379,7 +851,7 @@ def run_publish(args):
     index_entry = {k: entry.get(k) for k in ["id", "commit", "timestamp", "summary", "catalog", "run_url", "artifacts"]}
     index_entry["scenarios"] = [
         {"name": name, **{k: c.get(k) for k in ["label", "protocol", "direction", "category", "tunnel"]},
-         **{k: (c.get("perf") or {}).get(k) for k in ["p50", "p95", "rps", "err", "requests"]}}
+         **{k: (c.get("perf") or {}).get(k) for k in ["p50", "p95", "p99", "p99_9", "rps", "err", "requests"]}}
         for name, c in entry.get("cases", {}).items()
     ]
     entries.append(index_entry)
@@ -443,11 +915,22 @@ def main():
     c = sub.add_parser("collect")
     c.add_argument("interval", type=float, nargs="?", default=1.0)
 
+    s = sub.add_parser("snapshot")
+    s.add_argument("--output", required=True)
+    s.add_argument("--case-name", required=True)
+    s.add_argument("--plan", default="")
+    s.add_argument("--config", action="append", default=[])
+    s.add_argument("--scope", action="append", default=[])
+    s.add_argument("--pid-file", action="append", default=[])
+    s.add_argument("--log-file", action="append", default=[])
+
     # Parse
     r = sub.add_parser("parse")
     r.add_argument("--input", required=True)
     r.add_argument("--output", required=True)
     r.add_argument("--k6-offset", type=int, default=0)
+    r.add_argument("--k6-start-ms", type=int)
+    r.add_argument("--k6-end-ms", type=int)
 
     # Publish
     b = sub.add_parser("publish")
@@ -467,11 +950,35 @@ def main():
     i.add_argument("--resources", required=True)
     i.add_argument("--case-name", required=True)
 
+    a = sub.add_parser("attach")
+    a.add_argument("--result", required=True)
+    a.add_argument("--metadata", required=True)
+    a.add_argument("--case-name", required=True)
+
+    g = sub.add_parser("gate")
+    g.add_argument("--result", required=True)
+    g.add_argument("--baseline", default="")
+    g.add_argument("--output", default="")
+    g.add_argument("--require-comparable", action="store_true")
+    g.add_argument("--max-dropped-iterations", type=float, default=None)
+    g.add_argument("--max-p95-regression-pct", type=float, default=10.0)
+    g.add_argument("--max-p99-regression-pct", type=float, default=10.0)
+    g.add_argument("--max-p99-9-regression-pct", type=float, default=15.0)
+    g.add_argument("--max-rps-drop-pct", type=float, default=5.0)
+    g.add_argument("--max-error-increase-pct-points", type=float, default=1.0)
+    g.add_argument("--max-dropped-increase", type=float, default=0.0)
+
     args = p.parse_args()
     if args.cmd == "collect": run_collect(args)
+    elif args.cmd == "snapshot": return_code = run_snapshot(args)
     elif args.cmd == "parse": run_parse(args)
     elif args.cmd == "inject": run_inject(args)
+    elif args.cmd == "attach": return_code = run_attach(args)
+    elif args.cmd == "gate": return_code = run_gate(args)
     elif args.cmd == "publish": run_publish(args)
+    else: return_code = 0
+    if "return_code" in locals():
+        sys.exit(return_code)
 
 if __name__ == "__main__":
     main()

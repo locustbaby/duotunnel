@@ -3,22 +3,33 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum ClientCommand {
     /// Create a new client and print its bearer token.
     Create {
         /// Unique client name / group identifier.
         name: String,
+        /// Stable request identifier to reuse when retrying the same mutation.
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Revoke all tokens for a client.
     Revoke {
         /// Client name.
         name: String,
+        /// Stable request identifier to reuse when retrying the same mutation.
+        #[arg(long)]
+        request_id: Option<String>,
     },
     /// Rotate the token for a client and print the new one.
     Rotate {
         /// Client name.
         name: String,
+        /// Stable request identifier to reuse when retrying the same mutation.
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 
@@ -48,28 +59,46 @@ pub(crate) enum Command {
 }
 
 pub(crate) async fn run_client_cli(socket: &str, cmd: ClientCommand) -> Result<()> {
-    let (path, query) = match cmd {
-        ClientCommand::Create { name } => ("/v1/clients/create", name),
-        ClientCommand::Revoke { name } => ("/v1/clients/revoke", name),
-        ClientCommand::Rotate { name } => ("/v1/clients/rotate", name),
+    let (path, query, request_id) = match cmd {
+        ClientCommand::Create { name, request_id } => ("/v1/clients/create", name, request_id),
+        ClientCommand::Revoke { name, request_id } => ("/v1/clients/revoke", name, request_id),
+        ClientCommand::Rotate { name, request_id } => ("/v1/clients/rotate", name, request_id),
     };
-    run_admin_cli(socket, path, query).await
+    run_admin_cli(
+        socket,
+        "POST",
+        path,
+        query,
+        Some(request_id.unwrap_or_else(new_request_id)),
+    )
+    .await
 }
 
 pub(crate) async fn run_token_cli(socket: &str, cmd: TokenCommand) -> Result<()> {
     match cmd {
-        TokenCommand::List => run_admin_cli(socket, "/v1/tokens", String::new()).await,
+        TokenCommand::List => run_admin_cli(socket, "GET", "/v1/tokens", String::new(), None).await,
     }
 }
 
-async fn run_admin_cli(socket: &str, path: &str, query: String) -> Result<()> {
+async fn run_admin_cli(
+    socket: &str,
+    method: &str,
+    path: &str,
+    query: String,
+    request_id: Option<String>,
+) -> Result<()> {
     let target = if query.is_empty() {
         path.to_string()
     } else {
         format!("{path}?name={}", percent_encode(&query))
     };
     let mut stream = UnixStream::connect(socket).await?;
-    let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let idempotency_header = request_id
+        .map(|request_id| format!("Idempotency-Key: {request_id}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{idempotency_header}Content-Length: 0\r\n\r\n"
+    );
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
@@ -100,6 +129,33 @@ fn percent_encode(value: &str) -> String {
         .collect()
 }
 
+fn new_request_id() -> String {
+    hex::encode(rand::random::<[u8; 16]>())
+}
+
+fn parse_idempotency_key(request: &str) -> Result<Option<String>> {
+    let Some(value) = request_header(request, "Idempotency-Key") else {
+        return Ok(None);
+    };
+    if value.is_empty()
+        || value.len() > MAX_IDEMPOTENCY_KEY_LEN
+        || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        anyhow::bail!("invalid Idempotency-Key")
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    let head = request
+        .split_once("\r\n\r\n")
+        .map_or(request, |(head, _)| head);
+    head.lines().skip(1).find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
 pub(crate) async fn handle_admin_request(
     request: &str,
     svc: &crate::control::service::ControlService,
@@ -122,26 +178,74 @@ pub(crate) async fn handle_admin_request(
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or("");
-    let result = match (method, path, name.as_deref()) {
+    let mutation = match (method, path, name.as_deref()) {
         ("POST", "/v1/config/override", None) => match serde_json::from_str(body) {
-            Ok(operation) => svc
-                .apply_config_override(&operation)
-                .await
-                .map(|_| "ok".into()),
+            Ok(operation) => Ok(Some(
+                crate::control::service::AdminMutation::ApplyConfigOverride(operation),
+            )),
             Err(error) => Err(anyhow::anyhow!("invalid ConfigOperation: {error}")),
         },
         ("POST", "/v1/config/clear", Some(key)) => match resource {
-            Some(resource) => svc
-                .clear_config_override(&resource, key)
-                .await
-                .map(|_| "ok".into()),
+            Some(resource) => Ok(Some(
+                crate::control::service::AdminMutation::ClearConfigOverride {
+                    resource,
+                    key: key.to_string(),
+                },
+            )),
             None => Err(anyhow::anyhow!("resource is required")),
         },
-        ("GET", "/v1/clients/create", Some(name)) => svc.create_client(name).await,
-        ("GET", "/v1/clients/rotate", Some(name)) => svc.rotate_token(name).await,
-        ("GET", "/v1/clients/revoke", Some(name)) => {
-            svc.revoke_token(name).await.map(|_| "ok".into())
-        }
+        ("POST", "/v1/clients/create", Some(name)) => Ok(Some(
+            crate::control::service::AdminMutation::CreateClient(name.to_string()),
+        )),
+        ("POST", "/v1/clients/rotate", Some(name)) => Ok(Some(
+            crate::control::service::AdminMutation::RotateToken(name.to_string()),
+        )),
+        ("POST", "/v1/clients/revoke", Some(name)) => Ok(Some(
+            crate::control::service::AdminMutation::RevokeToken(name.to_string()),
+        )),
+        _ => Ok(None),
+    };
+    let mutation = match mutation {
+        Ok(mutation) => mutation,
+        Err(error) => return (400, error.to_string()),
+    };
+    if let Some(mutation) = mutation {
+        let request_id = match parse_idempotency_key(request) {
+            Ok(Some(request_id)) => request_id,
+            Ok(None) => {
+                return (
+                    428,
+                    "Idempotency-Key is required for admin mutations".into(),
+                )
+            }
+            Err(error) => return (400, error.to_string()),
+        };
+        let fingerprint = match mutation.canonical_fingerprint() {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return (400, error.to_string()),
+        };
+        return match svc
+            .execute_admin_mutation(&request_id, &fingerprint, mutation)
+            .await
+        {
+            Ok(response) => (response.status, response.body),
+            Err(error) => error
+                .downcast_ref::<crate::control::service::AdminMutationError>()
+                .map_or_else(
+                    || (503, "admin mutation unavailable".into()),
+                    |error| {
+                        let status = match error.kind() {
+                            crate::control::service::AdminErrorKind::InvalidRequest => 400,
+                            crate::control::service::AdminErrorKind::NotFound => 404,
+                            crate::control::service::AdminErrorKind::Conflict => 409,
+                        };
+                        (status, error.message().to_owned())
+                    },
+                ),
+        };
+    }
+
+    let result = match (method, path, name.as_deref()) {
         ("GET", "/v1/tokens", None) => svc.list_tokens().await.map(|tokens| {
             let mut body = String::new();
             for token in tokens {
@@ -166,7 +270,8 @@ pub(crate) async fn handle_admin_request(
     };
     match result {
         Ok(body) => (200, body),
-        Err(error) => (400, error.to_string()),
+        Err(error) if error.to_string() == "unknown admin endpoint" => (404, error.to_string()),
+        Err(error) => (503, error.to_string()),
     }
 }
 
@@ -186,4 +291,44 @@ fn percent_decode(value: &str) -> String {
         index += 1;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_idempotency_key_without_affecting_other_headers() {
+        let request =
+            "GET /v1/tokens HTTP/1.1\r\nHost: localhost\r\nIdempotency-Key: request-1\r\n\r\n";
+        assert_eq!(
+            parse_idempotency_key(request).unwrap().as_deref(),
+            Some("request-1")
+        );
+
+        let request = "GET /v1/tokens HTTP/1.1\r\nhOsT: localhost\r\n\r\n";
+        assert_eq!(parse_idempotency_key(request).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_idempotency_key() {
+        let request =
+            "POST /v1/clients/rotate?name=alpha HTTP/1.1\r\nIdempotency-Key: bad key\r\n\r\n";
+        assert!(parse_idempotency_key(request).is_err());
+    }
+
+    #[test]
+    fn canonical_fingerprint_uses_typed_mutation() {
+        let first = crate::control::service::AdminMutation::CreateClient("alpha".into());
+        let same = crate::control::service::AdminMutation::CreateClient("alpha".into());
+        let different = crate::control::service::AdminMutation::CreateClient("beta".into());
+        assert_eq!(
+            first.canonical_fingerprint().unwrap(),
+            same.canonical_fingerprint().unwrap()
+        );
+        assert_ne!(
+            first.canonical_fingerprint().unwrap(),
+            different.canonical_fingerprint().unwrap()
+        );
+    }
 }

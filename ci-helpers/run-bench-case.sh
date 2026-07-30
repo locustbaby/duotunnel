@@ -10,11 +10,11 @@ REQUESTED_FRP_HTTP_PORT="${FRP_HTTP_PORT}"
 FRP_TMP_DIR=""
 FRPS_CONFIG="ci-helpers/configs/frps.toml"
 FRPC_CONFIG="ci-helpers/configs/frpc.toml"
+source ci-helpers/cpu-contract.sh
 
-CPU_QUOTA_ARG=()
-if [ "${STRESS_CPU_QUOTA}" != "none" ] && [ "${STRESS_CPU_QUOTA}" != "unlimited" ] && [ "${STRESS_CPU_QUOTA}" != "0" ] && [ "${STRESS_CPU_QUOTA}" != "0%" ]; then
-  CPU_QUOTA_ARG=(-p CPUQuota="${STRESS_CPU_QUOTA:-100%}")
-fi
+cpu_contract_resolve "${DUOTUNNEL_BENCH_CPU_MODE:-isolate}" "${WORKER_THREADS:-0}" "${STRESS_CPU_QUOTA:-100%}"
+mapfile -t FRP_SERVER_CPU_ARGS < <(cpu_contract_scope_args frp-server)
+mapfile -t FRP_CLIENT_CPU_ARGS < <(cpu_contract_scope_args frp-client)
 
 pick_frp_ports() {
   if [ -n "${FRP_SERVER_PORT}" ] && [ -n "${FRP_HTTP_PORT}" ]; then
@@ -66,6 +66,21 @@ cleanup_frp() {
   if [ -n "${FRP_HTTP_PORT}" ]; then sudo fuser -k "${FRP_HTTP_PORT}/tcp" 2>/dev/null || true; fi
 }
 
+COLLECT_PID=""
+cleanup_case() {
+  if [ -n "${COLLECT_PID:-}" ]; then
+    kill -9 "${COLLECT_PID}" 2>/dev/null || true
+  fi
+  if [ "${IS_FRP:-0}" -eq 1 ]; then
+    cleanup_frp
+    cleanup_frp_tmp
+  fi
+}
+trap cleanup_case EXIT
+
+SERVER_LOG_PATH="/tmp/ci-server.log"
+CLIENT_LOG_PATH="/tmp/ci-client.log"
+
 port_is_listening() {
   ss -H -tln "sport = :$1" 2>/dev/null | grep -q .
 }
@@ -93,7 +108,7 @@ start_frp_stack() {
   : > /tmp/frpc.log
 
   sudo systemd-run --scope --unit=frp-server --collect \
-    "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    "${FRP_SERVER_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frps -c "${FRPS_CONFIG}" >> /tmp/frps.log 2>&1 &
 
   for i in $(seq 1 20); do
@@ -110,7 +125,7 @@ start_frp_stack() {
   fi
 
   sudo systemd-run --scope --unit=frp-client --collect \
-    "${CPU_QUOTA_ARG[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
+    "${FRP_CLIENT_CPU_ARGS[@]}" -p CPUWeight=1024 -p MemoryMax=2G -p MemoryLow=256M \
     -- frpc -c "${FRPC_CONFIG}" >> /tmp/frpc.log 2>&1 &
 
   for i in $(seq 1 20); do
@@ -130,8 +145,8 @@ start_frp_stack() {
 
 IS_FRP=0
 [[ "$CASE_NAME" == frp_* ]] && IS_FRP=1
-if [ "$IS_FRP" -eq 1 ]; then
-  trap 'cleanup_frp; cleanup_frp_tmp' EXIT
+if [ "$IS_FRP" -eq 0 ]; then
+  bash ci-helpers/warmup.sh ctld 8080 "$SERVER_LOG_PATH" "$CLIENT_LOG_PATH"
 fi
 
 if [ "$IS_FRP" -eq 1 ]; then
@@ -171,9 +186,11 @@ if [ "$IS_FRP" -eq 1 ]; then
     echo "=== frps ===" && cat /tmp/frps.log || true
     echo "=== frpc ===" && cat /tmp/frpc.log || true
     cleanup_frp_tmp
-    exit 0
+    exit 1
   fi
 fi
+
+bash ci-helpers/benchmark-env.sh configure "$CASE_NAME" "$SERVER_LOG_PATH" "$CLIENT_LOG_PATH"
 
 python3 ci-helpers/bench-tool.py collect 1 > "/tmp/collect-${CASE_NAME}.jsonl" 2>/dev/null &
 echo $! > "/tmp/collect-${CASE_NAME}.pid"
@@ -183,6 +200,8 @@ if [ "${DUOTUNNEL_COLLECT_RESOURCE_METRICS:-1}" = "0" ] || [ "${DUOTUNNEL_COLLEC
   kill -9 "${COLLECT_PID}" 2>/dev/null || true
   rm -f "/tmp/collect-${CASE_NAME}.jsonl" "/tmp/collect-${CASE_NAME}.pid"
   COLLECT_ENABLED=0
+else
+  bash ci-helpers/benchmark-env.sh pin-pid "$CASE_NAME" "$COLLECT_PID" 2>/dev/null || true
 fi
 
 K6_ENV=(
@@ -195,7 +214,17 @@ if [ -n "${K6_CORE_STRESS_RATE}" ]; then
   K6_ENV+=(-e K6_CORE_STRESS_RATE="${K6_CORE_STRESS_RATE}")
 fi
 
-(cd ci-helpers/k6 && k6 run "${K6_ENV[@]}" bench.js)
+K6_START_MS=$(date +%s%3N)
+set +e
+(cd ci-helpers/k6 && bash ../../ci-helpers/benchmark-env.sh run-load "$CASE_NAME" k6 run "${K6_ENV[@]}" bench.js)
+K6_STATUS=$?
+set -e
+K6_END_MS=$(date +%s%3N)
+
+python3 ci-helpers/bench-tool.py attach \
+  --result "/tmp/bench-results-${CASE_NAME}.json" \
+  --metadata "/tmp/benchmark-snapshot-${CASE_NAME}.json" \
+  --case-name "$CASE_NAME"
 
 if [ "${COLLECT_ENABLED}" = "1" ]; then
   kill -9 "$(cat "/tmp/collect-${CASE_NAME}.pid" 2>/dev/null)" 2>/dev/null || true
@@ -203,7 +232,8 @@ if [ "${COLLECT_ENABLED}" = "1" ]; then
 
   python3 ci-helpers/bench-tool.py parse \
     --input  "/tmp/collect-${CASE_NAME}.jsonl" \
-    --k6-offset 0 \
+    --k6-start-ms "${K6_START_MS}" \
+    --k6-end-ms "${K6_END_MS}" \
     --output "/tmp/resource-${CASE_NAME}.json" || true
 
   if [ -s "/tmp/resource-${CASE_NAME}.json" ] && [ -s "/tmp/bench-results-${CASE_NAME}.json" ]; then
@@ -212,6 +242,7 @@ if [ "${COLLECT_ENABLED}" = "1" ]; then
       --resources "/tmp/resource-${CASE_NAME}.json" \
       --case-name "${CASE_NAME}" || true
   fi
+  COLLECT_PID=""
 fi
 
 if [ "$IS_FRP" -eq 1 ]; then
@@ -219,3 +250,20 @@ if [ "$IS_FRP" -eq 1 ]; then
   wait_for_frp_ports_free || true
   cleanup_frp_tmp
 fi
+
+GATE_ARGS=(
+  --result "/tmp/bench-results-${CASE_NAME}.json"
+  --output "/tmp/benchmark-gate-${CASE_NAME}.json"
+)
+if [ "${DUOTUNNEL_BENCHMARK_REQUIRE_COMPARABLE:-1}" = "1" ]; then
+  GATE_ARGS+=(--require-comparable)
+fi
+MAX_DROPPED_ITERATIONS="${DUOTUNNEL_BENCHMARK_MAX_DROPPED_ITERATIONS:-3000}"
+if [ "$MAX_DROPPED_ITERATIONS" != "-1" ]; then
+  GATE_ARGS+=(--max-dropped-iterations "$MAX_DROPPED_ITERATIONS")
+fi
+if ! python3 ci-helpers/bench-tool.py gate "${GATE_ARGS[@]}"; then
+  exit 1
+fi
+
+exit "$K6_STATUS"

@@ -77,7 +77,7 @@ SQLite directly.
 
 `RoutingSnapshot` is immutable per version: HTTP vhost routers per listener port, `TunnelManagement`, `ServerEgressMap`, egress vhost allowlist. Hot reload **replaces the whole snapshot** via `ArcSwap::store`.
 
-Client selection: `ClientRegistry::select_healthy(preferred_shard)` → P2C over inflight load per shard (`duotunnel-server/ingress/registry.rs`).
+Client selection: `ClientRegistry::select_healthy(preferred_shard)` rotates the shard start, selects the lowest-inflight candidate from every shard, and uses the rotated order to break ties (`duotunnel-server/ingress/registry.rs`). This preserves sharded mutation snapshots while preventing a fixed preferred shard from monopolizing a group.
 
 ---
 
@@ -189,8 +189,9 @@ Client config is **not** pushed over watch; it is embedded in `LoginResp.config`
 
 ### Auth
 
-- Standalone: `AuthStore` (SQLite) validates `Login.token` at QUIC handshake.
-- Managed: `LocalTokenCache` synced from ctld; `revocation_tx` broadcast for forced disconnect.
+- Unified control-plane deployment: `LocalTokenCache` synced from ctld validates
+  `Login.token` at the QUIC handshake; `revocation_tx` broadcasts forced
+  disconnects. The server has no standalone/local SQLite authority mode.
 
 ---
 

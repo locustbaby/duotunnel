@@ -1,15 +1,22 @@
 use crate::bootstrap::{cli, CtldBootstrap};
-use crate::control::layer::{ConfigSource, YamlConfigSource};
+use crate::control::layer::{ConfigSource, SqliteConfigSource, YamlConfigSource};
 use crate::control::revision::SqliteControlRevisionStore;
-use crate::control::service::ControlService;
+use crate::control::service::{ControlService, DegradedSource};
 use crate::control::token::cache::{SqliteTokenCacheProvider, TokenCacheProvider};
 use crate::control::watch::WatchServer;
 use crate::storage::sqlite::{open_sqlite_pool, SqliteAuthStore};
 use crate::storage::sqlite_rules::SqliteRuleStore;
 use anyhow::Result;
+use figment::{
+    providers::{Format, Yaml},
+    Figment,
+};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::sync::oneshot;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -23,6 +30,7 @@ impl CtldApp {
     }
 
     pub(crate) async fn run(self) -> Result<()> {
+        let config_path = self.args.config.clone();
         let bootstrap = CtldBootstrap::from_args(self.args)?;
         let cfg = bootstrap.config();
 
@@ -40,30 +48,184 @@ impl CtldApp {
         let ready = Arc::new(AtomicBool::new(false));
         match bootstrap.command().cloned().unwrap_or(cli::Command::Serve) {
             cli::Command::Serve => {
-                let yaml_source = configured_yaml_source(cfg).await?;
-                let svc = build_control_service(cfg, yaml_source.as_ref()).await?;
-                if let Some(source) = yaml_source {
+                let legacy_server_config = configured_legacy_server_config_path(&config_path)?;
+                let yaml_source =
+                    configured_yaml_source(cfg, legacy_server_config.as_deref()).await?;
+                let (svc, sqlite_source) = build_control_service(
+                    cfg,
+                    yaml_source.as_ref(),
+                    legacy_server_config.is_some(),
+                )
+                .await?;
+                {
                     let svc_ref = Arc::clone(&svc);
-                    let mut changes = source.subscribe();
+                    let mut changes = sqlite_source.subscribe();
+                    let svc_degraded = Arc::clone(&svc);
+                    let mut degraded = sqlite_source.subscribe_degraded();
+                    tokio::spawn(async move {
+                        while degraded.changed().await.is_ok() {
+                            if *degraded.borrow() {
+                                if let Err(error) = svc_degraded
+                                    .set_source_degraded(DegradedSource::Sqlite, true)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "failed to persist degraded SQLite source state"
+                                    );
+                                }
+                            } else if let Err(error) = svc_degraded
+                                .set_source_degraded(DegradedSource::Sqlite, false)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %error,
+                                    "failed to clear degraded SQLite source state"
+                                );
+                            }
+                        }
+                    });
                     tokio::spawn(async move {
                         while changes.changed().await.is_ok() {
-                            let layer = changes.borrow().clone();
-                            if let Err(error) = svc_ref.apply_yaml_layer(&layer).await {
-                                tracing::warn!(error = %error, "failed to apply updated YAML layer");
+                            let mut layer = changes.borrow().clone();
+                            let mut backoff = std::time::Duration::from_secs(1);
+                            loop {
+                                match svc_ref.apply_sqlite_layer(&layer).await {
+                                    Ok(_) => break,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            error = %error,
+                                            backoff_secs = backoff.as_secs(),
+                                            "failed to apply updated SQLite source layer; retrying"
+                                        );
+                                        let sleep = tokio::time::sleep(backoff);
+                                        tokio::pin!(sleep);
+                                        tokio::select! {
+                                            changed = changes.changed() => {
+                                                if changed.is_err() {
+                                                    return;
+                                                }
+                                                let next = changes.borrow().clone();
+                                                backoff = std::time::Duration::from_secs(1);
+                                                layer = next;
+                                            }
+                                            _ = &mut sleep => {
+                                                backoff =
+                                                    (backoff * 2).min(std::time::Duration::from_secs(30));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     });
                 }
-                let ready_state = Arc::clone(&ready);
-                let svc_ref = Arc::clone(&svc);
-                tokio::spawn(run_admin_server(cfg.admin_socket.clone(), Arc::clone(&svc)));
+                if let Some(source) = yaml_source {
+                    let svc_ref = Arc::clone(&svc);
+                    let mut changes = source.subscribe();
+                    let svc_degraded = Arc::clone(&svc);
+                    let mut degraded = source.subscribe_degraded();
+                    tokio::spawn(async move {
+                        while degraded.changed().await.is_ok() {
+                            if *degraded.borrow() {
+                                if let Err(error) = svc_degraded
+                                    .set_source_degraded(DegradedSource::Yaml, true)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "failed to persist degraded YAML state"
+                                    );
+                                }
+                            } else if let Err(error) = svc_degraded
+                                .set_source_degraded(DegradedSource::Yaml, false)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %error,
+                                    "failed to clear degraded YAML source state"
+                                );
+                            }
+                        }
+                    });
+                    tokio::spawn(async move {
+                        while changes.changed().await.is_ok() {
+                            let mut layer = changes.borrow().clone();
+                            let mut backoff = std::time::Duration::from_secs(1);
+                            loop {
+                                match svc_ref.apply_yaml_layer(&layer).await {
+                                    Ok(_) => {
+                                        if let Err(error) = svc_ref
+                                            .set_source_degraded(DegradedSource::Yaml, false)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                error = %error,
+                                                "failed to clear degraded YAML state"
+                                            );
+                                        }
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            error = %error,
+                                            backoff_secs = backoff.as_secs(),
+                                            "failed to apply updated YAML layer; retrying"
+                                        );
+                                        if let Err(mark_error) = svc_ref
+                                            .set_source_degraded(DegradedSource::Yaml, true)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                error = %mark_error,
+                                                "failed to persist degraded YAML state"
+                                            );
+                                        }
+                                        let sleep = tokio::time::sleep(backoff);
+                                        tokio::pin!(sleep);
+                                        tokio::select! {
+                                            changed = changes.changed() => {
+                                                if changed.is_err() {
+                                                    return;
+                                                }
+                                                layer = changes.borrow().clone();
+                                                backoff = std::time::Duration::from_secs(1);
+                                            }
+                                            _ = &mut sleep => {
+                                                backoff =
+                                                    (backoff * 2).min(std::time::Duration::from_secs(30));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                let addr: SocketAddr = cfg.watch_addr.parse()?;
+                let watch_listener = TcpListener::bind(addr).await?;
+
+                let (admin_ready_tx, admin_ready_rx) = oneshot::channel();
+                tokio::spawn(run_admin_server(
+                    cfg.admin_socket.clone(),
+                    Arc::clone(&svc),
+                    admin_ready_tx,
+                ));
                 if let Some(port) = cfg.metrics_port {
-                    tokio::spawn(run_healthz_server(port, ready_state, svc_ref));
+                    let (health_ready_tx, health_ready_rx) = oneshot::channel();
+                    tokio::spawn(run_healthz_server(
+                        port,
+                        Arc::clone(&ready),
+                        health_ready_tx,
+                    ));
+                    await_ready(admin_ready_rx, "admin socket").await?;
+                    await_ready(health_ready_rx, "healthz").await?;
+                } else {
+                    await_ready(admin_ready_rx, "admin socket").await?;
                 }
                 ready.store(true, Ordering::Release);
-                let addr: SocketAddr = cfg.watch_addr.parse()?;
                 WatchServer::new(Arc::clone(&svc), addr, cfg.watch_token.clone())
-                    .run()
+                    .run_with_listener(watch_listener)
                     .await?;
             }
             cli::Command::Client(cmd) => {
@@ -81,7 +243,8 @@ impl CtldApp {
 async fn build_control_service(
     cfg: &crate::bootstrap::config::Config,
     yaml_source: Option<&Arc<YamlConfigSource>>,
-) -> Result<Arc<ControlService>> {
+    legacy_server_config_source: bool,
+) -> Result<(Arc<ControlService>, Arc<SqliteConfigSource>)> {
     let database_url = configured_database_url(cfg);
     let pool = open_sqlite_pool(database_url, 8).await?;
 
@@ -90,7 +253,13 @@ async fn build_control_service(
 
     let rule_store_inner = SqliteRuleStore::new(pool.clone());
     rule_store_inner.migrate().await?;
-    crate::control::layer::initialize_sqlite_layer(&pool, &rule_store_inner).await?;
+    crate::control::layer::initialize_sqlite_layer(
+        &pool,
+        &rule_store_inner,
+        legacy_server_config_source,
+    )
+    .await?;
+    let sqlite_source = SqliteConfigSource::new(pool.clone()).await?;
 
     let auth_store: Arc<dyn crate::storage::AuthStore> = Arc::new(auth_store_inner);
     let rule_store: Arc<dyn crate::storage::RuleStore> = Arc::new(rule_store_inner);
@@ -110,11 +279,17 @@ async fn build_control_service(
         let layer = source.load().await?;
         svc.apply_yaml_layer(&layer).await?;
     }
-    Ok(svc)
+    let sqlite_layer = sqlite_source.load().await?;
+    svc.apply_sqlite_layer(&sqlite_layer).await?;
+    if yaml_source.is_some() {
+        svc.do_publish().await?;
+    }
+    Ok((svc, sqlite_source))
 }
 
 async fn configured_yaml_source(
     cfg: &crate::bootstrap::config::Config,
+    legacy_server_config: Option<&str>,
 ) -> Result<Option<Arc<YamlConfigSource>>> {
     let yaml = cfg
         .config
@@ -122,12 +297,31 @@ async fn configured_yaml_source(
         .iter()
         .filter(|source| source.kind.eq_ignore_ascii_case("yaml"))
         .max_by_key(|source| source.priority);
-    let Some(spec) = yaml else { return Ok(None) };
+    let Some(spec) = yaml else {
+        return match legacy_server_config {
+            Some(path) => Ok(Some(YamlConfigSource::new(path).await?)),
+            None => Ok(None),
+        };
+    };
     let path = spec
         .path
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("YAML config source requires path"))?;
     Ok(Some(YamlConfigSource::new(path).await?))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LegacyCtldConfig {
+    #[serde(default)]
+    server_config: Option<String>,
+}
+
+fn configured_legacy_server_config_path(config_path: &str) -> Result<Option<String>> {
+    let legacy: LegacyCtldConfig = Figment::new().merge(Yaml::file(config_path)).extract()?;
+    Ok(legacy
+        .server_config
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty()))
 }
 
 fn configured_database_url(cfg: &crate::bootstrap::config::Config) -> &str {
@@ -140,18 +334,33 @@ fn configured_database_url(cfg: &crate::bootstrap::config::Config) -> &str {
         .unwrap_or(&cfg.database_url)
 }
 
-async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, svc: Arc<ControlService>) {
+async fn await_ready(
+    receiver: oneshot::Receiver<std::result::Result<(), String>>,
+    component: &str,
+) -> Result<()> {
+    receiver
+        .await
+        .map_err(|_| anyhow::anyhow!("{component} startup task exited before binding"))?
+        .map_err(|error| anyhow::anyhow!("{component} failed to bind: {error}"))
+}
+
+async fn run_healthz_server(
+    port: u16,
+    ready: Arc<AtomicBool>,
+    ready_sender: oneshot::Sender<std::result::Result<(), String>>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     let addr = format!("0.0.0.0:{port}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(error) => {
+            let _ = ready_sender.send(Err(error.to_string()));
             tracing::warn!(addr = %addr, error = %error, "failed to bind healthz server");
             return;
         }
     };
+    let _ = ready_sender.send(Ok(()));
 
     info!(addr = %addr, "healthz server started");
     loop {
@@ -159,7 +368,6 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, svc: Arc<ControlS
             continue;
         };
         let ready_state = Arc::clone(&ready);
-        let svc_ref = Arc::clone(&svc);
         tokio::spawn(async move {
             let mut buf = [0u8; 256];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -170,10 +378,6 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, svc: Arc<ControlS
                 } else {
                     ("503 Service Unavailable", "not ready\n")
                 }
-            } else if req.starts_with("POST /api/reload") {
-                tracing::info!("manual reload triggered via api");
-                svc_ref.publish();
-                ("200 OK", "reloaded\n")
             } else {
                 ("404 Not Found", "not found\n")
             };
@@ -188,28 +392,60 @@ async fn run_healthz_server(port: u16, ready: Arc<AtomicBool>, svc: Arc<ControlS
     }
 }
 
-async fn run_admin_server(socket_path: String, svc: Arc<ControlService>) {
+async fn run_admin_server(
+    socket_path: String,
+    svc: Arc<ControlService>,
+    ready_sender: oneshot::Sender<std::result::Result<(), String>>,
+) {
     use tokio::io::AsyncWriteExt;
-    use tokio::net::UnixListener;
 
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            let _ = ready_sender.send(Err(error.to_string()));
+            return;
+        }
     }
     if std::path::Path::new(&socket_path).exists() {
-        let _ = tokio::fs::remove_file(&socket_path).await;
+        match UnixStream::connect(&socket_path).await {
+            Ok(_) => {
+                let _ =
+                    ready_sender.send(Err("another ctld admin socket is already active".into()));
+                tracing::warn!(path = %socket_path, "another ctld admin socket is already active");
+                return;
+            }
+            Err(connect_error) => {
+                if let Err(remove_error) = tokio::fs::remove_file(&socket_path).await {
+                    tracing::warn!(
+                        path = %socket_path,
+                        connect_error = %connect_error,
+                        remove_error = %remove_error,
+                        "stale ctld admin socket could not be removed"
+                    );
+                    let _ = ready_sender.send(Err(remove_error.to_string()));
+                    return;
+                }
+            }
+        }
     }
     let listener = match UnixListener::bind(&socket_path) {
         Ok(listener) => listener,
         Err(error) => {
+            let _ = ready_sender.send(Err(error.to_string()));
             tracing::warn!(path = %socket_path, error = %error, "failed to bind ctld admin socket");
             return;
         }
     };
-    let _ = tokio::fs::set_permissions(
+    if let Err(error) = tokio::fs::set_permissions(
         &socket_path,
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
     )
-    .await;
+    .await
+    {
+        let _ = ready_sender.send(Err(error.to_string()));
+        let _ = tokio::fs::remove_file(&socket_path).await;
+        return;
+    }
+    let _ = ready_sender.send(Ok(()));
     info!(path = %socket_path, "ctld admin socket started");
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
@@ -223,11 +459,25 @@ async fn run_admin_server(socket_path: String, svc: Arc<ControlService>) {
             };
             let response = format!(
                 "HTTP/1.1 {status} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                if status == 200 { "OK" } else { "Bad Request" },
+                admin_reason_phrase(status),
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes()).await;
         });
+    }
+}
+
+fn admin_reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        409 => "Conflict",
+        410 => "Gone",
+        428 => "Precondition Required",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "Unknown Status",
     }
 }
 

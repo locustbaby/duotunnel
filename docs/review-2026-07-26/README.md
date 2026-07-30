@@ -32,6 +32,8 @@
 | 12 | [商业产品对比与缺口](./12-commercial-landscape-gap.md) | cloudflared/ngrok/frp 等对比，DuoTunnel 缺哪些能力、哪些该补 |
 | 13 | [协议版本化与运维补遗](./13-protocol-versioning-and-ops-addendum.md) | 完整性补遗：线协议无版本协商（阻碍滚动升级）+ 供应链/日志隐私 |
 | 14 | [性能、健壮性与长期稳定性补遗](./14-performance-robustness-stability-addendum.md) | 三轮静态复核：控制面一致性、生命周期/readiness/drain、确定性能热点与证据门槛 |
+| 15 | [实施任务拆分与当前进度](./15-task-breakdown.md) | 基于当前 review 分支工作树重新核对已实现项、待验收项、依赖和提交顺序 |
+| 16 | [工业级实施设计](./16-industrial-implementation-design.md) | 配置事务、admin socket、Delta/RuntimeGeneration、dial9 观测边界和验收分层 |
 
 ---
 
@@ -138,7 +140,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 
 | 项 | 证据 | 方案 |
 | --- | --- | --- |
-| ✅ control `watch` 可跳过相对 Patch，server 无 gap/hash 校验 | `service.rs`、`watch.rs`、`control_client.rs` | V1 始终发完整快照；V2 持久 epoch/sequence、canonical hash、Applied ACK 与 LKG |
+| ✅ control `watch` 可跳过相对 Patch，server 无 gap/hash 校验 | `service.rs`、`watch.rs`、`control_client.rs` | 统一 numeric wire envelope；Snapshot/Delta 使用持久 epoch/sequence、canonical hash、Applied ACK 与 LKG，不保留业务 V1/V2 双栈 |
 | ✅ revoke/rotate 不关闭已认证连接 | `handlers/quic.rs`、`registry.rs` | session 固定 token identity；安全写门内先 fence/revoke，再发布新 generation |
 | ✅ 空 body 非幂等请求可在 ambiguous failure 后重放 | `tls/mod.rs`、`h2c/mod.rs` | 仅 allowlist 的安全 method + 空 body 可自动重试 |
 | ✅ inflight slot 提前复用，旧 guard 可修改新连接计数 | `connection_handle.rs`、`inflight.rs`、`registry.rs` | owned `ConnectionState`，retire 与容量释放 exactly-once |
@@ -153,7 +155,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 | owned ConnectionState + reliable unregister | 14 §4.1/§6.1, D9 §5 | 消除 slot ABA 与容量/生命周期混用 |
 | duotunnel-client + duotunnel-server 聚合 readiness | 14 §4.3, D9 §6 | 避免 last-writer-wins 与关键组件假 ready |
 | UDP/stream 解耦 + session/task/queue 上限 | 14 §6.2, D9 §8, D10 §2.3 | 同时是稳定性与性能 P0 |
-| RuntimeGeneration + control V2/LKG + revoke fence | D9 §2-§4 | 防止配置撕裂、回滚、丢更新和安全状态延迟生效 |
+| RuntimeGeneration + numeric control wire/LKG + revoke fence | D9 §2-§4 | 防止配置撕裂、回滚、丢更新和安全状态延迟生效；不恢复业务 V1/V2 双栈 |
 | listener 全量 prepare/commit + protocol/QUIC typed drain | D9 §4/§7 | 防止部分监听提交、drain 期间新 work 和无限等待 |
 | 跨代 backend health + HTTP/TCP/DNS 被动隔离 | D9 §2, D10 §2 | reload 不清空故障状态，group 间不互相误伤 |
 

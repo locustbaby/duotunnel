@@ -15,9 +15,9 @@ pub use auth::{hash_token_bytes, AuthError, AuthResult};
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 pub use egress::http::{
     create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
-    forward_http, H2cClient, HttpClientParams,
+    forward_http, forward_http_with_buffer_params, H2cClient, HttpClientParams,
 };
-pub use engine::bridge::relay_quic_to_tcp;
+pub use engine::bridge::{relay_quic_to_tcp, relay_quic_to_tcp_with_buffer_size};
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
 pub use infra::dns_cache::EgressDnsCache;
 pub use infra::metrics::{
@@ -37,7 +37,9 @@ pub use lb::inflight::{
     pick_p2c_inflight, ConnectionState, InflightGuard, InflightTable,
 };
 pub use lb::overload::{
-    maybe_slow_path, BackoffStrategy, OverloadLimits, OverloadMode as SharedOverloadMode,
+    maybe_slow_path, AdmissionConfigError, AdmissionController, AdmissionLimits, AdmissionPermit,
+    AdmissionRejectScope, AdmissionRejected, AdmissionStats, BackoffStrategy, OverloadLimits,
+    OverloadMode as SharedOverloadMode,
 };
 pub use lb::shard::{
     pick_from_preferred_shards, pick_p2c_inflight_owned, stable_shard_index,

@@ -9,10 +9,22 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    relay_with_buffer_size(stream_a, stream_b, DEFAULT_RELAY_BUF_SIZE).await
+}
+
+pub async fn relay_with_buffer_size<A, B>(
+    stream_a: A,
+    stream_b: B,
+    buffer_size: usize,
+) -> std::io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
     let (a_read, a_write) = tokio::io::split(stream_a);
     let (b_read, b_write) = tokio::io::split(stream_b);
-    let a_to_b = copy_buffered_then_shutdown(a_read, b_write, DEFAULT_RELAY_BUF_SIZE);
-    let b_to_a = copy_buffered_then_shutdown(b_read, a_write, DEFAULT_RELAY_BUF_SIZE);
+    let a_to_b = copy_buffered_then_shutdown(a_read, b_write, buffer_size);
+    let b_to_a = copy_buffered_then_shutdown(b_read, a_write, buffer_size);
     match tokio::try_join!(a_to_b, b_to_a) {
         Ok((sent, recv)) => {
             debug!("relay completed: sent={:?}, recv={:?}", sent, recv);
@@ -26,7 +38,19 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let bytes = copy_buffered_then_shutdown(reader, writer, DEFAULT_RELAY_BUF_SIZE).await?;
+    relay_unidirectional_with_buffer_size(reader, writer, DEFAULT_RELAY_BUF_SIZE).await
+}
+
+pub async fn relay_unidirectional_with_buffer_size<R, W>(
+    reader: R,
+    writer: W,
+    buffer_size: usize,
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let bytes = copy_buffered_then_shutdown(reader, writer, buffer_size).await?;
     trace!("unidirectional relay completed: {} bytes", bytes);
     Ok(bytes)
 }
@@ -48,15 +72,32 @@ impl QuicBiStream {
 pub async fn relay_with_first_data(
     quic_recv: quinn::RecvStream,
     quic_send: quinn::SendStream,
+    tcp_stream: tokio::net::TcpStream,
+    first_data: Option<&[u8]>,
+) -> anyhow::Result<(u64, u64)> {
+    relay_with_first_data_and_buffer_size(
+        quic_recv,
+        quic_send,
+        tcp_stream,
+        first_data,
+        DEFAULT_RELAY_BUF_SIZE,
+    )
+    .await
+}
+
+pub async fn relay_with_first_data_and_buffer_size(
+    quic_recv: quinn::RecvStream,
+    quic_send: quinn::SendStream,
     mut tcp_stream: tokio::net::TcpStream,
     first_data: Option<&[u8]>,
+    buffer_size: usize,
 ) -> anyhow::Result<(u64, u64)> {
     if let Some(data) = first_data {
         tcp_stream.write_all(data).await?;
     }
     let (tcp_read, tcp_write) = tcp_stream.into_split();
     let quic_to_tcp = copy_quic_to_shutdown(quic_recv, tcp_write);
-    let tcp_to_quic = copy_buffered_then_finish(tcp_read, quic_send, DEFAULT_RELAY_BUF_SIZE);
+    let tcp_to_quic = copy_buffered_then_finish(tcp_read, quic_send, buffer_size);
     match tokio::try_join!(quic_to_tcp, tcp_to_quic) {
         Ok((sent, recv)) => {
             debug!("quic-tcp relay: quic->tcp={:?}, tcp->quic={:?}", sent, recv);
@@ -71,12 +112,62 @@ pub async fn relay_quic_to_tcp(
     quic_send: quinn::SendStream,
     tcp_stream: tokio::net::TcpStream,
 ) -> anyhow::Result<(u64, u64)> {
-    relay_with_first_data(quic_recv, quic_send, tcp_stream, None).await
+    relay_quic_to_tcp_with_buffer_size(quic_recv, quic_send, tcp_stream, DEFAULT_RELAY_BUF_SIZE)
+        .await
+}
+
+pub async fn relay_quic_to_tcp_with_buffer_size(
+    quic_recv: quinn::RecvStream,
+    quic_send: quinn::SendStream,
+    tcp_stream: tokio::net::TcpStream,
+    buffer_size: usize,
+) -> anyhow::Result<(u64, u64)> {
+    relay_with_first_data_and_buffer_size(quic_recv, quic_send, tcp_stream, None, buffer_size).await
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct CapacityReader {
+        observed: Arc<AtomicUsize>,
+        emitted: bool,
+    }
+
+    impl AsyncRead for CapacityReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.emitted {
+                return Poll::Ready(Ok(()));
+            }
+            self.observed.store(buf.remaining(), Ordering::Release);
+            buf.put_slice(b"configured relay buffer");
+            self.emitted = true;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn non_default_relay_buffer_reaches_copy_reader() {
+        let observed = Arc::new(AtomicUsize::new(0));
+        let reader = CapacityReader {
+            observed: observed.clone(),
+            emitted: false,
+        };
+        let count = relay_unidirectional_with_buffer_size(reader, tokio::io::sink(), 131_072)
+            .await
+            .expect("relay should complete");
+        assert_eq!(count, b"configured relay buffer".len() as u64);
+        assert!(observed.load(Ordering::Acquire) >= 131_072);
+    }
+
     #[tokio::test]
     async fn test_relay_unidirectional() {
         let data = b"hello world";

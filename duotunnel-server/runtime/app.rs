@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::bootstrap::cli::{Cli, Commands};
 use crate::bootstrap::{build_server_state, ServerBootstrap, ServerState};
-use crate::ingress::{handlers, shutdown_all_listeners, sync_listeners};
+use crate::ingress::{handlers, shutdown_all_listeners, sync_current_listeners};
 use crate::runtime;
 use crate::runtime::metrics;
 use crate::runtime::supervisor::{
@@ -67,28 +67,34 @@ async fn run_server(bootstrap: ServerBootstrap) -> Result<()> {
     }
 
     let runtime = ServerRuntime::build(&bootstrap).await?;
-    let signal_shutdown = runtime.shutdown.clone();
-    runtime::spawn_task(async move {
-        wait_for_shutdown_signal().await;
-        info!("Received shutdown signal, draining server...");
-        signal_shutdown.cancel();
-    });
     let bootstrap = Arc::new(bootstrap);
     let supervisor = start_supervisor(bootstrap.clone(), &runtime);
     let health = runtime.state.health().clone();
     let mut proxy = Box::pin(proxy_main(runtime.state.clone(), runtime.shutdown.clone()));
+    let mut signal = Box::pin(wait_for_shutdown_signal());
+    let graceful_shutdown;
     let result = tokio::select! {
-        result = &mut proxy => result,
+        result = &mut proxy => {
+            graceful_shutdown = true;
+            result
+        },
         failure = health.wait_for_failure() => {
-            runtime.shutdown.cancel();
+            graceful_shutdown = true;
+            enter_draining(&runtime.state, &runtime.shutdown);
             let _ = proxy.await;
             Err(anyhow::anyhow!("critical component failed: {failure}"))
         }
+        _ = &mut signal => {
+            graceful_shutdown = true;
+            info!("Received shutdown signal, draining server...");
+            enter_draining(&runtime.state, &runtime.shutdown);
+            proxy.await
+        }
     };
-    if runtime.shutdown.is_cancelled() {
+    enter_draining(&runtime.state, &runtime.shutdown);
+    if graceful_shutdown {
         wait_for_shutdown_drain("server").await;
     }
-    runtime.shutdown.cancel();
     supervisor.shutdown();
     result
 }
@@ -109,32 +115,51 @@ fn start_supervisor(bootstrap: Arc<ServerBootstrap>, runtime: &ServerRuntime) ->
 }
 
 async fn proxy_main(state: Arc<ServerState>, shutdown: CancellationToken) -> Result<()> {
-    let listeners = state.ingress_listeners();
-    sync_listeners(&state, &listeners).await?;
+    let mut listeners_shutdown = false;
+    let result = async {
+        sync_current_listeners(&state).await?;
 
-    let quic_state = state.clone();
-    let quic_shutdown = shutdown.clone();
-    let mut quic_handle = runtime::spawn_task(async move {
-        handlers::quic::run_quic_server(quic_state, quic_shutdown).await
-    });
+        let quic_state = state.clone();
+        let quic_shutdown = shutdown.clone();
+        let mut quic_handle = runtime::spawn_task(async move {
+            handlers::quic::run_quic_server(quic_state, quic_shutdown).await
+        });
 
-    tokio::select! {
-        r = &mut quic_handle => {
-            r??;
-            shutdown_all_listeners(&state).await;
-            if !shutdown.is_cancelled() {
-                anyhow::bail!("QUIC server exited unexpectedly");
+        tokio::select! {
+            result = &mut quic_handle => {
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::anyhow!("QUIC server task failed: {error}")),
+                };
+                match result {
+                    Ok(()) if shutdown.is_cancelled() => Ok(()),
+                    Ok(()) => anyhow::bail!("QUIC server exited unexpectedly"),
+                    Err(error) => Err(error),
+                }
             }
-            return Ok(());
+            _ = shutdown.cancelled() => {
+                // Stop public accepts before waiting for QUIC connections to drain.
+                shutdown_all_listeners(&state).await;
+                listeners_shutdown = true;
+                match quic_handle.await {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::anyhow!("QUIC server task failed: {error}")),
+                }
+            }
         }
-        _ = shutdown.cancelled() => {}
     }
-    // Shutdown order: stop public accepts first so the drain counters can
-    // reach zero while tunnel connections are still open; run_quic_server
-    // then drains and closes connections before closing the endpoint.
-    shutdown_all_listeners(&state).await;
-    quic_handle.await??;
-    Ok(())
+    .await;
+
+    enter_draining(&state, &shutdown);
+    if !listeners_shutdown {
+        shutdown_all_listeners(&state).await;
+    }
+    result
+}
+
+fn enter_draining(state: &ServerState, shutdown: &CancellationToken) {
+    state.health().mark_quic_bound(false);
+    shutdown.cancel();
 }
 
 async fn wait_for_shutdown_signal() {

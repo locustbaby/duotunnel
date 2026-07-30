@@ -4,6 +4,7 @@ use figment::{
     Figment,
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Config {
@@ -55,10 +56,42 @@ fn default_admin_socket() -> String {
 
 impl Config {
     pub(crate) fn load(path: &str) -> Result<Self> {
-        Ok(Figment::new()
+        let config: Self = Figment::new()
             .merge(Yaml::file(path))
             .merge(Env::prefixed("DUOTUNNEL_CTLD__").split("__"))
-            .extract()?)
+            .extract()?;
+        config.validate_sources()?;
+        Ok(config)
+    }
+
+    fn validate_sources(&self) -> Result<()> {
+        let mut kinds = HashSet::new();
+        let mut priorities = HashSet::new();
+        for source in &self.config.sources {
+            let kind = source.kind.trim().to_ascii_lowercase();
+            if !matches!(kind.as_str(), "yaml" | "sqlite") {
+                anyhow::bail!("unsupported config source type: {}", source.kind);
+            }
+            if !kinds.insert(kind.clone()) {
+                anyhow::bail!("duplicate config source type: {}", source.kind);
+            }
+            if !priorities.insert(source.priority) {
+                anyhow::bail!(
+                    "duplicate config source priority {} creates an ambiguous merge order",
+                    source.priority
+                );
+            }
+            match kind.as_str() {
+                "yaml" if source.path.as_deref().is_none_or(str::is_empty) => {
+                    anyhow::bail!("YAML config source requires path")
+                }
+                "sqlite" if source.database_url.as_deref().is_some_and(str::is_empty) => {
+                    anyhow::bail!("SQLite config source database_url must not be empty")
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn log_level(&self) -> &str {

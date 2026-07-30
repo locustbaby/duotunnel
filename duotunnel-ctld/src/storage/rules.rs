@@ -11,5 +11,6 @@ pub use duotunnel_lib::{
 #[async_trait]
 pub trait RuleStore: Send + Sync {
     async fn load_routing(&self) -> Result<RoutingData>;
+    #[cfg(test)]
     async fn save_routing(&self, data: &RoutingData) -> Result<()>;
 }

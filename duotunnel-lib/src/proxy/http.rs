@@ -2,6 +2,7 @@ use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
 use crate::protocol::driver::h1::Http1Driver;
 use crate::protocol::driver::ProtocolDriver;
+use crate::proxy::buffer_params::ProxyBufferParams;
 use crate::timeout as lazy_timeout;
 use crate::ProxyError;
 use anyhow::Result;
@@ -15,6 +16,7 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct HttpPeer {
     pub connector: SharedHttpConnector,
     pub spec: HttpPeerSpec,
+    pub buffer_params: ProxyBufferParams,
 }
 impl HttpPeer {
     pub async fn connect_inner(
@@ -52,8 +54,14 @@ impl HttpPeer {
                 return Err(anyhow::anyhow!("invalid target authority: {e}"));
             }
         };
-        let mut driver =
-            Http1Driver::new(send, recv, parsed_scheme, parsed_authority, initial_data);
+        let mut driver = Http1Driver::new_with_buffer_params(
+            send,
+            recv,
+            parsed_scheme,
+            parsed_authority,
+            initial_data,
+            &self.buffer_params,
+        );
         loop {
             let req = match lazy_timeout(KEEPALIVE_IDLE_TIMEOUT, driver.read_request()).await {
                 Ok(Ok(Some(r))) => r,

@@ -1,11 +1,11 @@
 use anyhow::Context;
 use duotunnel_lib::ctld_proto::{
     apply_config_operations, recv_config_event, send_watch_request, snapshot_content_hash,
-    ApplyResponse, ApplyStatus, ConfigEvent, ConfigSnapshot, ControlRevision, ProtoClientGroup,
-    ProtoEgressUpstreamDef, ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode,
-    VersionedConfigSnapshot, WatchRequest, CURRENT_CONTROL_PROTOCOL_VERSION,
+    ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot, ControlRevision,
+    ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule, ProtoIngressListener,
+    ProtoIngressListenerMode, VersionedConfigSnapshot, WatchRequest,
+    CURRENT_CONTROL_PROTOCOL_VERSION,
 };
-use duotunnel_lib::models::msg::{send_message, MessageType};
 use serde::{Deserialize, Serialize};
 /// Maintains the canonical ctld watch stream and applies Snapshot/Delta events.
 use std::net::SocketAddr;
@@ -59,6 +59,14 @@ const LKG_CONTROL_PROTOCOL_VERSION: u32 = CURRENT_CONTROL_PROTOCOL_VERSION as u3
 const MAX_LKG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LKG_AGE: Duration = crate::runtime::health::CONTROL_SECURITY_STALE_AFTER;
 const MAX_LKG_FUTURE_SKEW: Duration = Duration::from_secs(300);
+const LKG_DURABILITY_METRIC: &str = "duotunnel_control_lkg_durability_degraded";
+const REJECT_REASON_SNAPSHOT_INVALID: &str = "snapshot semantic validation failed";
+const REJECT_REASON_SNAPSHOT_HASH_MISMATCH: &str = "snapshot content hash mismatch";
+const REJECT_REASON_DELTA_INVALID: &str = "delta semantic validation failed";
+const REJECT_REASON_DELTA_HASH_MISMATCH: &str = "delta target content hash mismatch";
+const REJECT_REASON_LKG_PREFLIGHT: &str = "LKG preflight failed";
+const REJECT_REASON_LKG_PERSIST: &str = "LKG persistence failed";
+const REJECT_REASON_RUNTIME_APPLY: &str = "runtime apply rejected";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LastKnownGood {
@@ -77,10 +85,20 @@ struct AppliedControlState {
     content_hash: String,
 }
 
-#[derive(Default)]
 struct WatchState {
     current_snapshot: Option<ConfigSnapshot>,
     applied: Option<AppliedControlState>,
+    authority_reset_allowed: bool,
+}
+
+impl Default for WatchState {
+    fn default() -> Self {
+        Self {
+            current_snapshot: None,
+            applied: None,
+            authority_reset_allowed: true,
+        }
+    }
 }
 
 fn get_snapshot_path(config_path: &str) -> PathBuf {
@@ -89,8 +107,17 @@ fn get_snapshot_path(config_path: &str) -> PathBuf {
     p
 }
 
+#[cfg(test)]
 async fn save_snapshot_to_disk(path: &Path, lkg: &LastKnownGood) -> anyhow::Result<()> {
     let bytes = encode_validated_lkg(lkg)?;
+    save_snapshot_bytes_to_disk(path, lkg, bytes).await
+}
+
+async fn save_snapshot_bytes_to_disk(
+    path: &Path,
+    lkg: &LastKnownGood,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
     let owned_path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         if let Ok(previous) = std::fs::read(&owned_path) {
@@ -108,6 +135,37 @@ async fn save_snapshot_to_disk(path: &Path, lkg: &LastKnownGood) -> anyhow::Resu
         version = lkg.snapshot.resource_version,
         "saved snapshot to disk"
     );
+    Ok(())
+}
+
+fn prepare_lkg(
+    revision: Option<ControlRevision>,
+    content_hash: String,
+    generated_at_unix_ms: u64,
+    snapshot: ConfigSnapshot,
+) -> anyhow::Result<(LastKnownGood, Vec<u8>)> {
+    let lkg = make_lkg(revision, content_hash, generated_at_unix_ms, snapshot)?;
+    let bytes = encode_validated_lkg(&lkg)?;
+    Ok((lkg, bytes))
+}
+
+fn set_lkg_durability_degraded(degraded: bool) {
+    metrics::gauge!(LKG_DURABILITY_METRIC).set(if degraded { 1.0 } else { 0.0 });
+}
+
+async fn persist_lkg(
+    snapshot_path: &Path,
+    lkg: &LastKnownGood,
+    bytes: Vec<u8>,
+    kind: &str,
+) -> anyhow::Result<()> {
+    if let Err(error) = save_snapshot_bytes_to_disk(snapshot_path, lkg, bytes).await {
+        warn!(error = %error, kind, "LKG persistence failed after runtime apply");
+        metrics::counter!("duotunnel_control_lkg_persist_failures_total").increment(1);
+        set_lkg_durability_degraded(true);
+        return Err(error);
+    }
+    set_lkg_durability_degraded(false);
     Ok(())
 }
 
@@ -217,6 +275,7 @@ fn validate_lkg_envelope(lkg: &LastKnownGood) -> anyhow::Result<()> {
     if payload_length != lkg.payload_length {
         anyhow::bail!("LKG payload length mismatch");
     }
+    duotunnel_lib::ctld_proto::validate_config_snapshot(&lkg.snapshot)?;
     let actual_hash = snapshot_content_hash(&lkg.snapshot)?;
     if actual_hash != lkg.content_hash {
         anyhow::bail!("LKG content hash mismatch");
@@ -252,7 +311,7 @@ fn select_newer_lkg(primary: LastKnownGood, previous: LastKnownGood) -> LastKnow
         }
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
-        (Some(_), Some(_)) => Ordering::Equal,
+        (Some(_), Some(_)) => Ordering::Greater,
         _ => primary
             .snapshot
             .resource_version
@@ -323,7 +382,12 @@ async fn watch_loop(
                     resource_version = lkg.snapshot.resource_version,
                     "loaded local snapshot fallback"
                 );
-                match apply_snapshot(&lkg.snapshot, &lkg.content_hash, &state).await {
+                let epoch = lkg
+                    .revision
+                    .as_ref()
+                    .map(|revision| revision.epoch.as_str())
+                    .unwrap_or("local");
+                match apply_snapshot(&lkg.snapshot, &lkg.content_hash, epoch, &state).await {
                     Ok(()) => {
                         let age =
                             validate_lkg_timestamp(lkg.generated_at_unix_ms).unwrap_or(MAX_LKG_AGE);
@@ -402,6 +466,7 @@ async fn connect_and_watch(
         last_applied_revision: applied.and_then(|state| state.revision.clone()),
         last_applied_hash: applied.map(|state| state.content_hash.clone()),
     };
+    watch_state.authority_reset_allowed = true;
     send_watch_request(&mut writer, &req).await?;
     info!(addr = %addr, revision = ?req.last_applied_revision, "sent WatchRequest");
 
@@ -446,7 +511,10 @@ fn classify_revision(
         return RevisionDecision::Apply;
     };
     if current.epoch != incoming.epoch {
-        return RevisionDecision::Apply;
+        return RevisionDecision::Reject(format!(
+            "control revision epoch changed: incoming={} current={}",
+            incoming.epoch, current.epoch
+        ));
     }
     if incoming.sequence < current.sequence {
         return RevisionDecision::Reject(format!(
@@ -475,11 +543,34 @@ async fn handle_snapshot<W>(
 where
     W: AsyncWriteExt + Unpin,
 {
-    let actual_hash = snapshot_content_hash(&versioned.snapshot)?;
+    if let Err(error) = duotunnel_lib::ctld_proto::validate_config_snapshot(&versioned.snapshot) {
+        return reject_after_error(
+            writer,
+            &versioned.revision,
+            &versioned.content_hash,
+            REJECT_REASON_SNAPSHOT_INVALID,
+            error,
+        )
+        .await;
+    }
+    let actual_hash = match snapshot_content_hash(&versioned.snapshot) {
+        Ok(hash) => hash,
+        Err(error) => {
+            return reject_after_error(
+                writer,
+                &versioned.revision,
+                &versioned.content_hash,
+                REJECT_REASON_SNAPSHOT_INVALID,
+                error,
+            )
+            .await;
+        }
+    };
     let reject = if versioned.revision.sequence != versioned.snapshot.resource_version {
         Some("revision and snapshot version diverged".to_string())
     } else {
-        (actual_hash != versioned.content_hash).then(|| "content hash mismatch".to_string())
+        (actual_hash != versioned.content_hash)
+            .then(|| REJECT_REASON_SNAPSHOT_HASH_MISMATCH.to_string())
     };
     if let Some(reason) = reject {
         send_apply_response(
@@ -493,13 +584,25 @@ where
         anyhow::bail!(reason);
     }
 
-    match classify_revision(
-        watch_state.applied.as_ref(),
-        &versioned.revision,
-        &versioned.content_hash,
-    ) {
+    let decision = if watch_state.authority_reset_allowed
+        && watch_state
+            .applied
+            .as_ref()
+            .and_then(|applied| applied.revision.as_ref())
+            .is_some_and(|revision| revision.epoch != versioned.revision.epoch)
+    {
+        RevisionDecision::Apply
+    } else {
+        classify_revision(
+            watch_state.applied.as_ref(),
+            &versioned.revision,
+            &versioned.content_hash,
+        )
+    };
+    match decision {
         RevisionDecision::Duplicate => {
             state.health().confirm_control_freshness();
+            watch_state.authority_reset_allowed = false;
             send_apply_response(
                 writer,
                 &versioned.revision,
@@ -524,38 +627,62 @@ where
         RevisionDecision::Apply => {}
     }
 
+    let (lkg, lkg_bytes) = match prepare_lkg(
+        Some(versioned.revision.clone()),
+        versioned.content_hash.clone(),
+        versioned.generated_at_unix_ms,
+        versioned.snapshot.clone(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return reject_after_error(
+                writer,
+                &versioned.revision,
+                &versioned.content_hash,
+                REJECT_REASON_LKG_PREFLIGHT,
+                error,
+            )
+            .await;
+        }
+    };
     state.health().begin_config_apply();
-    if let Err(error) = apply_snapshot(&versioned.snapshot, &actual_hash, state).await {
+    if let Err(error) = apply_snapshot(
+        &versioned.snapshot,
+        &actual_hash,
+        &versioned.revision.epoch,
+        state,
+    )
+    .await
+    {
         state.health().fail_config_apply();
-        let reason = format!("runtime apply failed: {error}");
-        send_apply_response(
+        warn!(error = %error, "runtime rejected snapshot apply");
+        return reject_after_error(
             writer,
             &versioned.revision,
             &versioned.content_hash,
-            ApplyStatus::Rejected,
-            Some(reason),
+            REJECT_REASON_RUNTIME_APPLY,
+            error,
         )
-        .await?;
-        return Err(error);
+        .await;
+    }
+    if let Err(error) = persist_lkg(snapshot_path, &lkg, lkg_bytes, "snapshot").await {
+        state.health().hold_config_apply_fence();
+        return reject_after_error(
+            writer,
+            &versioned.revision,
+            &versioned.content_hash,
+            REJECT_REASON_LKG_PERSIST,
+            error,
+        )
+        .await;
     }
     state.health().finish_config_apply();
+    watch_state.authority_reset_allowed = false;
     watch_state.current_snapshot = Some(versioned.snapshot.clone());
     watch_state.applied = Some(AppliedControlState {
         revision: Some(versioned.revision.clone()),
         content_hash: versioned.content_hash.clone(),
     });
-
-    let lkg = make_lkg(
-        Some(versioned.revision.clone()),
-        versioned.content_hash.clone(),
-        versioned.generated_at_unix_ms,
-        versioned.snapshot.clone(),
-    )?;
-    if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
-        warn!(error = %error, "live snapshot applied but LKG persistence degraded");
-        metrics::counter!("duotunnel_control_lkg_persist_failures_total").increment(1);
-    }
-
     send_apply_response(
         writer,
         &versioned.revision,
@@ -576,101 +703,92 @@ async fn handle_delta<W>(
 where
     W: AsyncWriteExt + Unpin,
 {
-    let Some(current) = watch_state.current_snapshot.as_ref() else {
-        send_apply_response(
-            writer,
-            &delta.target_revision,
-            &delta.target_hash,
-            ApplyStatus::ResyncRequired,
-            Some("no base snapshot is applied".to_string()),
-        )
-        .await?;
-        return Ok(());
+    let candidate = match prepare_delta_candidate(
+        watch_state.current_snapshot.as_ref(),
+        watch_state.applied.as_ref(),
+        &delta,
+    ) {
+        Ok(candidate) => candidate,
+        Err(DeltaPreflightError::Resync(reason)) => {
+            send_apply_response(
+                writer,
+                &delta.target_revision,
+                &delta.target_hash,
+                ApplyStatus::ResyncRequired,
+                Some(reason.to_string()),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(DeltaPreflightError::Rejected { reason, error }) => {
+            return reject_after_error(
+                writer,
+                &delta.target_revision,
+                &delta.target_hash,
+                reason,
+                error,
+            )
+            .await;
+        }
     };
-    let Some(applied) = watch_state.applied.as_ref() else {
-        anyhow::bail!("current snapshot has no applied control state");
-    };
-    let Some(base_revision) = applied.revision.as_ref() else {
-        send_apply_response(
-            writer,
-            &delta.target_revision,
-            &delta.target_hash,
-            ApplyStatus::ResyncRequired,
-            Some("base snapshot has no control revision".to_string()),
-        )
-        .await?;
-        return Ok(());
-    };
-    if base_revision != &delta.base_revision || applied.content_hash != delta.base_hash {
-        send_apply_response(
-            writer,
-            &delta.target_revision,
-            &delta.target_hash,
-            ApplyStatus::ResyncRequired,
-            Some("delta base revision or hash does not match".to_string()),
-        )
-        .await?;
-        return Ok(());
-    }
-    if delta.target_revision.epoch != delta.base_revision.epoch
-        || delta.target_revision.sequence <= delta.base_revision.sequence
-    {
-        send_apply_response(
-            writer,
-            &delta.target_revision,
-            &delta.target_hash,
-            ApplyStatus::ResyncRequired,
-            Some("delta target revision is not newer than its base".to_string()),
-        )
-        .await?;
-        return Ok(());
-    }
 
-    let mut candidate = current.clone();
-    apply_config_operations(&mut candidate, &delta.operations)?;
-    candidate.resource_version = delta.target_revision.sequence;
-    let actual_hash = snapshot_content_hash(&candidate)?;
-    if actual_hash != delta.target_hash {
-        send_apply_response(
-            writer,
-            &delta.target_revision,
-            &delta.target_hash,
-            ApplyStatus::Rejected,
-            Some("delta target content hash mismatch".to_string()),
-        )
-        .await?;
-        anyhow::bail!("delta target content hash mismatch");
-    }
+    let (lkg, lkg_bytes) = match prepare_lkg(
+        Some(delta.target_revision.clone()),
+        delta.target_hash.clone(),
+        unix_time_ms(),
+        candidate.clone(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return reject_after_error(
+                writer,
+                &delta.target_revision,
+                &delta.target_hash,
+                REJECT_REASON_LKG_PREFLIGHT,
+                error,
+            )
+            .await;
+        }
+    };
 
     state.health().begin_config_apply();
-    if let Err(error) = apply_snapshot(&candidate, &actual_hash, state).await {
+    if let Err(error) = apply_snapshot(
+        &candidate,
+        &delta.target_hash,
+        &delta.target_revision.epoch,
+        state,
+    )
+    .await
+    {
         state.health().fail_config_apply();
-        send_apply_response(
+        warn!(error = %error, "runtime rejected delta apply");
+        return reject_after_error(
             writer,
             &delta.target_revision,
             &delta.target_hash,
-            ApplyStatus::Rejected,
-            Some(format!("runtime apply failed: {error}")),
+            REJECT_REASON_RUNTIME_APPLY,
+            error,
         )
-        .await?;
-        return Err(error);
+        .await;
+    }
+    if let Err(error) = persist_lkg(snapshot_path, &lkg, lkg_bytes, "delta").await {
+        state.health().hold_config_apply_fence();
+        return reject_after_error(
+            writer,
+            &delta.target_revision,
+            &delta.target_hash,
+            REJECT_REASON_LKG_PERSIST,
+            error,
+        )
+        .await;
     }
     state.health().finish_config_apply();
+    watch_state.authority_reset_allowed = false;
     watch_state.current_snapshot = Some(candidate.clone());
     watch_state.applied = Some(AppliedControlState {
         revision: Some(delta.target_revision.clone()),
         content_hash: delta.target_hash.clone(),
     });
-    let lkg = make_lkg(
-        Some(delta.target_revision.clone()),
-        delta.target_hash.clone(),
-        unix_time_ms(),
-        candidate,
-    )?;
-    if let Err(error) = save_snapshot_to_disk(snapshot_path, &lkg).await {
-        warn!(error = %error, "live delta applied but LKG persistence degraded");
-        metrics::counter!("duotunnel_control_lkg_persist_failures_total").increment(1);
-    }
     send_apply_response(
         writer,
         &delta.target_revision,
@@ -679,6 +797,77 @@ where
         None,
     )
     .await
+}
+
+#[derive(Debug)]
+enum DeltaPreflightError {
+    Resync(&'static str),
+    Rejected {
+        reason: &'static str,
+        error: anyhow::Error,
+    },
+}
+
+fn prepare_delta_candidate(
+    current: Option<&ConfigSnapshot>,
+    applied: Option<&AppliedControlState>,
+    delta: &ConfigDelta,
+) -> Result<ConfigSnapshot, DeltaPreflightError> {
+    let Some(current) = current else {
+        return Err(DeltaPreflightError::Resync("no base snapshot is applied"));
+    };
+    let Some(applied) = applied else {
+        return Err(DeltaPreflightError::Resync(
+            "current snapshot has no applied control state",
+        ));
+    };
+    let Some(base_revision) = applied.revision.as_ref() else {
+        return Err(DeltaPreflightError::Resync(
+            "base snapshot has no control revision",
+        ));
+    };
+    if base_revision != &delta.base_revision || applied.content_hash != delta.base_hash {
+        return Err(DeltaPreflightError::Resync(
+            "delta base revision or hash does not match",
+        ));
+    }
+    if delta.target_revision.epoch != delta.base_revision.epoch {
+        return Err(DeltaPreflightError::Resync(
+            "delta cannot cross revision epochs; full snapshot required",
+        ));
+    }
+    if delta.target_revision.sequence <= delta.base_revision.sequence {
+        return Err(DeltaPreflightError::Resync(
+            "delta target revision is not newer than its base",
+        ));
+    }
+
+    let mut candidate = current.clone();
+    apply_config_operations(&mut candidate, &delta.operations).map_err(|error| {
+        DeltaPreflightError::Rejected {
+            reason: REJECT_REASON_DELTA_INVALID,
+            error,
+        }
+    })?;
+    candidate.resource_version = delta.target_revision.sequence;
+    duotunnel_lib::ctld_proto::validate_config_snapshot(&candidate).map_err(|error| {
+        DeltaPreflightError::Rejected {
+            reason: REJECT_REASON_DELTA_INVALID,
+            error,
+        }
+    })?;
+    let actual_hash =
+        snapshot_content_hash(&candidate).map_err(|error| DeltaPreflightError::Rejected {
+            reason: REJECT_REASON_DELTA_INVALID,
+            error,
+        })?;
+    if actual_hash != delta.target_hash {
+        return Err(DeltaPreflightError::Rejected {
+            reason: REJECT_REASON_DELTA_HASH_MISMATCH,
+            error: anyhow::anyhow!("delta target content hash mismatch"),
+        });
+    }
+    Ok(candidate)
 }
 
 async fn send_apply_response<W>(
@@ -697,9 +886,30 @@ where
         status,
         reason,
     };
-    send_message(writer, MessageType::ConfigPush, &response).await?;
+    duotunnel_lib::ctld_proto::send_apply_response(writer, &response).await?;
     writer.flush().await?;
     Ok(())
+}
+
+async fn reject_after_error<W>(
+    writer: &mut W,
+    revision: &ControlRevision,
+    content_hash: &str,
+    reason: &'static str,
+    error: anyhow::Error,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    send_apply_response(
+        writer,
+        revision,
+        content_hash,
+        ApplyStatus::Rejected,
+        Some(reason.to_string()),
+    )
+    .await?;
+    Err(error)
 }
 
 fn unix_time_ms() -> u64 {
@@ -713,14 +923,22 @@ fn unix_time_ms() -> u64 {
 async fn apply_snapshot(
     snap: &ConfigSnapshot,
     content_hash: &str,
+    epoch: &str,
     state: &Arc<ServerState>,
 ) -> anyhow::Result<()> {
-    let (listeners, generation) = build_runtime_generation(snap, content_hash, state)?;
+    let (listeners, generation) = build_runtime_generation(snap, content_hash, epoch, state)?;
     let previous = state.runtime_generation();
     let previous_listeners = previous.routing().ingress_listeners().to_vec();
     let _security_commit = state.security_apply_gate().write().await;
     if let Err(error) = crate::ingress::sync_all_listeners(state, &listeners).await {
-        state.health().hold_config_apply_fence();
+        if let Err(rollback_error) =
+            crate::ingress::sync_all_listeners(state, &previous_listeners).await
+        {
+            state.health().hold_config_apply_fence();
+            return Err(anyhow::anyhow!(
+                "listener apply failed and rollback is uncertain: {error}; rollback: {rollback_error}"
+            ));
+        }
         return Err(error);
     }
     if let Err(error) =
@@ -763,6 +981,7 @@ fn build_token_map(
 fn build_runtime_generation(
     snap: &ConfigSnapshot,
     content_hash: &str,
+    epoch: &str,
     state: &Arc<ServerState>,
 ) -> anyhow::Result<(Vec<IngressListener>, Arc<RuntimeGeneration>)> {
     let tm = proto_to_tunnel_management(&snap.ingress_listeners, &snap.client_groups);
@@ -773,12 +992,14 @@ fn build_runtime_generation(
         &egress,
         &http_params,
         state.upstream_health(),
+        state.proxy_buffer_params(),
     )?;
     let listeners = tm.server_ingress_routing.listeners.clone();
     let token_map = build_token_map(&snap.token_cache)?;
     Ok((
         listeners,
-        Arc::new(RuntimeGeneration::managed(
+        Arc::new(RuntimeGeneration::from_control_plane(
+            epoch,
             snap.resource_version,
             Arc::<str>::from(content_hash),
             routing_snapshot,
@@ -930,6 +1151,7 @@ fn proto_to_server_egress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duotunnel_lib::ctld_proto::ConfigOperation;
 
     fn empty_snapshot(resource_version: u64) -> ConfigSnapshot {
         ConfigSnapshot {
@@ -940,6 +1162,48 @@ mod tests {
             egress_vhost_rules: Vec::new(),
             token_cache: Vec::new(),
         }
+    }
+
+    fn delta_fixture() -> (
+        ConfigSnapshot,
+        ConfigSnapshot,
+        ConfigDelta,
+        AppliedControlState,
+    ) {
+        let base = empty_snapshot(10);
+        let target = ConfigSnapshot {
+            resource_version: 11,
+            egress_upstreams: vec![duotunnel_lib::EgressUpstreamDef {
+                name: "api".into(),
+                lb_policy: "round_robin".into(),
+                servers: vec![],
+            }],
+            ..base.clone()
+        };
+        let base_revision = ControlRevision {
+            epoch: "epoch-a".into(),
+            sequence: base.resource_version,
+        };
+        let target_revision = ControlRevision {
+            epoch: "epoch-a".into(),
+            sequence: target.resource_version,
+        };
+        let base_hash = snapshot_content_hash(&base).unwrap();
+        let target_hash = snapshot_content_hash(&target).unwrap();
+        let delta = ConfigDelta {
+            base_revision: base_revision.clone(),
+            base_hash: base_hash.clone(),
+            target_revision,
+            target_hash,
+            operations: vec![ConfigOperation::UpsertEgressUpstream(
+                target.egress_upstreams[0].clone(),
+            )],
+        };
+        let applied = AppliedControlState {
+            revision: Some(base_revision),
+            content_hash: base_hash,
+        };
+        (base, target, delta, applied)
     }
 
     #[test]
@@ -964,8 +1228,6 @@ mod tests {
             RevisionDecision::Reject(_)
         ));
         assert!(matches!(
-            // A full Snapshot from a new control epoch is an authority reset;
-            // only Delta events require the existing epoch as their base.
             classify_revision(
                 Some(&current),
                 &ControlRevision {
@@ -996,7 +1258,7 @@ mod tests {
                 },
                 "hash-a"
             ),
-            RevisionDecision::Apply
+            RevisionDecision::Reject(_)
         ));
         assert!(matches!(
             classify_revision(
@@ -1007,8 +1269,108 @@ mod tests {
                 },
                 "hash-b"
             ),
-            RevisionDecision::Apply
+            RevisionDecision::Reject(_)
         ));
+    }
+
+    #[test]
+    fn duplicate_snapshot_after_lost_ack_is_idempotent() {
+        let current = AppliedControlState {
+            revision: Some(ControlRevision {
+                epoch: "epoch-a".into(),
+                sequence: 12,
+            }),
+            content_hash: "hash-a".into(),
+        };
+
+        assert!(matches!(
+            classify_revision(
+                Some(&current),
+                current.revision.as_ref().unwrap(),
+                &current.content_hash,
+            ),
+            RevisionDecision::Duplicate
+        ));
+    }
+
+    #[test]
+    fn delta_base_revision_and_hash_mismatch_require_resync() {
+        let (base, _target, mut delta, applied) = delta_fixture();
+
+        delta.base_revision.sequence += 1;
+        assert!(matches!(
+            prepare_delta_candidate(Some(&base), Some(&applied), &delta),
+            Err(DeltaPreflightError::Resync(
+                "delta base revision or hash does not match"
+            ))
+        ));
+
+        let (base, _target, mut delta, mut applied) = delta_fixture();
+        delta.base_hash = "wrong-base-hash".into();
+        applied.content_hash = snapshot_content_hash(&base).unwrap();
+        assert!(matches!(
+            prepare_delta_candidate(Some(&base), Some(&applied), &delta),
+            Err(DeltaPreflightError::Resync(
+                "delta base revision or hash does not match"
+            ))
+        ));
+    }
+
+    #[test]
+    fn delta_target_hash_mismatch_is_rejected_without_changing_old_state() {
+        let (base, _target, mut delta, applied) = delta_fixture();
+        delta.target_hash = "wrong-target-hash".into();
+        let old_state = base.clone();
+
+        assert!(matches!(
+            prepare_delta_candidate(Some(&base), Some(&applied), &delta),
+            Err(DeltaPreflightError::Rejected { reason, error })
+                if reason == REJECT_REASON_DELTA_HASH_MISMATCH
+                    && error.to_string() == "delta target content hash mismatch"
+        ));
+        assert_eq!(base, old_state);
+    }
+
+    #[test]
+    fn valid_delta_candidate_matches_target_and_keeps_base_immutable() {
+        let (base, target, delta, applied) = delta_fixture();
+        let candidate = prepare_delta_candidate(Some(&base), Some(&applied), &delta).unwrap();
+
+        assert_eq!(candidate, target);
+        assert_eq!(base, empty_snapshot(10));
+    }
+
+    #[tokio::test]
+    async fn semantic_rejection_sends_stable_reason_before_returning_error() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        let revision = ControlRevision {
+            epoch: "epoch-a".to_string(),
+            sequence: 2,
+        };
+
+        let result = reject_after_error(
+            &mut writer,
+            &revision,
+            "target-hash",
+            REJECT_REASON_DELTA_INVALID,
+            anyhow::anyhow!("duplicate listener port 443"),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "duplicate listener port 443"
+        );
+
+        let response = duotunnel_lib::ctld_proto::recv_apply_response(&mut reader)
+            .await
+            .unwrap();
+        assert_eq!(response.revision, revision);
+        assert_eq!(response.content_hash, "target-hash");
+        assert_eq!(response.status, ApplyStatus::Rejected);
+        assert_eq!(
+            response.reason.as_deref(),
+            Some(REJECT_REASON_DELTA_INVALID)
+        );
     }
 
     #[tokio::test]

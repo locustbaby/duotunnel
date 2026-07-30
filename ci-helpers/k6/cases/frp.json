@@ -21,7 +21,7 @@
         "duration": "20s",
         "startTime": "0s",
         "preAllocatedVUs": 100,
-        "maxVUs": 500
+        "maxVUs": 2000
       }
     },
     {

@@ -1,5 +1,10 @@
 # 多核线性扩展与绑核设计（2026-07-26）
 
+> **当前状态（2026-07-30）**：已落地 CI 级别的 `AllowedCPUs` 分区和 runtime
+> affinity-aware 并行度计算。server/FRPS 使用 server 集合，client/FRPC 使用
+> client 集合，K6/echo/ctld/collector 使用 load 集合；Tokio worker 一对一的
+> `sched_setaffinity` 仍未实现，需由 profile 证明收益后再单独排期。
+
 ## 背景
 
 好的网络应用应当满足两条工程标准：**QPS 随核数近似线性增长**、**延迟波动小**（高分位平稳）。DuoTunnel 的目标是在多核机器上稳定支撑 **8k QPS** 的多核吞吐。用户在本轮 review 中明确提出两个方向性疑问：**actor mode 是否是达成该目标的合适手段**，以及**绑核（CPU affinity）具体怎么做**。本文先建立线性扩展的判定框架，再落到 DuoTunnel 的代码证据与分阶段路线。

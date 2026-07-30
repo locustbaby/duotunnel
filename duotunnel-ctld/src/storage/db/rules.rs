@@ -382,7 +382,8 @@ impl SqliteRuleStore {
             if let Some(last) = listeners.last_mut() {
                 if last.id == id {
                     if mode == "http" {
-                        let match_host: Option<String> = row.try_get("match_host").ok();
+                        let match_host: Option<String> =
+                            row.try_get::<Option<String>, _>("match_host")?;
                         if let Some(host) = match_host {
                             if let IngressListenerMode::Http { vhost } = &mut last.mode {
                                 vhost.push(IngressVhostRule {
@@ -403,7 +404,7 @@ impl SqliteRuleStore {
                 }
             } else {
                 let mut vhost = Vec::new();
-                let match_host: Option<String> = row.try_get("match_host").ok();
+                let match_host: Option<String> = row.try_get::<Option<String>, _>("match_host")?;
                 if let Some(host) = match_host {
                     vhost.push(IngressVhostRule {
                         match_host: host,
@@ -549,22 +550,17 @@ impl SqliteRuleStore {
             egress_vhost_rules,
         })
     }
-}
 
-#[async_trait]
-impl RuleStore for SqliteRuleStore {
-    async fn load_routing(&self) -> Result<RoutingData> {
-        let mut conn = self.pool.acquire().await?;
-        Self::load_routing_on(&mut conn).await
-    }
-    async fn save_routing(&self, data: &RoutingData) -> Result<()> {
-        let current = self.load_routing().await?;
+    pub async fn save_routing_on(
+        conn: &mut sqlx::SqliteConnection,
+        data: &RoutingData,
+    ) -> Result<()> {
+        let current = Self::load_routing_on(conn).await?;
         let plan = Self::build_mutation_plan(&current, data);
-        let mut tx = self.pool.begin().await?;
         for port in plan.ingress.delete_ports {
             sqlx::query("DELETE FROM ingress_listeners WHERE port = ?")
                 .bind(port as i64)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale ingress listener")?;
         }
@@ -590,7 +586,7 @@ impl RuleStore for SqliteRuleStore {
             .bind(mode)
             .bind(tcp_group)
             .bind(tcp_proxy)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await
             .context("upsert ingress listener and returning id")?;
             for match_host in &listener_plan.delete_vhosts {
@@ -599,7 +595,7 @@ impl RuleStore for SqliteRuleStore {
                 )
                 .bind(lid)
                 .bind(match_host)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale ingress vhost rule")?;
             }
@@ -616,7 +612,7 @@ impl RuleStore for SqliteRuleStore {
                     .bind(&r.match_host)
                     .bind(r.group_id.as_str())
                     .bind(r.proxy_name.as_str())
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await
                     .context("insert ingress vhost rule")?;
                 }
@@ -625,7 +621,7 @@ impl RuleStore for SqliteRuleStore {
         for group_id in plan.client_groups.delete_groups {
             sqlx::query("DELETE FROM client_groups WHERE group_id = ?")
                 .bind(group_id.as_str())
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale client group")?;
         }
@@ -639,14 +635,14 @@ impl RuleStore for SqliteRuleStore {
             )
             .bind(g.group_id.as_str())
             .bind(&g.config_version)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .context("upsert client group")?;
             for upstream_name in &group_plan.delete_upstreams {
                 sqlx::query("DELETE FROM client_upstreams WHERE group_id = ? AND name = ?")
                     .bind(g.group_id.as_str())
                     .bind(upstream_name)
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await
                     .context("delete stale client upstream")?;
             }
@@ -662,7 +658,7 @@ impl RuleStore for SqliteRuleStore {
                 .bind(g.group_id.as_str())
                 .bind(&u.name)
                 .bind(&u.lb_policy)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut *conn)
                 .await
                 .context("upsert client upstream")?;
                 for address in &upstream_plan.delete_servers {
@@ -671,7 +667,7 @@ impl RuleStore for SqliteRuleStore {
                     )
                     .bind(uid)
                     .bind(address)
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await
                     .context("delete stale client upstream server")?;
                 }
@@ -684,7 +680,7 @@ impl RuleStore for SqliteRuleStore {
                     .bind(uid)
                     .bind(&s.address)
                     .bind(s.resolve as i64)
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await
                     .context("insert client upstream server")?;
                 }
@@ -693,7 +689,7 @@ impl RuleStore for SqliteRuleStore {
         for upstream_name in plan.egress.delete_upstreams {
             sqlx::query("DELETE FROM egress_upstreams WHERE name = ?")
                 .bind(upstream_name)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale egress upstream")?;
         }
@@ -708,7 +704,7 @@ impl RuleStore for SqliteRuleStore {
             )
             .bind(&u.name)
             .bind(&u.lb_policy)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await
             .context("upsert egress upstream")?;
             for address in &upstream_plan.delete_servers {
@@ -717,7 +713,7 @@ impl RuleStore for SqliteRuleStore {
                 )
                 .bind(uid)
                 .bind(address)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale egress server")?;
             }
@@ -730,7 +726,7 @@ impl RuleStore for SqliteRuleStore {
                 .bind(uid)
                 .bind(&s.address)
                 .bind(s.resolve as i64)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("insert egress server")?;
             }
@@ -738,7 +734,7 @@ impl RuleStore for SqliteRuleStore {
         for match_host in plan.egress.delete_vhosts {
             sqlx::query("DELETE FROM egress_vhost_rules WHERE match_host = ?")
                 .bind(match_host)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .context("delete stale egress vhost rule")?;
         }
@@ -751,10 +747,24 @@ impl RuleStore for SqliteRuleStore {
             )
             .bind(&r.match_host)
             .bind(&r.action_upstream)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .context("upsert egress vhost rule")?;
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RuleStore for SqliteRuleStore {
+    async fn load_routing(&self) -> Result<RoutingData> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_routing_on(&mut conn).await
+    }
+    #[cfg(test)]
+    async fn save_routing(&self, data: &RoutingData) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        Self::save_routing_on(&mut tx, data).await?;
         tx.commit().await?;
         info!("routing data saved to DB");
         Ok(())

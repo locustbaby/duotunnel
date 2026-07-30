@@ -55,10 +55,18 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
     use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
     use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 
+    let max_file_size = std::env::var("DIAL9_MAX_FILE_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(512 * 1024 * 1024);
+    let max_total_size = std::env::var("DIAL9_MAX_TOTAL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(2 * 1024 * 1024 * 1024);
     let writer = RotatingWriter::builder()
         .base_path(&trace_path)
-        .max_file_size(512 * 1024 * 1024)
-        .max_total_size(512 * 1024 * 1024)
+        .max_file_size(max_file_size)
+        .max_total_size(max_total_size)
         .build()?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
@@ -83,17 +91,7 @@ fn run_with_dial9(trace_path: PathBuf, fut: impl Future<Output = Result<()>>) ->
         .build_and_start_with_writer(builder, writer)?;
     let _ = DIAL9_HANDLE.set(guard.handle());
     info!("dial9 trace started, base path: {trace_path_display}");
-    let result = runtime.block_on(async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            r = fut => r,
-            _ = sigterm.recv() => {
-                info!("SIGTERM received, starting graceful shutdown");
-                Ok(())
-            }
-        }
-    });
+    let result = runtime.block_on(fut);
     info!("runtime stopped, flushing dial9 trace (timeout 30s)");
     drop(runtime);
     match guard.graceful_shutdown(std::time::Duration::from_secs(30)) {

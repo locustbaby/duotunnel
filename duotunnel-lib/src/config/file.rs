@@ -175,6 +175,9 @@ pub struct ServerBasicConfig {
     /// not for the authenticated slot table.
     #[serde(default = "default_max_unauthenticated_connections")]
     pub max_unauthenticated_connections: usize,
+    /// Maximum number of authenticated client connections held by the server registry.
+    #[serde(default = "default_connection_registry_capacity")]
+    pub connection_registry_capacity: usize,
     #[serde(default = "default_open_stream_timeout_ms")]
     pub open_stream_timeout_ms: u64,
     #[serde(default = "default_h2_single_authority")]
@@ -190,6 +193,9 @@ fn default_login_timeout_secs() -> u64 {
 }
 fn default_max_unauthenticated_connections() -> usize {
     64
+}
+fn default_connection_registry_capacity() -> usize {
+    4096
 }
 fn default_open_stream_timeout_ms() -> u64 {
     5000
@@ -312,7 +318,11 @@ impl ServerConfigFile {
             .merge(Yaml::file(path))
             .merge(
                 Env::prefixed("DUOTUNNEL_SERVER__")
-                    .only(&["server.log_level", "server.database_url"])
+                    .only(&[
+                        "server.log_level",
+                        "server.database_url",
+                        "server.connection_registry_capacity",
+                    ])
                     .split("__"),
             )
             .extract()?;
@@ -330,8 +340,14 @@ impl ServerConfigFile {
         if self.server.max_unauthenticated_connections == 0 {
             errors.push("server.max_unauthenticated_connections must be >= 1".into());
         }
+        if self.server.connection_registry_capacity == 0 {
+            errors.push("server.connection_registry_capacity must be >= 1".into());
+        }
         if self.server.open_stream_timeout_ms == 0 {
             errors.push("server.open_stream_timeout_ms must be >= 1".into());
+        }
+        if let Err(error) = self.server.proxy_buffers.validate() {
+            errors.push(format!("server.proxy_buffers: {error}"));
         }
         if matches!(self.server.quic.shards, Some(0)) {
             errors.push("server.quic.shards must be >= 1 when set".into());
@@ -494,6 +510,7 @@ mod tests {
                 accept_workers: None,
                 overload: Default::default(),
                 max_unauthenticated_connections: 64,
+                connection_registry_capacity: 4096,
             },
             server_egress_upstream: Default::default(),
             tunnel_management: Default::default(),
@@ -505,6 +522,10 @@ mod tests {
         assert!(routing_data.client_groups.is_empty());
         assert!(routing_data.egress_upstreams.is_empty());
         assert!(routing_data.egress_vhost_rules.is_empty());
+        assert!(cfg.validate().is_ok());
+        let mut invalid = cfg.clone();
+        invalid.server.connection_registry_capacity = 0;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -560,6 +581,7 @@ mod tests {
                 accept_workers: None,
                 overload: Default::default(),
                 max_unauthenticated_connections: 64,
+                connection_registry_capacity: 4096,
             },
             server_egress_upstream: ServerEgressUpstream {
                 upstreams: egress_upstreams,

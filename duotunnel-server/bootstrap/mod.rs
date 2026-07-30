@@ -26,7 +26,7 @@ pub(crate) struct ServerBootstrap {
 
 #[derive(Clone)]
 pub(crate) enum ServerMode {
-    Managed {
+    ControlPlane {
         ctld_addr: String,
         ctld_token: Option<String>,
     },
@@ -35,7 +35,7 @@ pub(crate) enum ServerMode {
 impl ServerBootstrap {
     pub(crate) fn from_cli(cli: &Cli) -> Result<Self> {
         let config = ServerConfigFile::load(&cli.config)?;
-        let mode = ServerMode::Managed {
+        let mode = ServerMode::ControlPlane {
             ctld_addr: cli.ctld_addr.clone(),
             ctld_token: cli.resolved_ctld_token(),
         };
@@ -66,12 +66,16 @@ impl ServerBootstrap {
         &self.config.server.pki
     }
 
+    pub(crate) fn connection_registry_capacity(&self) -> usize {
+        self.config.server.connection_registry_capacity
+    }
+
     pub(crate) fn mode(&self) -> &ServerMode {
         &self.mode
     }
 
-    pub(crate) fn is_ctld_managed(&self) -> bool {
-        matches!(self.mode, ServerMode::Managed { .. })
+    pub(crate) fn uses_control_plane(&self) -> bool {
+        matches!(self.mode, ServerMode::ControlPlane { .. })
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -133,6 +137,7 @@ impl RoutingSnapshot {
 }
 
 pub(crate) struct RuntimeGeneration {
+    epoch: Arc<str>,
     sequence: u64,
     content_hash: Arc<str>,
     routing: RoutingSnapshot,
@@ -142,6 +147,7 @@ pub(crate) struct RuntimeGeneration {
 impl RuntimeGeneration {
     pub(crate) fn local(routing: RoutingSnapshot, token_map: Arc<local_auth::TokenMap>) -> Self {
         Self {
+            epoch: Arc::from("local"),
             sequence: 0,
             content_hash: Arc::from("local"),
             routing,
@@ -149,13 +155,15 @@ impl RuntimeGeneration {
         }
     }
 
-    pub(crate) fn managed(
+    pub(crate) fn from_control_plane(
+        epoch: impl Into<Arc<str>>,
         sequence: u64,
         content_hash: impl Into<Arc<str>>,
         routing: RoutingSnapshot,
         token_map: Arc<local_auth::TokenMap>,
     ) -> Self {
         Self {
+            epoch: epoch.into(),
             sequence,
             content_hash: content_hash.into(),
             routing,
@@ -165,6 +173,10 @@ impl RuntimeGeneration {
 
     pub(crate) fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    pub(crate) fn epoch(&self) -> &str {
+        &self.epoch
     }
 
     pub(crate) fn content_hash(&self) -> &str {
@@ -288,6 +300,7 @@ impl ServerState {
 
     pub(crate) fn publish_generation(&self, generation: Arc<RuntimeGeneration>) {
         info!(
+            epoch = generation.epoch(),
             sequence = generation.sequence(),
             content_hash = generation.content_hash(),
             "publishing runtime generation"
@@ -310,6 +323,10 @@ impl ServerState {
 
     pub(crate) fn relay_buf_size(&self) -> usize {
         self.ingress.proxy_buffer_params.relay_buf_size
+    }
+
+    pub(crate) fn proxy_buffer_params(&self) -> &duotunnel_lib::ProxyBufferParams {
+        &self.ingress.proxy_buffer_params
     }
 
     pub(crate) fn sniff_timeout(&self) -> std::time::Duration {
@@ -353,14 +370,19 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
     info!("running with resident ctld control plane; no local SQLite stores");
 
     let http_params = HttpClientParams::from(&bootstrap.config.server.http_pool);
+    let proxy_buffer_params =
+        duotunnel_lib::ProxyBufferParams::from(&bootstrap.config.server.proxy_buffers);
     let tm = TunnelManagement::default();
     let egress = ServerEgressUpstream::default();
     let upstream_health =
         Arc::new(duotunnel_lib::proxy::upstream::UpstreamHealthRegistry::default());
-    let initial_snapshot =
-        build_routing_snapshot_with_health(&tm, &egress, &http_params, upstream_health.clone())?;
-    let proxy_buffer_params =
-        duotunnel_lib::ProxyBufferParams::from(&bootstrap.config.server.proxy_buffers);
+    let initial_snapshot = build_routing_snapshot_with_health(
+        &tm,
+        &egress,
+        &http_params,
+        upstream_health.clone(),
+        &proxy_buffer_params,
+    )?;
     let peek_buf_pool = crate::PeekBufPool::new(proxy_buffer_params.peek_buf_size);
     let max_streams = duotunnel_lib::QuicTransportParams::from(&bootstrap.config.server.quic)
         .max_concurrent_streams;
@@ -375,9 +397,11 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
     let shard_count = duotunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
     let accept_workers =
         duotunnel_lib::resolve_accept_workers(bootstrap.config.server.accept_workers);
+    let connection_registry_capacity = bootstrap.connection_registry_capacity();
     info!(
         shards = shard_count,
         accept_workers = accept_workers,
+        connection_registry_capacity,
         configured_worker_threads = duotunnel_lib::configured_worker_threads(),
         cpu_parallelism = duotunnel_lib::available_parallelism(),
         cgroup_cpu_limit = ?duotunnel_lib::cgroup_cpu_limit(),
@@ -388,13 +412,21 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         shard_count,
         max_streams,
         overload_limits.max_pending_streams,
+        connection_registry_capacity,
+    );
+    let registry_capacity = shared_registry.capacity_snapshot();
+    info!(
+        active = registry_capacity.active,
+        available = registry_capacity.available,
+        exhausted = registry_capacity.exhausted,
+        "server connection registry capacity initialized"
     );
     let generation = Arc::new(ArcSwap::from_pointee(RuntimeGeneration::local(
         initial_snapshot,
         Arc::new(HashMap::new()),
     )));
     let health = Arc::new(crate::runtime::health::ServerHealthFacts::new(
-        bootstrap.is_ctld_managed(),
+        bootstrap.uses_control_plane(),
     ));
     let plugin_registry = {
         use duotunnel_lib::plugin::PluginRegistry;
@@ -454,6 +486,7 @@ pub(crate) fn build_routing_snapshot_with_health(
     egress: &ServerEgressUpstream,
     http_params: &HttpClientParams,
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
+    proxy_buffer_params: &duotunnel_lib::ProxyBufferParams,
 ) -> Result<RoutingSnapshot> {
     let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
@@ -476,8 +509,12 @@ pub(crate) fn build_routing_snapshot_with_health(
             http_routers.insert(listener.port, Arc::new(router));
         }
     }
-    let egress_map =
-        egress::ServerEgressMap::from_config_with_health(egress, http_params, upstream_health)?;
+    let egress_map = egress::ServerEgressMap::from_config_with_health(
+        egress,
+        http_params,
+        upstream_health,
+        proxy_buffer_params,
+    )?;
     let egress_rules = egress
         .rules
         .vhost

@@ -15,7 +15,7 @@
 
 | 范围 | 实现结果 |
 | --- | --- |
-| control | V1 latest full snapshot；V2 持久 epoch/sequence、canonical hash、Applied ACK；DB 同事务快照；LKG 双代原子持久化与完整校验 |
+| control | 统一 numeric wire envelope；Snapshot/Delta 使用持久 epoch/sequence、canonical hash、Applied ACK；DB 同事务快照；LKG 双代原子持久化与完整校验 |
 | generation/security | `ArcSwap<RuntimeGeneration>` 整代发布；token identity 精确 revoke；auth→register 与安全发布使用读写门 |
 | listener/lifecycle | 全端口 pre-bind 后统一 commit；新 worker 先接管再 drain predecessor；generation fencing；predecessor 存活校验；10s drain + abort |
 | connection/drain | owned connection state；registry fail-closed；QUIC 先 retire 再 drain；H1/H2/TLS 15s graceful→force |
@@ -126,7 +126,10 @@ deadline。
 revision/hash/ACK。这样可先升级 ctld，旧 server 仍可解析，立即消除相对 Patch 丢失；
 它只保证最终内容收敛，不声称具备端到端 applied 证明。
 
-### 3.2 M0a-1：ControlProtocolV2 双栈
+### 3.2 M0a-1：ControlProtocolV2 双栈（历史迁移方案）
+
+本节是历史 rollout 设计。当前实现不再保留 V1/V2 业务分支，正式协议统一为
+Snapshot/Delta，并仅使用 numeric wire version 做 envelope 校验。
 
 revision/hash/ACK 属于线协议变更，必须先增加明确的
 `ControlProtocolV2` capability/version negotiation：server 先支持 v1+v2，ctld 根据
@@ -159,7 +162,7 @@ ACK 必须表示 `applied revision/hash`，不能仅表示“已接收”。控�
 只有全量 Snapshot 的尺寸/频率数据证明需要时才引入：
 
 ```text
-Patch { base_revision, new_revision, content_hash, operations }
+ConfigDelta { base_revision, target_revision, base_hash, target_hash, operations }
 Ack   { applied_revision, content_hash }
 Nack  { current_revision, reason = Gap|HashMismatch|Invalid }
 ```
@@ -368,7 +371,7 @@ fence 新 stream，并登记关闭任务与 deadline。QUIC CONNECTION_CLOSE 可
 | 阶段 | 内容 | 兼容/风险 |
 | --- | --- | --- |
 | ✅ M0a-0 | ctld 在旧 wire 上只发 Full Snapshot，消除 Patch 丢失 | 保持旧 server 可解析 |
-| ✅ M0a-1 | 持久 revision/epoch；V2 capability/双栈；hash/applied ACK；原子 LKG；client active count | V1/V2 并存 |
+| ✅ M0a-1 | 持久 revision/epoch；numeric wire version；Snapshot/Delta hash/applied ACK；原子 LKG；client active count | 当前不保留 V1/V2 业务双栈 |
 | ✅ M0b | listener prepare/commit + 聚合 readiness；stable-session backoff reset | 多端口 bind 失败零部分提交 |
 | ✅ M0c | RuntimeGeneration 整代发布；revocation + security stale policy | apply admission fence；request/stream 显式 pin |
 | ✅ M0d | owned ConnectionState；可靠 unregister；typed drain | graceful deadline 后 force |
@@ -382,7 +385,7 @@ LB 扩展和 profile-gated 多 Endpoint。
 - [ ] watch consumer 阻塞跨 1000 revision，最终 applied hash 与 ctld 一致；
 - [x] rollback、duplicate、gap、equal-revision-different-hash 均按表处理；
 - [ ] ctld 重启与 leader failover 后 revision/epoch 不倒退，server 不会永久拒绝新配置；
-- [ ] v1 server + 新 ctld、双栈 server + v1/v2 ctld 均按协商矩阵工作；
+- [x] 当前 server/ctld 使用统一 canonical wire layout；旧 V1/V2 业务 codec 不作为运行时兼容矩阵；
 - [x] login、public request/connection、QUIC reverse stream 与 UDP session 在各自 work
   unit 内 pin 一个 generation；
 - [ ] 并发 reload 1000 次和 actor 在 prepare/commit 任一点退出，旧代或最高新代保持完整；

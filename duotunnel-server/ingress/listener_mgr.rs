@@ -486,10 +486,13 @@ async fn wait_listener_drained(
     port: u16,
     drained: &CancellationToken,
     abort_handles: &[tokio::task::AbortHandle],
-) {
+) -> bool {
     if tokio::time::timeout(LISTENER_DRAIN_TIMEOUT, drained.cancelled())
         .await
-        .is_err()
+        .is_ok()
+    {
+        return true;
+    }
     {
         warn!(
             port = %port,
@@ -502,8 +505,10 @@ async fn wait_listener_drained(
         }
         if tokio::time::timeout(LISTENER_ABORT_TIMEOUT, drained.cancelled())
             .await
-            .is_err()
+            .is_ok()
         {
+            return true;
+        } else {
             error!(
                 port = %port,
                 timeout_secs = LISTENER_ABORT_TIMEOUT.as_secs(),
@@ -511,6 +516,7 @@ async fn wait_listener_drained(
             );
         }
     }
+    false
 }
 
 struct ListenerWorkerExit {
@@ -584,7 +590,10 @@ async fn run_start_operation(
     if !state.listeners().is_current_start(port, generation) {
         if let Some(predecessor) = predecessor {
             predecessor.cancel.cancel();
-            wait_listener_drained(port, &predecessor.drained, &predecessor.abort_handles).await;
+            if !wait_listener_drained(port, &predecessor.drained, &predecessor.abort_handles).await
+            {
+                anyhow::bail!("listener {port} predecessor did not drain after replacement race");
+            }
         }
         drained.cancel();
         return Ok(());
@@ -683,7 +692,9 @@ async fn run_start_operation(
     start_gate.cancel();
     if let Some(predecessor) = predecessor {
         predecessor.cancel.cancel();
-        wait_listener_drained(port, &predecessor.drained, &predecessor.abort_handles).await;
+        if !wait_listener_drained(port, &predecessor.drained, &predecessor.abort_handles).await {
+            anyhow::bail!("listener {port} predecessor did not drain after replacement");
+        }
     }
 
     if workers_registered {
@@ -703,12 +714,15 @@ async fn run_listener_operation(
             sockets,
         } => run_start_operation(state, reservation, listener, sockets).await,
         ListenerOperation::Drain(reservation) => {
-            wait_listener_drained(
+            if !wait_listener_drained(
                 reservation.port,
                 &reservation.drained,
                 &reservation.abort_handles,
             )
-            .await;
+            .await
+            {
+                anyhow::bail!("listener {} did not drain before timeout", reservation.port);
+            }
             state
                 .listeners()
                 .complete_drain(reservation.port, reservation.generation);
@@ -752,7 +766,10 @@ async fn sync_listeners_inner(
         match handle.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                failures.insert(fence.port, (fence.generation, e.to_string()));
+                let port = fence.port;
+                let generation = fence.generation;
+                state.listeners().fail_operation(fence);
+                failures.insert(port, (generation, e.to_string()));
             }
             Err(e) => {
                 let error = format!("listener lifecycle operation task failed: {e}");
@@ -789,17 +806,17 @@ pub(crate) async fn sync_all_listeners(
     sync_listeners_inner(state, desired, None).await
 }
 
-pub(crate) async fn sync_listeners(
-    state: &Arc<ServerState>,
-    desired: &[IngressListener],
-) -> anyhow::Result<()> {
-    sync_all_listeners(state, desired).await
+pub(crate) async fn sync_current_listeners(state: &Arc<ServerState>) -> anyhow::Result<()> {
+    let _guard = state.listener_apply_gate().lock().await;
+    let desired = state.ingress_listeners();
+    sync_listeners_inner(state, &desired, None).await
 }
 
 pub(crate) async fn shutdown_all_listeners(state: &Arc<ServerState>) {
+    let _guard = state.listener_apply_gate().lock().await;
     let drained = state.listeners().begin_shutdown();
     for (port, drained, abort_handles) in drained {
-        wait_listener_drained(port, &drained, &abort_handles).await;
+        let _ = wait_listener_drained(port, &drained, &abort_handles).await;
     }
 }
 

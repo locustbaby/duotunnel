@@ -292,7 +292,7 @@ handshake failures feed passive ejection; success clears the matching entry. The
 h2c-to-H1 preference cache have hard entry caps and TTL cleanup. Active probes have a process-wide
 128-task budget and deterministic jitter; a probe owner token prevents stale-task ABA cleanup.
 
-Client-initiated reverse streams have both per-connection (256) and process-wide (4096) admission
+Client-initiated reverse streams have both per-connection (1000) and process-wide (4096) admission
 budgets. Routing metadata is capped at 8 KiB and must arrive within 5 seconds; over-budget streams
 are reset before a task is spawned.
 
@@ -331,7 +331,7 @@ Bootstrap builds `PluginRegistry` at startup and wires server ingress plugins:
 
 Request-time ingress uses `IngressDispatcher` with this registry; handlers do not construct plugins ad hoc.
 
-Shard topology is resolved at bootstrap: `resolve_shard_count(server.quic.shards, None)` feeds `new_shared_registry(shard_count, max_streams, max_pending_streams)` (`duotunnel-server/bootstrap/mod.rs:333`, `duotunnel-server/bootstrap/mod.rs:345`) — the pending bound is per-connection and therefore travels with the registry into each `ConnectionHandle`.
+Shard topology is resolved at bootstrap: `resolve_shard_count(server.quic.shards, None)` and `server.connection_registry_capacity` feed `new_shared_registry(shard_count, max_streams, max_pending_streams, connection_registry_capacity)` (`duotunnel-server/bootstrap/mod.rs`) — the pending bound is per-connection and therefore travels with the registry into each `ConnectionHandle`; registry capacity is a separate checked admission budget and does not evict live connections.
 
 ## Invariants
 

@@ -116,6 +116,8 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
             accept_workers,
             overload: Arc::new(overload_limits),
             sniff_timeout: Duration::from_millis(config.proxy_buffers.sniff_timeout_ms),
+            relay_buf_size: duotunnel_lib::ProxyBufferParams::from(&config.proxy_buffers)
+                .relay_buf_size,
         };
 
         engine.add_service(Arc::new(crate::egress::listener::EgressListenerService {

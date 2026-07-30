@@ -59,12 +59,14 @@ pub(crate) async fn run_client(
     entry_pool.set_egress_rules(resp.config.egress_rules.clone());
     let lb = Arc::new(plugins::lb_round_robin::RoundRobinLb::new());
     let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
+    let proxy_buffer_params = duotunnel_lib::ProxyBufferParams::from(&config.proxy_buffers);
     let proxy_map = Arc::new(
-        LocalProxyMap::from_config(
+        LocalProxyMap::from_config_with_buffer_params(
             &resp.config,
             &duotunnel_lib::HttpClientParams::from(&config.http_pool),
             lb,
             resolver,
+            &proxy_buffer_params,
         )
         .map_err(ConnectError::fatal)?,
     );
@@ -130,12 +132,21 @@ pub(crate) async fn run_client(
                         debug!("Accepted work stream from server");
                         let proxy_map = proxy_map.clone();
                         let tcp_params = tcp_params.clone();
+                        let proxy_buffer_params = proxy_buffer_params.clone();
                         let activity = activity.clone();
                         crate::runtime::spawn_task(async move {
                             let _tracked = duotunnel_lib::track_resource(
                                 duotunnel_lib::TrackedResource::ReverseStream,
                             );
-                            match handle_work_stream(send, recv, proxy_map, tcp_params).await {
+                            match handle_work_stream(
+                                send,
+                                recv,
+                                proxy_map,
+                                tcp_params,
+                                proxy_buffer_params.clone(),
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     activity.mark_business_completed();
                                 }

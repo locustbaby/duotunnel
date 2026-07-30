@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use duotunnel_lib::{
-    decode_udp_datagram_envelope, encode_udp_datagram_envelope, UdpDatagramEnvelope, UdpSessionKey,
-    MAX_DATAGRAM_BYTES,
+    decode_udp_datagram_envelope, encode_udp_datagram_envelope, AdmissionController,
+    AdmissionLimits, AdmissionPermit, UdpDatagramEnvelope, UdpSessionKey, MAX_DATAGRAM_BYTES,
 };
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -65,7 +65,7 @@ struct SessionEntry {
     reg_id: UdpRegId,
     state: Arc<SessionState>,
     created_at: std::time::Instant,
-    _connection_capacity: OwnedSemaphorePermit,
+    _session_admission: AdmissionPermit,
     _global_capacity: OwnedSemaphorePermit,
 }
 
@@ -175,7 +175,7 @@ pub struct UdpSessionManager {
     // Parent of every per-session token: one cancel stops all reply pumps.
     root_cancel: CancellationToken,
     tasks: TaskTracker,
-    session_capacity: Arc<Semaphore>,
+    session_admission: AdmissionController,
     global_session_capacity: Arc<Semaphore>,
     worker_abort_handles: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     create_tx: mpsc::Sender<CreateSessionReq>,
@@ -190,7 +190,9 @@ impl UdpSessionManager {
         let (create_tx, mut create_rx) = mpsc::channel::<CreateSessionReq>(256);
         let next_udp_reg_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let worker_abort_handles = Arc::new(Mutex::new(Vec::with_capacity(UDP_DATAGRAM_WORKERS)));
-        let session_capacity = Arc::new(Semaphore::new(MAX_UDP_SESSIONS_PER_CONNECTION));
+        let session_admission =
+            AdmissionController::new(AdmissionLimits::new(Some(MAX_UDP_SESSIONS_PER_CONNECTION)))
+                .expect("UDP session admission limits are valid");
         let global_session_capacity = global_udp_session_capacity();
 
         let manager_tmp = Self {
@@ -199,7 +201,7 @@ impl UdpSessionManager {
             state: state.clone(),
             root_cancel: root_cancel.clone(),
             tasks: tasks.clone(),
-            session_capacity,
+            session_admission,
             global_session_capacity,
             worker_abort_handles,
             create_tx,
@@ -404,15 +406,21 @@ impl UdpSessionManager {
                     use dashmap::mapref::entry::Entry;
                     match self.sessions.entry(key.clone()) {
                         Entry::Vacant(vacant) => {
-                            let capacity = match self.session_capacity.clone().try_acquire_owned() {
+                            let session_admission = match self
+                                .session_admission
+                                .try_acquire_global()
+                            {
                                 Ok(permit) => permit,
                                 Err(_) if self.evict_one_idle_session() => {
-                                    self.session_capacity.clone().try_acquire_owned().map_err(
-                                        |_| anyhow::anyhow!("UDP session capacity exhausted"),
-                                    )?
+                                    self.session_admission.try_acquire_global().map_err(|_| {
+                                        anyhow::anyhow!("UDP session capacity exhausted")
+                                    })?
                                 }
                                 Err(_) => {
-                                    return Err(anyhow::anyhow!("UDP session capacity exhausted"))
+                                    crate::runtime::metrics::udp_datagram_dropped(
+                                        "session_capacity",
+                                    );
+                                    return Err(anyhow::anyhow!("UDP session capacity exhausted"));
                                 }
                             };
                             let global_capacity = self
@@ -436,7 +444,7 @@ impl UdpSessionManager {
                                     send_gate: AsyncMutex::new(()),
                                 }),
                                 created_at: std::time::Instant::now(),
-                                _connection_capacity: capacity,
+                                _session_admission: session_admission,
                                 _global_capacity: global_capacity,
                             });
                             vacant.insert(entry.clone());
@@ -704,7 +712,10 @@ mod tests {
     use super::*;
 
     async fn test_entry(last_activity: u64, reg_id: UdpRegId) -> Arc<SessionEntry> {
-        let connection_capacity = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let session_admission = AdmissionController::new(AdmissionLimits::new(Some(1)))
+            .expect("test admission limits are valid")
+            .try_acquire_global()
+            .expect("test session admission slot");
         let global_capacity = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
         let session = Arc::new(UdpSession {
             socket: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
@@ -721,7 +732,7 @@ mod tests {
             reg_id,
             state,
             created_at: std::time::Instant::now(),
-            _connection_capacity: connection_capacity,
+            _session_admission: session_admission,
             _global_capacity: global_capacity,
         })
     }
@@ -732,6 +743,36 @@ mod tests {
             client_addr: "127.0.0.1".parse().unwrap(),
             client_port: 53000,
         }
+    }
+
+    fn entry_with_permit(permit: AdmissionPermit) -> Arc<SessionEntry> {
+        let global_capacity = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        Arc::new(SessionEntry {
+            reg_id: UdpRegId(1),
+            state: Arc::new(SessionState {
+                phase: AtomicU8::new(SESSION_CONNECTING),
+                pending_packets: Mutex::new(std::collections::VecDeque::new()),
+                session: Mutex::new(None),
+                send_gate: AsyncMutex::new(()),
+            }),
+            created_at: std::time::Instant::now(),
+            _session_admission: permit,
+            _global_capacity: global_capacity,
+        })
+    }
+
+    #[test]
+    fn session_entry_drop_releases_session_admission() {
+        let controller = AdmissionController::new(AdmissionLimits::new(Some(1)))
+            .expect("test admission limits are valid");
+        let entry = entry_with_permit(
+            controller
+                .try_acquire_global()
+                .expect("test session admission slot"),
+        );
+        assert_eq!(controller.stats().active, 1);
+        drop(entry);
+        assert_eq!(controller.stats().active, 0);
     }
 
     #[tokio::test]

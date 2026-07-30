@@ -61,7 +61,7 @@ Single source of truth for dashboard labels, units, and process grouping (`ci-he
 
 ### 2.3 Runtime config patched at CI startup
 
-`start-infra` and `run-trace-8k.sh` rewrite `ci-helpers/configs/client.yaml` at runtime:
+`start-infra` and `run-trace-8k.sh` keep the checked-in role configs unchanged and inject the ctld-issued client token through the process environment:
 
 | Field | Repo default | CI effective | Set by |
 |-------|--------------|--------------|--------|
@@ -70,18 +70,28 @@ Single source of truth for dashboard labels, units, and process grouping (`ci-he
 
 **Parallelism anchor** — single workflow input `worker_threads` (`0` = auto):
 
-`effective_runtime_parallelism()` = `min(requested, cgroup_cpu_limit)` where `requested` is `TOKIO_WORKER_THREADS` or host logical CPUs. **systemd `CPUQuota=100%` = 1 CPU** (not 100% of all cores); the runtime reads cgroup `cpu.max` / `cpu.cfs_quota_us` so derived values match the quota.
+`effective_runtime_parallelism()` = `min(requested, cgroup_cpu_limit)` where `requested` is `TOKIO_WORKER_THREADS` or host logical CPUs. The runtime reads cgroup quota and the process `Cpus_allowed_list`; in benchmark `isolate` mode the latter is the authoritative CPU width after `benchmark-env.sh` clears `CPUQuota`.
 
-| Derived field | YAML path | CI default (`worker_threads=0`, `CPUQuota=100%`) |
+In `isolate` mode, DuoTunnel server/client and FRPS/FRPC share the same service CPU
+set. K6, echo, ctld, and the resource collector use a separate three-CPU load set.
+K6 is launched through `benchmark-env.sh run-load`, so it is not left on the
+host-wide CPU set. The generated CPU contract records `load_cpu_count`; isolate
+mode requires at least `service_width + 3` effective CPUs. With the default
+`100%` quota, this is one shared service CPU plus three load CPUs.
+
+| Derived field | YAML path | CI default (`worker_threads=0`, isolate cpuset) |
 |---------------|-----------|-----------------------------------------------------|
 | Tokio workers | (runtime builder) | **1** |
 | `accept_workers` | `server.accept_workers` / `entry.accept_workers` | **1** |
 | `quic.shards` | `server.quic.shards` / `quic.shards` | **1** |
 | `quic.connections` | `quic.connections` (`0` = auto) | **1** |
 
-Examples: `CPUQuota=400%` → anchor **4** on a quota that allows 4 CPUs; `worker_threads=2` with `CPUQuota=100%` → anchor **1** (quota caps explicit pin). Set `stress_cpu_quota` to `none` / `0` to disable cgroup cap and use full host CPU count.
+Examples: `CPUQuota=400%` → anchor **4** when quota is preserved; `worker_threads=2` with `CPUQuota=100%` → anchor **1**. In isolate mode, `AllowedCPUs=0` makes the auto anchor **1** and removes CFS quota throttling. Set `DUOTUNNEL_BENCH_CPU_MODE=observe` for the quota-based experiment.
 
 Explicit yaml overrides (e.g. `connections: 1`) are honored without a separate Actions input.
+
+The same `load_cpu_count` value is included in each `/tmp/duotunnel-bench-plan-*.json`
+CPU contract and benchmark snapshot for diagnosing undersized runners.
 
 **Ports** (`defaults.json` ↔ configs)
 
@@ -108,8 +118,8 @@ See prior `BENCHMARK_DATA.entries[]` shape — commit, summary, scenarios[].
 
 ### 3.3 Resource sampling alignment
 
-- **Preferred**: record `sampling_start` and `k6_start`, pass `--k6-offset $((k6_start - sampling_start))` to `bench-tool.py parse` (`bench-basic` job).
-- **Known gap**: `run-bench-case.sh` and `run-trace-8k.sh` currently use `--k6-offset 0` while collect starts before k6 — resource charts may be shifted vs latency window.
+- **Preferred**: record absolute millisecond `k6_start` and `k6_end` timestamps, then pass `--k6-start-ms` and `--k6-end-ms` to `bench-tool.py parse`. This is the common path for `bench-basic`, `run-bench-case.sh`, and `run-trace-8k.sh`.
+- `run-bench-case.sh` and `run-trace-8k.sh` both record the k6 start/end wall-clock window and filter resource samples to that interval.
 
 ---
 
@@ -134,9 +144,10 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 
 | Input | Type | Form default | Effective on push | Valid values | Wired to |
 |-------|------|--------------|-------------------|--------------|----------|
-| `worker_threads` | number | `0` | `0` | `0` = auto (`min(host CPUs, cgroup quota)`; with default `CPUQuota=100%` → derived **1**). `1`–`256` = pin `TOKIO_WORKER_THREADS` request (still capped by quota). | `start-infra`, `run-trace-8k.sh` → `effective_runtime_parallelism()` |
+| `worker_threads` | number | `0` | `0` | `0` = auto (`min(host CPUs, quota, allowed CPUs)`; isolate mode uses allowed CPUs). `1`–`256` = pin `TOKIO_WORKER_THREADS` request (still capped by runtime limits). | `start-infra`, `run-trace-8k.sh` → `effective_runtime_parallelism()` |
 | `stress_core_target_rate` | number | `0` | `0` | `0` = use per-case `rate` in `stress.json` (3000 for `*_3000qps` / `ingress_multihost`). `1`–`50000` = override via `K6_CORE_STRESS_RATE` for **non-8k** stress cases only. | `K6_CORE_STRESS_RATE` env → `bench.js` |
-| `stress_cpu_quota` | string | `100%` | `100%` | systemd `CPUQuota` per scope. **`100%` = 1 CPU** → derived parallelism **1**. `400%` ≈ 4 CPUs. `none` \| `unlimited` \| `0` = no cap. Same value for DuoTunnel and frp. | `STRESS_CPU_QUOTA` env |
+| `stress_cpu_mode` | choice | `isolate` | `isolate` | `isolate` shares the service CPU set between server/client and reserves three load CPUs; `observe` keeps runner placement and applies `stress_cpu_quota` to service scopes. | `start-infra`, `benchmark-env.sh`, `run-bench-case.sh`, `run-trace-8k.sh` |
+| `stress_cpu_quota` | string | `100%` | `100%` | In `observe` mode, systemd `CPUQuota` per scope (`100%` = 1 CPU, `400%` ≈ 4 CPUs). In `isolate` mode, `benchmark-env.sh` clears the quota after assigning `AllowedCPUs`; set `DUOTUNNEL_BENCH_PRESERVE_CPU_QUOTA=1` for an explicit quota experiment. | `STRESS_CPU_QUOTA` env |
 
 ### 4.3 Observability
 
@@ -149,6 +160,7 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 | Variable | Source | Consumers |
 |----------|--------|-----------|
 | `STRESS_CPU_QUOTA` | `inputs.stress_cpu_quota` or `100%` | systemd scopes |
+| `DUOTUNNEL_BENCH_CPU_MODE` | `inputs.stress_cpu_mode` or `isolate` | CPU contract resolver and benchmark snapshots |
 | `K6_CORE_STRESS_RATE` | set only if `stress_core_target_rate > 0` | k6 `bench.js` via `run-bench-case.sh` |
 | `DUOTUNNEL_COLLECT_RESOURCE_METRICS` | `1` on push; `0` when dispatch sets `collect_resource_metrics=false` | `run-bench-case.sh`, `run-trace-8k.sh`, `bench-basic` job |
 
@@ -158,9 +170,9 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 
 | Script | Role |
 |--------|------|
-| `run-bench-case.sh <case> <sha>` | Single k6 case + collect + parse + inject; starts frp when case name is `frp_*` |
-| `run-trace-8k.sh <case> <sha> <profile> <threads>` | Restart server/client per case, dial9 trace, 8k case |
-| `warmup.sh` | Ingress/egress probe; optional restart using `STRESS_CPU_QUOTA` |
+| `run-bench-case.sh <case> <sha>` | Single k6 case + collect + parse + inject; `frp_*` cases start and measure FRPS/FRPC without requiring DuoTunnel server/client scopes; FRPS/FRPC follow the server/client CPU sets in isolate mode |
+| `run-trace-8k.sh <case> <sha> <profile> <threads>` | Restart server/client per case, existing dial9 trace path, 8k case |
+| `warmup.sh` | Ingress/egress probe; optional restart using `STRESS_CPU_QUOTA` only in `observe` mode |
 | `merge-results.py` | Merge multiple `bench-results-*.json` |
 | `bench_ui/publish-gh-pages.sh` | Publish dashboard |
 
@@ -169,7 +181,7 @@ Applies only to **manual** runs. **Push to `main`** uses fixed defaults in job Y
 ## 6. CLI (`bench-tool.py`)
 
 - **collect** `<interval_sec>` — JSONL stream to stdout.
-- **parse** `--input` `--k6-offset` `--output` — trim to k6 window.
+- **parse** `--input` `--k6-start-ms` `--k6-end-ms` `--output` — trim to the absolute k6 window. `--k6-offset` is retained only as a historical compatibility option.
 - **inject** `--result` `--resources` `--case-name` — attach resources to one case in result JSON.
 
 ---

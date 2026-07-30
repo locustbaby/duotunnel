@@ -15,12 +15,14 @@ pub struct ServerEgressMap {
     http_rules: VhostRouter<String>,
     http_connector: SharedHttpConnector,
     dns_cache: duotunnel_lib::EgressDnsCache,
+    relay_buf_size: usize,
 }
 impl ServerEgressMap {
     pub fn from_config_with_health(
         egress: &ServerEgressUpstream,
         http_params: &HttpClientParams,
         health: Arc<UpstreamHealthRegistry>,
+        buffer_params: &duotunnel_lib::ProxyBufferParams,
     ) -> anyhow::Result<Self> {
         let mut upstreams = HashMap::new();
         let http_rules = VhostRouter::new();
@@ -47,12 +49,17 @@ impl ServerEgressMap {
         let https_client = duotunnel_lib::create_https_client_with(http_params)?;
         let h2c_client = duotunnel_lib::create_h2c_client_with(http_params);
         let http_connector =
-            duotunnel_lib::proxy::http_connector::HttpConnector::new(https_client, h2c_client);
+            duotunnel_lib::proxy::http_connector::HttpConnector::new_with_buffer_params(
+                https_client,
+                h2c_client,
+                buffer_params.clone(),
+            );
         Ok(Self {
             upstreams,
             http_rules,
             http_connector,
             dns_cache: duotunnel_lib::EgressDnsCache::new(std::time::Duration::from_secs(30)),
+            relay_buf_size: buffer_params.relay_buf_size,
         })
     }
 
@@ -319,11 +326,12 @@ impl UpstreamResolver for ServerEgressMap {
                         if let Some(ref b_ref) = current_backend_ref {
                             b_ref.mark_success();
                         }
-                        duotunnel_lib::engine::bridge::relay_with_first_data(
+                        duotunnel_lib::engine::bridge::relay_with_first_data_and_buffer_size(
                             recv,
                             send,
                             tcp_stream,
                             initial_data.as_deref(),
+                            self.relay_buf_size,
                         )
                         .await
                         .map_err(|e| ProxyError::upstream_forward(e.to_string()))?;
@@ -350,11 +358,12 @@ impl UpstreamResolver for ServerEgressMap {
                             b_ref.mark_success();
                         }
 
-                        duotunnel_lib::engine::relay::relay_with_initial(
+                        duotunnel_lib::engine::relay::relay_with_initial_and_buffer_size(
                             recv,
                             send,
                             tls_stream,
                             initial_data.as_deref().unwrap_or(&[]),
+                            self.relay_buf_size,
                         )
                         .await
                         .map_err(|e| ProxyError::upstream_forward(e.to_string()))?;

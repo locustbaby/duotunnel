@@ -104,6 +104,7 @@ export const options = {
   scenarios: buildScenarios(ACTIVE_CASES),
   noConnectionReuse: false,
   thresholds: buildThresholds(ACTIVE_CASES),
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
 };
 
 function track(ok) {

@@ -2,7 +2,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::control::service::ControlService;
+use crate::control::service::{ControlService, DegradedSource};
 
 const PUBLISH_DEBOUNCE_MS: u64 = 50;
 
@@ -24,6 +24,13 @@ pub(crate) async fn debounce_publish_task(
                 if let Err(e) = svc.do_publish().await {
                     consecutive_failures += 1;
                     let backoff = Duration::from_secs(1 << consecutive_failures.min(5));
+                    svc.publish();
+                    if let Err(mark_error) = svc
+                        .set_source_degraded(DegradedSource::Coordinator, true)
+                        .await
+                    {
+                        warn!(error = %mark_error, "failed to persist degraded config state");
+                    }
                     warn!(
                         error = %e,
                         consecutive_failures,
@@ -33,6 +40,12 @@ pub(crate) async fn debounce_publish_task(
                     tokio::time::sleep(backoff).await;
                 } else {
                     consecutive_failures = 0;
+                    if let Err(clear_error) = svc
+                        .set_source_degraded(DegradedSource::Coordinator, false)
+                        .await
+                    {
+                        warn!(error = %clear_error, "failed to clear degraded config state");
+                    }
                 }
             }
         }

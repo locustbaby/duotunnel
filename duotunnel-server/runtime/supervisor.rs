@@ -257,7 +257,7 @@ impl ServerComponent for BackgroundComponent {
 
 async fn background_main(ctx: ComponentContext) -> anyhow::Result<()> {
     let svc: Box<dyn BackgroundService> = match ctx.bootstrap.mode() {
-        crate::bootstrap::ServerMode::Managed {
+        crate::bootstrap::ServerMode::ControlPlane {
             ctld_addr,
             ctld_token,
         } => match ctld_addr.parse::<std::net::SocketAddr>() {

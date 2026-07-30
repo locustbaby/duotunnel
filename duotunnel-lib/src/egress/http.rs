@@ -1,4 +1,8 @@
 use crate::protocol::rewrite::Rewriter;
+use crate::proxy::buffer_params::{
+    normalize_http_body_chunk_size, normalize_http_header_buf_size, ProxyBufferParams,
+    MAX_HTTP_HEADER_BUF_SIZE,
+};
 use crate::transport::addr::parse_upstream;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -90,17 +94,37 @@ pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
 }
 
 pub async fn forward_http(
+    recv: RecvStream,
+    send: SendStream,
+    upstream_addr: &str,
+    client: &HttpsClient,
+    rewriter: Option<&Rewriter>,
+) -> Result<()> {
+    forward_http_with_buffer_params(
+        recv,
+        send,
+        upstream_addr,
+        client,
+        rewriter,
+        &ProxyBufferParams::default(),
+    )
+    .await
+}
+
+pub async fn forward_http_with_buffer_params(
     mut recv: RecvStream,
     mut send: SendStream,
     upstream_addr: &str,
     client: &HttpsClient,
     rewriter: Option<&Rewriter>,
+    buffer_params: &ProxyBufferParams,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
     let parsed = parse_upstream(upstream_addr);
 
-    const MAX_HEADER_BUF: usize = 64 * 1024;
-    let mut head_buf = BytesMut::with_capacity(8192);
+    let header_buf_size = normalize_http_header_buf_size(buffer_params.http_header_buf_size);
+    let body_chunk_size = normalize_http_body_chunk_size(buffer_params.http_body_chunk_size);
+    let mut head_buf = BytesMut::with_capacity(header_buf_size);
 
     let header_end = loop {
         let mut tmp = [httparse::EMPTY_HEADER; 64];
@@ -108,14 +132,14 @@ pub async fn forward_http(
         match req.parse(&head_buf) {
             Ok(httparse::Status::Complete(n)) => break n,
             Ok(httparse::Status::Partial) => {
-                if head_buf.len() >= MAX_HEADER_BUF {
+                if head_buf.len() >= MAX_HTTP_HEADER_BUF_SIZE {
                     return Err(anyhow::anyhow!(
                         "HTTP request headers exceed {} bytes",
-                        MAX_HEADER_BUF
+                        MAX_HTTP_HEADER_BUF_SIZE
                     ));
                 }
                 let old_len = head_buf.len();
-                let spare = (MAX_HEADER_BUF - old_len).min(8192);
+                let spare = (MAX_HTTP_HEADER_BUF_SIZE - old_len).min(header_buf_size);
                 match read_into_bytes_mut(&mut recv, &mut head_buf, spare).await? {
                     Some(_) => {}
                     None => {
@@ -176,7 +200,7 @@ pub async fn forward_http(
     > = if content_length > 0 {
         let stream = futures_util::stream::try_unfold(
             (recv, Some(remaining_first), 0usize, content_length),
-            |(mut recv, first_chunk, mut read, total)| async move {
+            move |(mut recv, first_chunk, mut read, total)| async move {
                 if let Some(chunk) = first_chunk {
                     let len = chunk.len();
                     if len > 0 {
@@ -191,7 +215,7 @@ pub async fn forward_http(
                     return Ok(None);
                 }
                 let remaining = total - read;
-                let to_read = 8192.min(remaining);
+                let to_read = body_chunk_size.min(remaining);
                 match recv.read_chunk(to_read, true).await {
                     Ok(Some(chunk)) => {
                         let len = chunk.bytes.len();
@@ -227,7 +251,8 @@ pub async fn forward_http(
         use std::fmt::Write as FmtWrite;
         let status = response.status();
         let headers = response.headers();
-        let mut header_buf = bytes::BytesMut::with_capacity(32 + headers.len() * 48 + 4);
+        let mut header_buf =
+            bytes::BytesMut::with_capacity((32 + headers.len() * 48 + 4).max(header_buf_size));
         write!(
             header_buf,
             "HTTP/1.1 {} {}\r\n",

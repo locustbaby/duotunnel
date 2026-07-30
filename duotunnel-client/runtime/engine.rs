@@ -32,7 +32,7 @@ impl RuntimeEngine {
         for service in services {
             let service_shutdown = shutdown.clone();
             let name = service.name();
-            handles.push(tokio::spawn(async move {
+            handles.push(super::spawn_task(async move {
                 if let Err(e) = service.start(service_shutdown).await {
                     tracing::error!(service = name, error = %e, "service crashed");
                     return Err(e);

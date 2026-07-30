@@ -3,9 +3,9 @@ use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use duotunnel_lib::{
-    default_client_detectors, maybe_slow_path, relay_quic_to_tcp, run_accept_worker, AcceptedConn,
-    ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool, ProxyError, RoutingInfo,
-    SniffPolicy, SniffRuntime, TcpParams,
+    default_client_detectors, maybe_slow_path, relay_quic_to_tcp_with_buffer_size,
+    run_accept_worker, AcceptedConn, ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool,
+    ProxyError, RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
 };
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -35,6 +35,7 @@ pub struct EntryListenerConfig {
     pub accept_workers: usize,
     pub overload: Arc<OverloadLimits>,
     pub sniff_timeout: Duration,
+    pub relay_buf_size: usize,
 }
 
 struct EntryListenerHealthGuard {
@@ -60,6 +61,7 @@ pub async fn start_entry_listener(
     let tcp_params = Arc::new(cfg.tcp_params);
     let overload = cfg.overload;
     let sniff_timeout = cfg.sniff_timeout;
+    let relay_buf_size = cfg.relay_buf_size;
     anyhow::ensure!(
         accept_workers > 0,
         "entry accept_workers must be at least 1"
@@ -101,6 +103,7 @@ pub async fn start_entry_listener(
                             open_stream_timeout,
                             &overload,
                             sniff_timeout,
+                            relay_buf_size,
                         )
                         .await
                         {
@@ -136,6 +139,7 @@ fn classify_accept_worker_exit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_entry_connection(
     pool: Arc<EntryConnPool>,
     mut local_stream: TcpStream,
@@ -144,6 +148,7 @@ async fn handle_entry_connection(
     open_stream_timeout: Duration,
     overload: &OverloadLimits,
     sniff_timeout: Duration,
+    relay_buf_size: usize,
 ) -> Result<()> {
     let peer_addr = local_stream.peer_addr()?;
     tcp_params.apply(&local_stream)?;
@@ -235,7 +240,9 @@ async fn handle_entry_connection(
                 let send = opened.send;
                 let recv = opened.recv;
                 let _inflight_guard = opened.inflight;
-                let (sent, received) = relay_quic_to_tcp(recv, send, local_stream).await?;
+                let (sent, received) =
+                    relay_quic_to_tcp_with_buffer_size(recv, send, local_stream, relay_buf_size)
+                        .await?;
                 conn.mark_business_completed();
                 let extra = initial_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                 debug!(
@@ -405,6 +412,7 @@ mod tests {
             Duration::from_secs(1),
             &overload,
             Duration::from_secs(1),
+            duotunnel_lib::ProxyBufferParams::default().relay_buf_size,
         )
         .await;
 
@@ -480,6 +488,7 @@ mod tests {
             Duration::from_secs(1),
             &overload,
             Duration::from_secs(1),
+            duotunnel_lib::ProxyBufferParams::default().relay_buf_size,
         )
         .await;
 
