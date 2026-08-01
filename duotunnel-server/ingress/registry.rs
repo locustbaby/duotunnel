@@ -148,8 +148,9 @@ impl ClientGroup {
                 pick_p2c_inflight_owned(
                     snapshot.as_slice(),
                     |c| {
-                        c.handle.connection_state().is_selectable()
+                        c.handle.is_selectable()
                             && c.handle.close_reason().is_none()
+                            && c.handle.has_stream_capacity()
                     },
                     |c| inflight_load(c.handle.connection_state(), Ordering::Relaxed),
                 )

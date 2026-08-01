@@ -1,6 +1,6 @@
 use crate::{
-    open_bi_guarded, send_routing_info, ConnectionState, OpenBiOutcome, OpenedStream,
-    OverloadLimits, ProxyError, RoutingInfo,
+    open_bi_guarded, send_routing_info, ConnectionState, OpenBiOutcome, OpenedStream, ProxyError,
+    RoutingInfo,
 };
 use bytes::Bytes;
 use quinn::Connection;
@@ -12,7 +12,6 @@ pub type OpenWaitObserver = fn(Duration, OpenBiOutcome);
 pub struct OpenStreamRequest {
     pub routing_info: RoutingInfo,
     pub initial_bytes: Option<Bytes>,
-    pub overload_limits: OverloadLimits,
     pub stream_timeout: Duration,
     pub on_wait_done: Option<OpenWaitObserver>,
 }
@@ -34,9 +33,9 @@ impl ConnectionHandle {
         max_concurrent_streams: u32,
         max_pending_streams: usize,
     ) -> Arc<Self> {
-        let stream_semaphore =
-            Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams as usize));
-        let pending_limit = max_pending_streams.max(1);
+        let stream_limit = max_concurrent_streams.max(1) as usize;
+        let stream_semaphore = Arc::new(tokio::sync::Semaphore::new(stream_limit));
+        let pending_limit = max_pending_streams.max(1).min(stream_limit);
         let pending_semaphore = Arc::new(tokio::sync::Semaphore::new(pending_limit));
 
         Arc::new(Self {
@@ -59,6 +58,14 @@ impl ConnectionHandle {
 
     pub fn close_reason(&self) -> Option<quinn::ConnectionError> {
         self.conn.close_reason()
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        self.connection_state.is_selectable()
+    }
+
+    pub fn has_stream_capacity(&self) -> bool {
+        self.stream_semaphore.available_permits() > 0
     }
 
     pub fn connection_state(&self) -> &Arc<ConnectionState> {

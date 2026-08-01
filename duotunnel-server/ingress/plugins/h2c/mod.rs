@@ -97,7 +97,9 @@ fn get_or_create_sender(
     {
         let guard = sender_cache.read();
         if let Some(entry) = guard.get(&key) {
-            if entry.selected.handle.close_reason().is_none() {
+            if entry.selected.handle.is_selectable()
+                && entry.selected.handle.close_reason().is_none()
+            {
                 return Some(entry.clone());
             }
         }
@@ -106,10 +108,11 @@ fn get_or_create_sender(
     let mut guard = sender_cache.write();
     guard.retain(|(cached_generation, _), entry| {
         *cached_generation >= generation.saturating_sub(1)
+            && entry.selected.handle.is_selectable()
             && entry.selected.handle.close_reason().is_none()
     });
     if let Some(entry) = guard.get(&key) {
-        if entry.selected.handle.close_reason().is_none() {
+        if entry.selected.handle.is_selectable() && entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
         }
         guard.remove(&key);
@@ -161,7 +164,6 @@ impl IngressProtocolHandler for H2cHandler {
         let src_port = ctx.peer_addr.port();
         let listener_port = ctx.listener_port;
         let single_authority = self.single_authority;
-        let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
 
         let first_authority: Arc<std::sync::OnceLock<String>> =
@@ -185,7 +187,6 @@ impl IngressProtocolHandler for H2cHandler {
             let health = health.clone();
             let metrics = metrics.clone();
             let src_addr = src_addr;
-            let overload = overload.clone();
             async move {
                 let _tracked =
                     duotunnel_lib::track_resource(duotunnel_lib::TrackedResource::HttpRequest);
@@ -289,7 +290,6 @@ impl IngressProtocolHandler for H2cHandler {
                     OpenStreamRequest {
                         routing_info: routing_info.clone(),
                         initial_bytes: None,
-                        overload_limits: overload.clone(),
                         stream_timeout: open_stream_timeout,
                         on_wait_done: None,
                     },
@@ -326,7 +326,6 @@ impl IngressProtocolHandler for H2cHandler {
                                     OpenStreamRequest {
                                         routing_info: routing_info.clone(),
                                         initial_bytes: None,
-                                        overload_limits: overload.clone(),
                                         stream_timeout: open_stream_timeout,
                                         on_wait_done: None,
                                     },

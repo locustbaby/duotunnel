@@ -1,4 +1,3 @@
-use crate::lb::overload::OverloadLimits;
 use crate::models::id::{GroupId, ProxyName};
 use crate::transport::tcp_params::TcpParams;
 use bytes::Bytes;
@@ -163,7 +162,6 @@ pub struct ServerCtx {
 
     // Shared read-only config (no need to abstract — single implementation)
     pub tcp_params: Arc<TcpParams>,
-    pub overload: OverloadLimits,
     pub timeouts: Timeouts,
     pub peer_addr: SocketAddr,
     pub listener_port: u16,
@@ -181,7 +179,6 @@ impl ServerCtx {
         peer_addr: SocketAddr,
         metrics: Arc<dyn MetricsSink>,
         tcp_params: Arc<TcpParams>,
-        overload: OverloadLimits,
         timeouts: Timeouts,
         listener_port: u16,
         relay_buf_size: usize,
@@ -194,7 +191,6 @@ impl ServerCtx {
             route: None,
             admitted: false,
             tcp_params,
-            overload,
             timeouts,
             peer_addr,
             listener_port,

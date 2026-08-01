@@ -23,7 +23,7 @@ const Utils = {
     return `<span class="d ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
   },
   deltaVal: (cur, pre, invert) => {
-    if (pre == null) return '—';
+    if (cur == null || pre == null) return '—';
     const diff = Utils.r2(cur - pre);
     const good = invert ? diff < 0 : diff > 0;
     const cls = Math.abs(diff) < 0.01 ? 'c-dim' : good ? 'c-good' : 'c-bad';
@@ -288,7 +288,6 @@ async function renderDetail(entry) {
   }
 
   const categoryDefs = categoryDefsFromEntry(entry);
-  const maxP95 = Math.max(...allCases.map(c => (c.perf||{}).p95 || 0), 1);
   const prevCaseMap = {};
   if (prevDetail) {
     Object.entries(prevDetail.cases || {}).forEach(([name, c]) => {
@@ -298,8 +297,8 @@ async function renderDetail(entry) {
 
   html += UI.Section('Scenario Results');
   let tableRows = [];
-  const base = ['Scenario', 'Proto', 'Dir', 'Time', 'Target', 'Threshold', 'p50', 'p95', 'Latency', 'RPS', 'Reqs', 'Err %'];
-  const headers = prevDetail ? [...base, 'Δ p50', 'Δ p95', 'Δ RPS'] : base;
+  const base = ['Scenario', 'Proto', 'Dir', 'Time', 'Target', 'Threshold', 'p95', 'p99', 'p99.9', 'RPS', 'Reqs', 'Err %'];
+  const headers = prevDetail ? [...base, 'Δ p95', 'Δ p99', 'Δ p99.9', 'Δ RPS'] : base;
 
   categoryDefs.forEach(cat => {
     const group = allCases.filter(c => c.category === cat.id);
@@ -313,12 +312,15 @@ async function renderDetail(entry) {
         `${scenarioLabel(c)}${c.tunnel==='frp'?' <span class="pill pill-ws">frp</span>':''}`,
         Utils.pill(c.protocol), c.direction, Utils.fmtTimeRange(perf.timeRange),
         perf.targetRate ? Utils.fmt(perf.targetRate)+' rps' : '—', perf.thresholdSpec || '—',
-        perf.p50+' ms', perf.p95+' ms', Utils.latencyBar(perf.p95, maxP95, c.protocol)+perf.p95+' ms',
+        perf.p95 == null ? '—' : `${perf.p95} ms`,
+        perf.p99 == null ? '—' : `${perf.p99} ms`,
+        perf.p99_9 == null ? '—' : `${perf.p99_9} ms`,
         Utils.fmt(perf.rps), Utils.fmt(perf.requests), `<span class="${perf.err>0?'c-bad':'c-dim'}">${perf.err}%</span>`
       ];
       if (prevDetail) {
-        cells.push(pp ? Utils.deltaVal(perf.p50, pp.p50, true) : '—');
         cells.push(pp ? Utils.deltaVal(perf.p95, pp.p95, true) : '—');
+        cells.push(pp ? Utils.deltaVal(perf.p99, pp.p99, true) : '—');
+        cells.push(pp ? Utils.deltaVal(perf.p99_9, pp.p99_9, true) : '—');
         cells.push(pp ? Utils.deltaVal(perf.rps, pp.rps, false) : '—');
       }
       tableRows.push({cells});

@@ -76,8 +76,6 @@ impl IngressProtocolHandler for H1Handler {
                 }
             };
 
-            duotunnel_lib::maybe_slow_path(selected.handle.connection_state(), &ctx.overload).await;
-
             let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
             let routing_info = duotunnel_lib::RoutingInfo {
                 proxy_name: proxy_name.clone(),
@@ -91,7 +89,6 @@ impl IngressProtocolHandler for H1Handler {
                 .open_stream(OpenStreamRequest {
                     routing_info,
                     initial_bytes: None,
-                    overload_limits: ctx.overload.clone(),
                     stream_timeout: open_timeout,
                     on_wait_done: None,
                 })

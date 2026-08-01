@@ -37,9 +37,8 @@ pub use lb::inflight::{
     pick_p2c_inflight, ConnectionState, InflightGuard, InflightTable,
 };
 pub use lb::overload::{
-    maybe_slow_path, AdmissionConfigError, AdmissionController, AdmissionLimits, AdmissionPermit,
-    AdmissionRejectScope, AdmissionRejected, AdmissionStats, BackoffStrategy, OverloadLimits,
-    OverloadMode as SharedOverloadMode,
+    AdmissionConfigError, AdmissionController, AdmissionLimits, AdmissionPermit,
+    AdmissionRejectScope, AdmissionRejected, AdmissionStats, OverloadLimits,
 };
 pub use lb::shard::{
     pick_from_preferred_shards, pick_p2c_inflight_owned, stable_shard_index,

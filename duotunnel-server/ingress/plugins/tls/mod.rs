@@ -34,7 +34,9 @@ fn get_or_create_sender(
     {
         let guard = sender_cache.read();
         if let Some(entry) = guard.get(&key) {
-            if entry.selected.handle.close_reason().is_none() {
+            if entry.selected.handle.is_selectable()
+                && entry.selected.handle.close_reason().is_none()
+            {
                 return Some(entry.clone());
             }
         }
@@ -43,10 +45,11 @@ fn get_or_create_sender(
     let mut guard = sender_cache.write();
     guard.retain(|(cached_generation, _), entry| {
         *cached_generation >= generation.saturating_sub(1)
+            && entry.selected.handle.is_selectable()
             && entry.selected.handle.close_reason().is_none()
     });
     if let Some(entry) = guard.get(&key) {
-        if entry.selected.handle.close_reason().is_none() {
+        if entry.selected.handle.is_selectable() && entry.selected.handle.close_reason().is_none() {
             return Some(entry.clone());
         }
         guard.remove(&key);
@@ -137,7 +140,6 @@ impl IngressProtocolHandler for TlsHandler {
         let src_addr = peer_addr.ip();
         let src_port = peer_addr.port();
         let target_host = host.clone();
-        let overload = ctx.overload.clone();
         let open_stream_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
         let listener_port = ctx.listener_port;
 
@@ -158,7 +160,6 @@ impl IngressProtocolHandler for TlsHandler {
             let health = health.clone();
             let pinned_route_target = pinned_route_target.clone();
             let src_addr = src_addr;
-            let overload = overload.clone();
             async move {
                 let _tracked =
                     duotunnel_lib::track_resource(duotunnel_lib::TrackedResource::HttpRequest);
@@ -291,7 +292,6 @@ impl IngressProtocolHandler for TlsHandler {
                         OpenStreamRequest {
                             routing_info: routing_info.clone(),
                             initial_bytes: None,
-                            overload_limits: overload.clone(),
                             stream_timeout: open_stream_timeout,
                             on_wait_done: None,
                         },

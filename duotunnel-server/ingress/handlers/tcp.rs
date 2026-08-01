@@ -2,8 +2,7 @@ use crate::runtime::metrics;
 use crate::ServerState;
 use anyhow::Result;
 use duotunnel_lib::{
-    maybe_slow_path, proxy, run_accept_worker, ErrorKind, GroupId, OpenBiOutcome,
-    OpenStreamRequest, ProxyName,
+    proxy, run_accept_worker, ErrorKind, GroupId, OpenBiOutcome, OpenStreamRequest, ProxyName,
 };
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -109,8 +108,6 @@ async fn handle_tcp_connection(
             .select_client_for_group(&group_id)
             .ok_or_else(|| anyhow::anyhow!("no client for group: {}", group_id))?;
 
-        maybe_slow_path(selected.handle.connection_state(), state.overload_limits()).await;
-
         let open_timeout = state.open_stream_timeout();
         let _open_bi_guard = metrics::open_bi_begin(&selected.conn_id);
         match selected
@@ -118,7 +115,6 @@ async fn handle_tcp_connection(
             .open_stream(OpenStreamRequest {
                 routing_info: routing_info.clone(),
                 initial_bytes: None,
-                overload_limits: state.overload_limits().clone(),
                 stream_timeout: open_timeout,
                 on_wait_done: Some(observe_wait_metrics),
             })

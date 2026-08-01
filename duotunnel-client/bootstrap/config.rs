@@ -85,93 +85,15 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
         }
     }
 }
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum OverloadMode {
-    #[default]
-    InflightSlowpath,
-    Burst,
-}
-
-impl From<OverloadMode> for duotunnel_lib::SharedOverloadMode {
-    fn from(m: OverloadMode) -> Self {
-        match m {
-            OverloadMode::InflightSlowpath => duotunnel_lib::SharedOverloadMode::InflightSlowpath,
-            OverloadMode::Burst => duotunnel_lib::SharedOverloadMode::Burst,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum BackoffStrategy {
-    None,
-    Fixed,
-    #[default]
-    Exponential,
-}
-
-impl From<BackoffStrategy> for duotunnel_lib::BackoffStrategy {
-    fn from(s: BackoffStrategy) -> Self {
-        match s {
-            BackoffStrategy::None => duotunnel_lib::BackoffStrategy::None,
-            BackoffStrategy::Fixed => duotunnel_lib::BackoffStrategy::Fixed,
-            BackoffStrategy::Exponential => duotunnel_lib::BackoffStrategy::Exponential,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct OverloadConfig {
-    pub mode: OverloadMode,
-    pub inflight_yield_threshold: usize,
-    pub inflight_sleep_threshold: usize,
     pub max_pending_streams: Option<usize>,
-    /// Total time budget for the slow-path wait, in milliseconds.
-    /// For `exponential` strategy the loop backs off within this budget;
-    /// for `fixed` it sleeps the full budget once.
-    pub inflight_sleep_ms: u64,
-    /// When set, overrides `inflight_yield_threshold` as a fraction of
-    /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
-    pub inflight_yield_pct: Option<f32>,
-    /// When set, overrides `inflight_sleep_threshold` as a fraction of
-    /// `quic.max_concurrent_streams` (0.0 – 1.0). Preferred over absolute values.
-    pub inflight_sleep_pct: Option<f32>,
-    /// How to wait when inflight ≥ sleep threshold.  Defaults to `exponential`
-    /// which backs off from ~6% to ~25% of `inflight_sleep_ms` per step and
-    /// rechecks inflight between steps.
-    pub backoff_strategy: BackoffStrategy,
-}
-
-impl Default for OverloadConfig {
-    fn default() -> Self {
-        Self {
-            mode: OverloadMode::InflightSlowpath,
-            inflight_yield_threshold: 800,
-            inflight_sleep_threshold: 950,
-            max_pending_streams: None,
-            inflight_sleep_ms: 2,
-            inflight_yield_pct: Some(0.80),
-            inflight_sleep_pct: Some(0.95),
-            backoff_strategy: BackoffStrategy::default(),
-        }
-    }
 }
 
 impl OverloadConfig {
     pub fn resolve(&self, max_concurrent_streams: u32) -> duotunnel_lib::OverloadLimits {
-        duotunnel_lib::OverloadLimits::resolve(
-            self.mode.clone().into(),
-            max_concurrent_streams,
-            self.inflight_yield_threshold,
-            self.inflight_sleep_threshold,
-            self.max_pending_streams,
-            self.inflight_yield_pct,
-            self.inflight_sleep_pct,
-            self.inflight_sleep_ms,
-            self.backoff_strategy.into(),
-        )
+        duotunnel_lib::OverloadLimits::resolve(max_concurrent_streams, self.max_pending_streams)
     }
 }
 
@@ -373,25 +295,8 @@ impl ClientConfigFile {
                 errors.push("tls_server_name must not be empty when set".into());
             }
         }
-        if self.overload.inflight_yield_threshold > self.overload.inflight_sleep_threshold {
-            errors.push(format!(
-                "overload.inflight_yield_threshold ({}) must be <= inflight_sleep_threshold ({})",
-                self.overload.inflight_yield_threshold, self.overload.inflight_sleep_threshold
-            ));
-        }
         if matches!(self.overload.max_pending_streams, Some(0)) {
             errors.push("overload.max_pending_streams must be >= 1 when set".into());
-        }
-        if let (Some(ypct), Some(spct)) = (
-            self.overload.inflight_yield_pct,
-            self.overload.inflight_sleep_pct,
-        ) {
-            if ypct > spct {
-                errors.push(format!(
-                    "overload.inflight_yield_pct ({}) must be <= inflight_sleep_pct ({})",
-                    ypct, spct
-                ));
-            }
         }
         if errors.is_empty() {
             Ok(())
@@ -475,99 +380,6 @@ mod tests {
         let config_override_space =
             create_mock_config("example.com", 443, Some(" tls.example.com ".to_string()));
         assert_eq!(config_override_space.tls_server_name(), "tls.example.com");
-    }
-
-    #[test]
-    fn test_overload_config_resolve_absolute() {
-        let config = OverloadConfig {
-            mode: OverloadMode::Burst,
-            inflight_yield_threshold: 100,
-            inflight_sleep_threshold: 200,
-            inflight_sleep_ms: 10,
-            max_pending_streams: None,
-            inflight_yield_pct: None,
-            inflight_sleep_pct: None,
-            backoff_strategy: BackoffStrategy::Fixed,
-        };
-
-        let limits = config.resolve(1000);
-
-        assert_eq!(limits.mode, duotunnel_lib::SharedOverloadMode::Burst);
-        assert_eq!(limits.inflight_yield_threshold, 100);
-        assert_eq!(limits.inflight_sleep_threshold, 200);
-        assert_eq!(limits.backoff, duotunnel_lib::BackoffStrategy::Fixed);
-        assert_eq!(
-            limits.inflight_sleep_budget,
-            std::time::Duration::from_millis(10)
-        );
-    }
-
-    #[test]
-    fn test_overload_config_resolve_percentage() {
-        let config = OverloadConfig {
-            mode: OverloadMode::InflightSlowpath,
-            inflight_yield_threshold: 10, // These should be overridden
-            inflight_sleep_threshold: 20, // These should be overridden
-            inflight_sleep_ms: 5,
-            max_pending_streams: None,
-            inflight_yield_pct: Some(0.5),
-            inflight_sleep_pct: Some(0.8),
-            backoff_strategy: BackoffStrategy::Exponential,
-        };
-
-        let limits = config.resolve(1000);
-
-        assert_eq!(
-            limits.mode,
-            duotunnel_lib::SharedOverloadMode::InflightSlowpath
-        );
-        assert_eq!(limits.inflight_yield_threshold, 500); // 1000 * 0.5
-        assert_eq!(limits.inflight_sleep_threshold, 800); // 1000 * 0.8
-        assert_eq!(limits.backoff, duotunnel_lib::BackoffStrategy::Exponential);
-        assert_eq!(
-            limits.inflight_sleep_budget,
-            std::time::Duration::from_millis(5)
-        );
-    }
-
-    #[test]
-    fn test_overload_config_resolve_clamp_yield() {
-        let config = OverloadConfig {
-            mode: OverloadMode::InflightSlowpath,
-            inflight_yield_threshold: 500,
-            inflight_sleep_threshold: 100,
-            inflight_sleep_ms: 5,
-            max_pending_streams: None,
-            inflight_yield_pct: None,
-            inflight_sleep_pct: None,
-            backoff_strategy: BackoffStrategy::None,
-        };
-
-        let limits = config.resolve(1000);
-
-        // Yield should be clamped to sleep threshold if it exceeds it.
-        assert_eq!(limits.inflight_sleep_threshold, 100);
-        assert_eq!(limits.inflight_yield_threshold, 100);
-    }
-
-    #[test]
-    fn test_overload_config_resolve_pct_clamp_yield() {
-        let config = OverloadConfig {
-            mode: OverloadMode::InflightSlowpath,
-            inflight_yield_threshold: 0,
-            inflight_sleep_threshold: 0,
-            inflight_sleep_ms: 5,
-            max_pending_streams: None,
-            inflight_yield_pct: Some(0.9),
-            inflight_sleep_pct: Some(0.5),
-            backoff_strategy: BackoffStrategy::None,
-        };
-
-        let limits = config.resolve(1000);
-
-        // Yield should be clamped to sleep threshold if it exceeds it.
-        assert_eq!(limits.inflight_sleep_threshold, 500); // 1000 * 0.5
-        assert_eq!(limits.inflight_yield_threshold, 500); // Clamped to 500
     }
 
     #[test]

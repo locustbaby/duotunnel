@@ -200,7 +200,6 @@ struct IngressRuntime {
     generation: Arc<ArcSwap<RuntimeGeneration>>,
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     listeners: listener_mgr::ListenerManager,
-    overload_limits: duotunnel_lib::OverloadLimits,
     plugin_registry: Arc<duotunnel_lib::plugin::PluginRegistry>,
     /// Listeners must always run on the multi-threaded proxy runtime, never on
     /// whichever runtime happened to apply a config update: the control-plane
@@ -337,10 +336,6 @@ impl ServerState {
         &self.ingress.peek_buf_pool
     }
 
-    pub(crate) fn overload_limits(&self) -> &duotunnel_lib::OverloadLimits {
-        &self.ingress.overload_limits
-    }
-
     pub(crate) fn plugin_registry(&self) -> &Arc<duotunnel_lib::plugin::PluginRegistry> {
         &self.ingress.plugin_registry
     }
@@ -388,10 +383,8 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         .max_concurrent_streams;
     let overload_limits = bootstrap.config.server.overload.resolve(max_streams);
     info!(
-        mode = ?overload_limits.mode,
-        yield_threshold = overload_limits.inflight_yield_threshold,
-        sleep_threshold = overload_limits.inflight_sleep_threshold,
         max_concurrent_streams = max_streams,
+        max_pending_streams = overload_limits.max_pending_streams,
         "overload protection resolved"
     );
     let shard_count = duotunnel_lib::resolve_shard_count(bootstrap.config.server.quic.shards, None);
@@ -468,7 +461,6 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             generation,
             upstream_health,
             listeners: listener_mgr::ListenerManager::new(),
-            overload_limits,
             plugin_registry,
             proxy_handle: tokio::runtime::Handle::current(),
         },
