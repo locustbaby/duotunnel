@@ -16,7 +16,7 @@
           {"target": 40, "duration": "20s"}
         ],
         "preAllocatedVUs": 30,
-        "maxVUs": 200
+        "maxVUs": 10000
       }
     },
     {
@@ -35,7 +35,7 @@
           {"target": 25, "duration": "5s"},
           {"target": 25, "duration": "20s"}
         ],
-        "maxVUs": 150
+        "maxVUs": 10000
       }
     },
     {
@@ -55,7 +55,7 @@
           {"target": 50, "duration": "20s"}
         ],
         "preAllocatedVUs": 30,
-        "maxVUs": 250
+        "maxVUs": 10000
       }
     },
     {
@@ -74,7 +74,7 @@
           {"target": 40, "duration": "5s"},
           {"target": 40, "duration": "20s"}
         ],
-        "maxVUs": 200
+        "maxVUs": 10000
       }
     },
     {
@@ -105,7 +105,7 @@
         "rate": 20,
         "duration": "20s",
         "startTime": "5s",
-        "maxVUs": 100
+        "maxVUs": 10000
       }
     },
     {
@@ -120,7 +120,7 @@
         "rate": 20,
         "duration": "20s",
         "startTime": "7s",
-        "maxVUs": 100
+        "maxVUs": 10000
       }
     },
     {

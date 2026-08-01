@@ -14,7 +14,7 @@
         "duration": "20s",
         "startTime": "35s",
         "preAllocatedVUs": 100,
-        "maxVUs": 300
+        "maxVUs": 10000
       }
     },
     {
@@ -31,7 +31,7 @@
         "duration": "20s",
         "startTime": "35s",
         "preAllocatedVUs": 80,
-        "maxVUs": 250
+        "maxVUs": 10000
       }
     },
     {
@@ -48,7 +48,7 @@
         "duration": "20s",
         "startTime": "35s",
         "preAllocatedVUs": 50,
-        "maxVUs": 200
+        "maxVUs": 10000
       }
     },
     {
@@ -65,7 +65,7 @@
         "duration": "20s",
         "startTime": "37s",
         "preAllocatedVUs": 80,
-        "maxVUs": 250
+        "maxVUs": 10000
       }
     },
     {
@@ -82,7 +82,7 @@
         "duration": "20s",
         "startTime": "36s",
         "preAllocatedVUs": 30,
-        "maxVUs": 100
+        "maxVUs": 10000
       }
     },
     {
@@ -98,7 +98,7 @@
         "rate": 15,
         "duration": "20s",
         "startTime": "38s",
-        "maxVUs": 80
+        "maxVUs": 10000
       }
     },
     {
@@ -118,7 +118,7 @@
           {"target": 100, "duration": "15s"}
         ],
         "preAllocatedVUs": 50,
-        "maxVUs": 200
+        "maxVUs": 10000
       }
     }
   ]

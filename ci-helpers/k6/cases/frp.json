@@ -21,7 +21,7 @@
         "duration": "20s",
         "startTime": "0s",
         "preAllocatedVUs": 100,
-        "maxVUs": 2000
+        "maxVUs": 10000
       }
     },
     {
@@ -39,7 +39,7 @@
         "duration": "20s",
         "startTime": "0s",
         "preAllocatedVUs": 100,
-        "maxVUs": 500
+        "maxVUs": 10000
       }
     },
     {
@@ -57,7 +57,7 @@
         "duration": "20s",
         "startTime": "0s",
         "preAllocatedVUs": 100,
-        "maxVUs": 2000
+        "maxVUs": 10000
       }
     },
     {
@@ -75,7 +75,7 @@
         "duration": "20s",
         "startTime": "0s",
         "preAllocatedVUs": 100,
-        "maxVUs": 3000
+        "maxVUs": 10000
       }
     }
   ]
