@@ -85,18 +85,10 @@ impl From<&ClientQuicConfig> for QuicTransportParams {
         }
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct OverloadConfig {
     pub max_pending_streams: Option<usize>,
-}
-
-impl Default for OverloadConfig {
-    fn default() -> Self {
-        Self {
-            max_pending_streams: None,
-        }
-    }
 }
 
 impl OverloadConfig {
