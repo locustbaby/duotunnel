@@ -57,7 +57,6 @@ pub async fn run_http_accept_loop(
                 peer_addr,
                 metrics_sink,
                 Arc::new(state.tcp_params().clone()),
-                state.overload_limits().clone(),
                 timeouts,
                 port,
                 state.relay_buf_size(),

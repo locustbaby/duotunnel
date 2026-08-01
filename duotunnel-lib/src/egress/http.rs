@@ -274,9 +274,12 @@ pub async fn forward_http_with_buffer_params(
     loop {
         match body.frame().await {
             Some(Ok(frame)) => {
-                if let Some(chunk) = frame.data_ref() {
-                    total_bytes += chunk.len();
-                    send.write_all(chunk).await?;
+                // This path forwards data frames only; trailers were not emitted here before.
+                if let Ok(chunk) = frame.into_data() {
+                    if !chunk.is_empty() {
+                        total_bytes += chunk.len();
+                        send.write_chunk(chunk).await?;
+                    }
                 }
             }
             Some(Err(e)) => {

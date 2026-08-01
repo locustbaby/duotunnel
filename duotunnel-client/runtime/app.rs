@@ -68,10 +68,8 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
     );
     let overload_limits = config.overload.resolve(config.quic.max_concurrent_streams);
     info!(
-        mode = ?overload_limits.mode,
-        yield_threshold = overload_limits.inflight_yield_threshold,
-        sleep_threshold = overload_limits.inflight_sleep_threshold,
         max_concurrent_streams = config.quic.max_concurrent_streams,
+        max_pending_streams = overload_limits.max_pending_streams,
         "overload protection resolved"
     );
     let health = Arc::new(ClientHealth::new(
@@ -114,7 +112,6 @@ async fn run_client_process(bootstrap: ClientBootstrap) -> Result<()> {
             peek_buf_size,
             open_stream_timeout,
             accept_workers,
-            overload: Arc::new(overload_limits),
             sniff_timeout: Duration::from_millis(config.proxy_buffers.sniff_timeout_ms),
             relay_buf_size: duotunnel_lib::ProxyBufferParams::from(&config.proxy_buffers)
                 .relay_buf_size,

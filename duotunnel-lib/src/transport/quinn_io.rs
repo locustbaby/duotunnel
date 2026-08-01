@@ -1,6 +1,6 @@
 use crate::SniffPrefix;
 use quinn::{RecvStream, SendStream};
-use std::io::Result;
+use std::io::{IoSlice, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -27,6 +27,18 @@ impl AsyncWrite for QuinnStream {
         Pin::new(&mut self.send)
             .poll_write(cx, buf)
             .map_err(std::io::Error::other)
+    }
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<Result<usize>> {
+        Pin::new(&mut self.send)
+            .poll_write_vectored(cx, bufs)
+            .map_err(std::io::Error::other)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.send.is_write_vectored()
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.send)
@@ -73,6 +85,16 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedReadWrite<S> {
         buf: &[u8],
     ) -> Poll<Result<usize>> {
         Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)

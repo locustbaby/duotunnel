@@ -3,9 +3,9 @@ use crate::runtime::engine::ClientService;
 use crate::tunnel::conn_pool::EntryConnPool;
 use anyhow::Result;
 use duotunnel_lib::{
-    default_client_detectors, maybe_slow_path, relay_quic_to_tcp_with_buffer_size,
-    run_accept_worker, AcceptedConn, ErrorKind, OpenStreamRequest, OverloadLimits, PeekBufPool,
-    ProxyError, RoutingInfo, SniffPolicy, SniffRuntime, TcpParams,
+    default_client_detectors, relay_quic_to_tcp_with_buffer_size, run_accept_worker, AcceptedConn,
+    ErrorKind, OpenStreamRequest, PeekBufPool, ProxyError, RoutingInfo, SniffPolicy, SniffRuntime,
+    TcpParams,
 };
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -33,7 +33,6 @@ pub struct EntryListenerConfig {
     pub peek_buf_size: usize,
     pub open_stream_timeout: Duration,
     pub accept_workers: usize,
-    pub overload: Arc<OverloadLimits>,
     pub sniff_timeout: Duration,
     pub relay_buf_size: usize,
 }
@@ -59,7 +58,6 @@ pub async fn start_entry_listener(
     let accept_workers = cfg.accept_workers;
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
     let tcp_params = Arc::new(cfg.tcp_params);
-    let overload = cfg.overload;
     let sniff_timeout = cfg.sniff_timeout;
     let relay_buf_size = cfg.relay_buf_size;
     anyhow::ensure!(
@@ -82,7 +80,6 @@ pub async fn start_entry_listener(
         let pool = pool.clone();
         let tcp_params = tcp_params.clone();
         let worker_cancel = worker_cancel.clone();
-        let overload = overload.clone();
         handles.push(crate::runtime::spawn_task(async move {
             run_accept_worker(
                 listener,
@@ -92,7 +89,6 @@ pub async fn start_entry_listener(
                 move |accepted| {
                     let pool = pool.clone();
                     let tcp_params = tcp_params.clone();
-                    let overload = overload.clone();
                     async move {
                         let AcceptedConn { stream, .. } = accepted;
                         if let Err(e) = handle_entry_connection(
@@ -101,7 +97,6 @@ pub async fn start_entry_listener(
                             peek_buf_size,
                             tcp_params,
                             open_stream_timeout,
-                            &overload,
                             sniff_timeout,
                             relay_buf_size,
                         )
@@ -146,7 +141,6 @@ async fn handle_entry_connection(
     peek_buf_size: usize,
     tcp_params: Arc<TcpParams>,
     open_stream_timeout: Duration,
-    overload: &OverloadLimits,
     sniff_timeout: Duration,
     relay_buf_size: usize,
 ) -> Result<()> {
@@ -217,7 +211,6 @@ async fn handle_entry_connection(
             None => break,
         };
         tried_conn_ids.insert(conn.handle.stable_id());
-        maybe_slow_path(conn.handle.connection_state(), overload).await;
         let routing_info = RoutingInfo {
             proxy_name: "entry".into(),
             src_addr: peer_addr.ip(),
@@ -230,7 +223,6 @@ async fn handle_entry_connection(
             .open_stream(OpenStreamRequest {
                 routing_info,
                 initial_bytes: initial_bytes.clone(),
-                overload_limits: overload.clone(),
                 stream_timeout: open_stream_timeout,
                 on_wait_done: None,
             })
@@ -392,25 +384,12 @@ mod tests {
 
         let (server_stream, _) = listener.accept().await.unwrap();
         let tcp_params = Arc::new(TcpParams::default());
-        let overload = OverloadLimits::resolve(
-            duotunnel_lib::SharedOverloadMode::Burst,
-            100,
-            0,
-            0,
-            None,
-            Some(0.0),
-            Some(0.0),
-            0,
-            duotunnel_lib::BackoffStrategy::Exponential,
-        );
-
         let res = handle_entry_connection(
             pool,
             server_stream,
             1024,
             tcp_params,
             Duration::from_secs(1),
-            &overload,
             Duration::from_secs(1),
             duotunnel_lib::ProxyBufferParams::default().relay_buf_size,
         )
@@ -468,25 +447,12 @@ mod tests {
 
         let (server_stream, _) = listener.accept().await.unwrap();
         let tcp_params = Arc::new(TcpParams::default());
-        let overload = OverloadLimits::resolve(
-            duotunnel_lib::SharedOverloadMode::Burst,
-            100,
-            0,
-            0,
-            None,
-            Some(0.0),
-            Some(0.0),
-            0,
-            duotunnel_lib::BackoffStrategy::Exponential,
-        );
-
         let res = handle_entry_connection(
             pool,
             server_stream,
             1024,
             tcp_params,
             Duration::from_secs(1),
-            &overload,
             Duration::from_secs(1),
             duotunnel_lib::ProxyBufferParams::default().relay_buf_size,
         )

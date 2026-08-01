@@ -57,15 +57,12 @@ impl IngressProtocolHandler for TcpPassHandler {
                 .select_client_for_group(&group_id)
                 .ok_or_else(|| ProxyError::no_client_available(group_id.to_string()))?;
 
-            duotunnel_lib::maybe_slow_path(selected.handle.connection_state(), &ctx.overload).await;
-
             let open_timeout = Duration::from_millis(ctx.timeouts.open_stream_ms);
             match selected
                 .handle
                 .open_stream(OpenStreamRequest {
                     routing_info: routing_info.clone(),
                     initial_bytes: None,
-                    overload_limits: ctx.overload.clone(),
                     stream_timeout: open_timeout,
                     on_wait_done: None,
                 })
