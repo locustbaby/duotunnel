@@ -146,6 +146,22 @@ SniffPrefix 零复制转发、open_bi 的 now_or_never 快路径、vectored writ
 
 ---
 
+## 2026-08-21 多视角专项评审（待确认）
+
+分四路并行扫描：安全攻击面、并发/死锁、配置校验、测试覆盖。结论：
+**并发卫生验证通过**——全仓脚本扫描“锁获取跨 .await”模式仅 1 个候选，人工核实为误报
+（dns_cache entry 守卫未跨 await）；admin socket 有界+超时+0600；cargo-audit 已在 CI 强制执行；
+validate() 聚合式错误报告良好。新增两项行动：
+
+1. **admin HTTP 解析器无单测** → TODO-163。手写解析不可信输入的代码恰是最需要
+   表驱动单测的地方，与已知“admin framing 硬化”事项配对。
+2. **配置缺重复监听端口校验** → TODO-164。当前靠 pre-bind 失败 rollback 兜底，
+   报错是低层 EADDRINUSE 而非配置层提示。
+3. 无需行动：DNS single-flight/broadcast 模式正确；MSRV 钉死 1.95.0 带 clippy/rustfmt；
+   quic/tls/h2c 认证路径由 ci-helpers 集成测试覆盖，可接受。
+
+---
+
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
 为了提高系统的安全性、稳定性与超高并发吞吐，DuoTunnel 的待办事项（TODO）被重新梳理并归纳为以下四个实施阶段：
@@ -982,3 +998,17 @@ flowchart TD
   ① `engine/copy.rs::return_buffer` 用三层 Option/借用切换实现本地池择优替换（~25 行），功能正确但难读；② `duotunnel-server/control/control_client.rs`（1522 行）混杂四件事：LKG 磁盘持久化、watch 重连循环、snapshot/delta apply、token fencing，天然是四个模块边界。
 * **Fix（待确认）**:
   ① 用平铺直叙的控制流重写 return_buffer，行为不变（池上限/4x 淘汰语义有测试兜底）；② 将 control_client 按上述四职责拆分为子模块（纯移动+可见性调整，不改逻辑）。长函数（handle_quic_connection 359 行）内部阶段注释已清晰，暂不拆。来源：2026-08-21 抽象与可读性评审。
+
+### [TODO-163] Unit tests for ctld admin HTTP request parser
+* **Priority**: Medium | **Status**: 待确认 (2026-08-21 multi-agent review) | **Track**: Ingress Security
+* **Problem**:
+  `duotunnel-ctld/src/runtime/app.rs::read_admin_request` 是手写的不可信输入 HTTP 解析器（本地 admin Unix socket），目前无单元测试。它只取第一个 Content-Length 头，不拒绝重复/矛盾头——正是既有 todo 中“admin socket framing 硬化”提到的场景。解析不可信输入的自研代码恰是最需要表驱动单测的地方。
+* **Fix（待确认）**:
+  表驱动单测覆盖：正常 GET/POST、缺失 Content-Length 的 POST、重复 Content-Length（决定拒绝策略）、声明长度与实际不符、超过 MAX_REQUEST_BYTES、分片到达（逐字节喂入）、非 UTF-8 body、慢速发送触发 5s 超时。与 admin framing 硬化一并落地。来源：2026-08-21 多视角专项评审（安全×测试交叉确认）。
+
+### [TODO-164] Duplicate ingress listener port validation in config validate()
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 multi-agent review) | **Track**: Control Plane & Config
+* **Problem**:
+  配置中两个 listener 配同一 port 时无配置层校验，靠运行时 pre-bind 失败 rollback 兜底——机制上安全，但报错是低层 `EADDRINUSE` 而非明确的 "listener port duplicated" 提示，排障体验差。
+* **Fix（待确认）**:
+  在 `duotunnel-lib/src/config/file.rs::validate()` 增加 HashSet 端口查重（几行代码），报配置层错误；注意与动态规则（SQLite override）合并后的生效端口集合是否也需要查重——若动态路径可能产生重复，应在 listener plan 阶段而非仅静态配置阶段检查。来源：2026-08-21 多视角专项评审。
