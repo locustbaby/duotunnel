@@ -63,6 +63,87 @@ io_uring, multi-endpoint, custom runtime, H2 sender-pool, or UDP wire-format
 changes without a dial9/Criterion profile showing that the relevant path is a
 measured bottleneck.
 
+## 2026-08-21 全项目代码评审（待确认）
+
+对四个 crate（约 31.5k 行 Rust）做了整体评审：clippy 全绿，283 个单元测试全部通过。
+重点精读了认证路径（`quic.rs` Login 握手、`auth.rs`）、数据面缓冲池（`engine/copy.rs`）、
+UDP 会话管理、连接池、监听器管理、TLS/PKI 和客户端重连逻辑。**未发现高危或阻断性问题。**
+
+评审确认的亮点（无需行动）：生产代码几乎零 `unwrap`/`expect`（全部位于测试模块）；
+PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算与 UDP 三层限额完整；
+无任何无界队列；Login 错误信息不外泄且 retryable 语义正确。
+
+待确认的改进项（是否立项请复核）：
+
+1. **TLS 跳过验证的告警强度** → TODO-152。`tls_skip_verify` 与
+   `allow_insecure_fallback` 目前仅有 `warn!` 日志，考虑加更醒目的启动告警。
+2. **UDP 容量常量硬编码** → TODO-153。`udp_datagram.rs` 中的单连接/全局会话上限
+   与排队 envelope 上限均为 `const`，其他配额已走配置，建议统一。
+3. **VhostRouter 通配符 O(n) 扫描** → 已由 TODO-31 覆盖，当前规模无碍，维持原优先级即可。
+4. **README 0-RTT 表述与实现的差距** → 已由 TODO-27 覆盖（ticket key 未持久化，
+   重启后 0-RTT 必然回退），文档措辞可在 TODO-27 落地时一并修正。
+
+---
+
+## 2026-08-21 深度评审：生命周期 / 数据结构 / 选型（待确认）
+
+按三个维度精读了核心实现：①进程保活与 worker 派生/cancel/重载/错误传播；
+②数据结构与命名；③选型性能。结论：**三层保活设计正确，cancel 语义完备，
+自研边界划得准（该用库的都用了），热路径选型几乎都是同类最优。**
+
+发现一项实质缺口与若干可选项：
+
+1. **Registry actor 无监督** → TODO-154（唯一实质问题）。actor panic 后
+   register/purge/revoke 静默失败且无人重启。
+2. 命名瑕疵（NegotiatedProtocol、MessageType 数值乱序、死字段等） → TODO-155。
+3. 可选性能优化（DefaultHasher→xxhash、UDP envelope 改 Bytes） → TODO-156。
+4. 观察项无需行动：`select_across_shards` 全 shard 扫描小规模无碍；
+   `background_main` 中 purge JoinHandle 被 drop 不 abort 但因每次重启新建
+   runtime 实际无泄漏（易误判，建议加注释）；supervise_component 一处 error!
+   缩进错位（cosmetic）。
+5. 确认的亮点：错误传播三段式（ErrorKind→Source/Retry/http_status）教科书级；
+   Login token 掩码、MAX_LOGIN_BYTES 预认证上限、LKG 双代快照回退、
+   fail-closed 令牌吊销均正确。
+
+---
+
+## 2026-08-21 性能专项评审：热路径扫描（待确认）
+
+对数据面热路径做了逐段扫描。结论：**HTTP/TCP 主链路（TLS→sniff→h1→QUIC relay）
+已高度优化，无发现值得动的点**——read_chunk 零拷贝、httparse 零拷贝解析、
+SniffPrefix 零复制转发、open_bi 的 now_or_never 快路径、vectored write 透传等均已到位。
+
+发现三处优化候选，按预期收益排序：
+
+1. **UDP 回包泵每包 3 次堆分配+拷贝** → TODO-157。`pump_udp_replies` 每个数据报
+   经 `to_vec()`→rkyv→`Bytes::copy_from_slice` 三次分配；每 task 独立缓冲即可归零。
+   注意 UDP pps 是当前 k6 基准的未覆盖盲区，按仓库门槛应先补基准再动手。
+2. **每请求 host 归一化堆分配** → TODO-158。`VhostRouter::get` 每次调用
+   `canonicalize_egress_host` 分配 String；可改栈上 ASCII 小写化零分配命中。
+3. **每流 RoutingInfo 序列化 2 次分配+2 次写** → TODO-159。可与 initial_bytes
+   合并为单次向量化写。
+4. 观察项不动：`select_across_shards` 全 shard 扫描当前规模可忽略；h1 解析缓冲的
+   chunk 拷贝是语义必需。
+
+---
+
+## 2026-08-21 抽象与可读性评审（待确认）
+
+评审了插件体系、trait 边界、泛型使用和代码可读性。结论：**扩展点少而准且全部真实
+被使用（6 个内置协议插件无一例外走 PluginRegistry），零 dyn 开销处用泛型、运行时
+多态处才用 Box<dyn>（全仓仅 4 处），注释文化解释“为什么”属范本级。**
+
+待确认项：
+
+1. **数据面流中变换无挂点** → TODO-160。ConnectionModule 只有 pre_admission/
+   on_complete 两个生命周期端点钩子，header 清洗硬编码在 h1 driver 内。
+2. **sniff 管道半硬编码** → TODO-161。SniffPolicy/detectors 每连接重建且不走
+   registry/配置；AdmissionReq.token 是预留半成品字段。
+3. **可读性债** → TODO-162（return_buffer 的 Option 舞蹈、control_client.rs 四职责
+   混杂）+ R1 已并入 TODO-158（VhostRouter::get 两段重复通配扫描与零分配化一并处理）。
+4. 不动的：error.rs 样板构造器保留显式风格（IDE 补全友好，见仁见智）；
+   handle_quic_connection 359 行内部阶段清晰，拆分收益中等不强求。
+
 ---
 
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
@@ -824,3 +905,80 @@ flowchart TD
   当前 ctld 向每个 server 下发同一份完整的全局配置；server 本地通过 Snapshot/Delta 维护完整配置状态。尚不支持按租户、区域或 server identity 过滤配置，因此所有 server 最终看到的 routing 配置相同。
 * **Design direction**:
   为 server 建立稳定 identity，并在配置资源上增加 tenant/scope 关联。ctld 根据 server 注册信息生成目标 server 专属的 Snapshot/Delta；server 只应用属于自身作用域的配置，同时保持 base revision、content hash、ACK 和重同步语义正确。需要明确租户与 server 的绑定、跨租户资源引用、默认配置、迁移/解绑行为，以及多 server 场景下的权限隔离和测试矩阵。
+
+### [TODO-152] Strengthen insecure-TLS startup warning
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `duotunnel-client/tunnel/endpoint.rs` 中 `tls_skip_verify` 与 `allow_insecure_fallback` 目前只有一条 `warn!` 日志。作为运维逃生门可以接受，但误配置时不易被察觉。
+* **Fix（待确认）**:
+  在启用任一不安全选项时增加启动横幅级醒目告警（如多行 banner + metrics 标记），或在配置文件注释中标注风险；不改默认行为。来源：2026-08-21 全项目代码评审。
+
+### [TODO-153] Make UDP session/queue capacity constants configurable
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: HA, Overload & Observability
+* **Problem**:
+  `duotunnel-server/ingress/handlers/udp_datagram.rs` 中 `MAX_UDP_SESSIONS_PER_CONNECTION`（1024）、`MAX_UDP_SESSIONS_GLOBAL`（16384）、`MAX_UDP_QUEUED_ENVELOPES_GLOBAL`（16384）均为硬编码 const，而 unauth 连接数等其他配额已走配置文件。
+* **Fix（待确认）**:
+  将三处上限纳入现有配置体系并保持默认值不变，便于不同规格机器调优；补充配置加载与边界校验测试。来源：2026-08-21 全项目代码评审。
+
+### [TODO-154] Registry actor watchdog / supervision
+* **Priority**: Medium | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `duotunnel-server/ingress/registry.rs` 的 registry actor 是裸 `tokio::spawn`，仅靠 `actor_alive: AtomicBool` 标记存活。若 actor panic，register/purge_dead/revoke_tokens 会静默失败（purge 循环每 10s 报错但无人重启 actor），注册表逐渐腐化且健康检查未必反映。组件层有 supervisor + catch_unwind + 重启预算，task 层的 actor 没有。
+* **Fix（待确认）**:
+  将 registry actor 纳入 component 监督体系（panic 后重建 actor 并从 DashMap/ArcSwap 现状恢复，读路径本就不依赖 actor 内部状态，恢复成本低）；或至少让 `purge_dead` 连续失败 N 次后上报 health 使 readiness 摘除。补充 actor panic 注入测试。来源：2026-08-21 深度评审。
+
+### [TODO-155] Naming and dead-field cleanup
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  评审发现的命名/字段小瑕疵：`NegotiatedProtocol { version, capabilities }` 装的是协商结果而非协议（宜叫 NegotiatedSession）；`MessageType` 数值乱序（0x10 夹在 0x04–0x06 之间）易误读；`SelectedConnection.negotiated` 是带解释的 dead_code 字段；`ComponentHandle._name` 未使用；`supervise_component` 一处 error! 缩进错位。
+* **Fix（待确认）**:
+  逐项清理；注意 wire 类型（MessageType 数值）不能改值只能改注释，内部类型可直接重命名。`stable_id` 命名问题见此前记录，不在此重复。来源：2026-08-21 深度评审。
+
+### [TODO-156] Optional hot-path micro-optimizations (xxhash, UDP Bytes)
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Future/Research & CI
+* **Problem**:
+  两处可选优化：① `lb/shard.rs::stable_shard_index` 用 SipHash（DefaultHasher），抗碰撞但较慢——当前按连接调用影响极小，但注意 DefaultHasher 跨版本稳定性无保证，绝不可用于任何持久化场景；② `UdpDatagramEnvelope.payload: Vec<u8>` 每个 datagram 一次堆分配+拷贝，换 `Bytes` 可减少编码路径拷贝（1200B 小包场景收益有限）。
+* **Fix（待确认）**:
+  仅在 dial9/Criterion profile 证明相关路径是瓶颈后再做（符合本仓库既定门槛）。若引入 xxhash/fxhash，需在文档标注其非抗碰撞、仅限进程内分片使用。来源：2026-08-21 深度评审。
+
+### [TODO-157] Reduce per-datagram allocations in UDP reply pump
+* **Priority**: Medium | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Transport & Performance
+* **Problem**:
+  `duotunnel-server/ingress/handlers/udp_datagram.rs::pump_udp_replies` 对每个上游 UDP 数据报执行三次堆分配+三次拷贝：`payload.to_vec()`（分配①）→ `encode_udp_datagram_envelope` rkyv `AlignedVec`（分配②）→ `Bytes::copy_from_slice`（分配③）。客户端侧 `udp_listener.rs` 同构。每个会话有独立 pump task，缓冲无需共享。
+* **Fix（待确认）**:
+  改为 per-task 复用缓冲（栈上 `[u8; MAX_DATAGRAM_BYTES]` 或 hand-rolled 紧凑头），目标命中路径零堆分配；`try_enqueue` 的 per-packet SipHash worker 选择可一并评估。**前置条件**：UDP pps 是当前 k6 基准盲区，先补 UDP 吞吐/pps 基准取得 before 数据，再动手并出 after 对比。来源：2026-08-21 性能专项评审。
+
+### [TODO-158] Allocation-free host canonicalization on vhost match hot path
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Performance Tuning
+* **Problem**:
+  `VhostRouter::get` 每次调用 `canonicalize_egress_host(host)` 分配一个 String（trim/校验/剥端口/to_lowercase），是每个 HTTP 请求 vhost 匹配的必经路径。
+* **Fix（待确认）**:
+  命中路径改为零分配：栈缓冲 ASCII 小写化 + 校验返回借用切片做匹配（已有 `is_ascii` 快路径判断可复用）；仅错误/回退路径保留 String 版本。保持对非 ASCII/IDN 行为不变并有测试覆盖。顺带重构：当前 ASCII 快路径与非 ASCII 慢路径是两段几乎相同的通配符扫描逻辑（约 20 行 × 2 复制粘贴），应把匹配收敛为以 `&str` 为参的单一内部函数，两条路径归一化后共用。来源：2026-08-21 性能专项 + 抽象/可读性评审。
+
+### [TODO-159] Fold RoutingInfo frame with initial bytes into one write
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Transport & Performance
+* **Problem**:
+  每次 `open_bi` 后 `send_routing_info` 执行 rkyv `AlignedVec` 分配①、frame Vec 组包分配②，随后与 `initial_bytes` 分两次 `write_all`——每流多一次分配和一次 flush。
+* **Fix（待确认）**:
+  序列化进调用方/线程局部 scratch buffer，并与 `initial_bytes` 合并为一次 `write_vectored`（QuinnStream 已支持 vectored 透传）；或直接把 routing info 与首包拼进同一缓冲一次写出。收益量级小于 TODO-157/158，改动小可顺手做。来源：2026-08-21 性能专项评审。
+
+### [TODO-160] Mid-stream transformation hook for ConnectionModule
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Future/Research & CI
+* **Problem**:
+  `ConnectionModule` 只有 `pre_admission`（准入前）和 `on_complete`（结束后）两个生命周期端点钩子；想做请求头改写、响应注入这类流中变换的插件没有挂点——header 清洗目前硬编码在 h1 driver 内部（sanitize_request_headers）。当前业务不需要，但这是最可能撞墙的扩展点缺口。
+* **Design direction（待确认）**:
+  参考 Pingora HttpBase/HttpModule 的 request_filter/response_filter 语义，在 ProtocolDriver 层增加可选的变换钩子；注意与现有 capability bits 协商机制对齐，避免未协商特性静默生效。先等真实需求出现再设计，避免过度抽象。来源：2026-08-21 抽象与可读性评审。
+
+### [TODO-161] Wire sniff pipeline into configuration/plugin registry
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  `dispatcher.rs::sniff` 每次 dispatch 都 `SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors())`：detector 集合与策略既不可配置也不走 PluginRegistry（与旁边精心设计的插件体系反差），同时每连接重建 detector 列表是个小性能点。另外 `AdmissionReq.token` 是带 "callers may populate" 注释的预留半成品字段。
+* **Fix（待确认）**:
+  将 detector 集合/SniffPolicy 提升为启动期构造一次并经配置或 registry 注入（SniffRuntime 本身不可变共享即可）；决定 token 字段的去留：要么接入认证流要么删除。来源：2026-08-21 抽象与可读性评审。
+
+### [TODO-162] Readability debts: return_buffer rewrite and control_client split
+* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Problem**:
+  ① `engine/copy.rs::return_buffer` 用三层 Option/借用切换实现本地池择优替换（~25 行），功能正确但难读；② `duotunnel-server/control/control_client.rs`（1522 行）混杂四件事：LKG 磁盘持久化、watch 重连循环、snapshot/delta apply、token fencing，天然是四个模块边界。
+* **Fix（待确认）**:
+  ① 用平铺直叙的控制流重写 return_buffer，行为不变（池上限/4x 淘汰语义有测试兜底）；② 将 control_client 按上述四职责拆分为子模块（纯移动+可见性调整，不改逻辑）。长函数（handle_quic_connection 359 行）内部阶段注释已清晰，暂不拆。来源：2026-08-21 抽象与可读性评审。
