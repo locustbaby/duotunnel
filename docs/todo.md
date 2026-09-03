@@ -1,7 +1,8 @@
 # Tunnel TODO
 
 > Last synced against code, analysis reports 1–7, the 2026-07-22 runtime audit, and the
-> 2026-07-26 review series + M1 batch (PR #58): 2026-07-26.
+> 2026-07-26 review series + M1 batch (PR #58), and the 2026-08-24 review verification:
+> 2026-08-24.
 >
 > This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
 
@@ -63,7 +64,7 @@ io_uring, multi-endpoint, custom runtime, H2 sender-pool, or UDP wire-format
 changes without a dial9/Criterion profile showing that the relevant path is a
 measured bottleneck.
 
-## 2026-08-21 全项目代码评审（待确认）
+## 2026-08-21 全项目代码评审（2026-08-24 已复核）
 
 对四个 crate（约 31.5k 行 Rust）做了整体评审：clippy 全绿，283 个单元测试全部通过。
 重点精读了认证路径（`quic.rs` Login 握手、`auth.rs`）、数据面缓冲池（`engine/copy.rs`）、
@@ -73,7 +74,7 @@ UDP 会话管理、连接池、监听器管理、TLS/PKI 和客户端重连逻�
 PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算与 UDP 三层限额完整；
 无任何无界队列；Login 错误信息不外泄且 retryable 语义正确。
 
-待确认的改进项（是否立项请复核）：
+改进项（已在 2026-08-24 复核，是否立项按优先级执行）：
 
 1. **TLS 跳过验证的告警强度** → TODO-152。`tls_skip_verify` 与
    `allow_insecure_fallback` 目前仅有 `warn!` 日志，考虑加更醒目的启动告警。
@@ -85,7 +86,7 @@ PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算
 
 ---
 
-## 2026-08-21 深度评审：生命周期 / 数据结构 / 选型（待确认）
+## 2026-08-21 深度评审：生命周期 / 数据结构 / 选型（2026-08-24 已复核）
 
 按三个维度精读了核心实现：①进程保活与 worker 派生/cancel/重载/错误传播；
 ②数据结构与命名；③选型性能。结论：**三层保活设计正确，cancel 语义完备，
@@ -93,8 +94,8 @@ PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算
 
 发现一项实质缺口与若干可选项：
 
-1. **Registry actor 无监督** → TODO-154（唯一实质问题）。actor panic 后
-   register/purge/revoke 静默失败且无人重启。
+1. **Registry actor 无自动恢复** → TODO-154（可用性缺口）。actor panic 后不会自动
+   重建；register/purge/revoke 会 fail-closed 并返回错误，不会静默继续写入。
 2. 命名瑕疵（NegotiatedProtocol、MessageType 数值乱序、死字段等） → TODO-155。
 3. 可选性能优化（DefaultHasher→xxhash、UDP envelope 改 Bytes） → TODO-156。
 4. 观察项无需行动：`select_across_shards` 全 shard 扫描小规模无碍；
@@ -107,7 +108,7 @@ PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算
 
 ---
 
-## 2026-08-21 性能专项评审：热路径扫描（待确认）
+## 2026-08-21 性能专项评审：热路径扫描（2026-08-24 已复核）
 
 对数据面热路径做了逐段扫描。结论：**HTTP/TCP 主链路（TLS→sniff→h1→QUIC relay）
 已高度优化，无发现值得动的点**——read_chunk 零拷贝、httparse 零拷贝解析、
@@ -127,7 +128,7 @@ SniffPrefix 零复制转发、open_bi 的 now_or_never 快路径、vectored writ
 
 ---
 
-## 2026-08-21 抽象与可读性评审（待确认）
+## 2026-08-21 抽象与可读性评审（2026-08-24 已复核）
 
 评审了插件体系、trait 边界、泛型使用和代码可读性。结论：**扩展点少而准且全部真实
 被使用（6 个内置协议插件无一例外走 PluginRegistry），零 dyn 开销处用泛型、运行时
@@ -146,21 +147,53 @@ SniffPrefix 零复制转发、open_bi 的 now_or_never 快路径、vectored writ
 
 ---
 
-## 2026-08-21 多视角专项评审（待确认）
+## 2026-08-21 多视角专项评审（2026-08-24 已复核）
 
 分四路并行扫描：安全攻击面、并发/死锁、配置校验、测试覆盖。结论：
 **并发卫生验证通过**——全仓脚本扫描“锁获取跨 .await”模式仅 1 个候选，人工核实为误报
 （dns_cache entry 守卫未跨 await）；admin socket 有界+超时+0600；cargo-audit 已在 CI 强制执行；
-validate() 聚合式错误报告良好。新增两项行动：
+validate() 聚合式错误报告良好。新增两项记录：
 
-1. **admin HTTP 解析器无单测** → TODO-163。手写解析不可信输入的代码恰是最需要
-   表驱动单测的地方，与已知“admin framing 硬化”事项配对。
-2. **配置缺重复监听端口校验** → TODO-164。当前靠 pre-bind 失败 rollback 兜底，
-   报错是低层 EADDRINUSE 而非配置层提示。
+1. **admin HTTP 解析器边界处理与单测缺口** → TODO-163。手写解析不可信输入的代码
+   恰是最需要表驱动单测的地方，与已知“admin framing 硬化”事项配对。
+2. **配置层缺少防御式重复监听端口校验** → TODO-164。底层 `ServerConfigFile::validate()`
+   未直接查重，但当前 control-plane、override 和 snapshot 校验均会在 bind 前拒绝重复端口；
+   这不是当前运行时依赖 EADDRINUSE 的未校验问题。
 3. 无需行动：DNS single-flight/broadcast 模式正确；MSRV 钉死 1.95.0 带 clippy/rustfmt；
    quic/tls/h2c 认证路径由 ci-helpers 集成测试覆盖，可接受。
 
 ---
+
+## 2026-08-24 review 复核结论
+
+已对 TODO-152～TODO-164 逐项核对实现，并运行三个相关 crate 的测试：
+`duotunnel-lib` 164 个、`duotunnel-server` 35 个、`duotunnel-ctld` 22 个全部通过。
+结论如下：
+
+- TODO-163 属于真实的 admin 请求 framing 正确性与测试缺口，应优先处理。缺失
+  `Content-Length` 的 POST 可能在 header 结束处提前返回；重复 `Content-Length` 只取首个值，
+  未拒绝冲突值。
+- TODO-164 的低层校验遗漏属实，但生效配置会经过 `normalize_and_validate_routing`、override
+  合并校验和 snapshot 校验，因此重复 listener 当前会在绑定前被明确拒绝。建议作为防御式校验
+  和独立 API 一致性改进，不应按运行时安全缺陷排期。
+- TODO-154 的自动重建/健康状态粒度缺口属实；actor 异常后的调用路径会 fail-closed、记录错误，
+  不属于 review 中所称的“静默失败”。
+- TODO-152、153、155～162 均为已确认的可观测性、配置能力、性能候选、架构扩展或可维护性项，
+  其中 UDP/host/stream 相关优化必须先补 benchmark，再根据 before/after 数据实施。
+
+## 2026-09-03 全项目代码与架构深度复核（2026-09-03 结论）
+
+基于对全仓 5 个 crate（约 32.7k 行 Rust）的全面审查与代码具体实现上下文的核实，确认并新增 6 项实质性技术债务与工程改进点（TODO-165 ～ TODO-170），并对前期已有 TODO（TODO-154、TODO-158、TODO-163）进行了精准上下文校正：
+
+1. **Client 端 EntryConnPool Actor 崩溃无自愈机制** → TODO-165。不同于 Server 端具备 `supervise_component` 线程级重启，Client 侧 `EntryConnPool` 的 actor 若 panic，虽然会标记 `actor_alive: false` 并 fail-closed，但因 pool 实例跨重连复用，一旦崩溃将导致客户端永久失效，必须重启进程。
+2. **Server 端 QUIC 随机自签证书无法配置固定证书链** → TODO-166。Server 每次启动无条件通过 `generate_self_signed_cert()` 动态生成随机公私钥，使得客户端无法使用持久化的 CA 证书进行严格校验（`tls_skip_verify: false`），生产环境被迫妥协为跳过校验。
+3. **H1 Driver 64 Header 上限与假挂起风险** → TODO-167。栈上固定 64 个 header slot，超限时 httparse 返回 `Status::Partial`。代码未检查缓冲区是否已含完整 `\r\n\r\n`，在客户端发完头后会死等 2.5s 超时或打满 8KB 报 431。
+4. **H2 Sender 单流重置错误驱逐全局复用连接** → TODO-168。`send_via` 发生任何流错误（如对端发送 `RST_STREAM`）时均无条件清退全局 `H2Sender` 缓存，未区分 Stream 错误与底层 Connection 致命错误，导致高并发多路复用连接雪崩重连。
+5. **TCP/QUIC 流中继核心代码重复** → TODO-169。`duotunnel-lib/src/engine/bridge.rs` 与 `relay.rs` 存在两份逻辑近乎完全一致的 relay 实现，需合并收敛。
+6. **PhaseOutcome 错误类型擦除导致指标收集脆弱的字符串子串匹配** → TODO-170。结构化 `ErrorKind` 被转为非结构化 `Option<String>`，后续打标时使用长达 30 余行的 `err_lower.contains(...)` 反向倒推，易碎且有多余分配。
+7. **历史项上下文校正**：
+   - TODO-158（VhostRouter）：确认 `DashMap<String, T>::get` 原生支持 `&str` 查询，内部的 256 字节栈拷贝和 `unsafe from_utf8_unchecked` 纯属多余，重构时可彻底移除。
+   - TODO-163（Admin HTTP framing）：确认 `cli.rs` 作为唯一客户端固定发送 `Content-Length: 0`，当前实际路径不触发截断，但协议防护和单测仍需补齐。
 
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
@@ -923,92 +956,141 @@ flowchart TD
   为 server 建立稳定 identity，并在配置资源上增加 tenant/scope 关联。ctld 根据 server 注册信息生成目标 server 专属的 Snapshot/Delta；server 只应用属于自身作用域的配置，同时保持 base revision、content hash、ACK 和重同步语义正确。需要明确租户与 server 的绑定、跨租户资源引用、默认配置、迁移/解绑行为，以及多 server 场景下的权限隔离和测试矩阵。
 
 ### [TODO-152] Strengthen insecure-TLS startup warning
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Priority**: Low | **Status**: 已确认：低优先级可观测性改进 | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
   `duotunnel-client/tunnel/endpoint.rs` 中 `tls_skip_verify` 与 `allow_insecure_fallback` 目前只有一条 `warn!` 日志。作为运维逃生门可以接受，但误配置时不易被察觉。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   在启用任一不安全选项时增加启动横幅级醒目告警（如多行 banner + metrics 标记），或在配置文件注释中标注风险；不改默认行为。来源：2026-08-21 全项目代码评审。
 
 ### [TODO-153] Make UDP session/queue capacity constants configurable
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: HA, Overload & Observability
+* **Priority**: Low | **Status**: 已确认：配置能力缺口 | **Track**: HA, Overload & Observability
 * **Problem**:
   `duotunnel-server/ingress/handlers/udp_datagram.rs` 中 `MAX_UDP_SESSIONS_PER_CONNECTION`（1024）、`MAX_UDP_SESSIONS_GLOBAL`（16384）、`MAX_UDP_QUEUED_ENVELOPES_GLOBAL`（16384）均为硬编码 const，而 unauth 连接数等其他配额已走配置文件。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   将三处上限纳入现有配置体系并保持默认值不变，便于不同规格机器调优；补充配置加载与边界校验测试。来源：2026-08-21 全项目代码评审。
 
 ### [TODO-154] Registry actor watchdog / supervision
-* **Priority**: Medium | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Priority**: Medium | **Status**: 已确认：恢复与健康状态缺口 | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
-  `duotunnel-server/ingress/registry.rs` 的 registry actor 是裸 `tokio::spawn`，仅靠 `actor_alive: AtomicBool` 标记存活。若 actor panic，register/purge_dead/revoke_tokens 会静默失败（purge 循环每 10s 报错但无人重启 actor），注册表逐渐腐化且健康检查未必反映。组件层有 supervisor + catch_unwind + 重启预算，task 层的 actor 没有。
-* **Fix（待确认）**:
+  `duotunnel-server/ingress/registry.rs` 的 registry actor 是裸 `tokio::spawn`，仅靠 `actor_alive: AtomicBool` 标记存活。若 actor panic，没有自动重建，健康状态也没有独立的 registry 维度。register/purge_dead/revoke_tokens 会检测 actor 状态，关闭可见连接并返回错误（fail-closed），不会静默继续操作。组件层有 supervisor + catch_unwind + 重启预算，task 层的 actor 没有。
+* **Fix（建议）**:
   将 registry actor 纳入 component 监督体系（panic 后重建 actor 并从 DashMap/ArcSwap 现状恢复，读路径本就不依赖 actor 内部状态，恢复成本低）；或至少让 `purge_dead` 连续失败 N 次后上报 health 使 readiness 摘除。补充 actor panic 注入测试。来源：2026-08-21 深度评审。
 
 ### [TODO-155] Naming and dead-field cleanup
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Priority**: Low | **Status**: 已确认：清理项 | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
   评审发现的命名/字段小瑕疵：`NegotiatedProtocol { version, capabilities }` 装的是协商结果而非协议（宜叫 NegotiatedSession）；`MessageType` 数值乱序（0x10 夹在 0x04–0x06 之间）易误读；`SelectedConnection.negotiated` 是带解释的 dead_code 字段；`ComponentHandle._name` 未使用；`supervise_component` 一处 error! 缩进错位。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   逐项清理；注意 wire 类型（MessageType 数值）不能改值只能改注释，内部类型可直接重命名。`stable_id` 命名问题见此前记录，不在此重复。来源：2026-08-21 深度评审。
 
 ### [TODO-156] Optional hot-path micro-optimizations (xxhash, UDP Bytes)
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Future/Research & CI
+* **Priority**: Low | **Status**: 已确认：benchmark-gated 优化候选 | **Track**: Future/Research & CI
 * **Problem**:
   两处可选优化：① `lb/shard.rs::stable_shard_index` 用 SipHash（DefaultHasher），抗碰撞但较慢——当前按连接调用影响极小，但注意 DefaultHasher 跨版本稳定性无保证，绝不可用于任何持久化场景；② `UdpDatagramEnvelope.payload: Vec<u8>` 每个 datagram 一次堆分配+拷贝，换 `Bytes` 可减少编码路径拷贝（1200B 小包场景收益有限）。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   仅在 dial9/Criterion profile 证明相关路径是瓶颈后再做（符合本仓库既定门槛）。若引入 xxhash/fxhash，需在文档标注其非抗碰撞、仅限进程内分片使用。来源：2026-08-21 深度评审。
 
 ### [TODO-157] Reduce per-datagram allocations in UDP reply pump
-* **Priority**: Medium | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Transport & Performance
+* **Priority**: Medium | **Status**: 已确认：benchmark-gated 性能候选 | **Track**: Transport & Performance
 * **Problem**:
   `duotunnel-server/ingress/handlers/udp_datagram.rs::pump_udp_replies` 对每个上游 UDP 数据报执行三次堆分配+三次拷贝：`payload.to_vec()`（分配①）→ `encode_udp_datagram_envelope` rkyv `AlignedVec`（分配②）→ `Bytes::copy_from_slice`（分配③）。客户端侧 `udp_listener.rs` 同构。每个会话有独立 pump task，缓冲无需共享。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   改为 per-task 复用缓冲（栈上 `[u8; MAX_DATAGRAM_BYTES]` 或 hand-rolled 紧凑头），目标命中路径零堆分配；`try_enqueue` 的 per-packet SipHash worker 选择可一并评估。**前置条件**：UDP pps 是当前 k6 基准盲区，先补 UDP 吞吐/pps 基准取得 before 数据，再动手并出 after 对比。来源：2026-08-21 性能专项评审。
 
 ### [TODO-158] Allocation-free host canonicalization on vhost match hot path
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Performance Tuning
+* **Priority**: Low | **Status**: 已确认：benchmark-gated 性能候选 | **Track**: Performance Tuning
 * **Problem**:
   `VhostRouter::get` 每次调用 `canonicalize_egress_host(host)` 分配一个 String（trim/校验/剥端口/to_lowercase），是每个 HTTP 请求 vhost 匹配的必经路径。
-* **Fix（待确认）**:
-  命中路径改为零分配：栈缓冲 ASCII 小写化 + 校验返回借用切片做匹配（已有 `is_ascii` 快路径判断可复用）；仅错误/回退路径保留 String 版本。保持对非 ASCII/IDN 行为不变并有测试覆盖。顺带重构：当前 ASCII 快路径与非 ASCII 慢路径是两段几乎相同的通配符扫描逻辑（约 20 行 × 2 复制粘贴），应把匹配收敛为以 `&str` 为参的单一内部函数，两条路径归一化后共用。来源：2026-08-21 性能专项 + 抽象/可读性评审。
+* **Fix（建议）**:
+  命中路径改为零分配：栈缓冲 ASCII 小写化 + 校验返回借用切片做匹配（已有 `is_ascii` 快路径判断可复用）；仅错误/回退路径保留 String 版本。保持对非 ASCII/IDN 行为不变并有测试覆盖。顺带重构：当前 ASCII 快路径与非 ASCII 慢路径是两段几乎相同的通配符扫描逻辑（约 20 行 × 2 复制粘贴），应把匹配收敛为以 `&str` 为参的单一内部函数，两条路径归一化后共用。（2026-09-03 复核补充：`DashMap<String, T>::get` 原生支持 `&str` 借用查询，第 158-163 行拷贝到栈 `[u8; 256]` 并使用 `unsafe { std::str::from_utf8_unchecked }` 纯属冗余操作，重构时可一并删除栈拷贝与 unsafe 代码）。来源：2026-08-21 性能专项 + 抽象/可读性评审及 2026-09-03 复核。
 
 ### [TODO-159] Fold RoutingInfo frame with initial bytes into one write
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 perf review) | **Track**: Transport & Performance
+* **Priority**: Low | **Status**: 已确认：小型性能候选 | **Track**: Transport & Performance
 * **Problem**:
   每次 `open_bi` 后 `send_routing_info` 执行 rkyv `AlignedVec` 分配①、frame Vec 组包分配②，随后与 `initial_bytes` 分两次 `write_all`——每流多一次分配和一次 flush。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   序列化进调用方/线程局部 scratch buffer，并与 `initial_bytes` 合并为一次 `write_vectored`（QuinnStream 已支持 vectored 透传）；或直接把 routing info 与首包拼进同一缓冲一次写出。收益量级小于 TODO-157/158，改动小可顺手做。来源：2026-08-21 性能专项评审。
 
 ### [TODO-160] Mid-stream transformation hook for ConnectionModule
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Future/Research & CI
+* **Priority**: Low | **Status**: 已确认：架构扩展项 | **Track**: Future/Research & CI
 * **Problem**:
   `ConnectionModule` 只有 `pre_admission`（准入前）和 `on_complete`（结束后）两个生命周期端点钩子；想做请求头改写、响应注入这类流中变换的插件没有挂点——header 清洗目前硬编码在 h1 driver 内部（sanitize_request_headers）。当前业务不需要，但这是最可能撞墙的扩展点缺口。
 * **Design direction（待确认）**:
   参考 Pingora HttpBase/HttpModule 的 request_filter/response_filter 语义，在 ProtocolDriver 层增加可选的变换钩子；注意与现有 capability bits 协商机制对齐，避免未协商特性静默生效。先等真实需求出现再设计，避免过度抽象。来源：2026-08-21 抽象与可读性评审。
 
 ### [TODO-161] Wire sniff pipeline into configuration/plugin registry
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Priority**: Low | **Status**: 已确认：设计改进项 | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
   `dispatcher.rs::sniff` 每次 dispatch 都 `SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors())`：detector 集合与策略既不可配置也不走 PluginRegistry（与旁边精心设计的插件体系反差），同时每连接重建 detector 列表是个小性能点。另外 `AdmissionReq.token` 是带 "callers may populate" 注释的预留半成品字段。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   将 detector 集合/SniffPolicy 提升为启动期构造一次并经配置或 registry 注入（SniffRuntime 本身不可变共享即可）；决定 token 字段的去留：要么接入认证流要么删除。来源：2026-08-21 抽象与可读性评审。
 
 ### [TODO-162] Readability debts: return_buffer rewrite and control_client split
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 review) | **Track**: Code Quality, Safety, and Registry
+* **Priority**: Low | **Status**: 已确认：可维护性债务 | **Track**: Code Quality, Safety, and Registry
 * **Problem**:
   ① `engine/copy.rs::return_buffer` 用三层 Option/借用切换实现本地池择优替换（~25 行），功能正确但难读；② `duotunnel-server/control/control_client.rs`（1522 行）混杂四件事：LKG 磁盘持久化、watch 重连循环、snapshot/delta apply、token fencing，天然是四个模块边界。
-* **Fix（待确认）**:
+* **Fix（建议）**:
   ① 用平铺直叙的控制流重写 return_buffer，行为不变（池上限/4x 淘汰语义有测试兜底）；② 将 control_client 按上述四职责拆分为子模块（纯移动+可见性调整，不改逻辑）。长函数（handle_quic_connection 359 行）内部阶段注释已清晰，暂不拆。来源：2026-08-21 抽象与可读性评审。
 
 ### [TODO-163] Unit tests for ctld admin HTTP request parser
-* **Priority**: Medium | **Status**: 待确认 (2026-08-21 multi-agent review) | **Track**: Ingress Security
+* **Priority**: Medium | **Status**: 已确认：请求 framing 正确性与测试缺口 | **Track**: Ingress Security
 * **Problem**:
-  `duotunnel-ctld/src/runtime/app.rs::read_admin_request` 是手写的不可信输入 HTTP 解析器（本地 admin Unix socket），目前无单元测试。它只取第一个 Content-Length 头，不拒绝重复/矛盾头——正是既有 todo 中“admin socket framing 硬化”提到的场景。解析不可信输入的自研代码恰是最需要表驱动单测的地方。
-* **Fix（待确认）**:
-  表驱动单测覆盖：正常 GET/POST、缺失 Content-Length 的 POST、重复 Content-Length（决定拒绝策略）、声明长度与实际不符、超过 MAX_REQUEST_BYTES、分片到达（逐字节喂入）、非 UTF-8 body、慢速发送触发 5s 超时。与 admin framing 硬化一并落地。来源：2026-08-21 多视角专项评审（安全×测试交叉确认）。
+  `duotunnel-ctld/src/runtime/app.rs::read_admin_request` 是手写的不可信输入 HTTP 解析器（本地 admin Unix socket），目前无单元测试。缺失 `Content-Length` 的 POST 可能在 header 结束处提前返回；重复 `Content-Length` 只取第一个可解析值，不拒绝重复/矛盾头。0600 socket 和 5 秒超时仍在生效，但 framing 行为需要明确化。
+* **Fix（建议）**:
+  表驱动单测覆盖：正常 GET/POST、缺失 Content-Length 的 POST、重复 Content-Length（决定拒绝策略）、声明长度与实际不符、超过 MAX_REQUEST_BYTES、分片到达（逐字节喂入）、非 UTF-8 body、慢速发送触发 5s 超时。与 admin framing 硬化一并落地。（2026-09-03 复核补充：当前 `duotunnel-ctld` 的唯一 CLI 客户端 `cli.rs` 中发送的所有 POST 请求均固定带有 `Content-Length: 0` 且参数全在 query string，因此生产 CLI 路径上不会触发该提前截断 bug，但作为接受非受信调用的 HTTP 解析器，该 framing 漏洞仍需修复并由单测兜底）。来源：2026-08-21 多视角专项评审及 2026-09-03 复核。
 
 ### [TODO-164] Duplicate ingress listener port validation in config validate()
-* **Priority**: Low | **Status**: 待确认 (2026-08-21 multi-agent review) | **Track**: Control Plane & Config
+* **Priority**: Low | **Status**: 已复核：防御式校验建议 | **Track**: Control Plane & Config
 * **Problem**:
-  配置中两个 listener 配同一 port 时无配置层校验，靠运行时 pre-bind 失败 rollback 兜底——机制上安全，但报错是低层 `EADDRINUSE` 而非明确的 "listener port duplicated" 提示，排障体验差。
-* **Fix（待确认）**:
-  在 `duotunnel-lib/src/config/file.rs::validate()` 增加 HashSet 端口查重（几行代码），报配置层错误；注意与动态规则（SQLite override）合并后的生效端口集合是否也需要查重——若动态路径可能产生重复，应在 listener plan 阶段而非仅静态配置阶段检查。来源：2026-08-21 多视角专项评审。
+  `duotunnel-lib/src/config/file.rs::ServerConfigFile::validate()` 没有直接检查 ingress listener 重复端口。但 YAML/SQLite override 合并后的 control-plane 路径会经过 `normalize_and_validate_routing`，最终 snapshot 也会再次校验，因此当前重复 listener 会在 bind 前被明确拒绝，不是无配置层校验而只能依赖 `EADDRINUSE`。
+* **Fix（建议）**:
+  可在 `ServerConfigFile::validate()` 增加 HashSet 端口查重，提升独立调用方的错误提示一致性；动态规则仍必须在合并后的最终 routing 层校验。该项属于防御式校验和可维护性改进，非当前运行时阻断问题。来源：2026-08-21 多视角专项评审及 2026-08-24 代码复核。
+
+### [TODO-165] Client EntryConnPool actor watchdog & auto-recovery
+* **Priority**: Medium | **Status**: TODO | **Track**: Client Runtime & Stability
+* **Problem**:
+  在 `duotunnel-client/tunnel/conn_pool.rs::EntryConnPool::new` 中，维护连接池状态的 Actor 是一个裸 `tokio::spawn` 异步任务，仅依靠 `actor_alive: Arc<AtomicBool>` 标记状态。若该 actor 因未捕获的 panic 或消息通道异常关闭而退出，`ActorAliveGuard` 在 drop 时将 `actor_alive` 置为 `false`，后续所有 `push`/`remove` 操作均 fail-closed 并返回错误。
+  不同于 Server 端拥有 `supervise_component` 线程级重启机制，Client 端的 `EntryConnPool` 是在客户端主进程启动时创建并作为单一实例传递给 `run_supervisor`。即使网络重连触发 `run_client` 重新执行，也始终复用旧的 `entry_pool` 实例。一旦该 actor 退出，整个客户端的连接池将永久处于不可用状态，必须重启整个客户端进程。
+* **Fix（建议）**:
+  在 `EntryConnPool` 或 `supervisor.rs` 中增加监控：当检测到 `!pool.is_alive()` 时，重建 actor 及其对应的 mpsc 队列与状态快照（只包含 active 连接），或者在 `supervisor` 的重试外环检测 pool 健康状态并在必要时实例化新的 `EntryConnPool` 注入下一次 session。补充针对 pool actor panic 的自愈单测。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-166] Configurable server-side QUIC TLS certificates & keys
+* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Security
+* **Problem**:
+  在 `duotunnel-server/ingress/handlers/quic.rs::run_quic_server` 中，启动 QUIC 服务端直接调用 `duotunnel_lib::transport::quic::create_server_config_with(&quic_params)`，其内部通过 `generate_self_signed_cert()` 每次启动时在内存中动态生成临时随机自签证书（CommonName: `localhost`）。
+  虽然 `duotunnel-client` 已经通过 `tls_ca_cert` 提供了加载自定义 CA 证书的功能，但服务端缺乏加载持久化证书与私钥的配置项。这导致客户端若开启严格 TLS 证书校验（`tls_skip_verify: false`），无法与每次重启生成不同随机公私钥的服务端匹配，迫使生产环境依赖不安全的 `tls_skip_verify: true`。
+* **Fix（建议）**:
+  在 `ServerConfigFile` 的 `quic` 配置节中增加可选的 `cert_file` 与 `key_file` 路径；在 `create_server_config_with` 中优先读取配置的 PEM 证书与私钥；若未配置则回退到现有的随机自签证书逻辑以兼容开发/本地测试。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-167] H1 Driver header limit detection & avoiding pseudo-hang on Partial
+* **Priority**: Medium | **Status**: TODO | **Track**: Protocol Drivers & Stability
+* **Problem**:
+  在 `duotunnel-lib/src/protocol/driver/h1.rs::read_request`（第 264 行）中，栈上固定分配了 64 个 header 槽位：`let mut headers = [httparse::EMPTY_HEADER; 64];`。
+  当客户端请求头超过 64 个时，`httparse::Request::parse` 会因为数组满而返回 `Status::Partial`。当前代码在 `Status::Partial` 分支下认为“尚未读取到完整头部”，继续调用 `read_into_bytes_mut` 尝试从 Socket 读取更多数据。
+  若客户端已经发送完请求头（缓冲区中已包含 `\r\n\r\n`），由于对端已停止发送，驱动将一直等待直到 `sniff_timeout_ms`（默认 2.5s）超时，或者当累积字节数达到 `header_buf_size`（默认 8KB）时才报错 `431 Request Header Fields Too Large`，表现为对端感知的 2.5 秒“假挂起”。
+* **Fix（建议）**:
+  ① 将栈上 `EMPTY_HEADER` 数组扩充至更宽裕的 128（耗费栈空间极小，仅 128 × 16B = 2KB）；
+  ② 在 `Status::Partial` 分支中，先检查当前 `self.read_buf` 是否已经包含 `b"\r\n\r\n"`。若已包含完整请求头结束标记却仍为 `Partial`，说明是 header 数量溢出而非数据不完整，立即直接返回 431 拒绝，无需盲目等待读取更多数据导致超时。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-168] Differentiate H2 stream reset from connection failure in H2Sender cache eviction
+* **Priority**: Low | **Status**: TODO | **Track**: Protocol Drivers & Performance
+* **Problem**:
+  在 `duotunnel-lib/src/proxy/h2_proxy.rs::forward_h2_request`（第 154-160 行）中：只要单次请求在 `send_via` 发生任何错误，代码就会无条件调用 `clear_sender_if_current` 将全局缓存的 `H2Sender` 清空。
+  在 HTTP/2 多路复用场景下，如果单个请求遭遇应用层错误或对端单流重置（`RST_STREAM`，例如单个请求被目标后端取消、超时或协议违例），底层 H2 TCP/QUIC 连接可能依然健康，但该清退操作会导致并发及后续到来的所有针对该 vhost 的请求均无法复用已有连接，被迫重新经历 `open_stream`、ALPN 握手和 H2 client 初始化流程。
+* **Fix（建议）**:
+  分析 `send_via` 返回的错误，区分流级别错误（Stream error，如接收到 `RST_STREAM`）与连接级别致命错误（Connection error，如 `GOAWAY`、IO EOF、Broken Pipe 等）。只有在底层连接确认失效时才调用 `clear_sender_if_current`。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-169] Consolidate duplicated TCP/QUIC relay implementations (bridge.rs vs relay.rs)
+* **Priority**: Low | **Status**: TODO | **Track**: Code Quality & Refactoring
+* **Problem**:
+  `duotunnel-lib/src/engine/bridge.rs` 中的 `relay_with_first_data_and_buffer_size` 与 `duotunnel-lib/src/engine/relay.rs` 中的 `relay_tcp_with_initial_and_buffer_size` 具有几乎完全相同的实现逻辑（发送首包数据、TCP `into_split` 拆分为读写半部、使用 `tokio::try_join!` 并行驱动 `copy_quic_to_shutdown` 与 `copy_buffered_then_finish`）。两份实现长期并行存在，增加了维护成本与分叉风险。
+* **Fix（建议）**:
+  统一保留并增强 `bridge.rs`（或统一在 `relay.rs`），将两套接口统一收敛为一个清晰的公共 API，删除冗余的平行实现，并迁移所有上游调用点。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-170] Preserve structured ErrorKind in PhaseOutcome to eliminate string matching in metrics logging
+* **Priority**: Low | **Status**: TODO | **Track**: Observability & Architecture
+* **Problem**:
+  在 `duotunnel-lib/src/plugin/ctx.rs` 中，`PhaseOutcome.error` 被定义为非结构化的 `Option<String>`。前面的代理管线中原本具有丰富结构化分类的 `ProxyError` / `ErrorKind`（见 `duotunnel-lib/src/error.rs`）在经过 `outcome` 时被转换为普通文本字符串。
+  随后在 `duotunnel-server/ingress/tunnel_service.rs::DefaultTunnelService::logging` 中，为了向 Prometheus 指标打标签，代码不得不对错误字符串做长达 30 余行的 `err_lower.contains("...")` 子串包含匹配（如 `contains("quic open timed out")`、`contains("route not found")` 等）。这种基于字符串的匹配脆弱、易受文案变动影响，且伴随无谓的 `to_lowercase()` 内存分配。
+* **Fix（建议）**:
+  在 `PhaseOutcome` 中引入强类型的 `pub error_kind: Option<ErrorKind>`（或保留 `error: Option<String>` 作为展示信息，额外附加 `error_kind` 字段以兼容旧插件）。在 `dispatcher.rs` 中提取原始 `ProxyError` 的 `ErrorKind`，直接传递给 `TunnelService::logging`，消除所有基于子串的倒推匹配。注意此项涉及插件接口规范微调，应平滑推进。来源：2026-09-03 全项目代码评审与复核。
