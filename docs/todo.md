@@ -195,6 +195,17 @@ validate() 聚合式错误报告良好。新增两项记录：
    - TODO-158（VhostRouter）：确认 `DashMap<String, T>::get` 原生支持 `&str` 查询，内部的 256 字节栈拷贝和 `unsafe from_utf8_unchecked` 纯属多余，重构时可彻底移除。
    - TODO-163（Admin HTTP framing）：确认 `cli.rs` 作为唯一客户端固定发送 `Content-Length: 0`，当前实际路径不触发截断，但协议防护和单测仍需补齐。
 
+## 2026-09-04 独立复审（认证/安全面定向 + 静态检查）
+
+复审范围：token 生命周期、TLS/QUIC 证书链、ctld admin socket、SQLite 存储参数化、VhostRouter、watch 认证、control_client 重连；另跑了 clippy（零警告）与全量测试（除 4 个依赖真实 TCP bind 的用例在禁网沙箱中 EPERM 外全部通过，非项目问题）。
+
+结论：此前的发现与已有 TODO 高度重合，仅新增 1 项（TODO-171），并对 TODO-166 做两点补充：
+
+1. **watch 流 fail-open 加固 → TODO-171（新增）。** `watch_addr` 默认绑定 `127.0.0.1:7788` 且 `watch_token` 可选；当管理员改绑非回环地址且忘配 token 时，仅输出一条 `watch_auth=false` 日志而不拒绝启动，明文 TCP 上任何可达客户端都能拉取完整路由快照。建议 fail-closed：非回环 watch_addr 必须配置 watch_token，否则拒绝启动。
+2. **TODO-166 补充 ①：** `README.md` 快速开始中的 `tls_skip_verify: true # set false in production with a real cert` 在 TODO-166 落地前不可执行（服务端无任何配置固定证书的入口），应随 TODO-166 一并修正措辞或提前落地 TODO-166。
+3. **TODO-166 补充 ②：** `duotunnel-lib/src/infra/pki.rs` 已有带 O_NOFOLLOW/uid 校验/fchmod 加固的持久化 CA 基础设施（`RootCa::load_or_generate`），目前仅服务于 ingress 动态 TLS 终止；TODO-166 落地时可直接复用，修复成本低于新增独立证书配置。
+4. **其余发现与已有记录重合确认：** admin framing 缺 Content-Length 的行为已包含在 TODO-163（`read_admin_request` 对无 Content-Length 的 POST 在 header 结束处提前返回，实际到 `cli.rs::handle_admin_request` 后被 serde 拒绝或本就不需要 body，无可利用影响，维持加固定位）；VhostRouter 通配符 add 不去重在现有调用链不可达（三处调用点均为快照全量重建 + ctld layer 拒绝重复 key），TODO-158 的简化方案落地后顺带消除；cargo-audit 已在 CI 强制执行（`ci.yml`），无需动作。正面确认：SQL 全参数化、token 仅存 SHA-256 哈希、`subtle` 恒定时间比较、日志脱敏、重连指数退避+抖动、`from_utf8_unchecked` 有前置 ASCII 校验。
+
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
 为了提高系统的安全性、稳定性与超高并发吞吐，DuoTunnel 的待办事项（TODO）被重新梳理并归纳为以下四个实施阶段：
@@ -1094,3 +1105,10 @@ flowchart TD
   随后在 `duotunnel-server/ingress/tunnel_service.rs::DefaultTunnelService::logging` 中，为了向 Prometheus 指标打标签，代码不得不对错误字符串做长达 30 余行的 `err_lower.contains("...")` 子串包含匹配（如 `contains("quic open timed out")`、`contains("route not found")` 等）。这种基于字符串的匹配脆弱、易受文案变动影响，且伴随无谓的 `to_lowercase()` 内存分配。
 * **Fix（建议）**:
   在 `PhaseOutcome` 中引入强类型的 `pub error_kind: Option<ErrorKind>`（或保留 `error: Option<String>` 作为展示信息，额外附加 `error_kind` 字段以兼容旧插件）。在 `dispatcher.rs` 中提取原始 `ProxyError` 的 `ErrorKind`，直接传递给 `TunnelService::logging`，消除所有基于子串的倒推匹配。注意此项涉及插件接口规范微调，应平滑推进。来源：2026-09-03 全项目代码评审与复核。
+
+### [TODO-171] Fail-closed watch auth for non-loopback watch_addr
+* **Priority**: Low | **Status**: TODO | **Track**: Control Plane Security
+* **Problem**:
+  `duotunnel-ctld/src/bootstrap/config.rs` 中 `watch_token` 为可选字段，`duotunnel-ctld/src/runtime/app.rs` 启动时仅以日志记录 `watch_auth = watch_token.is_some()`，不会阻止启动。`control/watch.rs::authorize` 在 `auth_token` 为 `None` 时直接放行。默认配置下 `watch_addr` 绑定 `127.0.0.1:7788` 无风险；但若管理员将 `watch_addr` 改绑到非回环地址（如 `0.0.0.0` 或内网 IP）且忘记配置 `watch_token`，任何可达该端口的客户端都能通过 watch 握手拉取完整路由快照（含 backend 地址、分组结构），且 watch 流为明文 TCP，即使配置了 token 也会被同网段嗅探。当前行为是 fail-open。
+* **Fix（建议）**:
+  在 ctld 启动校验中加入 fail-closed 规则：`watch_addr` 解析后若为非回环地址且 `watch_token` 为空/空白，则拒绝启动并给出明确错误信息；同时更新 `config/ctld.yaml` 注释说明该约束。可作为 TODO-166 的伴生项：若 watch 流未来迁移到 TLS/QUIC 通道，一并解决明文嗅探问题。来源：2026-09-04 独立复审。
