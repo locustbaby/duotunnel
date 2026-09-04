@@ -204,7 +204,8 @@ validate() 聚合式错误报告良好。新增两项记录：
 1. **watch 流 fail-open 加固 → TODO-171（新增）。** `watch_addr` 默认绑定 `127.0.0.1:7788` 且 `watch_token` 可选；当管理员改绑非回环地址且忘配 token 时，仅输出一条 `watch_auth=false` 日志而不拒绝启动，明文 TCP 上任何可达客户端都能拉取完整路由快照。建议 fail-closed：非回环 watch_addr 必须配置 watch_token，否则拒绝启动。
 2. **TODO-166 补充 ①：** `README.md` 快速开始中的 `tls_skip_verify: true # set false in production with a real cert` 在 TODO-166 落地前不可执行（服务端无任何配置固定证书的入口），应随 TODO-166 一并修正措辞或提前落地 TODO-166。
 3. **TODO-166 补充 ②：** `duotunnel-lib/src/infra/pki.rs` 已有带 O_NOFOLLOW/uid 校验/fchmod 加固的持久化 CA 基础设施（`RootCa::load_or_generate`），目前仅服务于 ingress 动态 TLS 终止；TODO-166 落地时可直接复用，修复成本低于新增独立证书配置。
-4. **其余发现与已有记录重合确认：** admin framing 缺 Content-Length 的行为已包含在 TODO-163（`read_admin_request` 对无 Content-Length 的 POST 在 header 结束处提前返回，实际到 `cli.rs::handle_admin_request` 后被 serde 拒绝或本就不需要 body，无可利用影响，维持加固定位）；VhostRouter 通配符 add 不去重在现有调用链不可达（三处调用点均为快照全量重建 + ctld layer 拒绝重复 key），TODO-158 的简化方案落地后顺带消除；cargo-audit 已在 CI 强制执行（`ci.yml`），无需动作。正面确认：SQL 全参数化、token 仅存 SHA-256 哈希、`subtle` 恒定时间比较、日志脱敏、重连指数退避+抖动、`from_utf8_unchecked` 有前置 ASCII 校验。
+4. **需求登记：Server HA 与 client-server 关联登记 → TODO-172（新增，2026-09-04 用户需求）。** 多 server 实例对外服务时，需要在 ctld（或共享存储）维护 server↔client 在线关联矩阵（哪个 server 上有哪些 group/client 在线、健康状态），供路由/外部 LB 把 vhost 流量导到持有对应 client 连接的 server，并在单实例故障时导流。TODO-151（server 稳定 identity + 注册信息）是其前置基础；client 侧现仅有单 `server_addr`，多 server 端点故障转移也需一并支持。
+5. **其余发现与已有记录重合确认：** admin framing 缺 Content-Length 的行为已包含在 TODO-163（`read_admin_request` 对无 Content-Length 的 POST 在 header 结束处提前返回，实际到 `cli.rs::handle_admin_request` 后被 serde 拒绝或本就不需要 body，无可利用影响，维持加固定位）；VhostRouter 通配符 add 不去重在现有调用链不可达（三处调用点均为快照全量重建 + ctld layer 拒绝重复 key），TODO-158 的简化方案落地后顺带消除；cargo-audit 已在 CI 强制执行（`ci.yml`），无需动作。正面确认：SQL 全参数化、token 仅存 SHA-256 哈希、`subtle` 恒定时间比较、日志脱敏、重连指数退避+抖动、`from_utf8_unchecked` 有前置 ASCII 校验。
 
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
@@ -1112,3 +1113,14 @@ flowchart TD
   `duotunnel-ctld/src/bootstrap/config.rs` 中 `watch_token` 为可选字段，`duotunnel-ctld/src/runtime/app.rs` 启动时仅以日志记录 `watch_auth = watch_token.is_some()`，不会阻止启动。`control/watch.rs::authorize` 在 `auth_token` 为 `None` 时直接放行。默认配置下 `watch_addr` 绑定 `127.0.0.1:7788` 无风险；但若管理员将 `watch_addr` 改绑到非回环地址（如 `0.0.0.0` 或内网 IP）且忘记配置 `watch_token`，任何可达该端口的客户端都能通过 watch 握手拉取完整路由快照（含 backend 地址、分组结构），且 watch 流为明文 TCP，即使配置了 token 也会被同网段嗅探。当前行为是 fail-open。
 * **Fix（建议）**:
   在 ctld 启动校验中加入 fail-closed 规则：`watch_addr` 解析后若为非回环地址且 `watch_token` 为空/空白，则拒绝启动并给出明确错误信息；同时更新 `config/ctld.yaml` 注释说明该约束。可作为 TODO-166 的伴生项：若 watch 流未来迁移到 TLS/QUIC 通道，一并解决明文嗅探问题。来源：2026-09-04 独立复审。
+
+### [TODO-172] Server HA: server↔client association registry & failover
+* **Priority**: Medium | **Status**: TODO（需求已确认，待设计） | **Track**: HA, Overload & Observability
+* **Problem**:
+  当前架构下 server 是无状态 data-plane，ctld 向所有 server 广播同一份全局配置，client 按 group 令牌连接单个 `server_addr`（`duotunnel-client/bootstrap/config.rs` 仅支持单地址）。ingress 路由假设「承载外部流量的 server 上恰好持有目标 group 的 client 连接」——当部署多个 server 实例做 HA 时，若 client 连在 server1 而外部流量落在 server2，server2 找不到对应 client 连接，请求失败；单实例故障时也无从感知哪些 client 需要重连到何处。整个系统没有任何 server↔client 在线关联的登记与视图。
+* **Design direction**:
+  1. **Server 稳定 identity**：复用 TODO-151 的 server 注册信息作为登记主键。
+  2. **反向上报通道**：现有 watch 是 ctld→server 的单向推送；需增加 server→ctld 的连接事件上报（client 连接/断开、group 在线计数、健康状态），或退化为 server 定期上报全量快照；需明确租约/心跳与僵尸条目清除语义。
+  3. **关联矩阵视图**：ctld 汇总 server↔group/client 在线矩阵，通过 admin API / health endpoint 暴露，供流量侧（LB/nginx 上游健康检查）把 vhost 流量导到持有对应 client 的 server；同一 group 的多 client 在多 server 间的分布直接决定导流策略。
+  4. **Client 多端点故障转移**：client 配置支持 server 地址列表（现有退避+快照同步语义可直接复用：重连新 server 后 ctld 重推 Snapshot，配置一致性由既有 hash/ACK 保证）。
+  5. **需先明确的边界**：会话级粘性（client 迁移时存量 ingress 流中断）是否接受、多 server 是否共享 ingress VIP、跨 server 重复登记（同一 client 短暂双连）的去重规则。来源：2026-09-04 用户需求登记。
