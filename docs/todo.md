@@ -1,211 +1,29 @@
 # Tunnel TODO
 
-> Last synced against code, analysis reports 1–7, the 2026-07-22 runtime audit, and the
-> 2026-07-26 review series + M1 batch (PR #58), and the 2026-08-24 review verification:
-> 2026-08-24.
->
-> This file is the source of truth for unfinished work. Completed or stale items were moved to [donelist.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/donelist.md). Detailed design notes remain in the topical docs, especially [pingora-tasks.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/archive/pingora-tasks.md) and [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md).
+> 2026-09-05 复核；代码基线 `7f8fe625bff1f6aa5c7e98924e4f946196a433a0`。
+> 本次仅更新评审与设计，不代表以下修复已经实施。历史已完成项保留状态以便追踪，不属于待实施队列。
 
-## 2026-07-30 implementation status
+[详细优化方案](review-2026-09-05/optimization-design.md) · [代码证据与复现](review-2026-09-05/README.md) · [旧评审记录](archive/review-history-through-2026-09-04.md)
 
-The current control-plane implementation has landed on the review branch:
+## 当前执行依据
 
-- YAML/SQLite merge, override/tombstone/clear semantics, schema initialization,
-  transactional effective-state commit, and canonical Snapshot hash are in
-  place.
-- `ConfigSource` now has an associated layer type. YAML remains the default
-  file source, while `SqliteConfigSource` is a read-only polling subscriber;
-  SQLite writes remain confined to ctld admin mutation transactions. Legacy
-  `server_config` is accepted as the YAML base when no explicit YAML source is
-  configured, and old normalized routing tables are preserved as SQLite
-  overrides with repeatable migration markers. The current coordinator supports
-  one YAML source plus one SQLite source; future Etcd-like sources need explicit
-  coordinator registration and merge/error-state policy.
-- The control wire uses one canonical envelope with a numeric wire version;
-  Snapshot/Delta ACK, Resync, target-hash validation, LKG preflight, and server
-  runtime-generation publication are implemented. Legacy business V1/V2
-  branches are not being reintroduced.
-- `duotunnel-ctld` owns the local admin Unix socket. CLI mutations go through
-  ctld and do not edit SQLite directly. The server remains a pure watch
-  consumer and never reads YAML or SQLite.
-- Admin mutations require an idempotency key and commit the key/fingerprint in
-  the same SQLite transaction. Configuration/revoke responses are replayable;
-  create/rotate bearer tokens use a redacted durable marker plus a bounded
-  process-local cache, so restart returns 410 instead of replaying or repeating
-  a token mutation.
-- CI 8K remains a performance-only case. It does not mutate YAML/SQLite or
-  claim to validate Delta consistency; those behaviors belong to control-plane
-  tests.
-- Admin socket framing still needs a focused hardening pass for duplicate or
-  missing `Content-Length`, declared-length/body mismatches, and handler-level
-  status tests. The current bounded `0600` Unix socket and request timeout keep
-  this as follow-up hardening rather than a current correctness blocker.
+每个问题根据真实调用链、领域职责、并发与资源生命周期、兼容迁移和验证成本综合决策。具体方案与不采用其他方案的理由见详细设计；测试是验证约束的手段。下方历史 Phase 不再表示当前执行优先级，以本节和各条复核状态为准。
 
-The remaining performance-related work is deliberately separated by nature:
+| 顺序 | 问题及推荐方向 | TODO |
+|---|---|---|
+| S1 | CA 加载不覆盖；显式初始化；独立的 tunnel 稳定身份 | 176、166、152 |
+| S2 | 请求固定 generation，所有相关缓存使用 epoch + sequence | 175、52 |
+| S3 | 统一 authority 契约，修 IPv6；H1 超头数明确 431 | 177、158、167 |
+| S4 | H2 错误作用域、两层实例身份、重试安全统一设计 | 168、68 |
+| S5 | admin 协议适配与业务 mutation 分离，严格有界 framing | 163 |
+| S6 | watch 安全监听可先独立实施；远程身份与显式 authority reset | 171、178 |
+| S7 | actor 失败传递到进程 owner；结构化阶段 outcome | 154、165、170 |
+| S8 | TCP relay 核心收敛；按真实生命周期管理容量 | 169、142、153 |
+| S9 | 有测量证据的热点优化；带租约关联视图与多目标 HA | 140、156–159、172 |
 
-| Task | Nature | Current decision |
-| --- | --- | --- |
-| TODO-140/T5 | Measurement and latency baseline | CI-side CPU contract/cpuset attempt, effective-config snapshot, absolute timing window, dropped iterations and fail-closed gate landed; real runner permission/repeatability and baseline artifacts remain. |
-| TODO-141/T6 | Real buffer parameter wiring | Implemented for relay, HTTP header/body, and QUIC stream sniff consumers; performance before/after evidence remains separate from this wiring task. |
-| TODO-145/T7 | Profile-guided hot-path optimization | dial9 is observation only; no optimization is accepted without before/after evidence. |
-| TODO-146/T8 | Capacity and cross-shard correctness | Capacity validation, exhaustion/high-water metrics, and rotating cross-shard selection landed; fairness/cross-shard acceptance evidence remains. |
-| TODO-142/T9 | Overload tail-latency control | Partial: UDP session production admission is wired with an owner-held RAII permit; HTTP/raw/reverse/queue domains remain separate and deferred pending lifecycle and threshold evidence. |
+状态约定：**已确认**表示代码可证明问题；**已复现**表示已有可执行证据；**候选**须先取得需求或测量依据；**已实现/原判断不成立**不继续按旧方案实施。推荐设计尚需在实现提交中通过其验收条件。
 
-Clarification for the 726 performance review: dial9 remains enabled only for the
-existing 8K trace cases. Basic, 3K, and 6K continue to use the release path and
-resource sampling without dial9. The recent CI changes improved CPU-role
-isolation, absolute sampling windows, collector cleanup, and gates; they did
-not expand dial9 coverage. FRPS is assigned the server CPU set and FRPC the
-client CPU set in isolate mode.
-
-The existing proven data-plane optimizations remain the baseline: `BytesMut`
-with `read_buf`, QUIC `read_chunk`, and TCP-specific owned split. Do not start
-io_uring, multi-endpoint, custom runtime, H2 sender-pool, or UDP wire-format
-changes without a dial9/Criterion profile showing that the relevant path is a
-measured bottleneck.
-
-## 2026-08-21 全项目代码评审（2026-08-24 已复核）
-
-对四个 crate（约 31.5k 行 Rust）做了整体评审：clippy 全绿，283 个单元测试全部通过。
-重点精读了认证路径（`quic.rs` Login 握手、`auth.rs`）、数据面缓冲池（`engine/copy.rs`）、
-UDP 会话管理、连接池、监听器管理、TLS/PKI 和客户端重连逻辑。**未发现高危或阻断性问题。**
-
-评审确认的亮点（无需行动）：生产代码几乎零 `unwrap`/`expect`（全部位于测试模块）；
-PKI 密钥处理有 `O_NOFOLLOW`/uid 校验/fchmod 0600 加固；预认证预算与 UDP 三层限额完整；
-无任何无界队列；Login 错误信息不外泄且 retryable 语义正确。
-
-改进项（已在 2026-08-24 复核，是否立项按优先级执行）：
-
-1. **TLS 跳过验证的告警强度** → TODO-152。`tls_skip_verify` 与
-   `allow_insecure_fallback` 目前仅有 `warn!` 日志，考虑加更醒目的启动告警。
-2. **UDP 容量常量硬编码** → TODO-153。`udp_datagram.rs` 中的单连接/全局会话上限
-   与排队 envelope 上限均为 `const`，其他配额已走配置，建议统一。
-3. **VhostRouter 通配符 O(n) 扫描** → 已由 TODO-31 覆盖，当前规模无碍，维持原优先级即可。
-4. **README 0-RTT 表述与实现的差距** → 已由 TODO-27 覆盖（ticket key 未持久化，
-   重启后 0-RTT 必然回退），文档措辞可在 TODO-27 落地时一并修正。
-
----
-
-## 2026-08-21 深度评审：生命周期 / 数据结构 / 选型（2026-08-24 已复核）
-
-按三个维度精读了核心实现：①进程保活与 worker 派生/cancel/重载/错误传播；
-②数据结构与命名；③选型性能。结论：**三层保活设计正确，cancel 语义完备，
-自研边界划得准（该用库的都用了），热路径选型几乎都是同类最优。**
-
-发现一项实质缺口与若干可选项：
-
-1. **Registry actor 无自动恢复** → TODO-154（可用性缺口）。actor panic 后不会自动
-   重建；register/purge/revoke 会 fail-closed 并返回错误，不会静默继续写入。
-2. 命名瑕疵（NegotiatedProtocol、MessageType 数值乱序、死字段等） → TODO-155。
-3. 可选性能优化（DefaultHasher→xxhash、UDP envelope 改 Bytes） → TODO-156。
-4. 观察项无需行动：`select_across_shards` 全 shard 扫描小规模无碍；
-   `background_main` 中 purge JoinHandle 被 drop 不 abort 但因每次重启新建
-   runtime 实际无泄漏（易误判，建议加注释）；supervise_component 一处 error!
-   缩进错位（cosmetic）。
-5. 确认的亮点：错误传播三段式（ErrorKind→Source/Retry/http_status）教科书级；
-   Login token 掩码、MAX_LOGIN_BYTES 预认证上限、LKG 双代快照回退、
-   fail-closed 令牌吊销均正确。
-
----
-
-## 2026-08-21 性能专项评审：热路径扫描（2026-08-24 已复核）
-
-对数据面热路径做了逐段扫描。结论：**HTTP/TCP 主链路（TLS→sniff→h1→QUIC relay）
-已高度优化，无发现值得动的点**——read_chunk 零拷贝、httparse 零拷贝解析、
-SniffPrefix 零复制转发、open_bi 的 now_or_never 快路径、vectored write 透传等均已到位。
-
-发现三处优化候选，按预期收益排序：
-
-1. **UDP 回包泵每包 3 次堆分配+拷贝** → TODO-157。`pump_udp_replies` 每个数据报
-   经 `to_vec()`→rkyv→`Bytes::copy_from_slice` 三次分配；每 task 独立缓冲即可归零。
-   注意 UDP pps 是当前 k6 基准的未覆盖盲区，按仓库门槛应先补基准再动手。
-2. **每请求 host 归一化堆分配** → TODO-158。`VhostRouter::get` 每次调用
-   `canonicalize_egress_host` 分配 String；可改栈上 ASCII 小写化零分配命中。
-3. **每流 RoutingInfo 序列化 2 次分配+2 次写** → TODO-159。可与 initial_bytes
-   合并为单次向量化写。
-4. 观察项不动：`select_across_shards` 全 shard 扫描当前规模可忽略；h1 解析缓冲的
-   chunk 拷贝是语义必需。
-
----
-
-## 2026-08-21 抽象与可读性评审（2026-08-24 已复核）
-
-评审了插件体系、trait 边界、泛型使用和代码可读性。结论：**扩展点少而准且全部真实
-被使用（6 个内置协议插件无一例外走 PluginRegistry），零 dyn 开销处用泛型、运行时
-多态处才用 Box<dyn>（全仓仅 4 处），注释文化解释“为什么”属范本级。**
-
-待确认项：
-
-1. **数据面流中变换无挂点** → TODO-160。ConnectionModule 只有 pre_admission/
-   on_complete 两个生命周期端点钩子，header 清洗硬编码在 h1 driver 内。
-2. **sniff 管道半硬编码** → TODO-161。SniffPolicy/detectors 每连接重建且不走
-   registry/配置；AdmissionReq.token 是预留半成品字段。
-3. **可读性债** → TODO-162（return_buffer 的 Option 舞蹈、control_client.rs 四职责
-   混杂）+ R1 已并入 TODO-158（VhostRouter::get 两段重复通配扫描与零分配化一并处理）。
-4. 不动的：error.rs 样板构造器保留显式风格（IDE 补全友好，见仁见智）；
-   handle_quic_connection 359 行内部阶段清晰，拆分收益中等不强求。
-
----
-
-## 2026-08-21 多视角专项评审（2026-08-24 已复核）
-
-分四路并行扫描：安全攻击面、并发/死锁、配置校验、测试覆盖。结论：
-**并发卫生验证通过**——全仓脚本扫描“锁获取跨 .await”模式仅 1 个候选，人工核实为误报
-（dns_cache entry 守卫未跨 await）；admin socket 有界+超时+0600；cargo-audit 已在 CI 强制执行；
-validate() 聚合式错误报告良好。新增两项记录：
-
-1. **admin HTTP 解析器边界处理与单测缺口** → TODO-163。手写解析不可信输入的代码
-   恰是最需要表驱动单测的地方，与已知“admin framing 硬化”事项配对。
-2. **配置层缺少防御式重复监听端口校验** → TODO-164。底层 `ServerConfigFile::validate()`
-   未直接查重，但当前 control-plane、override 和 snapshot 校验均会在 bind 前拒绝重复端口；
-   这不是当前运行时依赖 EADDRINUSE 的未校验问题。
-3. 无需行动：DNS single-flight/broadcast 模式正确；MSRV 钉死 1.95.0 带 clippy/rustfmt；
-   quic/tls/h2c 认证路径由 ci-helpers 集成测试覆盖，可接受。
-
----
-
-## 2026-08-24 review 复核结论
-
-已对 TODO-152～TODO-164 逐项核对实现，并运行三个相关 crate 的测试：
-`duotunnel-lib` 164 个、`duotunnel-server` 35 个、`duotunnel-ctld` 22 个全部通过。
-结论如下：
-
-- TODO-163 属于真实的 admin 请求 framing 正确性与测试缺口，应优先处理。缺失
-  `Content-Length` 的 POST 可能在 header 结束处提前返回；重复 `Content-Length` 只取首个值，
-  未拒绝冲突值。
-- TODO-164 的低层校验遗漏属实，但生效配置会经过 `normalize_and_validate_routing`、override
-  合并校验和 snapshot 校验，因此重复 listener 当前会在绑定前被明确拒绝。建议作为防御式校验
-  和独立 API 一致性改进，不应按运行时安全缺陷排期。
-- TODO-154 的自动重建/健康状态粒度缺口属实；actor 异常后的调用路径会 fail-closed、记录错误，
-  不属于 review 中所称的“静默失败”。
-- TODO-152、153、155～162 均为已确认的可观测性、配置能力、性能候选、架构扩展或可维护性项，
-  其中 UDP/host/stream 相关优化必须先补 benchmark，再根据 before/after 数据实施。
-
-## 2026-09-03 全项目代码与架构深度复核（2026-09-03 结论）
-
-基于对全仓 5 个 crate（约 32.7k 行 Rust）的全面审查与代码具体实现上下文的核实，确认并新增 6 项实质性技术债务与工程改进点（TODO-165 ～ TODO-170），并对前期已有 TODO（TODO-154、TODO-158、TODO-163）进行了精准上下文校正：
-
-1. **Client 端 EntryConnPool Actor 崩溃无自愈机制** → TODO-165。不同于 Server 端具备 `supervise_component` 线程级重启，Client 侧 `EntryConnPool` 的 actor 若 panic，虽然会标记 `actor_alive: false` 并 fail-closed，但因 pool 实例跨重连复用，一旦崩溃将导致客户端永久失效，必须重启进程。
-2. **Server 端 QUIC 随机自签证书无法配置固定证书链** → TODO-166。Server 每次启动无条件通过 `generate_self_signed_cert()` 动态生成随机公私钥，使得客户端无法使用持久化的 CA 证书进行严格校验（`tls_skip_verify: false`），生产环境被迫妥协为跳过校验。
-3. **H1 Driver 64 Header 上限与假挂起风险** → TODO-167。栈上固定 64 个 header slot，超限时 httparse 返回 `Status::Partial`。代码未检查缓冲区是否已含完整 `\r\n\r\n`，在客户端发完头后会死等 2.5s 超时或打满 8KB 报 431。
-4. **H2 Sender 单流重置错误驱逐全局复用连接** → TODO-168。`send_via` 发生任何流错误（如对端发送 `RST_STREAM`）时均无条件清退全局 `H2Sender` 缓存，未区分 Stream 错误与底层 Connection 致命错误，导致高并发多路复用连接雪崩重连。
-5. **TCP/QUIC 流中继核心代码重复** → TODO-169。`duotunnel-lib/src/engine/bridge.rs` 与 `relay.rs` 存在两份逻辑近乎完全一致的 relay 实现，需合并收敛。
-6. **PhaseOutcome 错误类型擦除导致指标收集脆弱的字符串子串匹配** → TODO-170。结构化 `ErrorKind` 被转为非结构化 `Option<String>`，后续打标时使用长达 30 余行的 `err_lower.contains(...)` 反向倒推，易碎且有多余分配。
-7. **历史项上下文校正**：
-   - TODO-158（VhostRouter）：确认 `DashMap<String, T>::get` 原生支持 `&str` 查询，内部的 256 字节栈拷贝和 `unsafe from_utf8_unchecked` 纯属多余，重构时可彻底移除。
-   - TODO-163（Admin HTTP framing）：确认 `cli.rs` 作为唯一客户端固定发送 `Content-Length: 0`，当前实际路径不触发截断，但协议防护和单测仍需补齐。
-
-## 2026-09-04 独立复审（认证/安全面定向 + 静态检查）
-
-复审范围：token 生命周期、TLS/QUIC 证书链、ctld admin socket、SQLite 存储参数化、VhostRouter、watch 认证、control_client 重连；另跑了 clippy（零警告）与全量测试（除 4 个依赖真实 TCP bind 的用例在禁网沙箱中 EPERM 外全部通过，非项目问题）。
-
-结论：此前的发现与已有 TODO 高度重合，仅新增 1 项（TODO-171），并对 TODO-166 做两点补充：
-
-1. **watch 流 fail-open 加固 → TODO-171（新增）。** `watch_addr` 默认绑定 `127.0.0.1:7788` 且 `watch_token` 可选；当管理员改绑非回环地址且忘配 token 时，仅输出一条 `watch_auth=false` 日志而不拒绝启动，明文 TCP 上任何可达客户端都能拉取完整路由快照。建议 fail-closed：非回环 watch_addr 必须配置 watch_token，否则拒绝启动。
-2. **TODO-166 补充 ①：** `README.md` 快速开始中的 `tls_skip_verify: true # set false in production with a real cert` 在 TODO-166 落地前不可执行（服务端无任何配置固定证书的入口），应随 TODO-166 一并修正措辞或提前落地 TODO-166。
-3. **TODO-166 补充 ②：** `duotunnel-lib/src/infra/pki.rs` 已有带 O_NOFOLLOW/uid 校验/fchmod 加固的持久化 CA 基础设施（`RootCa::load_or_generate`），目前仅服务于 ingress 动态 TLS 终止；TODO-166 落地时可直接复用，修复成本低于新增独立证书配置。
-4. **需求登记：Server HA 与 client-server 关联登记 → TODO-172（新增，2026-09-04 用户需求）。** 多 server 实例对外服务时，需要在 ctld（或共享存储）维护 server↔client 在线关联矩阵（哪个 server 上有哪些 group/client 在线、健康状态），供路由/外部 LB 把 vhost 流量导到持有对应 client 连接的 server，并在单实例故障时导流。TODO-151（server 稳定 identity + 注册信息）是其前置基础；client 侧现仅有单 `server_addr`，多 server 端点故障转移也需一并支持。
-5. **其余发现与已有记录重合确认：** admin framing 缺 Content-Length 的行为已包含在 TODO-163（`read_admin_request` 对无 Content-Length 的 POST 在 header 结束处提前返回，实际到 `cli.rs::handle_admin_request` 后被 serde 拒绝或本就不需要 body，无可利用影响，维持加固定位）；VhostRouter 通配符 add 不去重在现有调用链不可达（三处调用点均为快照全量重建 + ctld layer 拒绝重复 key），TODO-158 的简化方案落地后顺带消除；cargo-audit 已在 CI 强制执行（`ci.yml`），无需动作。正面确认：SQL 全参数化、token 仅存 SHA-256 哈希、`subtle` 恒定时间比较、日志脱敏、重连指数退避+抖动、`from_utf8_unchecked` 有前置 ASCII 校验。
+ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）；重复的 Tick Timer 改为 TODO-173，Count-Min Sketch 改为 TODO-174。新增 175–178，不复用旧 ID。
 
 ## 📌 实施路线图与优先级划分 (Roadmap & Implementation Sequence)
 
@@ -523,11 +341,10 @@ flowchart TD
   先完成 TODO-97 的安全 `BytesMut/read_buf` 缓冲模型，再在 relay benchmark 中比较 thread-local reuse、task-owned buffer 和有界全局 fallback 的 allocator 事件、P99 与吞吐。仅在 pool miss 是可观测瓶颈时保留 task-owned buffer；保持取消安全和每个 relay 两个方向 buffer 的明确上限。
 
 ### [TODO-20] Bytes::copy_from_slice -> split_to().freeze() (消减 HTTP 驱动拷贝)
-* **Priority**: Medium | **Status**: TODO | **Track**: Zero-Copy & Buffer Pooling
-* **Problem**:
-  HTTP 转发在部分 H1 驱动中仍然执行了冗余的 `copy_from_slice` 动作，生成了新的堆分配。
-* **Fix**:
-  在保证生命周期和 Buffer 回收安全的前提下，将其全部改写为引用计数的 `BytesMut::split_to().freeze()`。
+
+**复核状态**：部分已实现；剩余优化须定位具体复制（2026-09-05）。
+
+H1 body_prefix 已使用 split_to().freeze()，不能以全量替换 copy_from_slice 作为方案。剩余序列化/缓冲复制逐处测量，比较引用计数持有大底层 allocation 的内存成本；验证首包、分片、取消和回收。
 
 ### [TODO-136] Safely remove sniff-buffer zero initialization with `BytesMut` / `read_buf`
 * **Priority**: Medium | **Status**: Research / benchmark-gated | **Track**: Zero-Copy & Buffer Pooling
@@ -626,9 +443,10 @@ flowchart TD
   创建 `H1Session` / `H2Session` 等生命周期宿主，使重试判定与会话逻辑拥有清晰的作用域。
 
 ### [TODO-68] Ingress request lifecycle convergence
-* **Priority**: Medium | **Status**: 🚧 Partial / H2 sender invalidation tightened | **Track**: Core Proxy & Protocol
-* **Fix**:
-  收敛 h2c per-connection request 生命周期的异常重试逻辑，与 TLS/H1 通路对齐。Current implementation invalidates stale H2 sender state on request failures so subsequent requests rebuild the QUIC-backed H2 connection instead of reusing a failed sender. Broader H1/TLS/H2C retry boundary unification remains open.
+
+**复核状态**：部分实现，后续并入 TODO-168（2026-09-05）。
+
+已有错误后失效逻辑，但任意请求失败都驱逐 sender 并非最终契约。共享转发策略同时表达失败作用域、实例身份、安全重试、总 deadline 与 body 完成；H2c/TLS 接入同一规则，保留协议适配差异。详见优化设计 §4。
 
 ### [TODO-62] Full per-peer protocol capability memory
 * **Priority**: Medium | **Status**: TODO | **Track**: Core Proxy & Protocol
@@ -701,10 +519,11 @@ flowchart TD
 * **Decision**:
   不做此重构。若未来 profile 发现新的 passthrough `BufReader<RecvStream>` callsite，再以该具体 callsite 新建任务；当前数据拷贝的安全修复由 TODO-97 负责。
 
-### [TODO-27] QUIC certificate and 0-RTT persistence
-* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
-* **Fix**:
-  持久化服务端的身份凭证与 Session 门票加密 key，使得服务重启不会使客户端的 0-RTT 回退。
+### [TODO-27] 身份、会话恢复与 0-RTT
+
+**复核状态**：需求需分别定义（2026-09-05）。
+
+持久证书改善身份稳定，但不自动开启 0-RTT。当前连接路径等待完整握手，未发现 early-data 接线。先实施 166；会话票据、服务端 resumption 状态与 early-data 重放策略需要独立协议设计和真实握手测试，不能以保存证书/票据声称完成。
 
 ### [TODO-73] Plugin-based IPv6 support and DNS Hijacking connection interceptor
 * **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance
@@ -739,12 +558,11 @@ flowchart TD
 * **Decision**:
   预构造 handle 会引入重复 Push 的去重、slot 回滚和 actor 关闭时的资源归还协议；在 reconnect 冷路径上不应先支付这份复杂度。仅在 TODO-106 的压测证明 `alloc_slot` / `ConnectionHandle::spawn` 是主导耗时后再设计两阶段 reserve/commit 协议。
 
-### [TODO-108] O(1) EntryConnPool connection removal by passing shard_id
-* **Priority**: Medium | **Status**: Fold into TODO-106 if it is approved | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  目前的 `PoolMsg::Remove` 仅包含 `stable_id`，导致 Actor 必须遍历所有的 `shards` ($O(S)$ 复杂度) 来查找并移除对应的连接。
-* **Fix**:
-  不必从连接对象额外携带 `shard_id`：当前 shard 选择已经是 `stable_id` 的确定性哈希，可在 `remove_stable_id` 中重算。该收益只在分片 Actor 落地后才值得引入，届时与 TODO-106 一次完成并验证重复/未知 remove 仍为幂等。
+### [TODO-108] EntryConnPool 定向 remove
+
+**复核状态**：候选（2026-09-05）。
+
+当前 push 接收调用方 shard_id 并取模，不能按 stable_id 哈希重算归属。若 profile 证明扫描成本显著，使用真实登记映射或在 handle/remove 中携带登记 shard，覆盖替换、重复注销与未知 ID。保持单 actor 写所有权，不以此强制实施 actor 分片。
 
 ### [TODO-109] Optimize InflightTable atomic operations by merging counters
 * **Priority**: Medium | **Status**: Semantics and benchmark gated | **Track**: Transport & Performance
@@ -753,23 +571,17 @@ flowchart TD
 * **Implementation plan**:
   可以改为 `total_inflight: AtomicUsize`，使 `promote()` 无需再改计数，load 只读取一个原子，Drop 在任何 phase（即时失败、等待超时、取消或正常关闭）递减后都 `notify_one()`：slowpath 等待的正是总 inflight 下降。先覆盖即时成功、即时失败、等待超时、取消和并发选择的 invariant/notification 测试，再以 flamegraph/基准确认是否值得合并。原子操作数量减少不等于端到端性能按相同比例提升。
 
-### [TODO-110] Replace InflightGuard drop CAS loop with fetch_sub
-* **Priority**: Low | **Status**: Fold into TODO-109 after invariants are tested | **Track**: Transport & Performance
-* **Problem**:
-  `InflightGuard` 的 `Drop` 实现中使用 `compare_exchange_weak` 循环来防止计数器下溢。
-* **Analysis**:
-  同一 QUIC connection 的流结束确实可能令 CAS 竞争；但现有 CAS 同时承担 release build 的饱和减法保护，不能在没有 invariant 测试的情况下机械替换成会下溢的 `fetch_sub`。计数合并后，此项自然收敛为 TODO-109 的 Drop 实现。
-* **Fix**:
-  先保证每个 guard 恰好递减一次，再用 `fetch_sub` 的返回值配合断言/明确的失败策略维护不下溢 invariant；无论 guard 处于哪个 phase，只要总 inflight 降低都应通知 slowpath 等待者。不要将其作为独立微优化提交。
+### [TODO-110] InflightGuard drop fetch_sub
 
-### [TODO-111] Remove Mutex lock from InflightTable slot allocation
-* **Priority**: Medium | **Status**: Ready after actor-ownership tests | **Track**: Transport & Performance
-* **Problem**:
-  `InflightTable` 中的 `free: Mutex<Vec<InflightSlotId>>` 在申请/释放槽位时使用了阻塞锁。虽然 low contention，但有 Mutex 锁操作开销。
-* **Pre-condition**:
-  已核对当前 callsite：client `EntryConnPool` 和 server `ClientRegistry` 都只在各自的单线程 actor mutation loop 中申请/释放 slot。实施时仍须补 actor 内重复注册、注销、连接替换与 purge 的测试，防止未来绕开 actor 新增调用方。
-* **Fix**:
-  将 slot free-list 的所有权移到各 Actor 的私有状态，或抽成只暴露给 actor 的 allocator；不要仅删除 `Mutex` 后继续让通用 `InflightTable` 暴露可并发的 alloc/free API。若 TODO-106 获批，每 shard actor 还必须拥有独立 slot allocator/table，避免把当前全局锁竞争扩散到多个 actor。
+**复核状态**：已实现，关闭旧任务（2026-09-05）。
+
+当前 Drop 已使用 fetch_sub，旧 CAS 循环描述过时。后续仅在 109 计数语义变更时验证恰好释放一次和等待者通知，不重复实现。
+
+### [TODO-111] InflightTable free-list Mutex
+
+**复核状态**：原对象已不存在，关闭旧任务（2026-09-05）。
+
+当前使用容量/注册原子与全局 ArrayQueue 池，不存在旧 free: Mutex<Vec<...>>。ConnectionState 的 owner Mutex 是另一职责，不能据此删除。剩余 allocator 改动须重新提交基于当前实现的性能证据。
 
 ### [TODO-146] Make Server ClientRegistry slot capacity explicit and observable
 * **Priority**: High | **Status**: Partially implemented; cross-shard acceptance pending | **Track**: Code Quality, Safety, and Registry
@@ -785,12 +597,11 @@ flowchart TD
 * **Decision**:
   不修改当前通知语义。TODO-109 若合并成单一总计数，任何 guard drop 后的总数下降仍应触发通知；补充这一 invariant 的测试即可。
 
-### [TODO-135] Document and test inflight_load non-atomic double read behavior
-* **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
-* **Problem**:
-  `inflight_load` 对 `pending_opens` 和 `active_streams` 执行两次独立的原子 `load`，中间无屏障保证。在 `promote()` 执行过程中（`pending -= 1`，`active += 1`），并发读取可能得到 `pending + active - 1`（瞬态少算 1），影响 load balancing 精度。
-* **Fix**:
-  在 TODO-109（合并为单一计数器）实施后可自然消除。短期应在代码中明确注释此 invariant："inflight 读值在 `promote()` 期间可能瞬态偏低 1"，避免调用方依赖此值做精确决策。
+### [TODO-135] Inflight 近似读语义
+
+**复核状态**：已确认（2026-09-05）。
+
+pending 与 active 两次 relaxed 读取不是同一时刻快照，并发多个 promote/释放时不能承诺最多低估 1。用于负载均衡可接受近似时应明确用途；硬准入使用独立准确预算。109 若统一 total，先验证生命周期与通知，而非仅减少 atomic 数量。
 
 ### [TODO-24] Multi-endpoint + SO_REUSEPORT UDP research
 * **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
@@ -828,29 +639,29 @@ flowchart TD
 * **Fix**:
   减少在热路径上直接调用 metrics。利用 trace 事件以非阻塞的 channel 异步收集指标，保证不在 Tracing 锁下更新 metrics 计数器。
 
-### [TODO-52] Route snapshot connection-level cache for H2
-* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
-* **Fix**:
-  在 H2 长连接范围中直接缓存 `Arc<RoutingSnapshot>`，防止重复读取。
+### [TODO-52] H2 请求级 generation 与缓存
+
+**复核状态**：并入 175（2026-09-05）。
+
+每个请求固定一个 RuntimeGeneration，连接可以长存活但新请求必须看到新 generation；不能将 RoutingSnapshot 永久固定在整条 H2 连接。缓存用完整 epoch+sequence，包含负缓存及迟到请求的淘汰规则。详见设计 §3。
 
 ### [TODO-36] Finish static dispatch cleanup
-* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  `PeerKind` 等运行时执行层依然保有 boxed upstream peer（动态堆分配封装）。
-* **Fix**:
-  用纯非 box 化的 Enum 或静态泛型将连接流水线全部重构为编译期静态分派，消灭虚函数及堆分配。
 
-### [TODO-ENTRY-POOL] Remove redundant EntryConnPool mutable Vec
-* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
-* **Fix**:
-  清理 `EntryConnPool` 的写侧缓存结构，简化为 `ArcSwap` 结合写锁控制。
+**复核状态**：候选，撤回全部静态分派目标（2026-09-05）。
 
-### [TODO-85] Async Listener Reconciliation
-* **Priority**: Low | **Status**: TODO | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  配置热加载重载监听器端口时，`sync_listeners` 使用了同步阻塞 Mutex，阻碍了编排协程。
-* **Fix**:
-  设计 `AsyncListenerReconciler` 以异步队列处理重绑定；并修复端口解绑时的 race 竞争，防止原 socket 没来得及释放导致的新连接 bind `EADDRINUSE` 故障。
+只有 profile 确认 boxed peer 的分配/分派影响时才比较 enum、泛型与现有 trait object；同时评估代码体积、编译成本和扩展边界。没有测量依据不重构整条管线。
+
+### [TODO-ENTRY-POOL] EntryConnPool 写侧与读快照
+
+**复核状态**：原替换建议撤回（2026-09-05）。
+
+actor 私有 Vec 是写模型，ArcSwap 是不可变读模型，二者不天然冗余。没有测量/不变量证明前保持单 owner，不能改成 ArcSwap+写锁并引入第二写入协议。
+
+### [TODO-85] Listener reconcile 验收
+
+**复核状态**：原同步阻塞描述过时（2026-09-05）。
+
+当前已有异步 listener 管理。保留实际验收：端口变更/失败绑定/并发 reload/取消期间的资源回收与 generation 发布顺序；不重新造 AsyncListenerReconciler。
 
 ### [TODO-103] Expose active slowpath waiting tasks metric on /metrics
 * **Priority**: Low | **Status**: ✅ Done (Phase 1 tail) | **Track**: HA, Overload & Observability
@@ -869,21 +680,17 @@ flowchart TD
 * **Problem**:
   使用 `CachePadded<AtomicUsize>` 包裹 `Arc` 可以防 False Sharing，但引发了多余的堆分配。
 
-### [TODO-CR-AUDIT-5] 潜在的整型乘法溢出漏洞
-* **Priority**: High | **Status**: 🚧 Partial — MB conversions fixed, capacity arithmetic remains | **Track**: Transport & Performance
-* **Current state**:
-  QUIC 配置中的 MiB→bytes 转换已经使用 `saturating_mul`，原先该部分的直接乘法风险已消除。
-* **Residual problem**:
-  `EntryConnPool::new` 仍使用 `(max_concurrent_streams as usize) * (connections as usize) * 2` 计算 inflight table 容量。超大但可反序列化的配置在 debug build 会 panic，在 release build 可 wrap 成错误容量；即使不溢出，也可能在启动阶段申请不可接受的内存并触发 OOM。
-* **Fix**:
-  使用 `checked_mul` 和显式容量/内存预算验证，错误必须在配置加载阶段带字段名返回，不能饱和到巨大值或在 allocator 阶段失败。为边界值、乘法溢出、32/64 位差异和内存预算拒绝补测试。
+### [TODO-CR-AUDIT-5] 配置容量算术与组合预算
 
-### [TODO-CR-AUDIT-6] 高并发连接管理器/线程池配置健壮性检验
-* **Priority**: High | **Status**: Ready for implementation | **Track**: Transport & Performance
-* **Problem**:
-  参数缺少合理的静态验证边界。`apply_transport_params` 对 stream/connection receive window 使用 `try_into().unwrap()`；超出 Quinn `VarInt` 范围的配置会在启动时 panic。`connections`、`shards`、`max_concurrent_streams`、accept/runtime workers、QUIC/TCP windows、socket buffers、relay/body/peek buffers 和 pending/admission limits 也缺少统一的上界及组合内存预算。
-* **Fix**:
-  将配置转换改成返回字段化 validation error，生产启动路径禁止依赖 `unwrap`。为每个资源参数定义协议上限、实现上限和推荐范围，并验证跨字段关系，例如 `shards <= connections`、window/buffer 与最大连接/stream 数推导的最坏内存。启动日志输出最终生效值和估算容量；补零值、最大合法值、首个非法值、极端组合及环境变量覆盖测试。TODO-146 的 Server registry capacity 必须纳入同一容量模型。
+**复核状态**：原三项乘法风险已过时（2026-09-05）。
+
+当前 client 容量有上限 262144，旧 max_streams × connections × 2 表达式已不存在。剩余工作是跨连接、stream、buffer、UDP 队列的可解释内存预算，不能继续按旧表达式报告漏洞。与 153/142/CR-AUDIT-6 统一有效配置验收。
+
+### [TODO-CR-AUDIT-6] 资源配置组合校验
+
+**复核状态**：部分已实现（2026-09-05）。
+
+QUIC VarInt/idle 转换已有错误返回及边界测试，不再按 unwrap panic 记录。后续校验真实跨字段预算、实现上界与有效值可观测性；协议合法不代表内存可承受。不要机械规定 shards <= connections 而不检查调度语义。
 
 ### [TODO-CR-AUDIT-7] 高频请求生命周期内 Engine 对象的动态实例化开销
 * **Priority**: Low | **Status**: TODO | **Track**: Transport & Performance
@@ -893,7 +700,7 @@ flowchart TD
 ### [TODO-PARAM-1] Unified parameter configuration schema
 * **Priority**: Medium | **Status**: TODO | **Track**: Control Plane & Config
 * **Fix**:
-  根据 [parameters.md](file:///Users/sexy/Documents/GitHub/duotunnel/docs/spec/parameters.md) 进一步细化和合并 timeout、重连退避机制等字段。
+  根据 [parameters.md](spec/parameters.md) 进一步细化和合并 timeout、重连退避机制等字段。
 
 ### [TODO-57] quinn stream-level lock research
 * **Priority**: Low | **Status**: Research | **Track**: Future/Research & CI
@@ -945,12 +752,12 @@ flowchart TD
 ### [TODO-15] egress_http_post phase boundary annotation
 * **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
 
-### [TODO-148] Coarse-grained shared Tick Timer (Pingora Fast-Timeout style)
+### [TODO-173] Coarse-grained shared Tick Timer (Pingora Fast-Timeout style)
 * **Priority**: Low | **Status**: TODO | **Track**: Future/Research & CI
 * **Fix**:
   实现 10ms 或 50ms 粗粒度的定时器轮（Timer Wheel），支持多 Future Waker 的共享 tick 唤醒，避免在高并发连接下频繁增删 Tokio 计时堆的 CPU 锁争用。
 
-### [TODO-149] DDoS-Resistant Count-Min Sketch Ingress Rate Limiter
+### [TODO-174] DDoS-Resistant Count-Min Sketch Ingress Rate Limiter
 * **Priority**: Medium | **Status**: TODO | **Track**: Ingress Security
 * **Fix**:
   在 Ingress Listener 阶段引入内存有界的 Count-Min Sketch 限流矩阵。对 Peer IP 进行快速多重 Hash 映射，避免在大流量防刷时因维护海量 IP Session Map 导致 OOM（内存溢出）。
@@ -967,26 +774,23 @@ flowchart TD
 * **Design direction**:
   为 server 建立稳定 identity，并在配置资源上增加 tenant/scope 关联。ctld 根据 server 注册信息生成目标 server 专属的 Snapshot/Delta；server 只应用属于自身作用域的配置，同时保持 base revision、content hash、ACK 和重同步语义正确。需要明确租户与 server 的绑定、跨租户资源引用、默认配置、迁移/解绑行为，以及多 server 场景下的权限隔离和测试矩阵。
 
-### [TODO-152] Strengthen insecure-TLS startup warning
-* **Priority**: Low | **Status**: 已确认：低优先级可观测性改进 | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  `duotunnel-client/tunnel/endpoint.rs` 中 `tls_skip_verify` 与 `allow_insecure_fallback` 目前只有一条 `warn!` 日志。作为运维逃生门可以接受，但误配置时不易被察觉。
-* **Fix（建议）**:
-  在启用任一不安全选项时增加启动横幅级醒目告警（如多行 banner + metrics 标记），或在配置文件注释中标注风险；不改默认行为。来源：2026-08-21 全项目代码评审。
+### [TODO-152] 不安全 TLS 状态可观测性
 
-### [TODO-153] Make UDP session/queue capacity constants configurable
-* **Priority**: Low | **Status**: 已确认：配置能力缺口 | **Track**: HA, Overload & Observability
-* **Problem**:
-  `duotunnel-server/ingress/handlers/udp_datagram.rs` 中 `MAX_UDP_SESSIONS_PER_CONNECTION`（1024）、`MAX_UDP_SESSIONS_GLOBAL`（16384）、`MAX_UDP_QUEUED_ENVELOPES_GLOBAL`（16384）均为硬编码 const，而 unauth 连接数等其他配额已走配置文件。
-* **Fix（建议）**:
-  将三处上限纳入现有配置体系并保持默认值不变，便于不同规格机器调优；补充配置加载与边界校验测试。来源：2026-08-21 全项目代码评审。
+**复核状态**：已确认，随 166 迁移（2026-09-05）。
 
-### [TODO-154] Registry actor watchdog / supervision
-* **Priority**: Medium | **Status**: 已确认：恢复与健康状态缺口 | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  `duotunnel-server/ingress/registry.rs` 的 registry actor 是裸 `tokio::spawn`，仅靠 `actor_alive: AtomicBool` 标记存活。若 actor panic，没有自动重建，健康状态也没有独立的 registry 维度。register/purge_dead/revoke_tokens 会检测 actor 状态，关闭可见连接并返回错误（fail-closed），不会静默继续操作。组件层有 supervisor + catch_unwind + 重启预算，task 层的 actor 没有。
-* **Fix（建议）**:
-  将 registry actor 纳入 component 监督体系（panic 后重建 actor 并从 DashMap/ArcSwap 现状恢复，读路径本就不依赖 actor 内部状态，恢复成本低）；或至少让 `purge_dead` 连续失败 N 次后上报 health 使 readiness 摘除。补充 actor panic 注入测试。来源：2026-08-21 深度评审。
+横幅不能修复缺乏稳定身份的问题。随 TODO-166 同步迁移样例与严格验证配置，并记录有效 insecure 状态与固定低基数指标。显式开发模式可告警，生产配置不可静默 fallback。验收覆盖启动配置、错误 CA/SAN 与重启后身份一致；详见设计 §1。
+
+### [TODO-153] UDP 容量配置与生命周期预算
+
+**复核状态**：已确认（2026-09-05）。
+
+三个硬编码上限确实存在，但只暴露数字不能保证资源有界。保持默认值，统一校验单连接 session、全局 session、排队 envelope 的组合预算；明确 permit 从何时取得，到出队、超时、取消、连接关闭何时释放。与 TODO-142 共用预算原则而非万能 limiter；并发压测验证峰值、释放和公平性。详见设计 §8–9。
+
+### [TODO-154] Server registry actor 失败传递
+
+**复核状态**：已确认，原自动恢复方案撤回（2026-09-05）。
+
+现有 actor 操作有 fail-closed 防护；release 配置 panic=abort，catch_unwind 不能提供生产 panic 恢复。即使 unwind，外部读快照也不足以证明可重建完整写侧状态。推荐 owner 追踪非预期退出并使进程失败，由外部 supervisor 重启；readiness 不可被迟到更新恢复。覆盖正常关闭、channel 异常与 release 子进程故障。与 165 共用失败契约，不共享业务 actor 状态。详见设计 §7。
 
 ### [TODO-155] Naming and dead-field cleanup
 * **Priority**: Low | **Status**: 已确认：清理项 | **Track**: Code Quality, Safety, and Registry
@@ -1002,26 +806,23 @@ flowchart TD
 * **Fix（建议）**:
   仅在 dial9/Criterion profile 证明相关路径是瓶颈后再做（符合本仓库既定门槛）。若引入 xxhash/fxhash，需在文档标注其非抗碰撞、仅限进程内分片使用。来源：2026-08-21 深度评审。
 
-### [TODO-157] Reduce per-datagram allocations in UDP reply pump
-* **Priority**: Medium | **Status**: 已确认：benchmark-gated 性能候选 | **Track**: Transport & Performance
-* **Problem**:
-  `duotunnel-server/ingress/handlers/udp_datagram.rs::pump_udp_replies` 对每个上游 UDP 数据报执行三次堆分配+三次拷贝：`payload.to_vec()`（分配①）→ `encode_udp_datagram_envelope` rkyv `AlignedVec`（分配②）→ `Bytes::copy_from_slice`（分配③）。客户端侧 `udp_listener.rs` 同构。每个会话有独立 pump task，缓冲无需共享。
-* **Fix（建议）**:
-  改为 per-task 复用缓冲（栈上 `[u8; MAX_DATAGRAM_BYTES]` 或 hand-rolled 紧凑头），目标命中路径零堆分配；`try_enqueue` 的 per-packet SipHash worker 选择可一并评估。**前置条件**：UDP pps 是当前 k6 基准盲区，先补 UDP 吞吐/pps 基准取得 before 数据，再动手并出 after 对比。来源：2026-08-21 性能专项评审。
+### [TODO-157] UDP 编码所有权与分配优化
 
-### [TODO-158] Allocation-free host canonicalization on vhost match hot path
-* **Priority**: Low | **Status**: 已确认：benchmark-gated 性能候选 | **Track**: Performance Tuning
-* **Problem**:
-  `VhostRouter::get` 每次调用 `canonicalize_egress_host(host)` 分配一个 String（trim/校验/剥端口/to_lowercase），是每个 HTTP 请求 vhost 匹配的必经路径。
-* **Fix（建议）**:
-  命中路径改为零分配：栈缓冲 ASCII 小写化 + 校验返回借用切片做匹配（已有 `is_ascii` 快路径判断可复用）；仅错误/回退路径保留 String 版本。保持对非 ASCII/IDN 行为不变并有测试覆盖。顺带重构：当前 ASCII 快路径与非 ASCII 慢路径是两段几乎相同的通配符扫描逻辑（约 20 行 × 2 复制粘贴），应把匹配收敛为以 `&str` 为参的单一内部函数，两条路径归一化后共用。（2026-09-03 复核补充：`DashMap<String, T>::get` 原生支持 `&str` 借用查询，第 158-163 行拷贝到栈 `[u8; 256]` 并使用 `unsafe { std::str::from_utf8_unchecked }` 纯属冗余操作，重构时可一并删除栈拷贝与 unsafe 代码）。来源：2026-08-21 性能专项 + 抽象/可读性评审及 2026-09-03 复核。
+**复核状态**：候选，撤回栈缓冲零分配承诺（2026-09-05）。
 
-### [TODO-159] Fold RoutingInfo frame with initial bytes into one write
-* **Priority**: Low | **Status**: 已确认：小型性能候选 | **Track**: Transport & Performance
-* **Problem**:
-  每次 `open_bi` 后 `send_routing_info` 执行 rkyv `AlignedVec` 分配①、frame Vec 组包分配②，随后与 `initial_bytes` 分两次 `write_all`——每流多一次分配和一次 flush。
-* **Fix（建议）**:
-  序列化进调用方/线程局部 scratch buffer，并与 `initial_bytes` 合并为一次 `write_vectored`（QuinnStream 已支持 vectored 透传）；或直接把 routing info 与首包拼进同一缓冲一次写出。收益量级小于 TODO-157/158，改动小可顺手做。来源：2026-08-21 性能专项评审。
+payload Vec、序列化 AlignedVec、转 Bytes 的复制链存在；Quinn 排队发送需要拥有数据，任务栈缓冲不能直接复用给未完成发送。先测 PPS、分配与排队内存；评估拥有 AlignedVec 的 Bytes owner，验证依赖能力后再实现，暂不改 wire format。同时按协议与连接 MTU 较小值限长，区分单包 TooLarge 与连接失败，检测 UDP 截断。验收含丢包、限长、队列饱和与会话继续工作。详见设计 §9。
+
+### [TODO-158] 统一 host 匹配并去除冗余 unsafe
+
+**复核状态**：已确认冗余；零分配收益待测（2026-09-05）。
+
+当前 canonicalizer 已分配 String，随后 ASCII 栈拷贝和 from_utf8_unchecked 并未消除该分配。先随 177 统一 request authority 与配置 pattern 的语义，使用一个 &str 匹配核心移除重复扫描及 unsafe；保留非 ASCII、端口忽略与 wildcard 语义。借用/Cow 优化在 profile 后单独验证，不再叠加栈拷贝。详见设计 §5。
+
+### [TODO-159] RoutingInfo 首包写入优化
+
+**复核状态**：候选；额外 flush 判断不成立（2026-09-05）。
+
+当前 send_message 有组包分配和 write_all，但没有原记录所称额外 flush。先测每流组包和首包延迟，再比较合并缓冲与 vectored 写；vectored 必须正确处理短写、跨 slice 推进、零写与取消，不能调用一次就假定全部发出。保持线协议与首包顺序。详见设计 §9。
 
 ### [TODO-160] Mid-stream transformation hook for ConnectionModule
 * **Priority**: Low | **Status**: 已确认：架构扩展项 | **Track**: Future/Research & CI
@@ -1030,26 +831,23 @@ flowchart TD
 * **Design direction（待确认）**:
   参考 Pingora HttpBase/HttpModule 的 request_filter/response_filter 语义，在 ProtocolDriver 层增加可选的变换钩子；注意与现有 capability bits 协商机制对齐，避免未协商特性静默生效。先等真实需求出现再设计，避免过度抽象。来源：2026-08-21 抽象与可读性评审。
 
-### [TODO-161] Wire sniff pipeline into configuration/plugin registry
-* **Priority**: Low | **Status**: 已确认：设计改进项 | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  `dispatcher.rs::sniff` 每次 dispatch 都 `SniffRuntime::new(SniffPolicy::default(), default_ingress_detectors())`：detector 集合与策略既不可配置也不走 PluginRegistry（与旁边精心设计的插件体系反差），同时每连接重建 detector 列表是个小性能点。另外 `AdmissionReq.token` 是带 "callers may populate" 注释的预留半成品字段。
-* **Fix（建议）**:
-  将 detector 集合/SniffPolicy 提升为启动期构造一次并经配置或 registry 注入（SniffRuntime 本身不可变共享即可）；决定 token 字段的去留：要么接入认证流要么删除。来源：2026-08-21 抽象与可读性评审。
+### [TODO-161] Sniff 策略配置需求
 
-### [TODO-162] Readability debts: return_buffer rewrite and control_client split
-* **Priority**: Low | **Status**: 已确认：可维护性债务 | **Track**: Code Quality, Safety, and Registry
-* **Problem**:
-  ① `engine/copy.rs::return_buffer` 用三层 Option/借用切换实现本地池择优替换（~25 行），功能正确但难读；② `duotunnel-server/control/control_client.rs`（1522 行）混杂四件事：LKG 磁盘持久化、watch 重连循环、snapshot/delta apply、token fencing，天然是四个模块边界。
-* **Fix（建议）**:
-  ① 用平铺直叙的控制流重写 return_buffer，行为不变（池上限/4x 淘汰语义有测试兜底）；② 将 control_client 按上述四职责拆分为子模块（纯移动+可见性调整，不改逻辑）。长函数（handle_quic_connection 359 行）内部阶段注释已清晰，暂不拆。来源：2026-08-21 抽象与可读性评审。
+**复核状态**：候选；每连接 detector 分配判断不成立（2026-09-05）。
 
-### [TODO-163] Unit tests for ctld admin HTTP request parser
-* **Priority**: Medium | **Status**: 已确认：请求 framing 正确性与测试缺口 | **Track**: Ingress Security
-* **Problem**:
-  `duotunnel-ctld/src/runtime/app.rs::read_admin_request` 是手写的不可信输入 HTTP 解析器（本地 admin Unix socket），目前无单元测试。缺失 `Content-Length` 的 POST 可能在 header 结束处提前返回；重复 `Content-Length` 只取第一个可解析值，不拒绝重复/矛盾头。0600 socket 和 5 秒超时仍在生效，但 framing 行为需要明确化。
-* **Fix（建议）**:
-  表驱动单测覆盖：正常 GET/POST、缺失 Content-Length 的 POST、重复 Content-Length（决定拒绝策略）、声明长度与实际不符、超过 MAX_REQUEST_BYTES、分片到达（逐字节喂入）、非 UTF-8 body、慢速发送触发 5s 超时。与 admin framing 硬化一并落地。（2026-09-03 复核补充：当前 `duotunnel-ctld` 的唯一 CLI 客户端 `cli.rs` 中发送的所有 POST 请求均固定带有 `Content-Length: 0` 且参数全在 query string，因此生产 CLI 路径上不会触发该提前截断 bug，但作为接受非受信调用的 HTTP 解析器，该 framing 漏洞仍需修复并由单测兜底）。来源：2026-08-21 多视角专项评审及 2026-09-03 复核。
+SniffRuntime::new 保存策略和借用的静态 detector 集合，不会每次构造分配列表。只有实际需要可配置 detector 顺序/策略时才从 bootstrap 注入不可变配置，覆盖歧义协议优先级与慢速输入；不要为虚构分配引入插件 registry。预留 token 字段单独依据真实调用方决定去留。
+
+### [TODO-162] 按不变量拆分 control_client
+
+**复核状态**：已确认维护成本；增量实施（2026-09-05）。
+
+提取 revision policy、LKG adapter、watch transport 与 apply/security orchestration；保持单一 apply owner 负责 listener、token fence、generation 发布顺序。模块默认私有，不让多个子模块各自发布状态。先等价移动，再在 175/178 对应提交修改契约；不让全面重构阻塞确定的缓存 bug。return_buffer 只在保持池上限/淘汰行为前提下简化。详见设计 §3、§11。
+
+### [TODO-163] ctld admin framing 与业务适配边界
+
+**复核状态**：已确认，P1（2026-09-05）。
+
+本地 socket 有权限和超时保护，现有 CLI POST 带 Content-Length: 0，不能宣称正常 CLI 已被截断。但解析器接受重复/非法长度、缺失长度，并有 header_end + length 溢出风险。推荐 ctld 私有 admin adapter 使用 httparse 处理语法及有界 framing 状态机；mutation 接收类型化请求，保留幂等指纹和 410 行为。拒绝重复 CL、TE、溢出，POST 强制 CL；保留 256KiB/5s 上限、单请求后关闭。覆盖逐字节输入、超时、尾随数据及非法请求零 mutation。为何暂不引入完整 Hyper server 见设计 §6。
 
 ### [TODO-164] Duplicate ingress listener port validation in config validate()
 * **Priority**: Low | **Status**: 已复核：防御式校验建议 | **Track**: Control Plane & Config
@@ -1058,69 +856,74 @@ flowchart TD
 * **Fix（建议）**:
   可在 `ServerConfigFile::validate()` 增加 HashSet 端口查重，提升独立调用方的错误提示一致性；动态规则仍必须在合并后的最终 routing 层校验。该项属于防御式校验和可维护性改进，非当前运行时阻断问题。来源：2026-08-21 多视角专项评审及 2026-08-24 代码复核。
 
-### [TODO-165] Client EntryConnPool actor watchdog & auto-recovery
-* **Priority**: Medium | **Status**: TODO | **Track**: Client Runtime & Stability
-* **Problem**:
-  在 `duotunnel-client/tunnel/conn_pool.rs::EntryConnPool::new` 中，维护连接池状态的 Actor 是一个裸 `tokio::spawn` 异步任务，仅依靠 `actor_alive: Arc<AtomicBool>` 标记状态。若该 actor 因未捕获的 panic 或消息通道异常关闭而退出，`ActorAliveGuard` 在 drop 时将 `actor_alive` 置为 `false`，后续所有 `push`/`remove` 操作均 fail-closed 并返回错误。
-  不同于 Server 端拥有 `supervise_component` 线程级重启机制，Client 端的 `EntryConnPool` 是在客户端主进程启动时创建并作为单一实例传递给 `run_supervisor`。即使网络重连触发 `run_client` 重新执行，也始终复用旧的 `entry_pool` 实例。一旦该 actor 退出，整个客户端的连接池将永久处于不可用状态，必须重启整个客户端进程。
-* **Fix（建议）**:
-  在 `EntryConnPool` 或 `supervisor.rs` 中增加监控：当检测到 `!pool.is_alive()` 时，重建 actor 及其对应的 mpsc 队列与状态快照（只包含 active 连接），或者在 `supervisor` 的重试外环检测 pool 健康状态并在必要时实例化新的 `EntryConnPool` 注入下一次 session。补充针对 pool actor panic 的自愈单测。来源：2026-09-03 全项目代码评审与复核。
+### [TODO-165] Client pool actor 失败传递
 
-### [TODO-166] Configurable server-side QUIC TLS certificates & keys
-* **Priority**: Medium | **Status**: TODO | **Track**: Transport & Security
-* **Problem**:
-  在 `duotunnel-server/ingress/handlers/quic.rs::run_quic_server` 中，启动 QUIC 服务端直接调用 `duotunnel_lib::transport::quic::create_server_config_with(&quic_params)`，其内部通过 `generate_self_signed_cert()` 每次启动时在内存中动态生成临时随机自签证书（CommonName: `localhost`）。
-  虽然 `duotunnel-client` 已经通过 `tls_ca_cert` 提供了加载自定义 CA 证书的功能，但服务端缺乏加载持久化证书与私钥的配置项。这导致客户端若开启严格 TLS 证书校验（`tls_skip_verify: false`），无法与每次重启生成不同随机公私钥的服务端匹配，迫使生产环境依赖不安全的 `tls_skip_verify: true`。
-* **Fix（建议）**:
-  在 `ServerConfigFile` 的 `quic` 配置节中增加可选的 `cert_file` 与 `key_file` 路径；在 `create_server_config_with` 中优先读取配置的 PEM 证书与私钥；若未配置则回退到现有的随机自签证书逻辑以兼容开发/本地测试。来源：2026-09-03 全项目代码评审与复核。
+**复核状态**：已确认，撤回局部快照重建（2026-09-05）。
 
-### [TODO-167] H1 Driver header limit detection & avoiding pseudo-hang on Partial
-* **Priority**: Medium | **Status**: TODO | **Track**: Protocol Drivers & Stability
-* **Problem**:
-  在 `duotunnel-lib/src/protocol/driver/h1.rs::read_request`（第 264 行）中，栈上固定分配了 64 个 header 槽位：`let mut headers = [httparse::EMPTY_HEADER; 64];`。
-  当客户端请求头超过 64 个时，`httparse::Request::parse` 会因为数组满而返回 `Status::Partial`。当前代码在 `Status::Partial` 分支下认为“尚未读取到完整头部”，继续调用 `read_into_bytes_mut` 尝试从 Socket 读取更多数据。
-  若客户端已经发送完请求头（缓冲区中已包含 `\r\n\r\n`），由于对端已停止发送，驱动将一直等待直到 `sniff_timeout_ms`（默认 2.5s）超时，或者当累积字节数达到 `header_buf_size`（默认 8KB）时才报错 `431 Request Header Fields Too Large`，表现为对端感知的 2.5 秒“假挂起”。
-* **Fix（建议）**:
-  ① 将栈上 `EMPTY_HEADER` 数组扩充至更宽裕的 128（耗费栈空间极小，仅 128 × 16B = 2KB）；
-  ② 在 `Status::Partial` 分支中，先检查当前 `self.read_buf` 是否已经包含 `b"\r\n\r\n"`。若已包含完整请求头结束标记却仍为 `Partial`，说明是 header 数量溢出而非数据不完整，立即直接返回 431 拒绝，无需盲目等待读取更多数据导致超时。来源：2026-09-03 全项目代码评审与复核。
+EntryConnPool 的 JoinHandle 未由运行时监督，pool 被 TCP、UDP、pool service 多处持有；替换局部 actor 不会自动修复旧 Arc 引用。release abort 与 154 相同。推荐进程 owner 收到不可恢复 actor 退出后取消服务并非零退出，外部重启；不承诺透明恢复已有流。验证 channel 关闭、旧 handle 拒绝服务、正常退出不误报及 release 故障。详见设计 §7。
 
-### [TODO-168] Differentiate H2 stream reset from connection failure in H2Sender cache eviction
-* **Priority**: Low | **Status**: TODO | **Track**: Protocol Drivers & Performance
-* **Problem**:
-  在 `duotunnel-lib/src/proxy/h2_proxy.rs::forward_h2_request`（第 154-160 行）中：只要单次请求在 `send_via` 发生任何错误，代码就会无条件调用 `clear_sender_if_current` 将全局缓存的 `H2Sender` 清空。
-  在 HTTP/2 多路复用场景下，如果单个请求遭遇应用层错误或对端单流重置（`RST_STREAM`，例如单个请求被目标后端取消、超时或协议违例），底层 H2 TCP/QUIC 连接可能依然健康，但该清退操作会导致并发及后续到来的所有针对该 vhost 的请求均无法复用已有连接，被迫重新经历 `open_stream`、ALPN 握手和 H2 client 初始化流程。
-* **Fix（建议）**:
-  分析 `send_via` 返回的错误，区分流级别错误（Stream error，如接收到 `RST_STREAM`）与连接级别致命错误（Connection error，如 `GOAWAY`、IO EOF、Broken Pipe 等）。只有在底层连接确认失效时才调用 `clear_sender_if_current`。来源：2026-09-03 全项目代码评审与复核。
+### [TODO-166] Tunnel QUIC 稳定 TLS 身份
 
-### [TODO-169] Consolidate duplicated TCP/QUIC relay implementations (bridge.rs vs relay.rs)
-* **Priority**: Low | **Status**: TODO | **Track**: Code Quality & Refactoring
-* **Problem**:
-  `duotunnel-lib/src/engine/bridge.rs` 中的 `relay_with_first_data_and_buffer_size` 与 `duotunnel-lib/src/engine/relay.rs` 中的 `relay_tcp_with_initial_and_buffer_size` 具有几乎完全相同的实现逻辑（发送首包数据、TCP `into_split` 拆分为读写半部、使用 `tokio::try_join!` 并行驱动 `copy_quic_to_shutdown` 与 `copy_buffered_then_finish`）。两份实现长期并行存在，增加了维护成本与分叉风险。
-* **Fix（建议）**:
-  统一保留并增强 `bridge.rs`（或统一在 `relay.rs`），将两套接口统一收敛为一个清晰的公共 API，删除冗余的平行实现，并迁移所有上游调用点。来源：2026-09-03 全项目代码评审与复核。
+**复核状态**：已确认，P1（2026-09-05）。
 
-### [TODO-170] Preserve structured ErrorKind in PhaseOutcome to eliminate string matching in metrics logging
-* **Priority**: Low | **Status**: TODO | **Track**: Observability & Architecture
-* **Problem**:
-  在 `duotunnel-lib/src/plugin/ctx.rs` 中，`PhaseOutcome.error` 被定义为非结构化的 `Option<String>`。前面的代理管线中原本具有丰富结构化分类的 `ProxyError` / `ErrorKind`（见 `duotunnel-lib/src/error.rs`）在经过 `outcome` 时被转换为普通文本字符串。
-  随后在 `duotunnel-server/ingress/tunnel_service.rs::DefaultTunnelService::logging` 中，为了向 Prometheus 指标打标签，代码不得不对错误字符串做长达 30 余行的 `err_lower.contains("...")` 子串包含匹配（如 `contains("quic open timed out")`、`contains("route not found")` 等）。这种基于字符串的匹配脆弱、易受文案变动影响，且伴随无谓的 `to_lowercase()` 内存分配。
-* **Fix（建议）**:
-  在 `PhaseOutcome` 中引入强类型的 `pub error_kind: Option<ErrorKind>`（或保留 `error: Option<String>` 作为展示信息，额外附加 `error_kind` 字段以兼容旧插件）。在 `dispatcher.rs` 中提取原始 `ProxyError` 的 `ErrorKind`，直接传递给 `TunnelService::logging`，消除所有基于子串的倒推匹配。注意此项涉及插件接口规范微调，应平滑推进。来源：2026-09-03 全项目代码评审与复核。
+server 当前无条件生成临时 localhost 身份，client 已支持 CA/server_name。推荐 bootstrap 加载经验证的 tunnel cert/key，身份配置独立于 QUIC 流控参数；仅底层安全文件读取与 ingress PKI 共享，不能复用 ingress CA 单例。显式 files/development 模式、错误不降级；样例同步迁移。真实握手验证 SAN、信任链、错配和重启一致性；依赖 176 的安全材料能力。详见设计 §1。
 
-### [TODO-171] Fail-closed watch auth for non-loopback watch_addr
-* **Priority**: Low | **Status**: TODO | **Track**: Control Plane Security
-* **Problem**:
-  `duotunnel-ctld/src/bootstrap/config.rs` 中 `watch_token` 为可选字段，`duotunnel-ctld/src/runtime/app.rs` 启动时仅以日志记录 `watch_auth = watch_token.is_some()`，不会阻止启动。`control/watch.rs::authorize` 在 `auth_token` 为 `None` 时直接放行。默认配置下 `watch_addr` 绑定 `127.0.0.1:7788` 无风险；但若管理员将 `watch_addr` 改绑到非回环地址（如 `0.0.0.0` 或内网 IP）且忘记配置 `watch_token`，任何可达该端口的客户端都能通过 watch 握手拉取完整路由快照（含 backend 地址、分组结构），且 watch 流为明文 TCP，即使配置了 token 也会被同网段嗅探。当前行为是 fail-open。
-* **Fix（建议）**:
-  在 ctld 启动校验中加入 fail-closed 规则：`watch_addr` 解析后若为非回环地址且 `watch_token` 为空/空白，则拒绝启动并给出明确错误信息；同时更新 `config/ctld.yaml` 注释说明该约束。可作为 TODO-166 的伴生项：若 watch 流未来迁移到 TLS/QUIC 通道，一并解决明文嗅探问题。来源：2026-09-04 独立复审。
+### [TODO-167] H1 header 上限明确返回 431
 
-### [TODO-172] Server HA: server↔client association registry & failover
-* **Priority**: Medium | **Status**: TODO（需求已确认，待设计） | **Track**: HA, Overload & Observability
-* **Problem**:
-  当前架构下 server 是无状态 data-plane，ctld 向所有 server 广播同一份全局配置，client 按 group 令牌连接单个 `server_addr`（`duotunnel-client/bootstrap/config.rs` 仅支持单地址）。ingress 路由假设「承载外部流量的 server 上恰好持有目标 group 的 client 连接」——当部署多个 server 实例做 HA 时，若 client 连在 server1 而外部流量落在 server2，server2 找不到对应 client 连接，请求失败；单实例故障时也无从感知哪些 client 需要重连到何处。整个系统没有任何 server↔client 在线关联的登记与视图。
-* **Design direction**:
-  1. **Server 稳定 identity**：复用 TODO-151 的 server 注册信息作为登记主键。
-  2. **反向上报通道**：现有 watch 是 ctld→server 的单向推送；需增加 server→ctld 的连接事件上报（client 连接/断开、group 在线计数、健康状态），或退化为 server 定期上报全量快照；需明确租约/心跳与僵尸条目清除语义。
-  3. **关联矩阵视图**：ctld 汇总 server↔group/client 在线矩阵，通过 admin API / health endpoint 暴露，供流量侧（LB/nginx 上游健康检查）把 vhost 流量导到持有对应 client 的 server；同一 group 的多 client 在多 server 间的分布直接决定导流策略。
-  4. **Client 多端点故障转移**：client 配置支持 server 地址列表（现有退避+快照同步语义可直接复用：重连新 server 后 ctld 重推 Snapshot，配置一致性由既有 hash/ACK 保证）。
-  5. **需先明确的边界**：会话级粘性（client 迁移时存量 ingress 流中断）是否接受、多 server 是否共享 ingress VIP、跨 server 重复登记（同一 client 短暂双连）的去重规则。来源：2026-09-04 用户需求登记。
+**复核状态**：原伪挂起结论不成立；状态码改进待实施（2026-09-05）。
+
+实际 httparse 超过 64 个 header 返回 TooManyHeaders，并非 Partial，当前驱动返回 400；已有探针证实 64/65/128 边界。保持 64 上限，按解析错误映射 431，不以 CRLFCRLF 猜测 Partial 原因，也不直接扩大栈数组。头字节上限只计 header，不把首包 body 混入；验证 Complete 和 Partial 两条边界、分片与大 body 前缀。详见设计 §5。
+
+### [TODO-168] H2 错误作用域与实例安全失效
+
+**复核状态**：已确认，P1（2026-09-05）。
+
+内层 send 错误清 sender，外层 H2c/TLS 还会移除路由 sender cache；外层仅按 QUIC stable_id 判断，旧请求失败可能删除同一 QUIC 上的新 H2 实例。缓存为 downstream connection 局部，重建 H2 不会重新做 QUIC ALPN。推荐 lib 返回请求/H2/QUIC 失败作用域，server 共享转发策略持有明确 SenderLease；外层 Arc 身份比较和内层 CAS 均保留。失效与重试独立，继续限制安全方法+空 body，总 deadline/permit 覆盖完整请求。用真实双流 RST、GOAWAY、driver 退出和迟到旧错误证明行为，不能仅 mock 错误字符串。详见设计 §4。
+
+### [TODO-169] TCP↔QUIC relay 核心收敛
+
+**复核状态**：已确认（2026-09-05）。
+
+bridge 与 relay 的 TCP 核心重复；收敛为一个私有实现，旧入口暂作薄 wrapper。保留泛型 TLS 路径，不能为统一签名丢掉 TCP 专用 into_split。首包目前未计入返回统计，等价迁移先保持；计数语义如需改变另作明确行为提交。测试双向内容、首包顺序、半关闭、背压、错误取消和统计。详见设计 §8。
+
+### [TODO-170] 结构化阶段 outcome
+
+**复核状态**：已确认（2026-09-05）。
+
+PhaseOutcome 丢失错误类型，server 从字符串倒推指标。推荐在真正阶段终止边界产生有限错误类别与 source，日志 adapter 映射固定标签；保留展示文本，明确插件接口迁移。错误作用域、阶段和重试 attempt 不应混为一个枚举。body 尚未完成不能提前宣告成功；验证文案变化不改指标、取消归类和基数上界。详见设计 §8。
+
+### [TODO-171] watch 监听安全默认与远程信任
+
+**复核状态**：已确认，P1（2026-09-05）。
+
+非回环无 token 会放行，README 示例会引导该配置；回环也不是同机用户级鉴权。bootstrap 校验得到 WatchEndpointPolicy，默认回环，非回环 token 缺失/空白拒绝启动；同步 README/配置样例。远程 bearer 明文仍不安全，采用 TLS 或受信安全隧道并验证远端身份。监听修复可先实施，不等待 178，但不能把它标为完整远程安全。测试 IPv4/IPv6 回环、通配绑定、空 token 与握手失败。详见设计 §2。
+
+### [TODO-172] Server HA 关联登记与可用路径
+
+**复核状态**：需求确认；推荐分阶段方案（2026-09-05）。
+
+保留 server↔group/client 关联视图需求。稳定 server_id + incarnation + event_seq + 租约，周期全量 reconciliation 修复事件丢失；presence 与 routing revision/hash 分离，ctld 重启为 unknown。第一期 group 级视图；client 级身份必须先定义认证来源。client 双目标各自 ServerSession/pool/退避/egress config，不能共享最后一次 LoginResp 覆盖的全局规则，也不能一台 fatal 取消全部目标。LB 必须能按 group 导流，或保证两个 server 均有目标 group；视图本身不提供可用路径。UDP 会话固定目标，存量流不承诺迁移。完整 151 不是前置；client 接收 LoginResp 而非 ctld Snapshot ACK。故障矩阵、预算和取舍详见设计 §10。
+
+### [TODO-175] 完整 generation 身份贯穿 H2 缓存
+
+**复核状态**：待实施（2026-09-05）。
+
+P1。RuntimeGeneration 包含 epoch，但 H2c/TLS 缓存仅使用 sequence。authority A/1 切 B/1 可复用旧路由/sender。推荐不可变 GenerationKey(epoch, sequence)，请求固定 generation，正负路由与 sender 缓存均接线；限制容量且旧请求完成不可淘汰新代。无需全局清缓存广播。长 H2c 连接跨 epoch 同 sequence 的真实测试是验收门槛；静态键冲突已确认，完整网络复现尚待实现。详见设计 §3。
+
+### [TODO-176] CA 加载失败不得覆盖已有身份
+
+**复核状态**：待实施（2026-09-05）。
+
+P1，已复现。RootCa::load_or_generate 遇到已有损坏文件会生成并覆盖。拆成只读验证加载与显式初始化，失败字节不变；初始化排他创建，不以两次 rename 冒充成套原子更新。共享材料能力而非共享 ingress/tunnel 信任域。覆盖缺单文件、损坏、权限、错配和初始化竞争。详见设计 §1。
+
+### [TODO-177] H2c authority IPv6 一致性
+
+**复核状态**：待实施（2026-09-05）。
+
+P1，已复现。[::1]:8080 经 split(':') 得到 [，无法匹配已有 IPv6 route。引入明确的请求 authority 与配置 host-pattern 解析边界，共享 canonical host 匹配，保留端口忽略/大小写/非 ASCII 当前语义。请求侧不接受配置 wildcard。覆盖 URI authority/Host 来源、IPv6 括号、端口与非法输入。详见设计 §5。
+
+### [TODO-178] 显式配置 authority reset
+
+**复核状态**：待实施（2026-09-05）。
+
+P1，策略缺口已确认。当前每次 watch reconnect 都允许不同 epoch 的完整 Snapshot，重连并不等于管理员授权换 authority。推荐绑定已认证控制端，并提供持久、幂等的 expected_old_epoch + target_epoch reset 操作；不同 epoch 默认保留 LKG 并报告异常。迁移需允许合法新 authority 恢复，防止无限拒绝；先修独立缓存键 175。覆盖迟到快照、断连重启、重复 reset 和错误身份。详见设计 §2。

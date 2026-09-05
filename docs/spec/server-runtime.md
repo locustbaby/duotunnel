@@ -276,8 +276,13 @@ If listener synchronization or session fencing fails during apply, the server ro
 
 Control freshness is based on the last confirmation from the authority, including an idempotent
 confirmation of the current revision/hash; the last successful apply is tracked separately for
-durability and LKG age. A different control epoch fails closed. The current deployment contract is
-single-leader; multi-leader failover requires an explicit authority-reset workflow.
+durability and LKG age. At the 2026-09-05 review baseline, each watch reconnect opens an
+authority-reset allowance: a full Snapshot with a different epoch may be accepted. Revision
+classification outside this allowance rejects epoch changes. Reconnection therefore currently
+acts as an implicit reset boundary; it is not an explicit administrative authorization.
+The deployment contract remains single-leader. [TODO-178](../todo.md) and the
+[optimization design](../review-2026-09-05/optimization-design.md) propose authenticated authority
+binding and a durable, explicit reset workflow; these are not yet implemented.
 
 The last-known-good cache stores a bounded, validated envelope with format/protocol version,
 payload length, hash, revision and timestamp. Rotation durably writes `previous` before replacing
