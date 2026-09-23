@@ -92,7 +92,7 @@ server 仅替换本地 token cache（`duotunnel-server/control/control_client.rs
 
 最佳方向不是继续给多个 `ArcSwap` 补顺序，而是构建单一不可变
 `RuntimeGeneration`，完成 schema/语义/引用校验和 listener prepare 后一次 commit。
-具体设计见 [D9](./design/09-runtime-reliability.md)。
+具体设计见 [D9](../../design/09-runtime-reliability.md)。
 
 ## 4. 生命周期、readiness 与 drain
 
@@ -188,7 +188,7 @@ RetryPolicy 必须同时判断：
 - 是否成功取得同一 scope 的 retry budget。
 
 默认只自动重试安全方法的可确认可重放失败；空 body POST/PATCH/DELETE 不应自动重试。
-原 [D2](./design/02-lb-quality.md) 中“保留现有 body 约束”的描述已不成立。
+原 [D2](../../design/02-lb-quality.md) 中“保留现有 body 约束”的描述已不成立。
 
 ### 5.2 upstream health 状态机会失效 `[P1]`
 
@@ -316,8 +316,8 @@ generation fencing 也已有代码闭环。本批仍不覆盖增量 Patch 的 re
 
 详细方案：
 
-- [D9 · RuntimeGeneration 与运行时可靠性](./design/09-runtime-reliability.md)
-- [D10 · 性能加固与证据门槛](./design/10-performance-hardening.md)
+- [D9 · RuntimeGeneration 与运行时可靠性](../../design/09-runtime-reliability.md)
+- [D10 · 性能加固与证据门槛](../../design/10-performance-hardening.md)
 
 ## 9. 上线阻断验收
 

@@ -75,7 +75,7 @@ DuoTunnel 同时对标两个方向：
 | D5 | [限流/IP 策略/分层 admission](./05-rate-limit-admission.md) | **容量公平**（防单 group 饿死全体），非抗攻击 | 高 | D1 + ConnectionModule + TODO-142 |
 | D6 | [客户端 IP 透传 + 每后端可观测](./06-client-ip-and-observability.md) | 能力线第一优先：后端看到真实来源 IP + 按后端归因 + LB 判据 | **能力线最高（M0 后）** | D9 + D1 + MetricsSink |
 | D7 | [Phase B：client 多 Endpoint](./07-multi-endpoint.md) | 候选 endpoint 收包扩展实验；附资源预算与 runtime 约束 | **P2 / profile-gated** | **D9 M0 + D10 可信 profile** |
-| D8 | 协议版本化 —— 已在分析 [13 §4](../13-protocol-versioning-and-ops-addendum.md) 详细设计 | 滚动升级前提 | 中 | 独立 |
+| D8 | 协议版本化 —— 已在分析 [13 §4](../archive/review-2026-07-26/13-protocol-versioning-and-ops-addendum.md) 详细设计 | 滚动升级前提 | 中 | 独立 |
 | **D9** | [**RuntimeGeneration 与运行时可靠性**](./09-runtime-reliability.md) | 完整 Snapshot、配置事务、listener actor、owned ConnectionState、readiness/stale/drain | **M0 / 最高** | numeric wire version 与持久 revision 是其 rollout 前置 |
 | **D10** | [**性能加固与证据门槛**](./10-performance-hardening.md) | UDP HOL、确定分配/内存、buffer 接线、profile 门槛、多 Endpoint 决策 | **M0 后性能主线** | D9 + 06 可信基线 |
 

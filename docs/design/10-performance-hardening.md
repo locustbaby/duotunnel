@@ -1,6 +1,6 @@
 # D10 · 性能加固与证据门槛
 
-> 承接：[14 性能、健壮性与长期稳定性补遗](../14-performance-robustness-stability-addendum.md)。
+> 承接：[14 性能、健壮性与长期稳定性补遗](../reviews/2026-07-26/14-performance-robustness-stability-addendum.md)。
 > 目标：先消除代码可直接证明的 HOL、内存放大、无效配置和高基数，再用可信 profile
 > 决定多 Endpoint、runtime 与 pool 分片。
 >

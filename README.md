@@ -284,7 +284,7 @@ duotunnel/
 
 ## Tech Stack
 
-- [quinn](https://github.com/quinn-rs/quinn) — QUIC (ALPN: `tunnel-quic`)
+- [quinn](https://github.com/quinn-rs/quinn) — QUIC (ALPN: `tunnel-quic/v1`)
 - [rustls](https://github.com/rustls/rustls) — TLS 1.3
 - [hyper](https://github.com/hyperium/hyper) — HTTP/1.1 & HTTP/2
 - [tokio](https://github.com/tokio-rs/tokio) — async runtime

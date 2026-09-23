@@ -3,8 +3,8 @@
 > 历史审阅记录：本文第 4 节描述的是当时的缺口，不代表当前实现状态。当前
 > `duotunnel-ctld` watch 使用带 numeric wire protocol version 的统一 envelope；业务
 > API 不保留 V1/V2 分叉，旧 codec 仅允许在迁移隔离区短期存在。当前验收以
-> [工业级实施设计](./16-industrial-implementation-design.md) 和
-> [任务进度](./15-task-breakdown.md) 为准。
+> [工业级实施设计](../../reviews/2026-07-26/16-industrial-implementation-design.md) 和
+> [任务进度](../../reviews/2026-07-26/15-task-breakdown.md) 为准。
 
 ## 背景
 

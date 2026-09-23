@@ -18,21 +18,21 @@
 
 | # | 文档 | 回答的核心问题 |
 | --- | --- | --- |
-| 01 | [热路径与瓶颈分析](./01-hotpath-analysis.md) | 8k QPS 数据通路逐段成本、正确性问题（含 UB）、优化优先级 |
+| 01 | [热路径与瓶颈分析](../../archive/review-2026-07-26/01-hotpath-analysis.md) | 8k QPS 数据通路逐段成本、正确性问题（含 UB）、优化优先级 |
 | 02 | [多核线性扩展与绑核设计](./02-scalability-and-cpu-affinity.md) | 如何随核数线性扩展且延迟平稳？actor mode 是否合适？绑核怎么做？ |
-| 03 | [io_uring 可行性评估](./03-io-uring-assessment.md) | pingora 用 io_uring 吗？Rust 生态约束？该不该切？ |
-| 04 | [代码质量与抽象审查](./04-code-quality-review.md) | unsafe/死代码/重复/抽象边界/测试覆盖 |
-| 05 | [项目成熟度评估](./05-maturity-assessment.md) | 是否达到成熟高水平网络应用？对标 pingora/frp 的差距 |
-| 06 | [CI 压测方法论改进](./06-bench-methodology.md) | 4c 争抢根因、用例定位、度量口径、microbench |
+| 03 | [io_uring 可行性评估](../../archive/review-2026-07-26/03-io-uring-assessment.md) | pingora 用 io_uring 吗？Rust 生态约束？该不该切？ |
+| 04 | [代码质量与抽象审查](../../archive/review-2026-07-26/04-code-quality-review.md) | unsafe/死代码/重复/抽象边界/测试覆盖 |
+| 05 | [项目成熟度评估](../../archive/review-2026-07-26/05-maturity-assessment.md) | 是否达到成熟高水平网络应用？对标 pingora/frp 的差距 |
+| 06 | [CI 压测方法论改进](../../archive/review-2026-07-26/06-bench-methodology.md) | 4c 争抢根因、用例定位、度量口径、microbench |
 | 07 | [安全性评估](./07-security-assessment.md) | 认证/DoS/密钥/走私/多租户隔离 |
 | 08 | [Server 一对多扇出审查](./08-server-one-to-many-fanout.md) | 一 server 服务同 group 多 client：选择/LB 设计是否有缺陷？ |
 | 09 | [顶级 LB 能力缺口分析](./09-lb-grade-capability-gap.md) | 对标顶级 LB 还差哪些能力（健康检测/重试/限流/客户端IP透传/可观测）？ |
-| 10 | [LB 适配抽象充分性](./10-lb-extensibility-abstraction.md) | 09 的缺口能否"加适配项"补上？现有 trait/seam 够不够？缺哪些抽象？ |
+| 10 | [LB 适配抽象充分性](../../archive/review-2026-07-26/10-lb-extensibility-abstraction.md) | 09 的缺口能否"加适配项"补上？现有 trait/seam 够不够？缺哪些抽象？ |
 | 11 | [透传模式进度（TCP/L7/UDP）](./11-passthrough-modes.md) | 三类透传实现到什么程度、还差多少、怎么补？ |
-| 12 | [商业产品对比与缺口](./12-commercial-landscape-gap.md) | cloudflared/ngrok/frp 等对比，DuoTunnel 缺哪些能力、哪些该补 |
-| 13 | [协议版本化与运维补遗](./13-protocol-versioning-and-ops-addendum.md) | 完整性补遗：线协议无版本协商（阻碍滚动升级）+ 供应链/日志隐私 |
+| 12 | [商业产品对比与缺口](../../archive/review-2026-07-26/12-commercial-landscape-gap.md) | cloudflared/ngrok/frp 等对比，DuoTunnel 缺哪些能力、哪些该补 |
+| 13 | [协议版本化与运维补遗](../../archive/review-2026-07-26/13-protocol-versioning-and-ops-addendum.md) | 完整性补遗：线协议无版本协商（阻碍滚动升级）+ 供应链/日志隐私 |
 | 14 | [性能、健壮性与长期稳定性补遗](./14-performance-robustness-stability-addendum.md) | 三轮静态复核：控制面一致性、生命周期/readiness/drain、确定性能热点与证据门槛 |
-| 15 | [实施任务拆分与当前进度](./15-task-breakdown.md) | 基于当前 review 分支工作树重新核对已实现项、待验收项、依赖和提交顺序 |
+| 15 | [实施任务拆分与当前进度](./15-task-breakdown.md) | 基于当前 review 分支工作树重新核对已实现项、待验收项、依赖和提交顺序（含附录：T9 admission slice） |
 | 16 | [工业级实施设计](./16-industrial-implementation-design.md) | 配置事务、admin socket、Delta/RuntimeGeneration、dial9 观测边界和验收分层 |
 
 ---
@@ -113,6 +113,10 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 > all-targets Clippy 均通过。大规模并发、故障注入、跨版本/多 leader 与长稳仍是
 > rollout 验收项，不能由本地单测替代；远端 CI 状态见下方实施记录。
 >
+> **文档索引说明**：01、03、04、05、06、10、12、13 已归档至
+> [`docs/archive/review-2026-07-26/`](../../archive/review-2026-07-26/)；
+> `design/` 目录内容已上移至 [`docs/design/`](../../design/)。
+>
 > PR #58 实施过程中经三轮对抗式
 > review（并发/内存、HTTP 协议合规、安全/协商），又查出 8 项后续问题一并修复——其中
 > 两项是本批自己引入的回归：未认证配额一度可被 64 个伪造源 IP 包确定性锁死；
@@ -120,7 +124,7 @@ LB 质量+客户端 IP 透传）是"能否替代 ngrok/cloudflared 去公网暴�
 > 另有一项超出原清单的重大发现：ctld 模式下 listener 被 spawn 到单线程 runtime，
 > 既导致停机死锁（CI stop 92s → 1s），也让整条公网 ingress 无法多核（新增串行点 S0，
 > 见 [02 §2.0](./02-scalability-and-cpu-affinity.md)）。
-> 逐条落地细节见 [`docs/todo.md`](../todo.md) 各条目的 Outcome。
+> 逐条落地细节见 [`docs/todo.md`](../../todo.md) 各条目的 Outcome。
 
 | 项 | 文档 | 证据 | todo 关系 |
 | --- | --- | --- | --- |
@@ -224,8 +228,8 @@ M0 运行时一致性/生命周期 ──▶ M1 可信测量+确定热点 ──
 聚合 readiness 与协议级 drain。本批已把这些统一收口为 M0；后续不再回到会放大
 生命周期复杂度的架构改造，而是先推进 M1 的可信测量与剩余确定热点。
 
-M0 之后先做 [06](./06-bench-methodology.md) 与
-[D10](./design/10-performance-hardening.md) 的可信基线、UDP HOL、指标基数、buffer
+M0 之后先做 [06](../../archive/review-2026-07-26/06-bench-methodology.md) 与
+[D10](../../design/10-performance-hardening.md) 的可信基线、UDP HOL、指标基数、buffer
 接线和确定分配项。多 Endpoint 只有 profiler 指向 endpoint driver 时再谈。
 
 **M0 验证记录（2026-07-27）**：手动触发
@@ -234,21 +238,8 @@ release build、workspace test/coverage、all-targets Clippy、`cargo-udeps`、
 `cargo-audit` 与全协议 integration 均通过；stress/trace/dial9 按本批验证范围关闭，
 留待 M1 可信基线建立后执行。
 
-### 后续 task 拆分
-
-1. **M0 rollout 验收**：watch 跨 1000 revision、A→B→C/supersede、reload×shutdown、
-   worker panic/磁盘满、跨版本矩阵与 10 次 reload 长连接；单独测试/CI commit。
-2. **control authority reset**：在启用多 leader 前设计并实现显式 epoch reset、审计与
-   failover 测试；当前单 leader 对未知 epoch 保持 fail-closed。
-3. **generation/revoke 可观测性**：retired generation count/age/bytes、revoked close
-   unfinished/deadline 与 durability-degraded 指标；不改变本批 ACK 前 admission fence。
-4. **listener/commit 强化（若 rollout 证据要求）**：stable acceptor 或 bind-not-listen/
-   FD handoff，进一步消除 `SO_REUSEPORT` prepare 的 OS 可见窗口；为 post-plan fault
-   injection 定义自动 retry/forward-fix，不把 fail-closed 误写成可回滚事务。
-5. **M1 测量基线**：cpuset 固定的协议分层 benchmark、allocator/lock/CPU profile；
-   结果独立 commit，先测量再选择优化。
-6. **确定热点**：按 profile 依次评估 buffer 接线、UDP 表示/拷贝、H1 scratch/copy、
-   metrics 基数与 DNS/cache；每个优化独立 commit 与 before/after 数据。
+后续 task 拆分见 [15-task-breakdown.md](./15-task-breakdown.md)（已取代本节曾经的
+6 项列表，含实施进度与提交顺序）。
 
 **顺序铁律**：M0 闭合后仍不直接启动会放大生命周期复杂度的架构优化；CI 可信基线
 （M1 首步）建立前，所有 CI 数字不可作为

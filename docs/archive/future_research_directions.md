@@ -7,7 +7,7 @@ This document outlines the strategic, high-impact research areas and architectur
 ## 1. Multipath QUIC (MP-QUIC) & Multi-Homing Failover
 
 ### 1.1 Context & Motivation
-Currently, `duotunnel` multiplexes streams over a single QUIC connection bound to a single local IP/port and a single remote destination ([transport/quic.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/transport/quic.rs)). If the network interface experiences packet loss or drops entirely (e.g., a mobile device switching from Wi-Fi to LTE, or a server with dual-ISP connections), the tunnel suffers from a temporary blackout during connection migration or reconnection.
+Currently, `duotunnel` multiplexes streams over a single QUIC connection bound to a single local IP/port and a single remote destination ([transport/quic.rs](../../duotunnel-lib/src/transport/quic.rs)). If the network interface experiences packet loss or drops entirely (e.g., a mobile device switching from Wi-Fi to LTE, or a server with dual-ISP connections), the tunnel suffers from a temporary blackout during connection migration or reconnection.
 
 Implementing **Multipath QUIC (MP-QUIC)** allows a single logical `duotunnel` connection to simultaneously utilize multiple physical paths (e.g., dual-homed servers utilizing both China Telecom and China Unicom paths, or client devices using Wi-Fi + 5G). 
 
@@ -28,7 +28,7 @@ Implementing **Multipath QUIC (MP-QUIC)** allows a single logical `duotunnel` co
 ## 2. Cross-Protocol Adaptive Backpressure & Flow Control
 
 ### 2.1 Context & Motivation
-In `duotunnel`, the data path crosses an L4 TCP boundary and a multiplexed QUIC stream boundary ([relay.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/engine/relay.rs)). 
+In `duotunnel`, the data path crosses an L4 TCP boundary and a multiplexed QUIC stream boundary ([relay.rs](../../duotunnel-lib/src/engine/relay.rs)). 
 Currently, the proxy relies on fixed-size buffers (`DEFAULT_RELAY_BUF_SIZE` = 64KB) to bridge these streams. If a downstream client reads very slowly from its TCP socket but the upstream sends data at 10 Gbps over QUIC, the proxy has to buffer this data.
 * If the user-space buffer is too small, throughput drops because we block the sender prematurely (rendezvous bottleneck).
 * If the user-space buffer is too large, we accumulate megabytes of unread data in user-space memory, increasing memory usage and P99 latency (bufferbloat).
@@ -69,7 +69,7 @@ To push performance to the physical hardware limit, we can transition the datapa
 ## 4. Self-Adaptive Queueing Delay Control (CoDel) for Overload Protection
 
 ### 4.1 Context & Motivation
-The current `overload.rs` ([lb/overload.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/lb/overload.rs)) uses static concurrent stream thresholds to trigger slowpath yields or sleep backoffs.
+The current `overload.rs` ([lb/overload.rs](../../duotunnel-lib/src/lb/overload.rs)) uses static concurrent stream thresholds to trigger slowpath yields or sleep backoffs.
 However, concurrent stream counts do not accurately reflect actual queueing delay or resource saturation. 100 fast, lightweight requests might cause less latency than 5 slow, heavy queries. Relying on absolute thresholds causes the proxy to either under-utilize resources or experience latency spikes.
 
 ### 4.2 Implementation Pathway in Duotunnel
@@ -97,7 +97,7 @@ Because `duotunnel` acts as a tunnel, it is susceptible to detection by advanced
 
 ### 5.2 Implementation Pathway in Duotunnel
 1. **uTLS-style Client Hello Camouflage:**
-   - Standard Rustls handshakes produce a specific fingerprint (JA3/JA4). Research is needed to customize the ClientHello packet generation in Quinn's TLS config ([pki.rs](file:///Users/sexy/Documents/GitHub/duotunnel/tunnel-lib/src/infra/pki.rs)) to mimic common browsers (Chrome, Firefox) or standard mobile application traffic.
+   - Standard Rustls handshakes produce a specific fingerprint (JA3/JA4). Research is needed to customize the ClientHello packet generation in Quinn's TLS config ([pki.rs](../../duotunnel-lib/src/infra/pki.rs)) to mimic common browsers (Chrome, Firefox) or standard mobile application traffic.
 2. **Adaptive Packet Padding & Morphing:**
    - Implement randomized frame padding. Instead of sending raw payloads, inject random padding bytes into the QUIC packets to alter the packet-size histogram.
    - Inject dummy `PING` or `PADDING` frames during active transfer to confuse statistical classifiers that look for specific upload/download packet sequences.
@@ -113,7 +113,7 @@ Because `duotunnel` acts as a tunnel, it is susceptible to detection by advanced
 ## 6. Zero-Downtime Hot Upgrades (FD Passing)
 
 ### 6.1 Context & Motivation
-Currently, upgrading `duotunnel` or changing static configurations requires restarting the service. While hot-reload is supported for routing rules ([hot_reload.rs](file:///Users/sexy/Documents/GitHub/duotunnel/server/control/hot_reload.rs)), upgrading the binary itself requires dropping the listening TCP/UDP sockets. This disconnects all active user connections and breaks ongoing QUIC tunnels.
+Currently, upgrading `duotunnel` or changing static configurations requires restarting the service. While hot-reload is supported for routing rules (now `duotunnel-server/control/control_client.rs` + `ingress/listener_mgr.rs`), upgrading the binary itself requires dropping the listening TCP/UDP sockets. This disconnects all active user connections and breaks ongoing QUIC tunnels.
 
 ### 6.2 Implementation Pathway in Duotunnel
 Implement **File Descriptor Passing (FD Passing)** via Unix Domain Sockets to allow seamless binary hot-upgrades.

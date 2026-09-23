@@ -3,8 +3,8 @@
 > **2026-07-27 三轮复核修正**：本文保留“不切 io_uring”的工程结论，但下文所有
 > 5–15%、接近线性和 0.5–5 天收益/工期均为当时机制估计，**没有 DuoTunnel 实测依据，
 > 不得用于排序或验收**。当前唯一权威性能顺序与统计门槛见
-> [14](./14-performance-robustness-stability-addendum.md) 和
-> [D10](./design/10-performance-hardening.md)：先可信基线，再按 profile 触发。
+> [14](../../reviews/2026-07-26/14-performance-robustness-stability-addendum.md) 和
+> [D10](../../design/10-performance-hardening.md)：先可信基线，再按 profile 触发。
 
 ## 背景
 

@@ -363,3 +363,77 @@ After `dial9-tokio-telemetry` publishes a crates.io version that includes commit
   - UDP 建连 Task 受 session permit 限制并被收纳进 `TaskTracker`，且在 await 阶段及 Shutdown 时能够 race 并响应 `root_cancel` 的 Cancellation 信号，消除了孤儿协程泄漏。
 - **Registry 管道溢出安全**：
   - 针对 unregister 的断线风暴风险，设计了去重合并的 `pending_unregisters`（`HashSet` 形式并加锁），在达到 4096 容量上限后优雅主动 `fail_closed()`，不再出现无限制内存积压。
+
+---
+
+## 从 todo.md 迁出（2026-09-23 整理）
+
+> `docs/todo.md` 重新整理为「仅保留未关闭事项」；以下为从中迁出的已关闭 / 已作出最终决策的条目，按原 ID 保留、正文压缩为关键结论与证据。完整历史推理见 git 历史中的旧版 `todo.md`。
+
+### Phase 0：安全防御与死锁修复
+
+- **[TODO-CR-AUDIT-17] DashMap 死锁修复** ✅ — 用 actor 拥有的 registry index + `ArcSwap` 快照替代嵌套 `DashMap` 修改，彻底消除原有锁顺序反转。
+- **[TODO-CR-AUDIT-22] 鉴权公开错误边界** ✅（2026-07-26）— `AuthError::Internal` 不再回传底层数据库/实现错误文本；重试判定改用机器可读的 `LoginResp.retryable`，避免瞬时故障与拒绝令牌不可区分。
+
+### Phase 1：零拷贝、缓冲池与高并发
+
+- **[TODO-CR-AUDIT-16] 复制引擎全局缓冲池锁竞争** ✅ — `SegQueue` 替换为有界 `ArrayQueue<Vec<u8>>(1024)`（`engine/copy.rs`），溢出静默丢弃，热路径无 O(N) `len()`。
+- **[TODO-97] 消除未初始化 `Vec<u8>` relay buffer 的 UB** ✅（2026-07-26，PR #58）— 池化 buffer 改为 `BytesMut` + `read_buf`，不再构造指向未初始化内存的 slice；补充取消/短读/EOF/复用测试。
+- **[performance_optimization_proposal.md §1] L7 零拷贝 Body Streaming** ✅ — QUIC→TCP relay 与 HTTP body 转发统一用 `read_chunk`/streaming `try_unfold`，无中间堆拷贝。
+- **[performance_optimization_proposal.md §2] L7 零拷贝 Chunked Response Writer** ✅ — `Http1Driver::write_response` 用栈分配前缀数组格式化十六进制长度+`\r\n`，避免中间缓冲区拼接。
+- **[TODO-81] Peek Buffer 零拷贝** ✅ — `SniffRuntime::sniff` 直接读入池化 `Vec<u8>`，返回 `Arc` 包裹的 `SniffPrefix::Pooled`，Matched 快路径无 `copy_from_slice`。残留的零填充问题已转为独立的 TODO-136（仍在 todo.md）。
+- **[TODO-104] EgressDnsCache 去全局 Mutex** ✅ — `DashMap` + broadcast 单飞去重，5s resolve timeout，失败时回退陈旧缓存。
+- **[TODO-89] DNS 轮询与 Fallback** ✅ — `EgressDnsCache` 保留完整解析地址集，原子游标轮询选择，含陈旧缓存 fallback。
+- **[TODO-74] Egress DNS 缓存 & L4 连接池** 🔚 最终决策（Phase 1 再范围界定）— DNS 缓存部分完整并留在生产路径；原生 TCP idle 连接池方向评估后从生产 egress 路径移除，不再是公开 API 的一部分（HTTP/H2 复用继续委托给 Hyper）。
+- **[TODO-76] Client 侧本地 egress 规则评估与早截断** ✅ — server 下发规则到 client 后作本地 allowlist；HTTP 明文无匹配路由返回 502 + `X-DuoTunnel-Reject`，TLS/Other 走 clean EOF；`egress_rejections_total` 指标；server 端仍保留最终防线。
+- **[TODO-82] 边缘节点去 SQLite（Stateless Edge）** ✅ — server 不再编译/查询本地 SQLite；ctld-managed 模式下通过 `ControlClientService` 接收 Snapshot/Patch；首个 Snapshot 前 `/healthz` not ready、QUIC login 拒绝；本地快照持久化与断线只读 fallback 已实现。
+- **[TODO-26] QUIC Datagram 原生 UDP 代理** ✅ — 最小可用运行时已落地：client `udp_entries` 封装 `UdpDatagramEnvelope` 经 QUIC datagram 发送，server 按 `UdpSessionKey` 建立/维护 UDP session 并回包；含基于最后活动时间的老化淘汰、per-connection/global session budget、可取消的后台 DNS/connect task。**残留**：生产级指标、压测门槛与故障注入验证仍未做，未宣称完整生产收尾（如需继续硬化，纳入 TODO-153/TODO-142 的预算与验收范围）。
+- **[TODO-32] 根 CA 签发模式** ✅ — 进程级 Root CA 一次生成、按 Host 签发 leaf cert，复用 host 级 `ServerConfig` cache 与并发限流；根证书磁盘持久化（首次生成写盘，重启自动加载）已实现。
+- **[TODO-53D] 移除遗留静态 token map** ✅ — 正式拓扑统一为 `ctld → server → client`；server 只消费 ctld 下发的只读 `LocalTokenCache`，配置 schema 与 bootstrap 路径中不再有 `auth_tokens` 静态 map 生产入口。
+- **[TODO-80] 主动限流与 Fast-Fail** ✅ 残留竞态已关闭（2026-07-26，PR #58）— 原 `open_bi_guarded` 先 load 后 `fetch_add` 的越限窗口，改为 `ConnectionHandle` 上 per-connection semaphore + `try_acquire_owned`，`PendingSlot` guard 在成功/失败/超时/取消四路径统一 RAII 归还；顺带修正阈值语义错配（本应是单连接阈值，此前误套用全局计数）与相关 gauge 泄漏。**遗留缺口**：移除全局闸门后，进程级总量兜底尚无替代，已并入 **TODO-142**（见 todo.md「inflight/准入」簇）。
+- **[TODO-CR-AUDIT-21] SIGTERM 优雅停机（核心实现）** ✅（2026-07-26，PR #58）— 顺序落地为：停 listener accept → 每连接 drain → `conn.close` → UDP session manager shutdown → 连接 `TaskTracker` wait → app 层 30s 兜底；CI "Stop ctld-mode tunnel" 步骤从 91–92s 降到 1s（根因是 TODO-148 的 listener runtime 归属死锁，非 drain 本身慢）；顺带修复淘汰循环退出后残留空闲 UDP reply pump 永远挂在 `socket.recv` 的泄漏。**已知残留缺口**（迁入 todo.md 作为独立跟踪项，见「HA, Overload & Observability」分组）：无应用层 GOAWAY；server 侧 drain 计数不含 client-entry 方向反向 egress stream；per-stream 短任务与 healthz 每请求任务有意保持 detached；停机路径仅有编译/手工验证、无集成测试。
+- **[TODO-35] 两级 upstream 连接池** ❌ 已废弃 — 随 L4 通用连接池方向放弃（仅保留 Hyper 协议感知的 HTTP/H2 复用），该设计一并废弃。
+- **[TODO-64] ClientId/GroupId/ProxyName/ReuseHash Newtype** ✅ — 引入强类型封装（`Deref<Target=str>`/`Borrow<str>`/`Display`），消除热路径裸 `String`/`Arc<str>` 的重复拷贝与 Hash 查找开销。
+
+### Phase 2：任务生命周期 / Actor 收口
+
+- **[TODO-96] JoinSet 任务生命周期跟踪（连接粒度）** ✅（2026-07-26，PR #58）— server QUIC 连接任务收编进 `TaskTracker`（close 后带超时 wait）；UDP session 的 reply pump/淘汰循环由 root `CancellationToken` + `TaskTracker` 管控；client 侧 QUIC 槽位已在 `JoinSet`。**设计决策**：每 stream 短任务有意不收编（连接关闭时 QUIC stream 自然出错退出，per-stream tracker 属热路径开销），已在代码注释写明，不作为待办。
+- **[TODO-CR-AUDIT-4] BufReader 双重拷贝** ❌ 代码核查后废弃 — 原假设 `quinn::RecvStream` 在 passthrough 路径被 `BufReader` 包装不成立；`BufReader` 仅用于控制面 framing 与证书解析，relay 路径用 `read_chunk`/relay buffer。若未来 profile 发现新 callsite 再单独立项。
+- **[TODO-110] InflightGuard drop fetch_sub** ✅ 关闭旧任务（2026-09-05 复核）— 当前 Drop 已用 `fetch_sub`，旧 CAS 循环描述已过时。
+- **[TODO-111] InflightTable free-list Mutex** ✅ 关闭旧任务（2026-09-05 复核）— 原对象已不存在（现用容量/注册原子 + 全局 `ArrayQueue`），不存在旧 `free: Mutex<Vec<...>>`。
+- **[TODO-134] open_bi_guarded 快路径误唤醒** ❌ 代码复核后废弃 — `inflight_load()` 为 `pending_opens + active_streams` 之和，快路径失败使 pending 下降，通知等待者本就正确必要，不修改。
+- **[TODO-103] /metrics 暴露 slowpath waiting tasks** ✅ — server/client `/metrics` 追加 `duotunnel_slowpath_waiting_tasks`。
+- **[TODO-CR-AUDIT-1] 共享 `Arc<TcpListener>` 与 SO_REUSEPORT 背离** ✅ managed ingress 已解决 — `ListenerManager` 为每个 accept worker 绑定独立 `SO_REUSEPORT` listener；通用 `run_accept_worker` 仍接受 `Arc<TcpListener>` 是有意的 API 复用（非托管/fallback 场景），不算残留 gap。
+- **[TODO-ENTRY-POOL] EntryConnPool 写侧与读快照** 🔚 原替换建议撤回（2026-09-05 复核）— actor 私有 Vec（写模型）与 `ArcSwap`（读模型）不天然冗余；没有测量/不变量证据前保持单 owner，不引入 `ArcSwap`+写锁的第二写入协议。
+
+### 历史路线图存档（Phase 0–3 框架 + Mermaid 依赖图 + 2026-07 审计索引）
+
+> 以下框架已被 `todo.md` 顶部「当前执行依据」S1–S9 表取代（2026-07-11 之后即不再代表执行优先级），原文整体存档于此，不再维护。
+
+**原 Phase 划分**：Phase 0 关键安全防御/死锁修复/日志脱敏；Phase 1 核心用户态零拷贝/并发无锁缓冲/连接重用；Phase 2 协程与局部性优化/长连接生命周期/架构重构；Phase 3 前瞻性性能实验与长尾微调。
+
+**2026-07-11 报告索引**（原表格，节选结论；`⏳/🔬` 项此后按具体 TODO 号在 `todo.md` 独立跟踪，不在此重复展开）：TCP ingress SO_REUSEPORT 已确认（TODO-CR-AUDIT-1，已关闭）；4MiB TCP buffer 覆盖内核自适应策略需先补默认值/配置覆盖/回归测试（TODO-105，todo.md 跟踪中）；单 QUIC endpoint 单核瓶颈保持研究状态，需先压测证明再考虑 CID-aware eBPF reuseport（TODO-24，todo.md 跟踪中）；`EntryConnPool` 单写 Actor 重连风暴积压保持证据驱动（TODO-106，todo.md 跟踪中）；`ConnectionHandle` 构造与 O(1) remove 延后至有 profile 证据（TODO-107/108，todo.md 跟踪中）；`pending_opens`/`active_streams` 合并需先补测试（TODO-109/110/111/134，110/111/134 已关闭见上，109 todo.md 跟踪中）；`set_len` UB 已修复（TODO-97，已关闭）；sniff pool 零填充/HTTP egress scratch buffer/QUIC chunk 聚合均保持 benchmark-gated（TODO-136/137/138，todo.md 跟踪中）；过载路径 notify_one 无新增缺陷（TODO-95/134，134 已关闭）。
+
+**2026-07-22 运行时审计补充**（原表格节选）：`max_pending_streams` load-then-fetch_add 越限窗口已修复（TODO-80，已关闭，残留并入 TODO-142）；shutdown drain 未覆盖 QUIC connection/活跃 stream/UDP session/H2 driver 已修复但有残留缺口（TODO-CR-AUDIT-21，已关闭，残留见 todo.md）；server `ClientRegistry` inflight slot table 固定 4096 已由显式容量/指标/边界测试覆盖，跨 shard 公平性验收待补（TODO-146，todo.md 跟踪中）；未认证客户端收到 `AuthError::Internal` 底层错误文本已修复（TODO-CR-AUDIT-22，已关闭）；QUIC window 转换 `unwrap()` 与连接池容量未检查乘法需具体化为 checked arithmetic 任务（TODO-CR-AUDIT-5/6，todo.md 跟踪中）。
+
+### 2026-09-23 全项目代码 Review 中已确认为「不成立/无新增缺陷」的部分（P3 清理项，已核实关闭）
+
+- `server/ingress/registry.rs:275` 同 `client_id` 替换旧连接分支不可达（`contains_key` 提前返回 + conn_id 每次新 UUID）——代码核实后关闭，无需动作。
+- `lib/lb/inflight.rs` 对象池只 pop 不 push 的问题——已核实，见 todo.md TODO-193 统一清理跟踪（未关闭，仅此条已定位不阻断功能）。
+
+### 控制面工业化实施（2026-07 `T0–T3E`，见 `reviews/2026-07-26/15-task-breakdown.md` / `16-industrial-implementation-design.md`）
+
+代码复核（`RuntimeGeneration`/`ConfigApplyCoordinator`/`TokenFenceLease`/`ListenerManager` prepare-commit-rollback 均已在 `duotunnel-server/bootstrap/mod.rs`、`control/control_client.rs`、`ingress/listener_mgr.rs`、`runtime/health.rs` 中存在并接线）确认以下均已实现：
+
+- **T0 / T0.1** — `config_layers`/物化 routing/`config_state`/`control_revision` 收敛到单一 SQLite 事务；ctld 启动 barrier（迁移 → 加载 source → merge/validate → 原子提交 → 创建 `ControlService` → 启动 admin/watch → readiness=true）已实现。
+- **T1** — 固定 magic/numeric wire version/message kind/payload length 的 control envelope；Snapshot/Delta/ACK/Duplicate/Rejected/ResyncRequired 状态机已实现。
+- **T2** — YAML/SQLite 分层 source manager、merge 校验、token 仅由 SQLite 管理已实现。
+- **T3A–T3E** — `RuntimeGeneration`（含 epoch）、`ServerHealthFacts` 的 `begin/finish/hold/fail_config_apply` 与 `security_fence_held`（对应 `CommitUncertain`/fence 语义）、`ListenerManager` 的 `OperationFence`/prepare-commit-rollback（`listener_mgr.rs`）、`fence_revoked_sessions`（TokenFenceLease）、单一 signal owner 的生命周期收口均已实现并接入 `apply_snapshot`。
+- **crate/目录/CLI 命名** — 已统一为 `duotunnel-*` / `DUOTUNNEL_*`。
+- **CI 8K case 拓扑迁移** — 已完成，继续只做性能测量。
+
+**未完成部分**（迁入 `todo.md` 作为 **TODO-198** 独立跟踪，不在此关闭）：T3F 的故障注入验收（新 schema/引用/端口冲突/证书错误、listener bind 失败、快速 A→B→C coalesce、token revoke 与 listener apply 并发、LKG 损坏/双代恢复、worker panic）与 T4 的 M0 长稳验收（1000+ revision watch、10 次 reload 并行长连接、断网/ctld 重启/磁盘满等故障矩阵）尚无系统级证据，只有单元测试覆盖不能替代。
+
+### D9/M0 与 D10/P0 能力设计落地（见 `design/09-runtime-reliability.md`、`design/10-performance-hardening.md`）
+
+`design/README.md` 确认 D9（RuntimeGeneration 与运行时可靠性）M0 范围与 D10（性能加固）P0 范围已实施并通过本地门禁；两者的跨版本/并发/故障注入/长稳验收（D9 剩余部分）和 P1/P2 范围（D10 剩余部分）未排期，随 D1–D7 一起等待 M1 可信基线后续规划——不在此关闭，相关新增能力项迁入 `todo.md` TODO-194～197。

@@ -258,7 +258,7 @@ trait，**不关心自己跑在哪个 runtime 实例上**——在哪个 runtime
 >
 > **2026-07-27 三轮修正**：本节以下阶段保留为候选方案，但执行顺序由
 > [14 §8](./14-performance-robustness-stability-addendum.md#8-推荐实施顺序) 和
-> [D10](./design/10-performance-hardening.md) 覆盖。
+> [D10](../../design/10-performance-hardening.md) 覆盖。
 
 按修正后的优先级排序，每阶段可独立验收：
 

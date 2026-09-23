@@ -483,7 +483,7 @@ buffer 的场景仍可显式配置。相比"下调固定值"，`None` 恢复自�
 
 **量级校准（决定该不该做的关键）**：1 核 8k QPS 的预算是 125 µs/req，L7 侧实测估算
 25–55 µs/req（§2）。合并几次流写量级在 **1–3 µs/req**。相比之下同一份分析里的
-S0（listener runtime 归属，[02 §2.0](./02-scalability-and-cpu-affinity.md)）决定的是整条公网
+S0（listener runtime 归属，[02 §2.0](../../reviews/2026-07-26/02-scalability-and-cpu-affinity.md)）决定的是整条公网
 ingress 跑在 1 个线程还是 N 个线程，§3.4 + §4.1 的 body 双拷贝 + 三重装箱是每请求
 ~2 次分配 + 2 次拷贝。**结论：批处理是二阶项**；先解结构性串行点与每请求分配，再谈批处理。
 
@@ -493,8 +493,8 @@ ingress 跑在 1 个线程还是 N 个线程，§3.4 + §4.1 的 body 双拷贝 
 | --- | --- | --- | --- |
 | B1 | **relay 读侧批量化**：`read_chunk`（单数）→ `read_chunks(&mut [Bytes])`（quinn 0.11.9 `recv_stream.rs:215` 已提供，全仓 4 处均用单数） | `engine/copy.rs`、`driver/h1.rs`、`egress/http.rs` | relay 是全系统频次最高的循环，但 64 KiB buffer 已摊薄大部分开销，且单次能否取到多个 chunk 取决于对端发送模式——**必须先用 microbench + profile 验证 chunk 到达分布**，否则可能零收益 |
 | B2 | **响应头与首个 body 帧合并写**：Content-Length / close-delimited 分支目前 header 用 `write_all`、body 每帧 `write_chunk`，小响应实际是 2 次流写 | `driver/h1.rs` write_response | 压测用例（GET 小响应）正好命中；与 §1.4 的"拼接 vs 向量化"未决问题同源，应一并测 |
-| B3 | **UDP 每包分配 + 每包 `send_datagram`** | 见 [11 §6](./11-passthrough-modes.md) | 已并入 TODO-144；批量化空间比 TCP relay 更明确（每包一次分配是确定的浪费） |
-| B4 | **per-core 计数消 K1** | [02 Phase A](./02-scalability-and-cpu-affinity.md) | 同一哲学在**缓存行**层面的应用：共享原子的每连接/每流 ±1 是"零售交互"。已在 Phase A，本节视角支持提高其优先级 |
+| B3 | **UDP 每包分配 + 每包 `send_datagram`** | 见 [11 §6](../../reviews/2026-07-26/11-passthrough-modes.md) | 已并入 TODO-144；批量化空间比 TCP relay 更明确（每包一次分配是确定的浪费） |
+| B4 | **per-core 计数消 K1** | [02 Phase A](../../reviews/2026-07-26/02-scalability-and-cpu-affinity.md) | 同一哲学在**缓存行**层面的应用：共享原子的每连接/每流 ±1 是"零售交互"。已在 Phase A，本节视角支持提高其优先级 |
 
 **顺序纪律**：以上全部受 [06](./06-bench-methodology.md) 的基线纪律约束。**此刻尤其不能启动**
 ——S0 修复后我们才知道此前所有多核数字都是在 ingress 被锁在单线程时测得的。正确顺序是

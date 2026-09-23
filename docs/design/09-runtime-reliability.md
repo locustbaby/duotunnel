@@ -1,6 +1,6 @@
 # D9 · RuntimeGeneration 与运行时可靠性
 
-> 承接：[14 性能、健壮性与长期稳定性补遗](../14-performance-robustness-stability-addendum.md)。
+> 承接：[14 性能、健壮性与长期稳定性补遗](../reviews/2026-07-26/14-performance-robustness-stability-addendum.md)。
 > 目标：用一套 revision、ownership 与失败语义同时解决 control Patch 丢失、配置撕裂、
 > listener orphan、token revoke、slot ABA、readiness 误报和 drain 不完整。
 >

@@ -1,6 +1,6 @@
 # 2026-07 审阅后续实施任务拆分
 
-> 本文按当前 review 分支工作树的实际代码状态重新整理 `docs/review-2026-07-26/` 的后续工作。
+> 本文按当前 review 分支工作树的实际代码状态重新整理 `docs/reviews/2026-07-26/` 的后续工作。
 > “已实现”表示代码已在当前工作树完成；“待验收”表示仍缺少故障注入、长稳、跨进程或性能证据。
 
 ## Changes review follow-up
@@ -250,3 +250,137 @@ T10 HttpFilter/LB extensions (product-scope gated)
 ```
 
 第一批建议先做 T0–T3E，再做 T1/T2/T3F 验收。T5 可并行推进；T5 是后续所有性能结论的前置，不和控制面验收混成一个大提交。
+
+---
+
+## 附录：T9 admission slice
+
+> 原文档 `17-t9-admission-slice.md` 已合并于此并删除，内容仅做翻译整理，技术细节未改动。
+
+### 已交付
+
+`duotunnel-lib/src/lb/overload.rs` 现已提供 `AdmissionController`，包含：
+
+- 可选的进程级全局上限；
+- 可选的具名 group 级上限；
+- 无等待队列的即时 `try_acquire` 决策；
+- RAII 的 `AdmissionPermit`，保证全局与 group 预留精确释放一次；
+- 全局与已配置 group 的 `admitted`、`rejected`、`active` 计数器；
+- 基于 CAS 的预留与回滚，使并发调用方不能超订任一上限；
+- 显式的 `try_acquire_global` / `try_acquire_group` API，区分 `Global` 与 `Group`
+  两种拒绝作用域；旧的 `Option<&str>` API 仅作为兼容包装保留。
+
+公共类型从 `duotunnel-lib/src/lib.rs` 重新导出。已配置的 group 上限是一个隔离边界，
+而非公平调度器。该抽象刻意不对调用方排队，也不承诺 FIFO 顺序；如果调用方需要
+队列公平性，必须在这个原语之上自行提供。
+
+### 生产接入：UDP session 域
+
+第一个生产接入刻意限定在一个资源域内：由单个 QUIC client 连接持有的 UDP
+session。这是当前唯一一个预算单元与所有者足够明确、可以在不改变协议语义的
+情况下直接接线的路径。
+
+`UdpSessionManager` 现在使用一个 `AdmissionController`，全局上限为
+`MAX_UDP_SESSIONS_PER_CONNECTION`。该 controller 局限于该 manager 内部，因此只
+统计该 client 连接的 UDP session 数量。已有的进程级 UDP 信号量仍是独立的进程
+资源预算，并未并入该 controller。
+
+`SessionEntry` 在整个 session 生命周期内持有 `AdmissionPermit`：
+
+```text
+try_acquire_global
+  → map 插入 / 创建排队
+  → 解析、socket bind/connect、待发送数据包 drain
+  → 已连接的回复 pump
+  → 空闲淘汰、建立失败、QUIC 关闭或 shutdown
+  → SessionEntry drop 释放 permit
+```
+
+既有的取消与超时边界保持权威：
+
+- session 建立使用既有的三秒操作超时完成解析、bind、connect 和发送；
+- 处于 connecting 状态的 entry 会在既有的有界建立窗口后被淘汰；
+- 空闲的已连接 session 会在既有的空闲超时后被淘汰；
+- manager shutdown 会取消根 token、移除 entry，并在有界 abort 兜底前等待已追踪任务；
+- 队列已满、容量拒绝、取消、超时和上游错误都会移除或丢弃所属的 `SessionEntry`，
+  因此不会有 permit 泄漏。
+
+admission controller 不用于每个数据报。已排队的数据报仍沿用既有的队列信号量，
+这是与长生命周期 UDP session 不同的资源域。
+
+### 接入契约
+
+permit 必须在调用方确定资源身份之后获取，并且必须保持在拥有该资源的
+task/struct 中直到该资源完整生命周期结束。不得在仅完成 accept、sniff 或
+`open_bi` 阶段后就将其释放。
+
+本次改动中，其余接入点刻意保持不变：
+
+1. `duotunnel-lib/src/plugin/dispatcher.rs` 是全局连接准入边界，但其早期准入阶段
+   并不总是知道路由 group。可以在那里获取全局 permit；per-group 准入应在路由
+   解析之后进行，并需贯穿到被选中的 ingress handler。
+2. `duotunnel-lib/src/transport/connection_handle.rs::ConnectionHandle::open_stream`
+   是 QUIC stream 准入边界。既有的 per-connection 信号量应继续作为本地守卫；
+   controller 应提供进程/group 级预算，其 permit 应由返回的 stream 生命周期持有。
+3. `duotunnel-server/ingress/handlers/udp_datagram.rs::UdpDatagramDispatcher` 的
+   队列预算与上述生产级 UDP session 准入保持独立。controller 刻意不按每个数据
+   报应用。
+4. `duotunnel-lib/src/engine/bridge.rs::{relay, relay_unidirectional, relay_with_first_data}`
+   是 relay 生命周期端点。此次未改动，因为这些文件由 T6 负责；其调用方必须在
+   relay 任务周围持有 permit，而不是在 bridge 内部再加一层准入策略。
+
+这些调用点需要单独接线，因为它们的预算单元与 group 身份可获得性各不相同。在
+明确选定策略之前不改变任何运行时行为。controller 仍不是一个生产级准入注册表：
+每个资源域都需要自己的 controller，并且必须在所有者完整生命周期内持有租约。
+
+### 为什么其余生产接线被刻意推迟
+
+具体的 ingress 调用链是
+`duotunnel-server/ingress/handlers/http.rs::run_http_accept_loop` →
+`IngressDispatcher::dispatch` → `IngressProtocolHandler::handle`。dispatcher 的
+生命周期对连接级 permit 而言是安全的，但对多路复用的 TLS/H2 而言不是正确的预算
+单元：`duotunnel-server/ingress/plugins/tls/mod.rs::TlsHandler::handle` 创建了一个
+嵌套的 `service_fn`，每个请求级 future 都可能比最初的协议 dispatch 存活得更久，
+同时共享同一个连接。
+
+正确的请求级接入点在该 `service_fn` 内部，位于 `route_target` 解析完成之后、
+围绕完整的 `forward_h2_request` 重试循环。现在实现它需要在
+`ServerState`/`TlsHandler` 中放置 controller，并需要一个权威的、已配置的
+全局/per-group 上限。既有的 `OverloadLimits::max_pending_streams` 不能被复用：
+它专门限定 `ConnectionHandle::open_stream` 中挂起的 QUIC `open_bi` 等待数量，
+把它当作活跃请求预算会悄悄改变过载行为。H1、H2C、TCP passthrough 和 UDP 也都
+有各自不同的生命周期单元。
+
+因此本次改动不会为各协议之间新增一个共享的隐藏上限。UDP session 准入已用既有
+的、已强制执行的 per-connection 上限完成生产接入。HTTP 请求、原始 relay、
+反向 stream 和 UDP 队列的预算仍保持独立，不被该 controller 统计。
+
+HTTP/原始 relay/反向 stream 的接入将持续推迟，直到每个域都有权威的上限、身份
+来源和拒绝契约。具体而言：
+
+| 域 | 所需 owner | 当前决定 |
+| --- | --- | --- |
+| HTTP 请求 | H1 请求 future 或 H2 stream future，直到响应体完成 | 推迟；不得使用 accept 连接的生命周期。 |
+| 原始 relay | 双向 relay 任务，直到两个方向都结束 | 推迟；不得使用 `open_bi` permit 的生命周期。 |
+| 反向 stream | 反向 stream 任务，含 drain/cancel | 推迟；不得与 UDP 或 HTTP 预算共享。 |
+| UDP session | `SessionEntry`，直到被移除/drop | 本次已完成生产接入。 |
+| UDP 队列 | 已排队的 envelope，直到 worker 消费/丢弃它 | 既有信号量保持独立。 |
+
+推迟域的验收标准是：一个具名的资源域计数器、一个由所有者持有的 RAII guard、
+显式的取消与超时释放、一个过载响应/关闭策略、active/admitted/rejected 及持有
+时长的指标，以及覆盖成功、拒绝、body/relay 完成、任务取消、超时、shutdown 和
+重试的测试。在满足这些标准之前，T9 必须保持部分完成状态，不能宣称已完成完整
+的 active-stream admission。
+
+### 测试
+
+`duotunnel-lib/src/lb/overload.rs` 中的针对性测试覆盖了非法 group 配置、RAII
+计数释放、显式释放/复用、共享全局容量下的 group 隔离、drop 触发的取消，以及对
+全局上限的并发争抢。UDP session 测试覆盖了过期替换和空闲重检；生产环境中的字段
+布局使 permit 始终由 `SessionEntry` 持有。
+
+运行方式：
+
+```text
+cargo test -p duotunnel-lib lb::overload::admission_tests -- --test-threads=1
+```

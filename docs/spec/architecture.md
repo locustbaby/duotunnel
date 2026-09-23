@@ -2,7 +2,7 @@
 
 Cross-cutting architecture reference: crate boundaries, the unified deployment topology, data-plane call paths, control plane, and key design decisions.
 
-For parameter defaults see [parameters.md](./parameters.md). For per-crate runtime layering see the `*-runtime.md` specs. For coding rules see [architecture-guidelines.md](./architecture-guidelines.md). For product goals and historical context see [DESIGN.md](./DESIGN.md).
+For parameter defaults see [parameters.md](./parameters.md). For per-crate runtime layering see the `*-runtime.md` specs. For coding rules see [architecture-guidelines.md](./architecture-guidelines.md). For product goals and historical context see [overview.md](./overview.md).
 
 ---
 
@@ -277,4 +277,4 @@ control/       ControlService, WatchServer, proto (snapshot/delta), reactor (deb
 | [duotunnel-ctld-runtime.md](./duotunnel-ctld-runtime.md) | ctld startup and control modules |
 | [duotunnel-lib.md](./duotunnel-lib.md) | Shared library module layout |
 | [duotunnel-ctld-storage.md](./duotunnel-ctld-storage.md) | Persistence layer and feature flags |
-| [DESIGN.md](./DESIGN.md) | Product goals, wire format detail, config examples |
+| [overview.md](./overview.md) | Product goals, frp comparison, metrics, security summary, design principles |

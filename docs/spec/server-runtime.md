@@ -204,7 +204,7 @@ This is load-bearing in ctld mode, where `apply_snapshot` runs on the `Backgroun
 - shutdown deadlock: the background runtime can be dropped before the accept workers observe cancellation, so the worker tail that decrements the counter and signals `drained` never runs, and `shutdown_all_listeners` waits on a notification nothing can send
 - no ingress parallelism: `run_accept_worker` spawns per-connection work onto the current runtime (`duotunnel-lib/src/transport/accept.rs:39`), so accept, sniff, dispatch and relay all share that one thread while the proxy workers stay idle
 
-See `docs/review-2026-07-26/02-scalability-and-cpu-affinity.md` §2.0 for the measured analysis.
+See `docs/reviews/2026-07-26/02-scalability-and-cpu-affinity.md` §2.0 for the measured analysis.
 
 Drain waits are bounded independently of that fix: `wait_listener_drained` gives each listener `LISTENER_DRAIN_TIMEOUT` (10s, `duotunnel-server/ingress/listener_mgr.rs:82`) and warns instead of hanging when a worker was dropped rather than cancelled.
 
@@ -281,7 +281,7 @@ authority-reset allowance: a full Snapshot with a different epoch may be accepte
 classification outside this allowance rejects epoch changes. Reconnection therefore currently
 acts as an implicit reset boundary; it is not an explicit administrative authorization.
 The deployment contract remains single-leader. [TODO-178](../todo.md) and the
-[optimization design](../review-2026-09-05/optimization-design.md) propose authenticated authority
+[optimization design](../design/optimization-design-2026-09-05.md) propose authenticated authority
 binding and a durable, explicit reset workflow; these are not yet implemented.
 
 The last-known-good cache stores a bounded, validated envelope with format/protocol version,

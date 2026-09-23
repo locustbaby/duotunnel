@@ -1,8 +1,8 @@
 # CI 压测方法论评审与改进（2026-07-26）
 
 > **当前状态（2026-07-30）**：本文保留改造前的问题分析和方案推导。当前实现以
-> [BENCHMARK_SPEC](../../ci-helpers/BENCHMARK_SPEC.md) 和
-> [任务拆分](./15-task-breakdown.md) 为准：isolate 模式已按 server/client/load
+> [BENCHMARK_SPEC](../../../ci-helpers/BENCHMARK_SPEC.md) 和
+> [任务拆分](../../reviews/2026-07-26/15-task-breakdown.md) 为准：isolate 模式已按 server/client/load
 > 分配 `AllowedCPUs`，FRPS/FRPC 分别跟随 server/client CPU 集合，K6/echo/ctld/
 > collector 使用 load 集合；8K 保留原有 dial9 trace，basic/3K/6K 不启用 dial9。
 
