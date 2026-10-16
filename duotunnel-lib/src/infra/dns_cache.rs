@@ -8,11 +8,14 @@ use tokio::sync::broadcast;
 const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const DNS_INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_secs(6);
 const DNS_FAILURE_STALE_BACKOFF: Duration = Duration::from_secs(10);
+const DNS_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(2);
+const DEFAULT_MAX_DNS_CACHE_ENTRIES: usize = 4096;
 
 pub struct DnsEntry {
     pub addrs: Vec<SocketAddr>,
     pub expires_at: Instant,
     next_index: AtomicUsize,
+    negative_error: Option<String>,
 }
 
 impl Clone for DnsEntry {
@@ -21,6 +24,7 @@ impl Clone for DnsEntry {
             addrs: self.addrs.clone(),
             expires_at: self.expires_at,
             next_index: AtomicUsize::new(self.next_index.load(Ordering::Relaxed)),
+            negative_error: self.negative_error.clone(),
         }
     }
 }
@@ -31,6 +35,16 @@ impl DnsEntry {
             addrs,
             expires_at,
             next_index: AtomicUsize::new(0),
+            negative_error: None,
+        }
+    }
+
+    fn new_negative(error: String, expires_at: Instant) -> Self {
+        Self {
+            addrs: Vec::new(),
+            expires_at,
+            next_index: AtomicUsize::new(0),
+            negative_error: Some(error),
         }
     }
 
@@ -51,15 +65,40 @@ pub struct EgressDnsCache {
     cache: Arc<DashMap<DnsKey, DnsEntry>>,
     inflight: Arc<DashMap<DnsKey, InflightTx>>,
     ttl: Duration,
+    max_entries: usize,
 }
 
 impl EgressDnsCache {
     pub fn new(ttl: Duration) -> Self {
+        Self::with_capacity(ttl, DEFAULT_MAX_DNS_CACHE_ENTRIES)
+    }
+
+    pub fn with_capacity(ttl: Duration, max_entries: usize) -> Self {
         Self {
             cache: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
             ttl,
+            max_entries: max_entries.max(1),
         }
+    }
+
+    fn insert_bounded(
+        cache: &DashMap<DnsKey, DnsEntry>,
+        max_entries: usize,
+        key: DnsKey,
+        entry: DnsEntry,
+    ) {
+        if cache.len() >= max_entries && !cache.contains_key(&key) {
+            let now = Instant::now();
+            cache.retain(|_, v| now < v.expires_at);
+            if cache.len() >= max_entries {
+                let victim = cache.iter().next().map(|item| item.key().clone());
+                if let Some(victim) = victim {
+                    cache.remove(&victim);
+                }
+            }
+        }
+        cache.insert(key, entry);
     }
 
     async fn wait_for_inflight(
@@ -133,6 +172,9 @@ impl EgressDnsCache {
                 if let Some(addr) = entry.next_addr() {
                     return Ok(addr);
                 }
+                if let Some(ref err_msg) = entry.negative_error {
+                    return Err(anyhow::anyhow!("DNS lookup failed: {}", err_msg));
+                }
             }
         }
 
@@ -160,6 +202,7 @@ impl EgressDnsCache {
             let cache = self.cache.clone();
             let inflight = self.inflight.clone();
             let ttl = self.ttl;
+            let max_entries = self.max_entries;
 
             tokio::spawn(async move {
                 let lookup_res = tokio::time::timeout(
@@ -183,14 +226,31 @@ impl EgressDnsCache {
 
                 match &result {
                     Ok(resolved_vec) => {
-                        cache.insert(
+                        Self::insert_bounded(
+                            &cache,
+                            max_entries,
                             key_clone.clone(),
                             DnsEntry::new(resolved_vec.clone(), Instant::now() + ttl),
                         );
                     }
-                    Err(_) => {
+                    Err(err_msg) => {
+                        let mut updated_stale = false;
                         if let Some(mut entry) = cache.get_mut(&key_clone) {
-                            entry.expires_at = Instant::now() + DNS_FAILURE_STALE_BACKOFF;
+                            if !entry.addrs.is_empty() {
+                                entry.expires_at = Instant::now() + DNS_FAILURE_STALE_BACKOFF;
+                                updated_stale = true;
+                            }
+                        }
+                        if !updated_stale {
+                            Self::insert_bounded(
+                                &cache,
+                                max_entries,
+                                key_clone.clone(),
+                                DnsEntry::new_negative(
+                                    err_msg.clone(),
+                                    Instant::now() + DNS_NEGATIVE_CACHE_TTL,
+                                ),
+                            );
                         }
                     }
                 }
@@ -254,5 +314,36 @@ mod tests {
         assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.1");
         assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.2");
         assert_eq!(entry.next_addr().unwrap().ip().to_string(), "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_dns_negative_cache_and_capacity_bound() {
+        let cache = EgressDnsCache::with_capacity(Duration::from_secs(10), 2);
+        EgressDnsCache::insert_bounded(
+            &cache.cache,
+            cache.max_entries,
+            ("nonexistent1.invalid".to_string(), 80),
+            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+        );
+        let err = cache
+            .resolve("nonexistent1.invalid", 80)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nxdomain"));
+
+        EgressDnsCache::insert_bounded(
+            &cache.cache,
+            cache.max_entries,
+            ("nonexistent2.invalid".to_string(), 80),
+            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+        );
+        EgressDnsCache::insert_bounded(
+            &cache.cache,
+            cache.max_entries,
+            ("nonexistent3.invalid".to_string(), 80),
+            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+        );
+        assert!(cache.cache.len() <= 2);
     }
 }
