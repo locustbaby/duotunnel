@@ -12,7 +12,6 @@
 
 | 顺序 | 问题及推荐方向 | TODO |
 |---|---|---|
-| S0 | 控制面 watch 无心跳，静态配置 120s/300s 后新连接被拒（2026-09-23 P0，见 review R1） | 179 |
 | S1 | CA 加载不覆盖；显式初始化；独立的 tunnel 稳定身份 | 176、166、152 |
 | S2 | 请求固定 generation，所有相关缓存使用 epoch + sequence | 175、52 |
 | S3 | 统一 authority 契约，修 IPv6；H1 超头数明确 431 | 177、158、167 |
@@ -43,45 +42,14 @@ ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）�
 
 - **隧道身份 / CA 信任**：TODO-166（P1，稳定 TLS 身份）、TODO-176（P1，CA 加载失败不覆盖）、TODO-152（已折叠→166）、TODO-99（证书 watch 热重载，另见 D4 指针）、TODO-27（身份/会话恢复/0-RTT，需求待细化）。
 - **watch 信任模型**：TODO-171（P1，watch 安全默认与远程信任）、TODO-178（P1，显式 authority reset）；另见本文件 R2（watch 通道明文 TCP，2026-09-23 新增，已作为跟进点附在 171/178 内）。
-- **H2 sender / 缓存**：TODO-175（P1，完整 generation 身份贯穿 H2 缓存，含原 TODO-52 内容）、TODO-168（P1，H2 错误作用域与实例安全失效，含原 TODO-68 内容）、TODO-139（benchmark-gated，H2 sender 重建风暴，含 R5 握手超时跟进）、TODO-143（研究，adaptive 小池）。
-- **inflight / 准入**：TODO-142（分层 active-stream admission，含原 TODO-80 残留的进程级总量兜底缺口）、TODO-109（InflightTable 计数器合并）、TODO-135（inflight 近似读语义）、TODO-146（Server registry slot 容量，含 T8 跨 shard correctness）；已关闭成员 TODO-80/TODO-110/TODO-111/TODO-134 见 `done.md`。
+- **H2 sender / 缓存**：TODO-175（P1，完整 generation 身份贯穿 H2 缓存，含原 TODO-52 内容）、TODO-168（P1，H2 错误作用域与实例安全失效，含原 TODO-68 内容）、TODO-139（benchmark-gated，H2 sender 重建风暴，R5 握手超时已于 `1cb9ae1` 修复）、TODO-143（研究，adaptive 小池）。
+- **inflight / 准入**：TODO-142（分层 active-stream admission，公网 HTTP/TCP 入口全局信号量 R6 已于 `da19007` 落地，剩余按 group 级预算与 per-IP 限流）、TODO-109（InflightTable 计数器合并）、TODO-135（inflight 近似读语义）、TODO-146（Server registry slot 容量，含 T8 跨 shard correctness）；已关闭成员 TODO-80/TODO-110/TODO-111/TODO-134 见 `done.md`。
 
 ---
 
 ## 🔐 2026-09-23 Review 新增（未追踪项，见 [`reviews/2026-09-23.md`](reviews/2026-09-23.md)）
 
-> 5 路并行代码 review（只看代码不看文档），基线 `2a20f59`。R2 已并入 TODO-171/178 簇；R5 已并入 TODO-139；R6 已并入 TODO-142/80 簇说明；均不新建 ID。R10 触发对 TODO-CR-AUDIT-18 / TODO-141 的重开（见下方对应小节）。
-
-### [TODO-179] 控制面 watch 心跳缺失，静态配置下 server 自判过期拒绝新连接
-* **Priority**: P0 | **Status**: 已确认（2026-09-23，review R1） | **Track**: Control Plane & Config
-* **证据**：`duotunnel-ctld/src/control/watch.rs:133` 只在 `changes.changed()` 时发送；全仓 `watch_tx.send` 仅 `service.rs:478` 一处，且只在 resource_version 变化时触发。server 新鲜度只在 `control_client.rs:394/604/679/785` 收到事件时刷新；阈值 `runtime/health.rs:7-9` = 60s 降级 / 120s 安全过期 / 300s 过期。`recv_config_event` 无读超时，TCP 无 keepalive。
-* **后果**：配置长期不变时，120s 后新 tunnel client 认证被拒（`ingress/handlers/quic.rs:252`），300s 后所有新公网连接被拒、`/healthz` not ready；ctld 半开死亡时 server 永不察觉。
-* **方案**：watch 协议加 Ping/Pong（或周期性 Duplicate 快照，间隔 < 30s）；server 端读超时即重连。
-* **验收**：静态配置长时间运行下新连接不被误拒；ctld 半开断连能在读超时内被 server 感知并重连。
-
-### [TODO-180] 上游 TCP connect / TLS 握手无超时
-* **Priority**: P1 | **Status**: 已确认（review R3 ✅ / R4 ✅） | **Track**: Transport & Performance
-* **证据**：`lib/proxy/tcp.rs:165`（connect）、`lib/proxy/tcp.rs:188`（TLS 握手）、`server/egress/mod.rs:244,313,347`。黑洞地址会挂起约 130s（TCP 默认重传超时），占用 stream 许可与 task；TLS 握手无超时与 connect 问题叠加。
-* **方案**：为 egress TCP connect 与 TLS 握手统一接入可配置超时（复用现有 timeout 基础设施 `infra/timeout.rs`），超时按 `ErrorSource::Upstream` 分类并快速失败释放 permit/task。
-* **验收**：黑洞/慢速上游在配置超时内失败退出，不长期占用 stream 许可；正常握手不受影响。
-
-### [TODO-181] client 反向拨号目标无本地白名单
-* **Priority**: P1 | **Status**: 已确认（review R7 ✅） | **Track**: Core Proxy & Protocol
-* **证据**：`client/tunnel/client.rs:63-65`（`LocalProxyMap` 完全来自 `resp.config`）、`client/ingress/app.rs:141-241`。拨号地址完全由 server 下发，server/ctld 失陷即可把 client 变成内网跳板。
-* **方案**：client 侧增加可选本地拨号目标白名单/规则（复用现有 egress 规则模型），默认关闭或宽松，可配置为严格模式用于高安全环境。
-* **验收**：白名单开启时，server 下发的越界目标被本地拒绝并有日志/指标；默认行为不回归。
-
-### [TODO-182] 502 响应体泄露内部拓扑
-* **Priority**: P1 | **Status**: 已确认（review R8 ✅） | **Track**: Core Proxy & Protocol
-* **证据**：`lib/proxy/http.rs:110,123` → `protocol/driver/h1.rs:121 write_502` 返回上游 `host:port` 与 IO 错误细节。
-* **方案**：对外 502 响应改为通用文案，详细原因只进结构化日志/指标（呼应 TODO-CR-AUDIT-22 已建立的公开错误边界模式）。
-* **验收**：外部 502 响应不包含上游地址/端口/底层 IO 错误文本；日志侧保留完整诊断信息。
-
-### [TODO-183] DNS 无负缓存且 `EgressDnsCache` 无容量上限
-* **Priority**: P2 | **Status**: 已确认（review R9 ✅） | **Track**: Transport & Performance
-* **证据**：`lib/infra/dns_cache.rs:191-195` —— 首次解析失败不入缓存，每次请求都要等 5s timeout；缓存 map 无容量上限。
-* **方案**：加短 TTL 负缓存减少重复 5s 等待；为缓存加容量上限与淘汰策略，避免海量域名场景内存无界增长。
-* **验收**：连续对同一失败域名的请求不再每次等待完整 5s；缓存条目数有界。
+> 5 路并行代码 review（只看代码不看文档），基线 `2a20f59`。其中 **TODO-179、TODO-180（含 R5）、TODO-181、TODO-182、TODO-183、R6（公网入口并发上限）、R10（TODO-141/TODO-CR-AUDIT-18）及 TODO-105 已于 2026-10-16 完成并迁入 [`done.md`](done.md)**；下方仅保留尚未关闭的 P2/P3 条目。
 
 ### [TODO-184] TLS ClientHello 只解析首个 record + 4KB 预算，大 ClientHello 丢 SNI
 * **Priority**: P2 | **Status**: 已确认（review R11） | **Track**: Transport & Performance
@@ -251,13 +219,6 @@ ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）�
 
 ## HA, Overload & Observability
 
-### [TODO-CR-AUDIT-18] Sniffer Slowloris Vulnerability in Protocol Detection — ⚠️ 重开（2026-09-23）
-* **Priority**: High | **Status**: 部分修复；QUIC stream 二次 sniff 路径仍硬编码 5s，未接入 `sniff_timeout_ms` | **Track**: HA, Overload & Observability
-* **原修复**: 已 `tokio::time::timeout(sniff_timeout, ...)` 包裹 ingress accept 路径的首次 sniff（client entry / server `IngressDispatcher`），默认 5s，可配置。
-* **重开原因（review R10，2026-09-23）**：`duotunnel-lib/src/proxy/core.rs:82` 的 `ProxyEngine::run_stream` 在 QUIC stream 内做二次 sniff 时仍写死 `std::time::Duration::from_secs(5)`，未读取任何 `sniff_timeout_ms` 配置，与 TODO-141 "buffer/relay 参数已全路径贯通"的表述不符（已核对代码：截至 `2a20f59` 该行仍是字面量）。
-* **Fix**:
-  让 `core.rs::run_stream` 的 sniff timeout 也接入统一的 sniff timeout 配置（与 ingress 路径共用同一来源），而不是独立的硬编码常量。
-
 ### [TODO-CR-AUDIT-21] SIGTERM Graceful Drain —— 残留缺口（核心修复已完成，见 `done.md`）
 * **Priority**: Medium | **Status**: 核心 drain 已实现；以下缺口仍未做 | **Track**: HA, Overload & Observability
 * **残留缺口**:
@@ -288,14 +249,14 @@ ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）�
   Treat external hotpath guides as practice references, not exact API contracts. Prefer current 0.21.x names (`HOTPATH_OUTPUT_FORMAT`, `HOTPATH_OUTPUT_PATH`, `HOTPATH_REPORT`, `HOTPATH_ALLOC_METRIC`, `HOTPATH_ALLOC_CUMULATIVE`) over older names such as `HOTPATH_OUTPUT` or `HOTPATH_MEMORY_MODE`. Do not add a custom Prometheus reporter unless the current crate API explicitly supports that integration; the first production-grade output path should remain static JSON artifacts plus existing DuoTunnel metrics. CI should compare controlled head/base artifacts and post a report before it becomes a blocking gate.
 
 ### [TODO-142] Add global and group-level active-stream admission control
-* **Priority**: High | **Status**: Partial / UDP session integrated, other domains deferred | **Track**: HA, Overload & Observability
+* **Priority**: High | **Status**: Partial / UDP session + public HTTP/TCP ingress connection cap integrated, per-group stream budgets deferred | **Track**: HA, Overload & Observability
 * **Problem**:
   当前 `open_bi` 有每 connection semaphore、pending queue 上限和 slowpath，但没有跨 connection 的 global active-relay 预算或按 client group 的公平预算。慢后端/慢客户端可在多个连接上同时占用 task 与 buffer，直到局部限制才生效。**含原 TODO-80 的残留缺口**：其进程级总量兜底闸门被移除后一直没有替代，归并到本项的分层模型中。
 * **Implementation plan**:
   当前已完成可复用 global/group RAII controller、显式 Global/Group rejection scope 和并发 invariant 测试，并将 controller 接入一个边界清晰的资源域：每个 QUIC client connection 的 UDP session。`UdpSessionManager` 的 `SessionEntry` 持有 permit，覆盖创建排队、三秒 session operation timeout、连接/空闲淘汰、失败、QUIC shutdown 和 reply pump 结束；原进程级 UDP semaphore 与 UDP queue semaphore 保持独立。HTTP request、raw relay、reverse stream 和 UDP queue 不共享该计数器。
 
   其他域只有在明确 owner、路由/认证 group identity、拒绝语义、取消/超时释放和完整测试后接入：HTTP permit 必须覆盖 response body 完成，raw relay 必须覆盖双向 relay task，reverse stream 必须覆盖 drain/cancel，queue budget 必须覆盖 queued envelope 的消费或丢弃。H1 可返回 503，其他协议需定义可观测的关闭/错误策略，并记录 reject、queue wait、permit-held duration。阈值仍以 TODO-140 慢客户端/慢后端基线为依据，不能把 `max_pending_streams` 当 active relay 上限，也不能把本次 UDP session 接入误标为全协议完成。
-* **补充（review R6 ✅，2026-09-23）**：公网 HTTP/TCP accept 目前无并发上限（`lib/transport/accept.rs:39` 每连接无条件 spawn；QUIC/metrics/UDP 均已有上限）。建议作为本项接入的下一个资源域，或补一个独立的公网入口全局信号量 + per-IP 限流（`reviews/2026-09-23.md` 建议推进顺序第 3 步）。
+* **进展更新（2026-10-16，`da19007`）**：公网 HTTP/TCP accept 全局并发连接上限（`OverloadConfig::max_ingress_connections`，默认 10,000）已通过 `ServerState::try_acquire_ingress_conn` 接入 `run_http_accept_loop` 与 `run_tcp_accept_loop`，闭合了 R6 的无界连接准入风险；剩余工作为 per-IP 限流与按 client group 的细粒度流级预算。
 * **D5 对应关系**：capacity fairness across client group 即本项的 group-level 预算；`design/05-rate-limit-admission.md` 的设计内容已并入本项范围，不单独立项。
 
 ### [TODO-88] Coarse Monotonic Clock for High-Frequency Telemetry
@@ -404,21 +365,13 @@ ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）�
 
 ## Transport & Performance
 
-### [TODO-141] Propagate relay and HTTP body buffer configuration end-to-end — ⚠️ 部分重开（2026-09-23）
-* **Priority**: High | **Status**: 绝大部分已实现；QUIC stream 二次 sniff timeout 仍未贯通配置（见 TODO-CR-AUDIT-18） | **Track**: Transport & Performance
-* **Problem**:
-  `ProxyBufferParams` 已提供 relay/header/body 参数，但部分 bridge、generic TCP/TLS relay、client entry、server egress 和 H1 reader 仍使用固定值，调参无法覆盖完整数据路径。
-* **Implementation**:
-  已在不改变默认值的前提下增加带参数 relay API，并将其接入 client entry、server ingress/server egress、generic TCP/TLS relay 和 ProxyEngine QUIC stream sniff；`HttpConnector`、`HttpPeer`、`Http1Driver` 和 `forward_http` 现在消费 header/body 参数。旧无参数函数保留为默认 wrapper。focused unit tests 验证非默认 relay capacity、H1 buffer configuration 和 sniff pool 配置的贯通。16/32/64/128 KiB 的吞吐、P99、CPU/GB 和 RSS 对比仍由 T5 性能基线单独执行。
-* **重开原因（review R10，2026-09-23）**：`lib/proxy/core.rs:82` 的二次 sniff timeout 仍是字面量 `Duration::from_secs(5)`，未接入任何 buffer/timeout 参数贯通链路——与本项"端到端贯通"的表述有出入。跟进动作见 TODO-CR-AUDIT-18。
-
 ### [TODO-137] Benchmark-gated H1 egress scratch-buffer and response-line optimization
 * **Priority**: Low | **Status**: Research | **Track**: Transport & Performance
 * **Problem**:
   `egress/http.rs::forward_http` 为请求头创建 8 KiB `BytesMut`，并为响应头创建独立 buffer；响应状态行经 `write!` 格式化。是否为真实热点尚无分配/CPU profile 证据，且 `write!` 的格式串是编译期解析，不存在报告所称的运行时格式串解析。
 * **Implementation plan**:
   先在 H1 小请求高 QPS profile 中分离 allocator、header parse、upstream I/O 与 response write 的占比。仅当 scratch allocation 可见时，设计取消安全、容量有上限的 scoped `BytesMut` reuse；不能因为 Tokio task 可跨 worker 迁移就简单依赖 thread-local pool。若响应行格式化进入 profile，再以 `status.as_str()` 和 `extend_from_slice` 取代通用 fmt，并保持现有 header buffer 的单次写入语义。
-* **关联（review P3，2026-09-23）**：`egress/http.rs::forward_http` 被 review 标注为不支持 chunked、无超时的遗留路径，见 TODO-193 清理清单与 TODO-147/TODO-180。
+* **关联（review P3，2026-09-23）**：`egress/http.rs::forward_http` 被 review 标注为不支持 chunked、无超时的遗留路径，见 TODO-193 清理清单与 TODO-147。
 
 ### [TODO-138] Benchmark QUIC-to-TCP small-chunk aggregation
 * **Priority**: Low | **Status**: Research | **Track**: Transport & Performance
@@ -433,13 +386,6 @@ ID 修正：保留原 TODO-148（listener ownership）、TODO-149（batching）�
   UDP 路径当前每包使用 rkyv envelope encode/decode，并在 session reply path 分配 payload/`Bytes`；每个 session 也维护 socket、reply pump 与定时清理。它保证了独立 upstream source-port 语义，但高 PPS、短 session 工作负载可能受 allocator、FD、task 和 wall-clock 调用限制。
 * **Implementation plan**:
   先在 TODO-140 的 PPS/session-density 基线中拆分 encode/decode、copy、DashMap、socket/task、timer 和 drop 成本。若确认瓶颈，再设计版本化紧凑 header、borrowed/`Bytes` decode view、粗粒度时间和带上限的 session shard；共享 socket 只能作为会改变 upstream source-port 语义的显式模式，不能替换默认语义。不要把 UDP datagram payload 上限硬编码为 1200 bytes，须依据协商的 QUIC datagram/path MTU 处理。
-
-### [TODO-105] Enable TCP Autotuning by defaulting buffer sizes to None
-* **Priority**: High | **Status**: Ready for implementation | **Track**: Transport & Performance
-* **Problem**:
-  在 `duotunnel-lib/src/transport/tcp_params.rs` 中，`recv_buf_size` 和 `send_buf_size` 默认被设置为 `Some(4 * 1024 * 1024)`；`TcpConfig::default()` 会透传这两个值，所有未显式配置的 TCP 路径都会调用 `setsockopt`。这会固定 socket buffer 的策略，放弃由 Linux 的 `tcp_rmem` / `tcp_wmem` 随 RTT 与 BDP 调节的默认能力，并为大量空闲连接保留过高的缓冲上限。
-* **Implementation plan**:
-  将 `TcpParams` 默认值改为 `None`，让 `TcpConfig::default()` 自然继承；保留配置文件中显式 `recv_buf_size` / `send_buf_size` 的覆盖语义。补充默认值、显式覆盖和 `apply()` 不调用对应 `setsockopt` 的测试，并在 Linux 上对低 RTT 与高 BDP 两组负载做吞吐/内存回归。不要修改 QUIC 的 UDP buffer 参数，它们是独立的收包队列调优项。
 
 ### [TODO-73] Plugin-based IPv6 support and DNS Hijacking connection interceptor
 * **Priority**: Medium | **Status**: TODO | **Track**: Transport & Performance

@@ -1,5 +1,28 @@
 # Tunnel Done List
 
+## 🛡️ 控制面活性、出站超时、安全边界与内核缓冲调优 (2026-10-16) ✅
+
+在 `feat/todo-implementation` 分支中，按独立 Commit 落地了 2026-09-23 代码审查发现的 P0/P1/P2 核心修复及历史高优项：
+
+- **[TODO-179 / R1] 控制面 Watch 空闲心跳与读超时保活 (`ac03647`)**：
+  - 在 DTCP v3 协议中新增轻量 `ConfigEvent::Heartbeat(ControlHeartbeat { revision, content_hash })`（20s 周期）与 45s 读超时常量。
+  - `duotunnel-ctld` 的 `WatchServer` 在配置无变更时定期发送心跳并开启 TCP Keepalive；`duotunnel-server` 的 `control_client` 校验 `revision`/`content_hash` 一致后直接刷新 `confirm_control_freshness()` 并回复 `ApplyStatus::Duplicate`（不触发磁盘 LKG 重写），若版本不一致则触发 `ResyncRequired` 全量重同步。
+- **[TODO-180 / R3 / R4 / R5] 上游 TCP connect、TLS 握手与 H2 连接重建超时保护 (`1cb9ae1`)**：
+  - 在 `TcpParams` 与 `TcpConfig` 中新增 `connect_timeout_ms`（默认 5000ms）与 `tls_handshake_timeout_ms`（默认 5000ms），并在 `TcpPeer::connect_inner_with_buffer_size` 及 `ServerEgressMap::connect_peer` 中统一接入超时保护与被动健康失败计数。
+  - 在 `forward_h2_request` 的 `rebuild_mu` 锁内为 `H2ClientBuilder::handshake` 接入 `stream_request.stream_timeout` 超时保护，防止慢握手阻塞同路由后续请求。
+- **[TODO-105] 默认启用 OS TCP 缓冲区自动调优 (`18f96a6`)**：
+  - 将 `TcpParams::default()` 中的 `recv_buf_size` 与 `send_buf_size` 从硬编码 `Some(4 MiB)` 改为 `None`，默认交由内核 `tcp_rmem` / `tcp_wmem` 自适应调节，同时保留显式配置覆盖语义。
+- **[TODO-182 / R8] 502 Bad Gateway 外部响应体脱敏 (`a1c2bd6`)**：
+  - `Http1Driver::write_502`、`HttpPeer::connect_inner` 与 `serve_h2` 对外统一返回通用 `"502 Bad Gateway"`，避免将内部上游 `host:port`、URI 解析错误或底层 IO 错误暴露给外部客户端，详细诊断信息保留在服务端日志。
+- **[TODO-141 / TODO-CR-AUDIT-18 / R10] `sniff_timeout_ms` 端到端透传至 `ProxyEngine` (`c7424ee`)**：
+  - `ProxyEngine` 保存并消费 `ProxyBufferParams::sniff_timeout_ms`（替代 `run_stream` 中硬编码的 5s 超时），并在 `ProxyBufferParams::validate` 中校验 `sniff_timeout_ms >= 1`。
+- **[TODO-181 / R7] Client 反向拨号目标本地白名单 (`6756f6b`)**：
+  - `ClientConfigFile` 新增可选 `allowed_dial_targets: Vec<String>`（默认空列表允许全部，支持 `host`、`host:port`、`*.domain`、IPv6），在 `LocalProxyMap` 装配与 `resolve_addr` 阶段拦截越界目标。
+- **[TODO-142 / R6] 公网 HTTP / TCP 入口并发连接上限 (`da19007`)**：
+  - `OverloadConfig` 新增 `max_ingress_connections`（默认 10,000），在 `ServerState` 中维护全局信号量并在 `run_http_accept_loop` / `run_tcp_accept_loop` 入口处做非阻塞准入控制与 `duotunnel_ingress_connections_rejected_overloaded_total` 指标统计。
+- **[TODO-183 / R9] `EgressDnsCache` 负缓存与最大容量上限 (`6266555`)**：
+  - 为无历史健康记录的解析失败域名写入 2s TTL 负缓存（已有健康记录继续沿用 10s Stale 兜底），并增加默认 4,096 条容量上限与过期优先淘汰策略。
+
 ## ⚡ DuoTunnel 热路径性能优化 (2026-07-27) ✅
 
 在 `perf/optimize-hotpaths` 分支中，我们对 Ingress、Tunnel 控制面及核心数据转发面进行了全方位的底层性能硬化与零分配重构：

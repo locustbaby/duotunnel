@@ -5,6 +5,8 @@
 > 证据优先级：本次实际执行的构建、测试与代码阅读 > 仓库内最新评审文档（`docs/reviews/2026-09-05.md`）> 历史评审（`docs/reviews/2026-07-26/`、`docs/archive/`）> README 自述。
 >
 > **2026-09-23 更新**：同基线的全量代码 review 见 [`reviews/2026-09-23.md`](reviews/2026-09-23.md)，新增 P0（控制面 watch 无心跳致静态配置下 120s/300s 后拒绝新连接）与多项出站超时/入口限流问题，已登记到 [`todo.md`](todo.md)。本报告其余内容未随之改写。
+>
+> **2026-10-16 更新**：`feat/todo-implementation` 分支已完成 `TODO-179 (R1)` 控制面 Watch 空闲心跳与读超时保活、`TODO-180 (R3/R4/R5)` 上游 TCP/TLS/H2 握手超时、`TODO-105` 默认启用 OS TCP 缓冲区自动调优、`TODO-182 (R8)` 502 响应体脱敏、`TODO-141 (R10)` QUIC 二次嗅探超时贯通、`TODO-181 (R7)` Client 反向拨号本地白名单、`TODO-142 (R6)` 公网 HTTP/TCP 入口并发连接上限及 `TODO-183 (R9)` Egress DNS 负缓存与容量上限（详见 [`done.md`](done.md)）。
 
 ---
 
