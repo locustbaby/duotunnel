@@ -14,8 +14,8 @@ impl Default for TcpParams {
     fn default() -> Self {
         Self {
             nodelay: true,
-            recv_buf_size: Some(4 * 1024 * 1024),
-            send_buf_size: Some(4 * 1024 * 1024),
+            recv_buf_size: None,
+            send_buf_size: None,
             keepalive: true,
             user_timeout_ms: 30_000,
             connect_timeout_ms: 5_000,

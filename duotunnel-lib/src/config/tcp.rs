@@ -38,3 +38,31 @@ impl From<&TcpConfig> for TcpParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_leaves_socket_buffers_to_os_autotuning() {
+        let params = TcpParams::default();
+        assert_eq!(params.recv_buf_size, None);
+        assert_eq!(params.send_buf_size, None);
+
+        let cfg = TcpConfig::default();
+        assert_eq!(cfg.recv_buf_size, None);
+        assert_eq!(cfg.send_buf_size, None);
+    }
+
+    #[test]
+    fn explicit_buffer_sizes_propagate_from_config() {
+        let cfg = TcpConfig {
+            recv_buf_size: Some(256 * 1024),
+            send_buf_size: Some(512 * 1024),
+            ..TcpConfig::default()
+        };
+        let params = TcpParams::from(&cfg);
+        assert_eq!(params.recv_buf_size, Some(256 * 1024));
+        assert_eq!(params.send_buf_size, Some(512 * 1024));
+    }
+}
