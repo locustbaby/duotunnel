@@ -226,6 +226,11 @@ impl UpstreamResolver for ServerEgressMap {
     ) -> Result<(), ProxyError> {
         match peer {
             PeerSpec::Tcp(spec) => {
+                let tcp_params = duotunnel_lib::TcpParams::default();
+                let connect_timeout =
+                    std::time::Duration::from_millis(tcp_params.connect_timeout_ms);
+                let tls_timeout =
+                    std::time::Duration::from_millis(tcp_params.tls_handshake_timeout_ms);
                 let mut current_backend_ref = spec.backend_ref.clone();
                 let (tcp_stream, final_tls) = if let Some(upstream_name) = &spec.upstream_name {
                     let group = self.upstreams.get(upstream_name).ok_or_else(|| {
@@ -238,10 +243,21 @@ impl UpstreamResolver for ServerEgressMap {
                     for _ in 0..group.servers.len().max(1) {
                         let tcp_peer = current_spec
                             .clone()
-                            .into_tcp_peer(duotunnel_lib::TcpParams::default())
+                            .into_tcp_peer(tcp_params.clone())
                             .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
 
-                        let stream_res = tokio::net::TcpStream::connect(tcp_peer.target_addr).await;
+                        let stream_res = match tokio::time::timeout(
+                            connect_timeout,
+                            tokio::net::TcpStream::connect(tcp_peer.target_addr),
+                        )
+                        .await
+                        {
+                            Ok(res) => res,
+                            Err(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!("upstream TCP connect timed out after {connect_timeout:?}"),
+                            )),
+                        };
 
                         match stream_res {
                             Ok(stream) => {
@@ -308,15 +324,22 @@ impl UpstreamResolver for ServerEgressMap {
                     (stream, tls)
                 } else {
                     let tcp_peer = spec
-                        .into_tcp_peer(duotunnel_lib::TcpParams::default())
+                        .into_tcp_peer(tcp_params.clone())
                         .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
-                    let stream = tokio::net::TcpStream::connect(tcp_peer.target_addr)
-                        .await
-                        .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
+                    let stream = tokio::time::timeout(
+                        connect_timeout,
+                        tokio::net::TcpStream::connect(tcp_peer.target_addr),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ProxyError::upstream_connect(format!(
+                            "upstream TCP connect timed out after {connect_timeout:?}"
+                        ))
+                    })?
+                    .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
                     (stream, tcp_peer.tls)
                 };
 
-                let tcp_params = duotunnel_lib::TcpParams::default();
                 tcp_params
                     .apply(&tcp_stream)
                     .map_err(|e| ProxyError::upstream_connect(e.to_string()))?;
@@ -344,14 +367,26 @@ impl UpstreamResolver for ServerEgressMap {
                                     e
                                 ))
                             })?;
-                        let tls_stream = match tls.connector.connect(server_name, tcp_stream).await
+                        let tls_stream = match tokio::time::timeout(
+                            tls_timeout,
+                            tls.connector.connect(server_name, tcp_stream),
+                        )
+                        .await
                         {
-                            Ok(stream) => stream,
-                            Err(error) => {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(error)) => {
                                 if let Some(ref b_ref) = current_backend_ref {
                                     b_ref.record_failure();
                                 }
                                 return Err(ProxyError::tls_handshake(error.to_string()));
+                            }
+                            Err(_) => {
+                                if let Some(ref b_ref) = current_backend_ref {
+                                    b_ref.record_failure();
+                                }
+                                return Err(ProxyError::tls_handshake(format!(
+                                    "TLS handshake timed out after {tls_timeout:?}"
+                                )));
                             }
                         };
                         if let Some(ref b_ref) = current_backend_ref {

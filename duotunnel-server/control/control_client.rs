@@ -463,6 +463,7 @@ async fn connect_and_watch(
         send_buf_size: None,
         keepalive: true,
         user_timeout_ms: 30_000,
+        ..duotunnel_lib::TcpParams::default()
     }
     .apply(&stream);
     let (reader, mut writer) = stream.into_split();
