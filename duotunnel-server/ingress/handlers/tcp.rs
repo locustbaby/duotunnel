@@ -22,6 +22,15 @@ pub async fn run_tcp_accept_loop(
         let state = state.clone();
         async move {
             let stream = accepted.stream;
+            let Some(_conn_permit) = state.try_acquire_ingress_conn() else {
+                debug!("rejecting public TCP connection: max_ingress_connections reached");
+                ::metrics::counter!(
+                    "duotunnel_ingress_connections_rejected_overloaded_total",
+                    "protocol" => "tcp"
+                )
+                .increment(1);
+                return;
+            };
             let Some(generation) = state.admit_runtime_generation() else {
                 debug!("rejecting public TCP connection while server is not ready");
                 return;

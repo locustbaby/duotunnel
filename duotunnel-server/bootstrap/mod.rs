@@ -201,6 +201,7 @@ struct IngressRuntime {
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     listeners: listener_mgr::ListenerManager,
     plugin_registry: Arc<duotunnel_lib::plugin::PluginRegistry>,
+    ingress_conn_semaphore: Arc<tokio::sync::Semaphore>,
     /// Listeners must always run on the multi-threaded proxy runtime, never on
     /// whichever runtime happened to apply a config update: the control-plane
     /// runtime is single-threaded and outlived by the listeners it would
@@ -221,6 +222,14 @@ pub(crate) struct ServerState {
 }
 
 impl ServerState {
+    pub(crate) fn try_acquire_ingress_conn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.ingress
+            .ingress_conn_semaphore
+            .clone()
+            .try_acquire_owned()
+            .ok()
+    }
+
     pub(crate) fn http_client_params(&self) -> HttpClientParams {
         HttpClientParams::from(&self.ingress.config.server.http_pool)
     }
@@ -462,6 +471,14 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             upstream_health,
             listeners: listener_mgr::ListenerManager::new(),
             plugin_registry,
+            ingress_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                bootstrap
+                    .config
+                    .server
+                    .overload
+                    .max_ingress_connections
+                    .max(1),
+            )),
             proxy_handle: tokio::runtime::Handle::current(),
         },
         connection: ConnectionRuntime {

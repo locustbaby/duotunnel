@@ -37,6 +37,15 @@ pub async fn run_http_accept_loop(
                 accepted_at,
                 ..
             } = accepted;
+            let Some(_conn_permit) = state.try_acquire_ingress_conn() else {
+                debug!("rejecting public HTTP connection: max_ingress_connections reached");
+                ::metrics::counter!(
+                    "duotunnel_ingress_connections_rejected_overloaded_total",
+                    "protocol" => "http"
+                )
+                .increment(1);
+                return;
+            };
             let Some(runtime_generation) = state.admit_runtime_generation() else {
                 debug!("rejecting public HTTP connection while server is not ready");
                 return;

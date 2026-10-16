@@ -61,6 +61,7 @@ impl RoutingConfigFile {
 pub struct OverloadConfig {
     pub emfile_backoff_ms: u64,
     pub max_pending_streams: Option<usize>,
+    pub max_ingress_connections: usize,
 }
 
 impl Default for OverloadConfig {
@@ -68,6 +69,7 @@ impl Default for OverloadConfig {
         Self {
             emfile_backoff_ms: 100,
             max_pending_streams: None,
+            max_ingress_connections: 10_000,
         }
     }
 }
@@ -286,6 +288,9 @@ impl ServerConfigFile {
         }
         if matches!(self.server.overload.max_pending_streams, Some(0)) {
             errors.push("server.overload.max_pending_streams must be >= 1 when set".into());
+        }
+        if self.server.overload.max_ingress_connections == 0 {
+            errors.push("server.overload.max_ingress_connections must be >= 1".into());
         }
         if errors.is_empty() {
             Ok(())
