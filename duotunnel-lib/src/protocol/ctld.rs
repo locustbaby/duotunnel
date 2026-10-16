@@ -99,6 +99,25 @@ pub struct ConfigDelta {
     pub operations: Vec<ConfigOperation>,
 }
 
+pub const WATCH_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+pub const WATCH_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ControlHeartbeat {
+    pub revision: ControlRevision,
+    pub content_hash: String,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -113,6 +132,7 @@ pub struct ConfigDelta {
 pub enum ConfigEvent {
     Snapshot(VersionedConfigSnapshot),
     Delta(ConfigDelta),
+    Heartbeat(ControlHeartbeat),
 }
 
 #[derive(

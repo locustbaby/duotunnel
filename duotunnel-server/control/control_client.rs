@@ -1,10 +1,10 @@
 use anyhow::Context;
 use duotunnel_lib::ctld_proto::{
     apply_config_operations, recv_config_event, send_watch_request, snapshot_content_hash,
-    ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot, ControlRevision,
-    ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule, ProtoIngressListener,
-    ProtoIngressListenerMode, VersionedConfigSnapshot, WatchRequest,
-    CURRENT_CONTROL_PROTOCOL_VERSION,
+    ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot, ControlHeartbeat,
+    ControlRevision, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
+    ProtoIngressListener, ProtoIngressListenerMode, VersionedConfigSnapshot, WatchRequest,
+    CURRENT_CONTROL_PROTOCOL_VERSION, WATCH_READ_TIMEOUT,
 };
 use serde::{Deserialize, Serialize};
 /// Maintains the canonical ctld watch stream and applies Snapshot/Delta events.
@@ -457,6 +457,14 @@ async fn connect_and_watch(
 ) -> anyhow::Result<()> {
     info!(addr = %addr, "connecting to duotunnel-ctld");
     let stream = TcpStream::connect(addr).await?;
+    let _ = duotunnel_lib::TcpParams {
+        nodelay: true,
+        recv_buf_size: None,
+        send_buf_size: None,
+        keepalive: true,
+        user_timeout_ms: 30_000,
+    }
+    .apply(&stream);
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -471,9 +479,15 @@ async fn connect_and_watch(
     info!(addr = %addr, revision = ?req.last_applied_revision, "sent WatchRequest");
 
     let err = loop {
-        let event = match recv_config_event(&mut reader).await {
-            Ok(e) => e,
-            Err(e) => break e,
+        let event = match tokio::time::timeout(WATCH_READ_TIMEOUT, recv_config_event(&mut reader)).await {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => break e,
+            Err(_) => {
+                break anyhow::anyhow!(
+                    "ctld watch read timed out after {:?}",
+                    WATCH_READ_TIMEOUT
+                );
+            }
         };
         match event {
             ConfigEvent::Snapshot(versioned) => {
@@ -481,6 +495,9 @@ async fn connect_and_watch(
             }
             ConfigEvent::Delta(delta) => {
                 handle_delta(delta, state, watch_state, snapshot_path, &mut writer).await?;
+            }
+            ConfigEvent::Heartbeat(hb) => {
+                handle_heartbeat(hb, state, watch_state, &mut writer).await?;
             }
         }
     };
@@ -491,6 +508,50 @@ async fn connect_and_watch(
             .as_ref()
             .and_then(|state| state.revision.as_ref())
     )))
+}
+
+async fn handle_heartbeat<W>(
+    hb: ControlHeartbeat,
+    state: &Arc<ServerState>,
+    watch_state: &mut WatchState,
+    writer: &mut W,
+) -> anyhow::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    match classify_revision(watch_state.applied.as_ref(), &hb.revision, &hb.content_hash) {
+        RevisionDecision::Duplicate => {
+            state.health().confirm_control_freshness();
+            send_apply_response(
+                writer,
+                &hb.revision,
+                &hb.content_hash,
+                ApplyStatus::Duplicate,
+                None,
+            )
+            .await
+        }
+        RevisionDecision::Apply => {
+            send_apply_response(
+                writer,
+                &hb.revision,
+                &hb.content_hash,
+                ApplyStatus::ResyncRequired,
+                Some("heartbeat revision ahead of applied state".to_string()),
+            )
+            .await
+        }
+        RevisionDecision::Reject(reason) => {
+            send_apply_response(
+                writer,
+                &hb.revision,
+                &hb.content_hash,
+                ApplyStatus::ResyncRequired,
+                Some(reason),
+            )
+            .await
+        }
+    }
 }
 
 enum RevisionDecision {

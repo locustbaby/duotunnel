@@ -3,7 +3,8 @@ use crate::control::service::ControlService;
 use anyhow::Result;
 use duotunnel_lib::ctld_proto::{
     config_event_wire_size, recv_apply_response, recv_watch_request, send_config_event,
-    snapshot_content_hash, ApplyStatus, ControlRevision, VersionedConfigSnapshot, WatchRequest,
+    snapshot_content_hash, ApplyStatus, ControlHeartbeat, ControlRevision, VersionedConfigSnapshot,
+    WatchRequest, WATCH_HEARTBEAT_INTERVAL,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub struct WatchServer {
     bind_addr: SocketAddr,
     auth_token: Option<String>,
     connection_budget: Arc<Semaphore>,
+    heartbeat_interval: std::time::Duration,
 }
 
 struct WatchConnectionState {
@@ -43,7 +45,14 @@ impl WatchServer {
             bind_addr,
             auth_token,
             connection_budget: Arc::new(Semaphore::new(MAX_WATCH_CONNECTIONS)),
+            heartbeat_interval: WATCH_HEARTBEAT_INTERVAL,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_heartbeat_interval(mut self, interval: std::time::Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
     }
 
     pub async fn run_with_listener(self, listener: TcpListener) -> Result<()> {
@@ -53,6 +62,7 @@ impl WatchServer {
             "WatchServer listening"
         );
         let auth_token = Arc::new(self.auth_token);
+        let heartbeat_interval = self.heartbeat_interval;
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
@@ -67,8 +77,14 @@ impl WatchServer {
                     };
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(error) =
-                            handle_watch_connection(stream, peer, svc, auth_token).await
+                        if let Err(error) = handle_watch_connection(
+                            stream,
+                            peer,
+                            svc,
+                            auth_token,
+                            heartbeat_interval,
+                        )
+                        .await
                         {
                             debug!(peer = %peer, error = %error, "watch connection ended");
                         }
@@ -85,8 +101,17 @@ async fn handle_watch_connection(
     peer: SocketAddr,
     svc: Arc<ControlService>,
     auth_token: Arc<Option<String>>,
+    heartbeat_interval: std::time::Duration,
 ) -> Result<()> {
     info!(peer = %peer, "watch connection accepted");
+    let _ = duotunnel_lib::TcpParams {
+        nodelay: true,
+        recv_buf_size: None,
+        send_buf_size: None,
+        keepalive: true,
+        user_timeout_ms: 30_000,
+    }
+    .apply(&stream);
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
@@ -130,10 +155,48 @@ async fn handle_watch_connection(
         anyhow::bail!("server requested resync for initial snapshot");
     }
 
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+
     loop {
-        if changes.changed().await.is_err() {
-            warn!(peer = %peer, "ControlService watch channel closed");
-            return Ok(());
+        tokio::select! {
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    warn!(peer = %peer, "ControlService watch channel closed");
+                    return Ok(());
+                }
+                heartbeat.reset();
+            }
+            _ = heartbeat.tick() => {
+                let hb_event = ConfigEvent::Heartbeat(ControlHeartbeat {
+                    revision: state.last_acked_revision.clone(),
+                    content_hash: state.last_acked_hash.clone(),
+                });
+                let acked_snapshot = state.last_acked_snapshot.clone();
+                if matches!(
+                    send_and_ack(&mut reader, &mut writer, &hb_event, &mut state, &acked_snapshot).await?,
+                    AckOutcome::Resync
+                ) {
+                    let current = svc.snapshot();
+                    let current_revision = svc.revision_for_snapshot(current.as_ref());
+                    let current_hash = snapshot_content_hash(current.as_ref())?;
+                    let snapshot_event = ConfigEvent::Snapshot(versioned_snapshot(
+                        current_revision,
+                        current_hash,
+                        current.as_ref().clone(),
+                    ));
+                    send_and_ack(
+                        &mut reader,
+                        &mut writer,
+                        &snapshot_event,
+                        &mut state,
+                        &current,
+                    )
+                    .await?;
+                }
+                continue;
+            }
         }
         let current = svc.snapshot();
         let current_revision = svc.revision_for_snapshot(current.as_ref());
@@ -243,7 +306,7 @@ where
     match response.status {
         ApplyStatus::Applied | ApplyStatus::Duplicate => {
             match event {
-                ConfigEvent::Snapshot(_) => {}
+                ConfigEvent::Snapshot(_) | ConfigEvent::Heartbeat(_) => {}
                 ConfigEvent::Delta(delta) => {
                     let mut candidate = state.last_acked_snapshot.as_ref().clone();
                     duotunnel_lib::ctld_proto::apply_config_operations(
@@ -280,6 +343,7 @@ fn event_target(event: &ConfigEvent) -> (&ControlRevision, &str) {
     match event {
         ConfigEvent::Snapshot(snapshot) => (&snapshot.revision, &snapshot.content_hash),
         ConfigEvent::Delta(delta) => (&delta.target_revision, &delta.target_hash),
+        ConfigEvent::Heartbeat(hb) => (&hb.revision, &hb.content_hash),
     }
 }
 
@@ -418,7 +482,9 @@ mod tests {
                 assert_eq!(snapshot.snapshot, *svc.snapshot());
                 (snapshot.revision.clone(), snapshot.content_hash.clone())
             }
-            ConfigEvent::Delta(_) => panic!("initial watch event must be a Snapshot"),
+            ConfigEvent::Delta(_) | ConfigEvent::Heartbeat(_) => {
+                panic!("initial watch event must be a Snapshot")
+            }
         };
         send_apply_response(
             &mut writer,
@@ -448,7 +514,9 @@ mod tests {
                 assert_eq!(delta.operations.len(), 1);
                 (delta.target_revision.clone(), delta.target_hash.clone())
             }
-            ConfigEvent::Snapshot(_) => panic!("small routing change should use Delta"),
+            ConfigEvent::Snapshot(_) | ConfigEvent::Heartbeat(_) => {
+                panic!("small routing change should use Delta")
+            }
         };
         send_apply_response(
             &mut writer,
@@ -456,6 +524,80 @@ mod tests {
                 revision: target_revision,
                 content_hash: target_hash,
                 status: ApplyStatus::Applied,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        drop(writer);
+        drop(reader);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn tcp_watch_sends_periodic_heartbeats_when_idle() {
+        let initial_routing = base_routing();
+        let svc = setup_service(&initial_routing).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(
+            WatchServer::new(Arc::clone(&svc), addr, None)
+                .with_heartbeat_interval(Duration::from_millis(20))
+                .run_with_listener(listener),
+        );
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        send_watch_request(
+            &mut writer,
+            &WatchRequest {
+                token: None,
+                last_applied_revision: None,
+                last_applied_hash: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let initial_event = recv_config_event(&mut reader).await.unwrap();
+        let (initial_revision, initial_hash) = match &initial_event {
+            ConfigEvent::Snapshot(snapshot) => {
+                (snapshot.revision.clone(), snapshot.content_hash.clone())
+            }
+            _ => panic!("expected initial Snapshot"),
+        };
+        send_apply_response(
+            &mut writer,
+            &ApplyResponse {
+                revision: initial_revision.clone(),
+                content_hash: initial_hash.clone(),
+                status: ApplyStatus::Applied,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let hb_event = tokio::time::timeout(Duration::from_secs(1), recv_config_event(&mut reader))
+            .await
+            .unwrap()
+            .unwrap();
+        match hb_event {
+            ConfigEvent::Heartbeat(hb) => {
+                assert_eq!(hb.revision, initial_revision);
+                assert_eq!(hb.content_hash, initial_hash);
+            }
+            other => panic!("expected Heartbeat, got {other:?}"),
+        }
+        send_apply_response(
+            &mut writer,
+            &ApplyResponse {
+                revision: initial_revision,
+                content_hash: initial_hash,
+                status: ApplyStatus::Duplicate,
                 reason: None,
             },
         )
