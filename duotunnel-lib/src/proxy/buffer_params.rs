@@ -79,6 +79,9 @@ impl ProxyBufferParams {
                 ));
             }
         }
+        if self.sniff_timeout_ms == 0 {
+            return Err("sniff_timeout_ms must be >= 1, got 0".to_string());
+        }
         Ok(())
     }
 }

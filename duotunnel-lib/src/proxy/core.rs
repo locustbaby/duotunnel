@@ -40,20 +40,20 @@ pub trait UpstreamResolver: Send + Sync {
 pub struct ProxyEngine<A: UpstreamResolver> {
     app: A,
     peek_buf_pool: PeekBufPool,
+    sniff_timeout: std::time::Duration,
 }
 
 impl<A: UpstreamResolver> ProxyEngine<A> {
     pub fn new(app: A) -> Self {
-        Self {
-            app,
-            peek_buf_pool: PeekBufPool::new(ProxyBufferParams::default().peek_buf_size),
-        }
+        Self::new_with_buffer_params(app, ProxyBufferParams::default())
     }
 
     pub fn new_with_peek_buf_size(app: A, peek_buf_size: usize) -> Self {
+        let defaults = ProxyBufferParams::default();
         Self {
             app,
             peek_buf_pool: PeekBufPool::new(peek_buf_size),
+            sniff_timeout: std::time::Duration::from_millis(defaults.sniff_timeout_ms.max(1)),
         }
     }
 
@@ -61,7 +61,11 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
         app: A,
         buffer_params: crate::proxy::buffer_params::ProxyBufferParams,
     ) -> Self {
-        Self::new_with_peek_buf_size(app, buffer_params.peek_buf_size)
+        Self {
+            app,
+            peek_buf_pool: PeekBufPool::new(buffer_params.peek_buf_size),
+            sniff_timeout: std::time::Duration::from_millis(buffer_params.sniff_timeout_ms.max(1)),
+        }
     }
     pub async fn run_stream(
         &self,
@@ -80,7 +84,7 @@ impl<A: UpstreamResolver> ProxyEngine<A> {
             let runtime =
                 SniffRuntime::new(SniffPolicy::default(), default_proxyengine_detectors());
             let sniffed = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                self.sniff_timeout,
                 runtime.sniff(&mut recv, &self.peek_buf_pool),
             )
             .await
