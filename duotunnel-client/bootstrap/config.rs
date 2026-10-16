@@ -162,6 +162,8 @@ pub struct ClientConfigFile {
     pub reconnect: ReconnectConfig,
     #[serde(default)]
     pub overload: OverloadConfig,
+    #[serde(default)]
+    pub allowed_dial_targets: Vec<String>,
 }
 
 impl std::fmt::Debug for ClientConfigFile {
@@ -190,6 +192,7 @@ impl std::fmt::Debug for ClientConfigFile {
             .field("proxy_buffers", &self.proxy_buffers)
             .field("reconnect", &self.reconnect)
             .field("overload", &self.overload)
+            .field("allowed_dial_targets", &self.allowed_dial_targets)
             .finish()
     }
 }
@@ -298,6 +301,11 @@ impl ClientConfigFile {
         if matches!(self.overload.max_pending_streams, Some(0)) {
             errors.push("overload.max_pending_streams must be >= 1 when set".into());
         }
+        for target in &self.allowed_dial_targets {
+            if target.trim().is_empty() {
+                errors.push("allowed_dial_targets entries must not be empty".into());
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -316,6 +324,75 @@ impl ClientConfigFile {
             .map(str::trim)
             .unwrap_or_else(|| self.server_addr.trim())
     }
+}
+
+pub fn is_dial_target_allowed(allowed_patterns: &[String], addr: &str) -> bool {
+    if allowed_patterns.is_empty() {
+        return true;
+    }
+    let parsed = duotunnel_lib::transport::addr::parse_upstream(addr);
+    let target_host = parsed.host.trim_matches(|c| c == '[' || c == ']');
+    let target_port = parsed.port;
+
+    for raw_pattern in allowed_patterns {
+        let pattern = raw_pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        if pattern == "*" {
+            return true;
+        }
+        let (pat_host, pat_port) = split_allowlist_pattern(pattern);
+        if let Some(required_port) = pat_port {
+            if required_port != target_port {
+                continue;
+            }
+        }
+        if host_matches_pattern(target_host, pat_host) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_allowlist_pattern(pattern: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = pattern.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            if let Some(port_str) = tail.strip_prefix(':') {
+                if port_str == "*" {
+                    return (host, None);
+                }
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return (host, Some(port));
+                }
+            }
+            return (host, None);
+        }
+    }
+    if pattern.matches(':').count() == 1 {
+        if let Some((host, port_str)) = pattern.rsplit_once(':') {
+            if port_str == "*" {
+                return (host, None);
+            }
+            if let Ok(port) = port_str.parse::<u16>() {
+                return (host, Some(port));
+            }
+        }
+    }
+    (pattern, None)
+}
+
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim_matches(|c| c == '[' || c == ']');
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host.len() > suffix.len()
+            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+            && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix);
+    }
+    host.eq_ignore_ascii_case(pattern)
 }
 
 #[cfg(test)]
@@ -346,7 +423,28 @@ mod tests {
             proxy_buffers: Default::default(),
             reconnect: Default::default(),
             overload: Default::default(),
+            allowed_dial_targets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn test_allowed_dial_targets_matching() {
+        assert!(is_dial_target_allowed(&[], "http://169.254.169.254:80"));
+
+        let allowlist = vec![
+            "127.0.0.1".to_string(),
+            "localhost:8080".to_string(),
+            "[::1]:9000".to_string(),
+            "*.svc.local".to_string(),
+        ];
+        assert!(is_dial_target_allowed(&allowlist, "http://127.0.0.1:3000"));
+        assert!(is_dial_target_allowed(&allowlist, "127.0.0.1:22"));
+        assert!(is_dial_target_allowed(&allowlist, "http://localhost:8080"));
+        assert!(!is_dial_target_allowed(&allowlist, "http://localhost:8081"));
+        assert!(is_dial_target_allowed(&allowlist, "[::1]:9000"));
+        assert!(!is_dial_target_allowed(&allowlist, "[::1]:9001"));
+        assert!(is_dial_target_allowed(&allowlist, "https://api.svc.local:443"));
+        assert!(!is_dial_target_allowed(&allowlist, "http://169.254.169.254:80"));
     }
 
     #[test]

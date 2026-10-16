@@ -23,6 +23,7 @@ pub struct LocalProxyMap<L, R> {
     upstreams: HashMap<String, UpstreamGroup<L>>,
     resolver: Arc<R>,
     pub http_connector: SharedHttpConnector,
+    allowed_dial_targets: Vec<String>,
 }
 
 impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
@@ -49,9 +50,44 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         resolver: Arc<R>,
         buffer_params: &ProxyBufferParams,
     ) -> Result<Self> {
+        Self::from_config_with_allowed_targets(
+            config,
+            http_params,
+            lb,
+            resolver,
+            buffer_params,
+            &[],
+        )
+    }
+
+    pub fn from_config_with_allowed_targets(
+        config: &ClientConfig,
+        http_params: &HttpClientParams,
+        lb: Arc<L>,
+        resolver: Arc<R>,
+        buffer_params: &ProxyBufferParams,
+        allowed_dial_targets: &[String],
+    ) -> Result<Self> {
         let mut upstreams = HashMap::new();
         for upstream in &config.upstreams {
-            let raw: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
+            let mut raw = Vec::new();
+            for s in &upstream.servers {
+                if crate::bootstrap::config::is_dial_target_allowed(
+                    allowed_dial_targets,
+                    &s.address,
+                ) {
+                    raw.push(s.address.clone());
+                } else {
+                    tracing::warn!(
+                        upstream = %upstream.name,
+                        address = %s.address,
+                        "rejecting server-pushed upstream target not in client allowed_dial_targets"
+                    );
+                }
+            }
+            if raw.is_empty() {
+                continue;
+            }
             let targets: Vec<Target> = raw
                 .iter()
                 .map(|addr| {
@@ -85,6 +121,7 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
             upstreams,
             resolver,
             http_connector,
+            allowed_dial_targets: allowed_dial_targets.to_vec(),
         })
     }
 
@@ -93,11 +130,24 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         let ctx = PickCtx { client_addr };
         let idx = group.lb.pick(&group.targets, &ctx)?;
         let addr = group.raw.get(idx).cloned()?;
+        if !crate::bootstrap::config::is_dial_target_allowed(&self.allowed_dial_targets, &addr) {
+            tracing::warn!(proxy_name = %proxy_name, server = %addr, "dial target blocked by allowed_dial_targets");
+            return None;
+        }
         debug!(proxy_name = %proxy_name, server = %addr, "upstream selected");
         Some(addr)
     }
 
     pub async fn resolve_addr(&self, connect_addr_str: &str) -> Result<SocketAddr> {
+        if !crate::bootstrap::config::is_dial_target_allowed(
+            &self.allowed_dial_targets,
+            connect_addr_str,
+        ) {
+            return Err(anyhow!(
+                "dial target {} is not permitted by allowed_dial_targets",
+                connect_addr_str
+            ));
+        }
         if let Ok(addr) = connect_addr_str.parse::<SocketAddr>() {
             return Ok(addr);
         }
