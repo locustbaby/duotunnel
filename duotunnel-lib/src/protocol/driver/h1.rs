@@ -119,12 +119,9 @@ impl Http1Driver {
         Ok(())
     }
     pub async fn write_502(&mut self, error_msg: &str) -> Result<()> {
-        let resp = format!(
-            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-            error_msg.len(),
-            error_msg
-        );
-        self.send.write_all(resp.as_bytes()).await?;
+        tracing::debug!(error = %error_msg, "writing sanitized 502 Bad Gateway response");
+        const RESP_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 15\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n502 Bad Gateway";
+        self.send.write_all(RESP_502).await?;
         Ok(())
     }
     async fn reclaim_recv(&mut self) -> Result<()> {

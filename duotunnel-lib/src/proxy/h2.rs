@@ -99,9 +99,10 @@ where
             {
                 Ok(uri) => uri,
                 Err(error) => {
-                    let body = http_body_util::Full::new(Bytes::from(format!(
-                        "invalid request target: {error}"
-                    )))
+                    debug!(error = %error, "H2 forward: invalid request target");
+                    let body = http_body_util::Full::new(Bytes::from_static(
+                        b"invalid request target",
+                    ))
                     .map_err(|never| match never {})
                     .boxed();
                     return Ok(Response::builder()
@@ -130,7 +131,7 @@ where
                     );
                     let payload = serde_json::json!({
                         "error_code": proxy_err.error_code(),
-                        "message": proxy_err.to_string(),
+                        "message": "502 Bad Gateway",
                     });
                     let body_bytes = Bytes::from(serde_json::to_vec(&payload).unwrap_or_default());
 

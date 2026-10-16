@@ -29,13 +29,9 @@ impl HttpPeer {
         let parsed_scheme = match self.spec.scheme.parse::<http::uri::Scheme>() {
             Ok(s) => s,
             Err(e) => {
-                let error_msg = format!("502 Bad Gateway: Invalid target scheme: {e}");
-                let resp = format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-                    error_msg.len(),
-                    error_msg
-                );
-                let _ = send.write_all(resp.as_bytes()).await;
+                debug!(error = %e, "invalid target scheme, sending 502");
+                const RESP_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 15\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n502 Bad Gateway";
+                let _ = send.write_all(RESP_502).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target scheme: {e}"));
             }
@@ -43,13 +39,9 @@ impl HttpPeer {
         let parsed_authority = match self.spec.target_host.parse::<http::uri::Authority>() {
             Ok(a) => a,
             Err(e) => {
-                let error_msg = format!("502 Bad Gateway: Invalid target authority: {e}");
-                let resp = format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-                    error_msg.len(),
-                    error_msg
-                );
-                let _ = send.write_all(resp.as_bytes()).await;
+                debug!(error = %e, "invalid target authority, sending 502");
+                const RESP_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 15\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n502 Bad Gateway";
+                let _ = send.write_all(RESP_502).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target authority: {e}"));
             }
