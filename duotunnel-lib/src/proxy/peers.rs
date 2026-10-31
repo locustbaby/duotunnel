@@ -52,6 +52,7 @@ pub struct HttpPeerSpec {
 
 #[derive(Debug, Clone)]
 pub struct MitmPeerSpec {
+    pub target_host: String,
     pub tls_host: String,
 }
 

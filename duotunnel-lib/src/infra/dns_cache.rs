@@ -66,6 +66,7 @@ pub struct EgressDnsCache {
     inflight: Arc<DashMap<DnsKey, InflightTx>>,
     ttl: Duration,
     max_entries: usize,
+    insertion_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 impl EgressDnsCache {
@@ -79,15 +80,18 @@ impl EgressDnsCache {
             inflight: Arc::new(DashMap::new()),
             ttl,
             max_entries: max_entries.max(1),
+            insertion_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
     fn insert_bounded(
         cache: &DashMap<DnsKey, DnsEntry>,
+        insertion_lock: &parking_lot::Mutex<()>,
         max_entries: usize,
         key: DnsKey,
         entry: DnsEntry,
     ) {
+        let _guard = insertion_lock.lock();
         if cache.len() >= max_entries && !cache.contains_key(&key) {
             let now = Instant::now();
             cache.retain(|_, v| now < v.expires_at);
@@ -203,6 +207,7 @@ impl EgressDnsCache {
             let inflight = self.inflight.clone();
             let ttl = self.ttl;
             let max_entries = self.max_entries;
+            let insertion_lock = self.insertion_lock.clone();
 
             tokio::spawn(async move {
                 let lookup_res = tokio::time::timeout(
@@ -228,6 +233,7 @@ impl EgressDnsCache {
                     Ok(resolved_vec) => {
                         Self::insert_bounded(
                             &cache,
+                            &insertion_lock,
                             max_entries,
                             key_clone.clone(),
                             DnsEntry::new(resolved_vec.clone(), Instant::now() + ttl),
@@ -244,6 +250,7 @@ impl EgressDnsCache {
                         if !updated_stale {
                             Self::insert_bounded(
                                 &cache,
+                            &insertion_lock,
                                 max_entries,
                                 key_clone.clone(),
                                 DnsEntry::new_negative(
@@ -321,6 +328,7 @@ mod tests {
         let cache = EgressDnsCache::with_capacity(Duration::from_secs(10), 2);
         EgressDnsCache::insert_bounded(
             &cache.cache,
+            &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent1.invalid".to_string(), 80),
             DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
@@ -334,16 +342,40 @@ mod tests {
 
         EgressDnsCache::insert_bounded(
             &cache.cache,
+            &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent2.invalid".to_string(), 80),
             DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
         );
         EgressDnsCache::insert_bounded(
             &cache.cache,
+            &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent3.invalid".to_string(), 80),
             DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
         );
         assert!(cache.cache.len() <= 2);
     }
+    #[test]
+    fn concurrent_inserts_respect_capacity() {
+        let cache = EgressDnsCache::with_capacity(Duration::from_secs(60), 8);
+        std::thread::scope(|scope| {
+            for worker in 0..16 {
+                let cache = &cache;
+                scope.spawn(move || {
+                    for index in 0..100 {
+                        EgressDnsCache::insert_bounded(
+                            &cache.cache,
+                            &cache.insertion_lock,
+                            cache.max_entries,
+                            (format!("{worker}-{index}.invalid"), 80),
+                            DnsEntry::new_negative("missing".into(), Instant::now() + Duration::from_secs(60)),
+                        );
+                        assert!(cache.cache.len() <= cache.max_entries);
+                    }
+                });
+            }
+        });
+    }
+
 }

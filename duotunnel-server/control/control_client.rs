@@ -4,7 +4,7 @@ use duotunnel_lib::ctld_proto::{
     ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot, ControlHeartbeat,
     ControlRevision, ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule,
     ProtoIngressListener, ProtoIngressListenerMode, VersionedConfigSnapshot, WatchRequest,
-    CURRENT_CONTROL_PROTOCOL_VERSION, WATCH_READ_TIMEOUT,
+    WATCH_READ_TIMEOUT,
 };
 use serde::{Deserialize, Serialize};
 /// Maintains the canonical ctld watch stream and applies Snapshot/Delta events.
@@ -55,7 +55,8 @@ impl BackgroundService for ControlClientService {
 }
 
 const LKG_FORMAT_VERSION: u32 = 3;
-const LKG_CONTROL_PROTOCOL_VERSION: u32 = CURRENT_CONTROL_PROTOCOL_VERSION as u32;
+// Heartbeats change the wire protocol, not the persisted snapshot schema.
+const LKG_CONTROL_PROTOCOL_VERSION: u32 = 3;
 const MAX_LKG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LKG_AGE: Duration = crate::runtime::health::CONTROL_SECURITY_STALE_AFTER;
 const MAX_LKG_FUTURE_SKEW: Duration = Duration::from_secs(300);
@@ -1055,6 +1056,7 @@ fn build_runtime_generation(
         &http_params,
         state.upstream_health(),
         state.proxy_buffer_params(),
+        state.tcp_params(),
     )?;
     let listeners = tm.server_ingress_routing.listeners.clone();
     let token_map = build_token_map(&snap.token_cache)?;

@@ -5,7 +5,7 @@
 在 `feat/todo-implementation` 分支中，按独立 Commit 落地了 2026-09-23 代码审查发现的 P0/P1/P2 核心修复及历史高优项：
 
 - **[TODO-179 / R1] 控制面 Watch 空闲心跳与读超时保活 (`ac03647`)**：
-  - 在 DTCP v3 协议中新增轻量 `ConfigEvent::Heartbeat(ControlHeartbeat { revision, content_hash })`（20s 周期）与 45s 读超时常量。
+  - 在 DTCP v4 协议中新增轻量 `ConfigEvent::Heartbeat(ControlHeartbeat { revision, content_hash })`（20s 周期）与 45s 读超时常量。v4 与旧版线协议不兼容，ctld/server 需要配套升级；磁盘 LKG 快照格式保持 v3。
   - `duotunnel-ctld` 的 `WatchServer` 在配置无变更时定期发送心跳并开启 TCP Keepalive；`duotunnel-server` 的 `control_client` 校验 `revision`/`content_hash` 一致后直接刷新 `confirm_control_freshness()` 并回复 `ApplyStatus::Duplicate`（不触发磁盘 LKG 重写），若版本不一致则触发 `ResyncRequired` 全量重同步。
 - **[TODO-180 / R3 / R4 / R5] 上游 TCP connect、TLS 握手与 H2 连接重建超时保护 (`1cb9ae1`)**：
   - 在 `TcpParams` 与 `TcpConfig` 中新增 `connect_timeout_ms`（默认 5000ms）与 `tls_handshake_timeout_ms`（默认 5000ms），并在 `TcpPeer::connect_inner_with_buffer_size` 及 `ServerEgressMap::connect_peer` 中统一接入超时保护与被动健康失败计数。

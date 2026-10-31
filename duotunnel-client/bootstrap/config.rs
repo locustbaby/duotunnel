@@ -302,8 +302,8 @@ impl ClientConfigFile {
             errors.push("overload.max_pending_streams must be >= 1 when set".into());
         }
         for target in &self.allowed_dial_targets {
-            if target.trim().is_empty() {
-                errors.push("allowed_dial_targets entries must not be empty".into());
+            if target.trim().is_empty() || (target.trim().starts_with('[') && split_allowlist_pattern(target.trim()).0 == target.trim()) {
+                errors.push("allowed_dial_targets entries must be nonempty and have valid bracketed host/port syntax".into());
             }
         }
         if errors.is_empty() {
@@ -366,7 +366,7 @@ fn split_allowlist_pattern(pattern: &str) -> (&str, Option<u16>) {
                     return (host, Some(port));
                 }
             }
-            return (host, None);
+            return if tail.is_empty() { (host, None) } else { (pattern, None) };
         }
     }
     if pattern.matches(':').count() == 1 {
@@ -424,6 +424,16 @@ mod tests {
             reconnect: Default::default(),
             overload: Default::default(),
             allowed_dial_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_ipv6_ports_fail_closed() {
+        for pattern in ["[::1]:65536", "[::1]:abc", "[::1]:", "[::1]junk"] {
+            assert!(!is_dial_target_allowed(&[pattern.into()], "[::1]:443"));
+            let mut config = create_mock_config("example.com", 443, None);
+            config.allowed_dial_targets = vec![pattern.into()];
+            assert!(config.validate().is_err());
         }
     }
 

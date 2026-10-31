@@ -16,6 +16,7 @@ pub struct ServerEgressMap {
     http_connector: SharedHttpConnector,
     dns_cache: duotunnel_lib::EgressDnsCache,
     relay_buf_size: usize,
+    tcp_params: duotunnel_lib::TcpParams,
 }
 impl ServerEgressMap {
     pub fn from_config_with_health(
@@ -23,6 +24,7 @@ impl ServerEgressMap {
         http_params: &HttpClientParams,
         health: Arc<UpstreamHealthRegistry>,
         buffer_params: &duotunnel_lib::ProxyBufferParams,
+        tcp_params: &duotunnel_lib::TcpParams,
     ) -> anyhow::Result<Self> {
         let mut upstreams = HashMap::new();
         let http_rules = VhostRouter::new();
@@ -60,6 +62,7 @@ impl ServerEgressMap {
             http_connector,
             dns_cache: duotunnel_lib::EgressDnsCache::new(std::time::Duration::from_secs(30)),
             relay_buf_size: buffer_params.relay_buf_size,
+            tcp_params: tcp_params.clone(),
         })
     }
 
@@ -226,7 +229,7 @@ impl UpstreamResolver for ServerEgressMap {
     ) -> Result<(), ProxyError> {
         match peer {
             PeerSpec::Tcp(spec) => {
-                let tcp_params = duotunnel_lib::TcpParams::default();
+                let tcp_params = self.tcp_params.clone();
                 let connect_timeout =
                     std::time::Duration::from_millis(tcp_params.connect_timeout_ms);
                 let tls_timeout =

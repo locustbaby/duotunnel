@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const CURRENT_CONTROL_PROTOCOL_VERSION: u16 = 3;
+pub const CURRENT_CONTROL_PROTOCOL_VERSION: u16 = 4;
 const CONTROL_WIRE_MAGIC: [u8; 4] = *b"DTCP";
 const CONTROL_ENVELOPE_HEADER_BYTES: usize = 4 + 2 + 1 + 4;
 

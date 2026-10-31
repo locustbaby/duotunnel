@@ -386,6 +386,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         &http_params,
         upstream_health.clone(),
         &proxy_buffer_params,
+        &duotunnel_lib::TcpParams::from(&bootstrap.config.server.tcp),
     )?;
     let peek_buf_pool = crate::PeekBufPool::new(proxy_buffer_params.peek_buf_size);
     let max_streams = duotunnel_lib::QuicTransportParams::from(&bootstrap.config.server.quic)
@@ -496,6 +497,7 @@ pub(crate) fn build_routing_snapshot_with_health(
     http_params: &HttpClientParams,
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     proxy_buffer_params: &duotunnel_lib::ProxyBufferParams,
+    tcp_params: &duotunnel_lib::TcpParams,
 ) -> Result<RoutingSnapshot> {
     let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
@@ -523,6 +525,7 @@ pub(crate) fn build_routing_snapshot_with_health(
         http_params,
         upstream_health,
         proxy_buffer_params,
+        tcp_params,
     )?;
     let egress_rules = egress
         .rules

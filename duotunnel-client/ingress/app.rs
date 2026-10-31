@@ -263,6 +263,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
             Protocol::Tcp => {
                 if is_https {
                     let spec = MitmPeerSpec {
+                        target_host: connect_addr_str,
                         tls_host: tls_host.as_deref().unwrap_or("localhost").to_string(),
                     };
                     Ok(PeerSpec::MitmH2(spec))
@@ -335,7 +336,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     .serve_h2(
                         accepted_stream,
                         HttpPeerSpec {
-                            target_host: spec.tls_host,
+                            target_host: spec.target_host,
                             scheme: "https".to_string(),
                             upstream_protocol: Protocol::H2,
                             upstream_name: None,
