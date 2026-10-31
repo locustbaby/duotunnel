@@ -15,7 +15,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const CURRENT_CONTROL_PROTOCOL_VERSION: u16 = 3;
+pub const CURRENT_CONTROL_PROTOCOL_VERSION: u16 = 4;
+/// v3 peers stay interoperable during rolling upgrades: every frame is stamped with
+/// the lowest version able to express it, so only v4-only payloads (Heartbeat) carry 4.
+pub const MIN_CONTROL_PROTOCOL_VERSION: u16 = 3;
+/// A WatchRequest stamped with at least this version declares that the server
+/// understands Heartbeat events and runs a read timeout on the watch stream.
+pub const HEARTBEAT_CONTROL_PROTOCOL_VERSION: u16 = 4;
 const CONTROL_WIRE_MAGIC: [u8; 4] = *b"DTCP";
 const CONTROL_ENVELOPE_HEADER_BYTES: usize = 4 + 2 + 1 + 4;
 
@@ -99,6 +105,25 @@ pub struct ConfigDelta {
     pub operations: Vec<ConfigOperation>,
 }
 
+pub const WATCH_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+pub const WATCH_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+#[derive(
+    Debug,
+    Clone,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ControlHeartbeat {
+    pub revision: ControlRevision,
+    pub content_hash: String,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -113,6 +138,7 @@ pub struct ConfigDelta {
 pub enum ConfigEvent {
     Snapshot(VersionedConfigSnapshot),
     Delta(ConfigDelta),
+    Heartbeat(ControlHeartbeat),
 }
 
 #[derive(
@@ -196,12 +222,17 @@ where
         .map_err(|e| anyhow!("rkyv deserialize failed: {e}"))
 }
 
-fn encode_control_payload<T>(kind: ControlMessageKind, payload: &T) -> Result<Vec<u8>>
+fn encode_control_payload<T>(
+    kind: ControlMessageKind,
+    wire_version: u16,
+    payload: &T,
+) -> Result<Vec<u8>>
 where
     T: for<'a> Serialize<
         HighSerializer<AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rancor::Error>,
     >,
 {
+    ensure_supported_wire_version(wire_version)?;
     let payload = rkyv::to_bytes::<rancor::Error>(payload)
         .map_err(|e| anyhow!("rkyv serialize failed: {e}"))?;
     let payload_len = u32::try_from(payload.len())
@@ -215,16 +246,31 @@ where
 
     let mut frame = Vec::with_capacity(frame_len);
     frame.extend_from_slice(&CONTROL_WIRE_MAGIC);
-    frame.extend_from_slice(&CURRENT_CONTROL_PROTOCOL_VERSION.to_be_bytes());
+    frame.extend_from_slice(&wire_version.to_be_bytes());
     frame.push(kind as u8);
     frame.extend_from_slice(&payload_len.to_be_bytes());
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
 
+fn ensure_supported_wire_version(wire_version: u16) -> Result<()> {
+    if !(MIN_CONTROL_PROTOCOL_VERSION..=CURRENT_CONTROL_PROTOCOL_VERSION).contains(&wire_version) {
+        return Err(anyhow!("unsupported control wire version: {wire_version}"));
+    }
+    Ok(())
+}
+
+fn config_event_wire_version(event: &ConfigEvent) -> u16 {
+    match event {
+        ConfigEvent::Snapshot(_) | ConfigEvent::Delta(_) => MIN_CONTROL_PROTOCOL_VERSION,
+        ConfigEvent::Heartbeat(_) => HEARTBEAT_CONTROL_PROTOCOL_VERSION,
+    }
+}
+
 async fn send_control_payload<W, T>(
     writer: &mut W,
     kind: ControlMessageKind,
+    wire_version: u16,
     payload: &T,
 ) -> Result<()>
 where
@@ -233,7 +279,7 @@ where
         HighSerializer<AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rancor::Error>,
     >,
 {
-    let payload = encode_control_payload(kind, payload)?;
+    let payload = encode_control_payload(kind, wire_version, payload)?;
     let frame_len = u32::try_from(payload.len())
         .map_err(|_| anyhow!("control message is too large: {} bytes", payload.len()))?;
     writer.write_u8(MessageType::ConfigPush as u8).await?;
@@ -245,7 +291,7 @@ where
 async fn recv_control_payload<R>(
     reader: &mut R,
     expected_kind: ControlMessageKind,
-) -> Result<AlignedVec<16>>
+) -> Result<(AlignedVec<16>, u16)>
 where
     R: AsyncReadExt + Unpin,
 {
@@ -272,9 +318,7 @@ where
         return Err(anyhow!("invalid control envelope magic"));
     }
     let wire_version = u16::from_be_bytes([frame[4], frame[5]]);
-    if wire_version != CURRENT_CONTROL_PROTOCOL_VERSION {
-        return Err(anyhow!("unsupported control wire version: {wire_version}"));
-    }
+    ensure_supported_wire_version(wire_version)?;
     let kind = ControlMessageKind::from_u8(frame[6])?;
     if kind != expected_kind {
         return Err(anyhow!(
@@ -293,25 +337,48 @@ where
 
     let mut payload = AlignedVec::<16>::with_capacity(payload_len);
     payload.extend_from_slice(&frame[CONTROL_ENVELOPE_HEADER_BYTES..]);
-    Ok(payload)
+    Ok((payload, wire_version))
 }
 
 pub async fn send_watch_request<W>(writer: &mut W, req: &WatchRequest) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    send_control_payload(writer, ControlMessageKind::WatchRequest, req).await
+    send_watch_request_with_version(writer, CURRENT_CONTROL_PROTOCOL_VERSION, req).await
+}
+
+/// The stamped version advertises the sender's capabilities; a v3 stamp keeps the
+/// request acceptable to ctld builds that still require an exact v3 match.
+pub async fn send_watch_request_with_version<W>(
+    writer: &mut W,
+    wire_version: u16,
+    req: &WatchRequest,
+) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    send_control_payload(writer, ControlMessageKind::WatchRequest, wire_version, req).await
 }
 
 pub async fn send_config_event<W>(writer: &mut W, event: &ConfigEvent) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    send_control_payload(writer, ControlMessageKind::ConfigEvent, event).await
+    send_control_payload(
+        writer,
+        ControlMessageKind::ConfigEvent,
+        config_event_wire_version(event),
+        event,
+    )
+    .await
 }
 
 pub fn config_event_wire_size(event: &ConfigEvent) -> Result<usize> {
-    let encoded = encode_control_payload(ControlMessageKind::ConfigEvent, event)?;
+    let encoded = encode_control_payload(
+        ControlMessageKind::ConfigEvent,
+        config_event_wire_version(event),
+        event,
+    )?;
     5usize
         .checked_add(encoded.len())
         .ok_or_else(|| anyhow!("control event wire size overflow"))
@@ -321,30 +388,52 @@ pub async fn send_apply_response<W>(writer: &mut W, response: &ApplyResponse) ->
 where
     W: AsyncWriteExt + Unpin,
 {
-    send_control_payload(writer, ControlMessageKind::ApplyResponse, response).await
+    send_control_payload(
+        writer,
+        ControlMessageKind::ApplyResponse,
+        MIN_CONTROL_PROTOCOL_VERSION,
+        response,
+    )
+    .await
 }
 
 pub async fn recv_watch_request<R>(reader: &mut R) -> Result<WatchRequest>
 where
     R: AsyncReadExt + Unpin,
 {
-    let buf = recv_control_payload(reader, ControlMessageKind::WatchRequest).await?;
-    decode_rkyv::<WatchRequest>(&buf)
+    Ok(recv_watch_request_with_version(reader).await?.0)
+}
+
+/// Returns the request together with the wire version the peer stamped on it.
+pub async fn recv_watch_request_with_version<R>(reader: &mut R) -> Result<(WatchRequest, u16)>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let (buf, wire_version) =
+        recv_control_payload(reader, ControlMessageKind::WatchRequest).await?;
+    Ok((decode_rkyv::<WatchRequest>(&buf)?, wire_version))
 }
 
 pub async fn recv_config_event<R>(reader: &mut R) -> Result<ConfigEvent>
 where
     R: AsyncReadExt + Unpin,
 {
-    let buf = recv_control_payload(reader, ControlMessageKind::ConfigEvent).await?;
-    decode_rkyv::<ConfigEvent>(&buf)
+    let (buf, wire_version) = recv_control_payload(reader, ControlMessageKind::ConfigEvent).await?;
+    let event = decode_rkyv::<ConfigEvent>(&buf)?;
+    if wire_version < config_event_wire_version(&event) {
+        return Err(anyhow!(
+            "config event requires wire version {}, got {wire_version}",
+            config_event_wire_version(&event)
+        ));
+    }
+    Ok(event)
 }
 
 pub async fn recv_apply_response<R>(reader: &mut R) -> Result<ApplyResponse>
 where
     R: AsyncReadExt + Unpin,
 {
-    let buf = recv_control_payload(reader, ControlMessageKind::ApplyResponse).await?;
+    let (buf, _) = recv_control_payload(reader, ControlMessageKind::ApplyResponse).await?;
     decode_rkyv::<ApplyResponse>(&buf)
 }
 
@@ -649,6 +738,89 @@ mod tests {
 
         send_watch_request(&mut client, &req).await.unwrap();
         assert_eq!(recv_watch_request(&mut server).await.unwrap(), req);
+    }
+
+    async fn raw_frame_version<R: AsyncReadExt + Unpin>(reader: &mut R) -> u16 {
+        assert_eq!(
+            reader.read_u8().await.unwrap(),
+            MessageType::ConfigPush as u8
+        );
+        let len = reader.read_u32().await.unwrap() as usize;
+        let mut frame = vec![0; len];
+        reader.read_exact(&mut frame).await.unwrap();
+        u16::from_be_bytes([frame[4], frame[5]])
+    }
+
+    #[tokio::test]
+    async fn frames_are_stamped_with_lowest_version_that_expresses_them() {
+        let revision = ControlRevision {
+            epoch: "epoch-a".into(),
+            sequence: 1,
+        };
+        let snapshot = ConfigEvent::Snapshot(VersionedConfigSnapshot {
+            revision: revision.clone(),
+            content_hash: "hash".into(),
+            generated_at_unix_ms: 0,
+            snapshot: empty_snapshot(1),
+        });
+        let heartbeat = ConfigEvent::Heartbeat(ControlHeartbeat {
+            revision: revision.clone(),
+            content_hash: "hash".into(),
+        });
+        let response = ApplyResponse {
+            revision,
+            content_hash: "hash".into(),
+            status: ApplyStatus::Duplicate,
+            reason: None,
+        };
+
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        send_config_event(&mut client, &snapshot).await.unwrap();
+        assert_eq!(raw_frame_version(&mut server).await, 3);
+        send_apply_response(&mut client, &response).await.unwrap();
+        assert_eq!(raw_frame_version(&mut server).await, 3);
+        send_config_event(&mut client, &heartbeat).await.unwrap();
+        assert_eq!(raw_frame_version(&mut server).await, 4);
+    }
+
+    #[tokio::test]
+    async fn v3_and_v4_watch_requests_are_both_accepted_with_their_version() {
+        let req = WatchRequest {
+            token: Some("t".into()),
+            last_applied_revision: None,
+            last_applied_hash: None,
+        };
+        for version in [3u16, 4] {
+            let (mut client, mut server) = tokio::io::duplex(1024);
+            send_watch_request_with_version(&mut client, version, &req)
+                .await
+                .unwrap();
+            assert_eq!(
+                recv_watch_request_with_version(&mut server).await.unwrap(),
+                (req.clone(), version)
+            );
+        }
+        let (mut client, _server) = tokio::io::duplex(1024);
+        assert!(send_watch_request_with_version(&mut client, 5, &req)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_in_v3_frame_is_rejected() {
+        let heartbeat = ConfigEvent::Heartbeat(ControlHeartbeat {
+            revision: ControlRevision {
+                epoch: "epoch-a".into(),
+                sequence: 1,
+            },
+            content_hash: "hash".into(),
+        });
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        send_control_payload(&mut client, ControlMessageKind::ConfigEvent, 3, &heartbeat)
+            .await
+            .unwrap();
+        let error = recv_config_event(&mut server).await.unwrap_err();
+        assert!(error.to_string().contains("requires wire version 4"));
     }
 
     #[tokio::test]

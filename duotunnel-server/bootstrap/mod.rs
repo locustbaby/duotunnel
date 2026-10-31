@@ -201,6 +201,7 @@ struct IngressRuntime {
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     listeners: listener_mgr::ListenerManager,
     plugin_registry: Arc<duotunnel_lib::plugin::PluginRegistry>,
+    ingress_conn_semaphore: Arc<tokio::sync::Semaphore>,
     /// Listeners must always run on the multi-threaded proxy runtime, never on
     /// whichever runtime happened to apply a config update: the control-plane
     /// runtime is single-threaded and outlived by the listeners it would
@@ -221,6 +222,14 @@ pub(crate) struct ServerState {
 }
 
 impl ServerState {
+    pub(crate) fn try_acquire_ingress_conn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.ingress
+            .ingress_conn_semaphore
+            .clone()
+            .try_acquire_owned()
+            .ok()
+    }
+
     pub(crate) fn http_client_params(&self) -> HttpClientParams {
         HttpClientParams::from(&self.ingress.config.server.http_pool)
     }
@@ -377,6 +386,7 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         &http_params,
         upstream_health.clone(),
         &proxy_buffer_params,
+        &duotunnel_lib::TcpParams::from(&bootstrap.config.server.tcp),
     )?;
     let peek_buf_pool = crate::PeekBufPool::new(proxy_buffer_params.peek_buf_size);
     let max_streams = duotunnel_lib::QuicTransportParams::from(&bootstrap.config.server.quic)
@@ -462,6 +472,14 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             upstream_health,
             listeners: listener_mgr::ListenerManager::new(),
             plugin_registry,
+            ingress_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                bootstrap
+                    .config
+                    .server
+                    .overload
+                    .max_ingress_connections
+                    .max(1),
+            )),
             proxy_handle: tokio::runtime::Handle::current(),
         },
         connection: ConnectionRuntime {
@@ -479,6 +497,7 @@ pub(crate) fn build_routing_snapshot_with_health(
     http_params: &HttpClientParams,
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     proxy_buffer_params: &duotunnel_lib::ProxyBufferParams,
+    tcp_params: &duotunnel_lib::TcpParams,
 ) -> Result<RoutingSnapshot> {
     let mut http_routers: HashMap<u16, Arc<VhostRouter<RouteTarget>>> = HashMap::new();
     for listener in &tm.server_ingress_routing.listeners {
@@ -506,6 +525,7 @@ pub(crate) fn build_routing_snapshot_with_health(
         http_params,
         upstream_health,
         proxy_buffer_params,
+        tcp_params,
     )?;
     let egress_rules = egress
         .rules

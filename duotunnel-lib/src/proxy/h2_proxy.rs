@@ -112,6 +112,7 @@ where
                 None => {
                     debug!("H2 sender miss, establishing new connection");
 
+                    let handshake_timeout = stream_request.stream_timeout;
                     let opened = client_conn.open_stream(stream_request).await?;
                     let crate::OpenedStream {
                         send,
@@ -121,11 +122,19 @@ where
                     } = opened;
                     let quic_stream = QuinnStream { send, recv };
                     let io = TokioIo::new(quic_stream);
-                    let (new_sender, conn_driver) =
+                    let (new_sender, conn_driver) = tokio::time::timeout(
+                        handshake_timeout,
                         H2ClientBuilder::new(hyper_util::rt::TokioExecutor::new())
                             .initial_max_send_streams(H2_CLIENT_MAX_SEND_STREAMS)
-                            .handshake(io)
-                            .await?;
+                            .handshake(io),
+                    )
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "H2 client handshake timed out after {:?}",
+                            handshake_timeout
+                        )
+                    })??;
 
                     let sender = new_sender.clone();
                     let sender_arc = Arc::new(Some(new_sender));

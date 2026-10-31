@@ -7,15 +7,19 @@ pub struct TcpParams {
     pub send_buf_size: Option<u32>,
     pub keepalive: bool,
     pub user_timeout_ms: u32,
+    pub connect_timeout_ms: u64,
+    pub tls_handshake_timeout_ms: u64,
 }
 impl Default for TcpParams {
     fn default() -> Self {
         Self {
             nodelay: true,
-            recv_buf_size: Some(4 * 1024 * 1024),
-            send_buf_size: Some(4 * 1024 * 1024),
+            recv_buf_size: None,
+            send_buf_size: None,
             keepalive: true,
             user_timeout_ms: 30_000,
+            connect_timeout_ms: 5_000,
+            tls_handshake_timeout_ms: 5_000,
         }
     }
 }

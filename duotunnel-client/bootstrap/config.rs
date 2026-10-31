@@ -1,3 +1,4 @@
+use crate::bootstrap::dial_policy::DialPolicy;
 use anyhow::Result;
 use duotunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use duotunnel_lib::transport::quic::QuicTransportParams;
@@ -162,6 +163,12 @@ pub struct ClientConfigFile {
     pub reconnect: ReconnectConfig,
     #[serde(default)]
     pub overload: OverloadConfig,
+    #[serde(default)]
+    pub allowed_dial_targets: Vec<String>,
+    /// Refuse dials whose resolved address is loopback, link-local (incl. cloud
+    /// metadata) or unspecified unless an explicit IP/CIDR entry allows it.
+    #[serde(default)]
+    pub deny_loopback_and_link_local_dial: bool,
 }
 
 impl std::fmt::Debug for ClientConfigFile {
@@ -190,6 +197,11 @@ impl std::fmt::Debug for ClientConfigFile {
             .field("proxy_buffers", &self.proxy_buffers)
             .field("reconnect", &self.reconnect)
             .field("overload", &self.overload)
+            .field("allowed_dial_targets", &self.allowed_dial_targets)
+            .field(
+                "deny_loopback_and_link_local_dial",
+                &self.deny_loopback_and_link_local_dial,
+            )
             .finish()
     }
 }
@@ -298,6 +310,9 @@ impl ClientConfigFile {
         if matches!(self.overload.max_pending_streams, Some(0)) {
             errors.push("overload.max_pending_streams must be >= 1 when set".into());
         }
+        if let Err(error) = self.dial_policy() {
+            errors.push(error.to_string());
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -306,6 +321,12 @@ impl ClientConfigFile {
                 errors.join("\n  - ")
             ))
         }
+    }
+    pub fn dial_policy(&self) -> Result<DialPolicy> {
+        DialPolicy::new(
+            &self.allowed_dial_targets,
+            self.deny_loopback_and_link_local_dial,
+        )
     }
     pub fn server_address(&self) -> String {
         format!("{}:{}", self.server_addr, self.server_port)
@@ -346,6 +367,26 @@ mod tests {
             proxy_buffers: Default::default(),
             reconnect: Default::default(),
             overload: Default::default(),
+            allowed_dial_targets: Vec::new(),
+            deny_loopback_and_link_local_dial: false,
+        }
+    }
+
+    #[test]
+    fn invalid_dial_targets_fail_validation() {
+        for pattern in [
+            "[::1]:65536",
+            "[::1]:abc",
+            "[::1]:",
+            "[::1]junk",
+            "10.0.0.0/40",
+        ] {
+            let mut config = create_mock_config("example.com", 443, None);
+            config.allowed_dial_targets = vec![pattern.into()];
+            assert!(
+                config.validate().is_err(),
+                "{pattern:?} should fail validation"
+            );
         }
     }
 

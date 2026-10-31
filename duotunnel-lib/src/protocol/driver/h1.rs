@@ -14,6 +14,19 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use quinn::{RecvStream, SendStream};
 use tokio::sync::oneshot;
+
+/// Machine-readable failure category on sanitized gateway errors; the detailed
+/// cause stays in logs so internal topology is never echoed to the client.
+pub(crate) const ERROR_CODE_HEADER: &str = "x-duotunnel-error";
+const BAD_GATEWAY_BODY: &str = "502 Bad Gateway";
+
+pub(crate) fn bad_gateway_response(error_code: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n{ERROR_CODE_HEADER}: {error_code}\r\nConnection: close\r\n\r\n{BAD_GATEWAY_BODY}",
+        BAD_GATEWAY_BODY.len()
+    )
+    .into_bytes()
+}
 struct Reclaim {
     recv: RecvStream,
     overflow: Bytes,
@@ -118,13 +131,10 @@ impl Http1Driver {
         self.send.finish()?;
         Ok(())
     }
-    pub async fn write_502(&mut self, error_msg: &str) -> Result<()> {
-        let resp = format!(
-            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-            error_msg.len(),
-            error_msg
-        );
-        self.send.write_all(resp.as_bytes()).await?;
+    pub async fn write_502(&mut self, error: &crate::ProxyError) -> Result<()> {
+        self.send
+            .write_all(&bad_gateway_response(error.error_code()))
+            .await?;
         Ok(())
     }
     async fn reclaim_recv(&mut self) -> Result<()> {
@@ -688,6 +698,16 @@ struct BodyState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_gateway_response_has_matching_length_and_error_code() {
+        let resp = String::from_utf8(bad_gateway_response("ERR_UPSTREAM_CONNECT")).unwrap();
+        let (head, body) = resp.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(head.contains(&format!("Content-Length: {}", body.len())));
+        assert!(head.contains("x-duotunnel-error: ERR_UPSTREAM_CONNECT"));
+        assert_eq!(body, "502 Bad Gateway");
+    }
     use crate::proxy::buffer_params::{MIN_HTTP_BODY_CHUNK_SIZE, MIN_HTTP_HEADER_BUF_SIZE};
 
     #[test]

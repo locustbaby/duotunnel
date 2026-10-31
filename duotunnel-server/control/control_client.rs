@@ -1,10 +1,11 @@
 use anyhow::Context;
 use duotunnel_lib::ctld_proto::{
-    apply_config_operations, recv_config_event, send_watch_request, snapshot_content_hash,
-    ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot, ControlRevision,
-    ProtoClientGroup, ProtoEgressUpstreamDef, ProtoEgressVhostRule, ProtoIngressListener,
-    ProtoIngressListenerMode, VersionedConfigSnapshot, WatchRequest,
-    CURRENT_CONTROL_PROTOCOL_VERSION,
+    apply_config_operations, recv_config_event, send_watch_request_with_version,
+    snapshot_content_hash, ApplyResponse, ApplyStatus, ConfigDelta, ConfigEvent, ConfigSnapshot,
+    ControlHeartbeat, ControlRevision, ProtoClientGroup, ProtoEgressUpstreamDef,
+    ProtoEgressVhostRule, ProtoIngressListener, ProtoIngressListenerMode, VersionedConfigSnapshot,
+    WatchRequest, CURRENT_CONTROL_PROTOCOL_VERSION, HEARTBEAT_CONTROL_PROTOCOL_VERSION,
+    MIN_CONTROL_PROTOCOL_VERSION, WATCH_READ_TIMEOUT,
 };
 use serde::{Deserialize, Serialize};
 /// Maintains the canonical ctld watch stream and applies Snapshot/Delta events.
@@ -55,7 +56,12 @@ impl BackgroundService for ControlClientService {
 }
 
 const LKG_FORMAT_VERSION: u32 = 3;
-const LKG_CONTROL_PROTOCOL_VERSION: u32 = CURRENT_CONTROL_PROTOCOL_VERSION as u32;
+/// Version of the persisted `ConfigSnapshot` semantics, deliberately decoupled from the
+/// control wire version: wire-only changes (e.g. heartbeats in v4) must not invalidate
+/// LKG files. Bump this whenever snapshot or delta semantics change; the pin test
+/// `lkg_snapshot_schema_version_is_reviewed_for_wire_version` forces that review.
+/// Persisted under the historical `control_protocol_version` field name.
+const LKG_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const MAX_LKG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LKG_AGE: Duration = crate::runtime::health::CONTROL_SECURITY_STALE_AFTER;
 const MAX_LKG_FUTURE_SKEW: Duration = Duration::from_secs(300);
@@ -89,6 +95,7 @@ struct WatchState {
     current_snapshot: Option<ConfigSnapshot>,
     applied: Option<AppliedControlState>,
     authority_reset_allowed: bool,
+    watch_request_version: u16,
 }
 
 impl Default for WatchState {
@@ -97,7 +104,19 @@ impl Default for WatchState {
             current_snapshot: None,
             applied: None,
             authority_reset_allowed: true,
+            watch_request_version: CURRENT_CONTROL_PROTOCOL_VERSION,
         }
+    }
+}
+
+/// Picks the WatchRequest version for the next attempt. A pre-v4 ctld drops a v4
+/// request before sending anything, so such a failure falls back to v3 once; any
+/// v3 session then retries v4 on its next reconnect so an upgraded ctld is picked up.
+fn next_watch_request_version(sent_version: u16, received_any_event: bool) -> u16 {
+    if sent_version >= HEARTBEAT_CONTROL_PROTOCOL_VERSION && !received_any_event {
+        MIN_CONTROL_PROTOCOL_VERSION
+    } else {
+        CURRENT_CONTROL_PROTOCOL_VERSION
     }
 }
 
@@ -265,7 +284,7 @@ fn validate_lkg_envelope(lkg: &LastKnownGood) -> anyhow::Result<()> {
     if lkg.format_version != LKG_FORMAT_VERSION {
         anyhow::bail!("unsupported LKG format version {}", lkg.format_version);
     }
-    if lkg.control_protocol_version != LKG_CONTROL_PROTOCOL_VERSION {
+    if lkg.control_protocol_version != LKG_SNAPSHOT_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported LKG control protocol version {}",
             lkg.control_protocol_version
@@ -339,7 +358,7 @@ fn make_lkg(
     let payload_length = serde_json::to_vec(&snapshot)?.len() as u64;
     Ok(LastKnownGood {
         format_version: LKG_FORMAT_VERSION,
-        control_protocol_version: LKG_CONTROL_PROTOCOL_VERSION,
+        control_protocol_version: LKG_SNAPSHOT_SCHEMA_VERSION,
         payload_length,
         revision,
         content_hash,
@@ -457,6 +476,9 @@ async fn connect_and_watch(
 ) -> anyhow::Result<()> {
     info!(addr = %addr, "connecting to duotunnel-ctld");
     let stream = TcpStream::connect(addr).await?;
+    if let Err(error) = duotunnel_lib::TcpParams::default().apply(&stream) {
+        warn!(addr = %addr, error = %error, "failed to apply TCP params to ctld watch socket");
+    }
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -466,24 +488,55 @@ async fn connect_and_watch(
         last_applied_revision: applied.and_then(|state| state.revision.clone()),
         last_applied_hash: applied.map(|state| state.content_hash.clone()),
     };
+    let wire_version = watch_state.watch_request_version;
+    // Only a heartbeat-capable ctld keeps an idle stream alive; a v3 ctld can stay
+    // silent indefinitely, so the idle read timeout is armed only after a v4 request.
+    let heartbeats_expected = wire_version >= HEARTBEAT_CONTROL_PROTOCOL_VERSION;
     watch_state.authority_reset_allowed = true;
-    send_watch_request(&mut writer, &req).await?;
-    info!(addr = %addr, revision = ?req.last_applied_revision, "sent WatchRequest");
+    send_watch_request_with_version(&mut writer, wire_version, &req).await?;
+    info!(addr = %addr, revision = ?req.last_applied_revision, wire_version, "sent WatchRequest");
 
+    let mut received_any_event = false;
     let err = loop {
-        let event = match recv_config_event(&mut reader).await {
-            Ok(e) => e,
+        let next = if heartbeats_expected || !received_any_event {
+            match tokio::time::timeout(WATCH_READ_TIMEOUT, recv_config_event(&mut reader)).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "ctld watch read timed out after {:?}",
+                    WATCH_READ_TIMEOUT
+                )),
+            }
+        } else {
+            recv_config_event(&mut reader).await
+        };
+        let event = match next {
+            Ok(event) => event,
             Err(e) => break e,
         };
-        match event {
+        received_any_event = true;
+        let handled = match event {
             ConfigEvent::Snapshot(versioned) => {
-                handle_snapshot(versioned, state, watch_state, snapshot_path, &mut writer).await?;
+                handle_snapshot(versioned, state, watch_state, snapshot_path, &mut writer).await
             }
             ConfigEvent::Delta(delta) => {
-                handle_delta(delta, state, watch_state, snapshot_path, &mut writer).await?;
+                handle_delta(delta, state, watch_state, snapshot_path, &mut writer).await
             }
+            ConfigEvent::Heartbeat(hb) => handle_heartbeat(hb, state, watch_state),
+        };
+        if let Err(e) = handled {
+            break e;
         }
     };
+    let next_version = next_watch_request_version(wire_version, received_any_event);
+    if next_version < wire_version {
+        warn!(
+            addr = %addr,
+            wire_version,
+            next_version,
+            "ctld closed the watch before any event; retrying with the v3 wire protocol"
+        );
+    }
+    watch_state.watch_request_version = next_version;
     Err(err.context(format!(
         "ctld disconnected at revision {:?}",
         watch_state
@@ -491,6 +544,28 @@ async fn connect_and_watch(
             .as_ref()
             .and_then(|state| state.revision.as_ref())
     )))
+}
+
+/// Heartbeats are one-way. A matching heartbeat refreshes control freshness; any
+/// divergence ends the session so the reconnect's initial snapshot resynchronizes.
+fn handle_heartbeat(
+    hb: ControlHeartbeat,
+    state: &Arc<ServerState>,
+    watch_state: &WatchState,
+) -> anyhow::Result<()> {
+    match classify_revision(watch_state.applied.as_ref(), &hb.revision, &hb.content_hash) {
+        RevisionDecision::Duplicate => {
+            state.health().confirm_control_freshness();
+            Ok(())
+        }
+        RevisionDecision::Apply => Err(anyhow::anyhow!(
+            "heartbeat revision {:?} is ahead of applied state; reconnecting to resync",
+            hb.revision
+        )),
+        RevisionDecision::Reject(reason) => Err(anyhow::anyhow!(
+            "heartbeat diverged from applied state ({reason}); reconnecting to resync"
+        )),
+    }
 }
 
 enum RevisionDecision {
@@ -993,6 +1068,7 @@ fn build_runtime_generation(
         &http_params,
         state.upstream_health(),
         state.proxy_buffer_params(),
+        state.tcp_params(),
     )?;
     let listeners = tm.server_ingress_routing.listeners.clone();
     let token_map = build_token_map(&snap.token_cache)?;
@@ -1204,6 +1280,34 @@ mod tests {
             content_hash: base_hash,
         };
         (base, target, delta, applied)
+    }
+
+    #[test]
+    fn watch_request_version_falls_back_once_then_retries_current() {
+        assert_eq!(
+            next_watch_request_version(CURRENT_CONTROL_PROTOCOL_VERSION, false),
+            MIN_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            next_watch_request_version(CURRENT_CONTROL_PROTOCOL_VERSION, true),
+            CURRENT_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            next_watch_request_version(MIN_CONTROL_PROTOCOL_VERSION, true),
+            CURRENT_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            next_watch_request_version(MIN_CONTROL_PROTOCOL_VERSION, false),
+            CURRENT_CONTROL_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn lkg_snapshot_schema_version_is_reviewed_for_wire_version() {
+        // When the wire version changes, decide whether snapshot/delta semantics changed
+        // too; if so bump LKG_SNAPSHOT_SCHEMA_VERSION, then update both values here.
+        assert_eq!(CURRENT_CONTROL_PROTOCOL_VERSION, 4);
+        assert_eq!(LKG_SNAPSHOT_SCHEMA_VERSION, 3);
     }
 
     #[test]

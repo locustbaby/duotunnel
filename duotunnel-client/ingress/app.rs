@@ -1,3 +1,4 @@
+use crate::bootstrap::dial_policy::DialPolicy;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use duotunnel_lib::plugin::{LoadBalancer, PickCtx, Resolver, Target};
@@ -8,7 +9,7 @@ use duotunnel_lib::proxy::peers::{
 };
 use duotunnel_lib::proxy::tcp::UpstreamScheme;
 use duotunnel_lib::{ClientConfig, HttpClientParams, ProxyBufferParams, ProxyError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::debug;
@@ -23,6 +24,8 @@ pub struct LocalProxyMap<L, R> {
     upstreams: HashMap<String, UpstreamGroup<L>>,
     resolver: Arc<R>,
     pub http_connector: SharedHttpConnector,
+    dial_policy: Arc<DialPolicy>,
+    blocked_upstreams: HashSet<String>,
 }
 
 impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
@@ -49,9 +52,51 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         resolver: Arc<R>,
         buffer_params: &ProxyBufferParams,
     ) -> Result<Self> {
+        Self::from_config_with_dial_policy(
+            config,
+            http_params,
+            lb,
+            resolver,
+            buffer_params,
+            Arc::new(DialPolicy::default()),
+        )
+    }
+
+    /// Every dial target comes from `raw`, so the name stage of the policy runs once
+    /// here; only the resolved-IP stage remains on the per-request path.
+    pub fn from_config_with_dial_policy(
+        config: &ClientConfig,
+        http_params: &HttpClientParams,
+        lb: Arc<L>,
+        resolver: Arc<R>,
+        buffer_params: &ProxyBufferParams,
+        dial_policy: Arc<DialPolicy>,
+    ) -> Result<Self> {
         let mut upstreams = HashMap::new();
+        let mut blocked_upstreams = HashSet::new();
         for upstream in &config.upstreams {
-            let raw: Vec<String> = upstream.servers.iter().map(|s| s.address.clone()).collect();
+            let mut raw = Vec::new();
+            for s in &upstream.servers {
+                if dial_policy.allows_target(&s.address) {
+                    raw.push(s.address.clone());
+                } else {
+                    tracing::warn!(
+                        upstream = %upstream.name,
+                        address = %s.address,
+                        "rejecting server-pushed upstream target not in client allowed_dial_targets"
+                    );
+                }
+            }
+            if raw.is_empty() {
+                if !upstream.servers.is_empty() {
+                    tracing::warn!(
+                        upstream = %upstream.name,
+                        "every server of this upstream is blocked by allowed_dial_targets; upstream disabled"
+                    );
+                    blocked_upstreams.insert(upstream.name.clone());
+                }
+                continue;
+            }
             let targets: Vec<Target> = raw
                 .iter()
                 .map(|addr| {
@@ -73,8 +118,10 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
                 },
             );
         }
-        let https_client = duotunnel_lib::create_https_client_with(http_params)?;
-        let h2c_client = duotunnel_lib::create_h2c_client_with(http_params);
+        let resolved_filter = dial_policy.resolved_addr_filter();
+        let https_client =
+            duotunnel_lib::create_https_client_with_filter(http_params, resolved_filter.clone())?;
+        let h2c_client = duotunnel_lib::create_h2c_client_with_filter(http_params, resolved_filter);
         let http_connector =
             duotunnel_lib::proxy::http_connector::HttpConnector::new_with_buffer_params(
                 https_client,
@@ -85,7 +132,13 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
             upstreams,
             resolver,
             http_connector,
+            dial_policy,
+            blocked_upstreams,
         })
+    }
+
+    pub fn is_blocked_by_dial_policy(&self, proxy_name: &str) -> bool {
+        self.blocked_upstreams.contains(proxy_name)
     }
 
     pub fn get_local_address(&self, proxy_name: &str, client_addr: SocketAddr) -> Option<String> {
@@ -103,6 +156,17 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         }
         let parsed = duotunnel_lib::transport::addr::parse_upstream(connect_addr_str);
         let mut addrs = self.resolver.resolve(&parsed.host, parsed.port).await?;
+        if !self.dial_policy.is_unrestricted() {
+            addrs.retain(|addr| {
+                self.dial_policy
+                    .allows_resolved(&parsed.host, addr.ip(), Some(parsed.port))
+            });
+            if addrs.is_empty() {
+                return Err(anyhow!(
+                    "no resolved address for {connect_addr_str} is permitted by allowed_dial_targets"
+                ));
+            }
+        }
         use rand::seq::SliceRandom;
         addrs.shuffle(&mut rand::rng());
         addrs
@@ -147,7 +211,14 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
             .map
             .get_local_address(&routing.proxy_name, context.client_addr)
             .ok_or_else(|| {
-                ProxyError::route_not_found(format!("proxy_name={}", routing.proxy_name))
+                if self.map.is_blocked_by_dial_policy(&routing.proxy_name) {
+                    ProxyError::route_not_found(format!(
+                        "proxy_name={} blocked by client allowed_dial_targets",
+                        routing.proxy_name
+                    ))
+                } else {
+                    ProxyError::route_not_found(format!("proxy_name={}", routing.proxy_name))
+                }
             })?;
         let (scheme, connect_addr_str, tls_host) = UpstreamScheme::from_address(&upstream_addr);
         let is_https = scheme.requires_tls();
@@ -213,7 +284,10 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
             Protocol::Tcp => {
                 if is_https {
                     let spec = MitmPeerSpec {
-                        tls_host: tls_host.as_deref().unwrap_or("localhost").to_string(),
+                        target_host: connect_addr_str,
+                        tls_host: tls_host.ok_or_else(|| {
+                            ProxyError::upstream_connect("TLS host required for MITM")
+                        })?,
                     };
                     Ok(PeerSpec::MitmH2(spec))
                 } else {
@@ -285,7 +359,7 @@ impl<L: LoadBalancer, R: Resolver> UpstreamResolver for IngressClientApp<L, R> {
                     .serve_h2(
                         accepted_stream,
                         HttpPeerSpec {
-                            target_host: spec.tls_host,
+                            target_host: spec.target_host,
                             scheme: "https".to_string(),
                             upstream_protocol: Protocol::H2,
                             upstream_name: None,

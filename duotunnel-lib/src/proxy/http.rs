@@ -1,6 +1,6 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::protocol::driver::h1::Http1Driver;
+use crate::protocol::driver::h1::{bad_gateway_response, Http1Driver};
 use crate::protocol::driver::ProtocolDriver;
 use crate::proxy::buffer_params::ProxyBufferParams;
 use crate::timeout as lazy_timeout;
@@ -29,13 +29,9 @@ impl HttpPeer {
         let parsed_scheme = match self.spec.scheme.parse::<http::uri::Scheme>() {
             Ok(s) => s,
             Err(e) => {
-                let error_msg = format!("502 Bad Gateway: Invalid target scheme: {e}");
-                let resp = format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-                    error_msg.len(),
-                    error_msg
-                );
-                let _ = send.write_all(resp.as_bytes()).await;
+                debug!(error = %e, "invalid target scheme, sending 502");
+                let error_code = ProxyError::upstream_connect(String::new()).error_code();
+                let _ = send.write_all(&bad_gateway_response(error_code)).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target scheme: {e}"));
             }
@@ -43,13 +39,9 @@ impl HttpPeer {
         let parsed_authority = match self.spec.target_host.parse::<http::uri::Authority>() {
             Ok(a) => a,
             Err(e) => {
-                let error_msg = format!("502 Bad Gateway: Invalid target authority: {e}");
-                let resp = format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-                    error_msg.len(),
-                    error_msg
-                );
-                let _ = send.write_all(resp.as_bytes()).await;
+                debug!(error = %e, "invalid target authority, sending 502");
+                let error_code = ProxyError::upstream_connect(String::new()).error_code();
+                let _ = send.write_all(&bad_gateway_response(error_code)).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target authority: {e}"));
             }
@@ -107,7 +99,7 @@ impl HttpPeer {
                         error = %proxy_err,
                         "H1 upstream request failed, sending 502"
                     );
-                    let _ = driver.write_502(&proxy_err.to_string()).await;
+                    let _ = driver.write_502(&proxy_err).await;
                     break;
                 }
                 Err(_) => {
@@ -120,7 +112,7 @@ impl HttpPeer {
                         error = %proxy_err,
                         "H1 upstream request timed out, sending 502"
                     );
-                    let _ = driver.write_502(&proxy_err.to_string()).await;
+                    let _ = driver.write_502(&proxy_err).await;
                     break;
                 }
             };

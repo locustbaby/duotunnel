@@ -14,8 +14,9 @@ pub mod transport;
 pub use auth::{hash_token_bytes, AuthError, AuthResult};
 pub use config::{resolve_config_path, HttpPoolConfig, ProxyBufferConfig, QuicConfig, TcpConfig};
 pub use egress::http::{
-    create_h2c_client, create_h2c_client_with, create_https_client, create_https_client_with,
-    forward_http, forward_http_with_buffer_params, H2cClient, HttpClientParams,
+    create_h2c_client, create_h2c_client_with, create_h2c_client_with_filter, create_https_client,
+    create_https_client_with, create_https_client_with_filter, forward_http,
+    forward_http_with_buffer_params, H2cClient, HttpClientParams, ResolvedAddrFilter,
 };
 pub use engine::bridge::{relay_quic_to_tcp, relay_quic_to_tcp_with_buffer_size};
 pub use error::{ErrorKind, ErrorSource, ProxyError, RetryType};
