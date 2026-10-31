@@ -1,6 +1,6 @@
 use super::http_connector::SharedHttpConnector;
 use super::peers::HttpPeerSpec;
-use crate::protocol::driver::h1::Http1Driver;
+use crate::protocol::driver::h1::{bad_gateway_response, Http1Driver};
 use crate::protocol::driver::ProtocolDriver;
 use crate::proxy::buffer_params::ProxyBufferParams;
 use crate::timeout as lazy_timeout;
@@ -30,8 +30,8 @@ impl HttpPeer {
             Ok(s) => s,
             Err(e) => {
                 debug!(error = %e, "invalid target scheme, sending 502");
-                const RESP_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 15\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n502 Bad Gateway";
-                let _ = send.write_all(RESP_502).await;
+                let error_code = ProxyError::upstream_connect(String::new()).error_code();
+                let _ = send.write_all(&bad_gateway_response(error_code)).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target scheme: {e}"));
             }
@@ -40,8 +40,8 @@ impl HttpPeer {
             Ok(a) => a,
             Err(e) => {
                 debug!(error = %e, "invalid target authority, sending 502");
-                const RESP_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 15\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n502 Bad Gateway";
-                let _ = send.write_all(RESP_502).await;
+                let error_code = ProxyError::upstream_connect(String::new()).error_code();
+                let _ = send.write_all(&bad_gateway_response(error_code)).await;
                 let _ = send.finish();
                 return Err(anyhow::anyhow!("invalid target authority: {e}"));
             }
@@ -99,7 +99,7 @@ impl HttpPeer {
                         error = %proxy_err,
                         "H1 upstream request failed, sending 502"
                     );
-                    let _ = driver.write_502(&proxy_err.to_string()).await;
+                    let _ = driver.write_502(&proxy_err).await;
                     break;
                 }
                 Err(_) => {
@@ -112,7 +112,7 @@ impl HttpPeer {
                         error = %proxy_err,
                         "H1 upstream request timed out, sending 502"
                     );
-                    let _ = driver.write_502(&proxy_err.to_string()).await;
+                    let _ = driver.write_502(&proxy_err).await;
                     break;
                 }
             };

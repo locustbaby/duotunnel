@@ -163,15 +163,13 @@ impl TcpPeer {
     ) -> Result<()> {
         debug!("connecting to tcp upstream: {}", self.target_addr);
         let connect_timeout = std::time::Duration::from_millis(self.tcp_params.connect_timeout_ms);
-        let tcp_stream = tokio::time::timeout(connect_timeout, TcpStream::connect(self.target_addr))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "tcp upstream connect timed out after {:?}",
-                    connect_timeout
-                )
-            })?
-            .context("failed to connect to tcp upstream")?;
+        let tcp_stream =
+            tokio::time::timeout(connect_timeout, TcpStream::connect(self.target_addr))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("tcp upstream connect timed out after {:?}", connect_timeout)
+                })?
+                .context("failed to connect to tcp upstream")?;
         self.tcp_params
             .apply(&tcp_stream)
             .context("failed to apply TCP params to upstream")?;
@@ -194,16 +192,13 @@ impl TcpPeer {
                     .map_err(|_| anyhow::anyhow!("invalid TLS server name: {}", tls.host))?;
                 let tls_timeout =
                     std::time::Duration::from_millis(self.tcp_params.tls_handshake_timeout_ms);
-                let tls_stream =
-                    tokio::time::timeout(tls_timeout, tls.connector.connect(server_name, tcp_stream))
-                        .await
-                        .map_err(|_| {
-                            anyhow::anyhow!(
-                                "TLS handshake timed out after {:?}",
-                                tls_timeout
-                            )
-                        })?
-                        .context("TLS handshake failed")?;
+                let tls_stream = tokio::time::timeout(
+                    tls_timeout,
+                    tls.connector.connect(server_name, tcp_stream),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("TLS handshake timed out after {:?}", tls_timeout))?
+                .context("TLS handshake failed")?;
                 info!(target = %self.target_addr, tls_host = %tls.host, "starting TLS bidirectional relay");
                 crate::engine::relay::relay_with_initial_and_buffer_size(
                     recv,

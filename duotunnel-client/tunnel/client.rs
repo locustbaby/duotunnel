@@ -61,13 +61,13 @@ pub(crate) async fn run_client(
     let resolver = Arc::new(plugins::resolver_cached::CachedResolver::new());
     let proxy_buffer_params = duotunnel_lib::ProxyBufferParams::from(&config.proxy_buffers);
     let proxy_map = Arc::new(
-        LocalProxyMap::from_config_with_allowed_targets(
+        LocalProxyMap::from_config_with_dial_policy(
             &resp.config,
             &duotunnel_lib::HttpClientParams::from(&config.http_pool),
             lb,
             resolver,
             &proxy_buffer_params,
-            &config.allowed_dial_targets,
+            Arc::new(config.dial_policy().map_err(ConnectError::fatal)?),
         )
         .map_err(ConnectError::fatal)?,
     );

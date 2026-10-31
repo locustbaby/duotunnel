@@ -9,18 +9,78 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::{header, HeaderMap, Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::connect::dns::{GaiResolver, Name};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use quinn::{RecvStream, SendStream};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tracing::debug;
 pub type HttpsClient = Client<
-    hyper_rustls::HttpsConnector<HttpConnector>,
+    hyper_rustls::HttpsConnector<HttpConnector<FilteringResolver>>,
     http_body_util::combinators::BoxBody<Bytes, std::io::Error>,
 >;
-pub type H2cClient =
-    Client<HttpConnector, http_body_util::combinators::BoxBody<Bytes, std::io::Error>>;
+pub type H2cClient = Client<
+    HttpConnector<FilteringResolver>,
+    http_body_util::combinators::BoxBody<Bytes, std::io::Error>,
+>;
+
+/// Decides whether a hostname may be dialed at a resolved IP. Applied after DNS so a
+/// name-based allowlist cannot be steered to an unintended address by resolution.
+pub type ResolvedAddrFilter = Arc<dyn Fn(&str, IpAddr) -> bool + Send + Sync>;
+
+#[derive(Clone)]
+pub struct FilteringResolver {
+    inner: GaiResolver,
+    filter: Option<ResolvedAddrFilter>,
+}
+
+impl FilteringResolver {
+    pub fn new(filter: Option<ResolvedAddrFilter>) -> Self {
+        Self {
+            inner: GaiResolver::new(),
+            filter,
+        }
+    }
+}
+
+type ResolveFuture =
+    Pin<Box<dyn Future<Output = std::io::Result<std::vec::IntoIter<SocketAddr>>> + Send>>;
+
+impl tower_service::Service<Name> for FilteringResolver {
+    type Response = std::vec::IntoIter<SocketAddr>;
+    type Error = std::io::Error;
+    type Future = ResolveFuture;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, name: Name) -> Self::Future {
+        let host = name.as_str().to_owned();
+        let lookup = self.inner.call(name);
+        let filter = self.filter.clone();
+        Box::pin(async move {
+            let resolved = lookup.await?;
+            let addrs: Vec<SocketAddr> = match filter {
+                Some(filter) => resolved.filter(|addr| filter(&host, addr.ip())).collect(),
+                None => resolved.collect(),
+            };
+            if addrs.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("no resolved address for {host} is permitted by the dial policy"),
+                ));
+            }
+            Ok(addrs.into_iter())
+        })
+    }
+}
 
 async fn read_into_bytes_mut(
     recv: &mut RecvStream,
@@ -56,7 +116,13 @@ pub fn create_https_client() -> Result<HttpsClient> {
     create_https_client_with(&HttpClientParams::default())
 }
 pub fn create_https_client_with(params: &HttpClientParams) -> Result<HttpsClient> {
-    let mut http = HttpConnector::new();
+    create_https_client_with_filter(params, None)
+}
+pub fn create_https_client_with_filter(
+    params: &HttpClientParams,
+    filter: Option<ResolvedAddrFilter>,
+) -> Result<HttpsClient> {
+    let mut http = HttpConnector::new_with_resolver(FilteringResolver::new(filter));
     http.set_nodelay(true);
     http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
     let https = HttpsConnectorBuilder::new()
@@ -79,7 +145,13 @@ pub fn create_h2c_client() -> H2cClient {
     create_h2c_client_with(&HttpClientParams::default())
 }
 pub fn create_h2c_client_with(params: &HttpClientParams) -> H2cClient {
-    let mut http = HttpConnector::new();
+    create_h2c_client_with_filter(params, None)
+}
+pub fn create_h2c_client_with_filter(
+    params: &HttpClientParams,
+    filter: Option<ResolvedAddrFilter>,
+) -> H2cClient {
+    let mut http = HttpConnector::new_with_resolver(FilteringResolver::new(filter));
     http.set_nodelay(true);
     http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
     let mut builder = Client::builder(TokioExecutor::new());

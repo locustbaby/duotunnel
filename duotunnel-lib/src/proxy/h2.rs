@@ -72,6 +72,20 @@ pub fn hardened_h1_server_builder() -> H1Builder {
     builder
 }
 
+/// `target_host` carries the dial port, but a default port must not leak into
+/// `:authority`/Host where origins match virtual hosts on the bare name.
+fn request_authority<'a>(scheme: &str, target_host: &'a str) -> &'a str {
+    let default_port = match scheme {
+        "https" => ":443",
+        "http" => ":80",
+        _ => return target_host,
+    };
+    target_host
+        .strip_suffix(default_port)
+        .filter(|host| !host.is_empty() && !host.ends_with(':'))
+        .unwrap_or(target_host)
+}
+
 pub async fn serve_h2_forward<IO>(
     io: IO,
     connector: SharedHttpConnector,
@@ -85,10 +99,11 @@ where
         let spec = spec.clone();
         async move {
             let (mut parts, body) = req.into_parts();
+            let authority = request_authority(&spec.scheme, &spec.target_host);
             let target_uri = match format!(
                 "{}://{}{}",
                 spec.scheme,
-                spec.target_host,
+                authority,
                 parts
                     .uri
                     .path_and_query()
@@ -100,11 +115,10 @@ where
                 Ok(uri) => uri,
                 Err(error) => {
                     debug!(error = %error, "H2 forward: invalid request target");
-                    let body = http_body_util::Full::new(Bytes::from_static(
-                        b"invalid request target",
-                    ))
-                    .map_err(|never| match never {})
-                    .boxed();
+                    let body =
+                        http_body_util::Full::new(Bytes::from_static(b"invalid request target"))
+                            .map_err(|never| match never {})
+                            .boxed();
                     return Ok(Response::builder()
                         .status(hyper::StatusCode::BAD_REQUEST)
                         .header(hyper::header::CONTENT_TYPE, "text/plain")
@@ -113,7 +127,7 @@ where
                 }
             };
             parts.uri = target_uri;
-            if let Ok(hv) = spec.target_host.parse() {
+            if let Ok(hv) = authority.parse() {
                 parts.headers.insert(hyper::header::HOST, hv);
             }
             debug!("H2 forward: {} {}", parts.method, parts.uri);
@@ -142,6 +156,10 @@ where
                                 .unwrap_or(hyper::StatusCode::BAD_GATEWAY),
                         )
                         .header(hyper::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            crate::protocol::driver::h1::ERROR_CODE_HEADER,
+                            proxy_err.error_code(),
+                        )
                         .body(
                             http_body_util::Full::new(body_bytes)
                                 .map_err(|never| match never {})
@@ -177,5 +195,26 @@ impl H2Peer {
         } else {
             serve_h2_forward(stream, self.connector, self.spec).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_authority_drops_only_the_scheme_default_port() {
+        assert_eq!(request_authority("https", "api.example:443"), "api.example");
+        assert_eq!(
+            request_authority("https", "api.example:8443"),
+            "api.example:8443"
+        );
+        assert_eq!(request_authority("http", "api.example:80"), "api.example");
+        assert_eq!(
+            request_authority("http", "api.example:443"),
+            "api.example:443"
+        );
+        assert_eq!(request_authority("https", "[::1]:443"), "[::1]");
+        assert_eq!(request_authority("https", "api.example"), "api.example");
     }
 }

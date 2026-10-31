@@ -93,11 +93,33 @@ impl EgressDnsCache {
     ) {
         let _guard = insertion_lock.lock();
         if cache.len() >= max_entries && !cache.contains_key(&key) {
+            // One scan at capacity (only on a cache miss, which already paid for a DNS
+            // lookup): drop expired entries, then evict a negative entry before any
+            // positive one so a flood of failing names cannot push out hot hosts.
             let now = Instant::now();
-            cache.retain(|_, v| now < v.expires_at);
+            let mut expired = Vec::new();
+            let mut negative_victim: Option<(Instant, DnsKey)> = None;
+            let mut positive_victim: Option<(Instant, DnsKey)> = None;
+            for item in cache.iter() {
+                let expires_at = item.value().expires_at;
+                if expires_at <= now {
+                    expired.push(item.key().clone());
+                    continue;
+                }
+                let slot = if item.value().negative_error.is_some() {
+                    &mut negative_victim
+                } else {
+                    &mut positive_victim
+                };
+                if slot.as_ref().is_none_or(|(oldest, _)| expires_at < *oldest) {
+                    *slot = Some((expires_at, item.key().clone()));
+                }
+            }
+            for key in &expired {
+                cache.remove(key);
+            }
             if cache.len() >= max_entries {
-                let victim = cache.iter().next().map(|item| item.key().clone());
-                if let Some(victim) = victim {
+                if let Some((_, victim)) = negative_victim.or(positive_victim) {
                     cache.remove(&victim);
                 }
             }
@@ -250,7 +272,7 @@ impl EgressDnsCache {
                         if !updated_stale {
                             Self::insert_bounded(
                                 &cache,
-                            &insertion_lock,
+                                &insertion_lock,
                                 max_entries,
                                 key_clone.clone(),
                                 DnsEntry::new_negative(
@@ -331,7 +353,10 @@ mod tests {
             &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent1.invalid".to_string(), 80),
-            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+            DnsEntry::new_negative(
+                "nxdomain".to_string(),
+                Instant::now() + Duration::from_secs(5),
+            ),
         );
         let err = cache
             .resolve("nonexistent1.invalid", 80)
@@ -345,17 +370,75 @@ mod tests {
             &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent2.invalid".to_string(), 80),
-            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+            DnsEntry::new_negative(
+                "nxdomain".to_string(),
+                Instant::now() + Duration::from_secs(5),
+            ),
         );
         EgressDnsCache::insert_bounded(
             &cache.cache,
             &cache.insertion_lock,
             cache.max_entries,
             ("nonexistent3.invalid".to_string(), 80),
-            DnsEntry::new_negative("nxdomain".to_string(), Instant::now() + Duration::from_secs(5)),
+            DnsEntry::new_negative(
+                "nxdomain".to_string(),
+                Instant::now() + Duration::from_secs(5),
+            ),
         );
         assert!(cache.cache.len() <= 2);
     }
+    #[test]
+    fn eviction_prefers_negative_then_earliest_expiring_entries() {
+        let cache = EgressDnsCache::with_capacity(Duration::from_secs(60), 3);
+        let insert = |host: &str, entry: DnsEntry| {
+            EgressDnsCache::insert_bounded(
+                &cache.cache,
+                &cache.insertion_lock,
+                cache.max_entries,
+                (host.to_string(), 80),
+                entry,
+            );
+        };
+        let addr: SocketAddr = "10.0.0.1:80".parse().unwrap();
+        let now = Instant::now();
+        insert(
+            "hot-long.example",
+            DnsEntry::new(vec![addr], now + Duration::from_secs(60)),
+        );
+        insert(
+            "hot-short.example",
+            DnsEntry::new(vec![addr], now + Duration::from_secs(30)),
+        );
+        for index in 0..10 {
+            insert(
+                &format!("missing-{index}.invalid"),
+                DnsEntry::new_negative("nxdomain".into(), now + Duration::from_secs(2)),
+            );
+        }
+        assert_eq!(cache.cache.len(), 3);
+        assert!(cache
+            .cache
+            .contains_key(&("hot-long.example".to_string(), 80)));
+        assert!(cache
+            .cache
+            .contains_key(&("hot-short.example".to_string(), 80)));
+
+        insert(
+            "hot-new.example",
+            DnsEntry::new(vec![addr], now + Duration::from_secs(60)),
+        );
+        insert(
+            "hot-newer.example",
+            DnsEntry::new(vec![addr], now + Duration::from_secs(60)),
+        );
+        assert!(cache
+            .cache
+            .contains_key(&("hot-long.example".to_string(), 80)));
+        assert!(!cache
+            .cache
+            .contains_key(&("hot-short.example".to_string(), 80)));
+    }
+
     #[test]
     fn concurrent_inserts_respect_capacity() {
         let cache = EgressDnsCache::with_capacity(Duration::from_secs(60), 8);
@@ -369,7 +452,10 @@ mod tests {
                             &cache.insertion_lock,
                             cache.max_entries,
                             (format!("{worker}-{index}.invalid"), 80),
-                            DnsEntry::new_negative("missing".into(), Instant::now() + Duration::from_secs(60)),
+                            DnsEntry::new_negative(
+                                "missing".into(),
+                                Instant::now() + Duration::from_secs(60),
+                            ),
                         );
                         assert!(cache.cache.len() <= cache.max_entries);
                     }
@@ -377,5 +463,4 @@ mod tests {
             }
         });
     }
-
 }

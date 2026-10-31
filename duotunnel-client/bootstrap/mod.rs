@@ -1,5 +1,6 @@
 pub(crate) mod cli;
 pub(crate) mod config;
+pub(crate) mod dial_policy;
 
 use anyhow::Result;
 
