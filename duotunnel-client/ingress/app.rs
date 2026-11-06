@@ -159,7 +159,7 @@ impl<L: LoadBalancer, R: Resolver> LocalProxyMap<L, R> {
         if !self.dial_policy.is_unrestricted() {
             addrs.retain(|addr| {
                 self.dial_policy
-                    .allows_resolved(&parsed.host, addr.ip(), Some(parsed.port))
+                    .allows_resolved(&parsed.host, addr.ip(), parsed.port)
             });
             if addrs.is_empty() {
                 return Err(anyhow!(

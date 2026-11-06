@@ -22,29 +22,84 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tracing::debug;
 pub type HttpsClient = Client<
-    hyper_rustls::HttpsConnector<HttpConnector<FilteringResolver>>,
+    hyper_rustls::HttpsConnector<FilteringConnector>,
     http_body_util::combinators::BoxBody<Bytes, std::io::Error>,
 >;
-pub type H2cClient = Client<
-    HttpConnector<FilteringResolver>,
-    http_body_util::combinators::BoxBody<Bytes, std::io::Error>,
->;
+pub type H2cClient =
+    Client<FilteringConnector, http_body_util::combinators::BoxBody<Bytes, std::io::Error>>;
 
 /// Decides whether a hostname may be dialed at a resolved IP. Applied after DNS so a
 /// name-based allowlist cannot be steered to an unintended address by resolution.
-pub type ResolvedAddrFilter = Arc<dyn Fn(&str, IpAddr) -> bool + Send + Sync>;
+pub type ResolvedAddrFilter = Arc<dyn Fn(&str, IpAddr, u16) -> bool + Send + Sync>;
+
+#[derive(Clone)]
+pub struct FilteringConnector {
+    filter: Option<ResolvedAddrFilter>,
+    keepalive: Option<Duration>,
+}
+
+impl FilteringConnector {
+    fn new(params: &HttpClientParams, filter: Option<ResolvedAddrFilter>) -> Self {
+        Self {
+            filter,
+            keepalive: params.tcp_keepalive_secs.map(Duration::from_secs),
+        }
+    }
+}
+
+impl tower_service::Service<Uri> for FilteringConnector {
+    type Response = <HttpConnector<FilteringResolver> as tower_service::Service<Uri>>::Response;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let port = uri
+            .port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            });
+        let host = uri.host().unwrap_or("").trim_matches(['[', ']']);
+        // Hyper bypasses its resolver for IP literals, so enforce the same policy here.
+        if let (Some(filter), Ok(ip)) = (&self.filter, host.parse::<IpAddr>()) {
+            if !filter(host, ip, port) {
+                return Box::pin(async {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "dial target denied by policy",
+                    )
+                    .into())
+                });
+            }
+        }
+        // Each dial owns its destination port; concurrent requests cannot overwrite it.
+        let mut connector =
+            HttpConnector::new_with_resolver(FilteringResolver::new(self.filter.clone(), port));
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_keepalive(self.keepalive);
+        Box::pin(async move { connector.call(uri).await.map_err(Into::into) })
+    }
+}
 
 #[derive(Clone)]
 pub struct FilteringResolver {
     inner: GaiResolver,
     filter: Option<ResolvedAddrFilter>,
+    port: u16,
 }
 
 impl FilteringResolver {
-    pub fn new(filter: Option<ResolvedAddrFilter>) -> Self {
+    pub fn new(filter: Option<ResolvedAddrFilter>, port: u16) -> Self {
         Self {
             inner: GaiResolver::new(),
             filter,
+            port,
         }
     }
 }
@@ -65,10 +120,13 @@ impl tower_service::Service<Name> for FilteringResolver {
         let host = name.as_str().to_owned();
         let lookup = self.inner.call(name);
         let filter = self.filter.clone();
+        let port = self.port;
         Box::pin(async move {
             let resolved = lookup.await?;
             let addrs: Vec<SocketAddr> = match filter {
-                Some(filter) => resolved.filter(|addr| filter(&host, addr.ip())).collect(),
+                Some(filter) => resolved
+                    .filter(|addr| filter(&host, addr.ip(), port))
+                    .collect(),
                 None => resolved.collect(),
             };
             if addrs.is_empty() {
@@ -122,9 +180,7 @@ pub fn create_https_client_with_filter(
     params: &HttpClientParams,
     filter: Option<ResolvedAddrFilter>,
 ) -> Result<HttpsClient> {
-    let mut http = HttpConnector::new_with_resolver(FilteringResolver::new(filter));
-    http.set_nodelay(true);
-    http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
+    let http = FilteringConnector::new(params, filter);
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .map_err(|e| anyhow::anyhow!("failed to load native roots for HTTPS client: {e}"))?
@@ -151,9 +207,7 @@ pub fn create_h2c_client_with_filter(
     params: &HttpClientParams,
     filter: Option<ResolvedAddrFilter>,
 ) -> H2cClient {
-    let mut http = HttpConnector::new_with_resolver(FilteringResolver::new(filter));
-    http.set_nodelay(true);
-    http.set_keepalive(params.tcp_keepalive_secs.map(Duration::from_secs));
+    let http = FilteringConnector::new(params, filter);
     let mut builder = Client::builder(TokioExecutor::new());
     builder
         .http2_only(true)
@@ -369,6 +423,34 @@ pub async fn forward_http_with_buffer_params(
 #[cfg(test)]
 mod client_construction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_dials_keep_their_own_port_for_names_and_literals() {
+        use tower_service::Service;
+
+        let allowed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let denied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let allowed_port = allowed.local_addr().unwrap().port();
+        let denied_port = denied.local_addr().unwrap().port();
+        let filter: ResolvedAddrFilter =
+            Arc::new(move |_, ip, port| ip == IpAddr::from([127, 0, 0, 1]) && port == allowed_port);
+        let mut connector = FilteringConnector::new(&HttpClientParams::default(), Some(filter));
+        for host in ["localhost", "127.0.0.1"] {
+            let permitted =
+                connector.call(format!("http://{host}:{allowed_port}/").parse().unwrap());
+            let rejected = connector.call(format!("http://{host}:{denied_port}/").parse().unwrap());
+            let (permitted, rejected) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(permitted, rejected)
+            })
+            .await
+            .unwrap();
+            assert!(
+                permitted.is_ok(),
+                "allowed IP/port was rejected: {permitted:?}"
+            );
+            assert!(rejected.is_err(), "disallowed IP/port was dialed");
+        }
+    }
 
     #[test]
     fn https_client_construction_returns_result() {

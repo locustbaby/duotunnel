@@ -27,11 +27,8 @@ enum HostRule {
 }
 
 impl DialRule {
-    fn port_matches(&self, port: Option<u16>) -> bool {
-        match (self.port, port) {
-            (Some(required), Some(port)) => required == port,
-            _ => true,
-        }
+    fn port_matches(&self, port: u16) -> bool {
+        self.port.is_none_or(|required| required == port)
     }
 }
 
@@ -56,7 +53,7 @@ impl DialPolicy {
     pub fn allows_target(&self, addr: &str) -> bool {
         let parsed = duotunnel_lib::transport::addr::parse_upstream(addr);
         let host = parsed.host.trim_matches(|c| c == '[' || c == ']');
-        let port = Some(parsed.port);
+        let port = parsed.port;
         if let Ok(ip) = host.parse::<IpAddr>() {
             return self.allows_ip(None, ip, port);
         }
@@ -72,13 +69,12 @@ impl DialPolicy {
         })
     }
 
-    /// Resolution stage. `port` is `None` when the resolver does not know it (hyper's
-    /// DNS hook); the name stage has already enforced port constraints in that case.
-    pub fn allows_resolved(&self, host: &str, ip: IpAddr, port: Option<u16>) -> bool {
+    /// Resolution stage, checked against the actual destination port of this dial.
+    pub fn allows_resolved(&self, host: &str, ip: IpAddr, port: u16) -> bool {
         self.allows_ip(Some(host), ip, port)
     }
 
-    fn allows_ip(&self, host: Option<&str>, ip: IpAddr, port: Option<u16>) -> bool {
+    fn allows_ip(&self, host: Option<&str>, ip: IpAddr, port: u16) -> bool {
         let ip = canonical_ip(ip);
         let cidr_allowed = self.rules.iter().any(|rule| {
             rule.port_matches(port)
@@ -104,8 +100,8 @@ impl DialPolicy {
             return None;
         }
         let policy = Arc::clone(self);
-        Some(Arc::new(move |host: &str, ip: IpAddr| {
-            policy.allows_resolved(host, ip, None)
+        Some(Arc::new(move |host: &str, ip: IpAddr, port: u16| {
+            policy.allows_resolved(host, ip, port)
         }))
     }
 }
@@ -229,6 +225,50 @@ fn is_loopback_or_link_local(ip: IpAddr) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn http_dial_cannot_combine_cidr_and_port_permissions() {
+        use http_body_util::{BodyExt, Empty};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let p = Arc::new(policy(
+            &[&format!("10.0.0.0/8:{port}"), "127.0.0.1:1", "[::1]:1"],
+            true,
+        ));
+        assert!(p.allows_target(&format!("http://localhost:{port}")));
+        let backend = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            assert!(socket.read(&mut buf).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let client = duotunnel_lib::create_https_client_with_filter(
+            &duotunnel_lib::HttpClientParams::default(),
+            p.resolved_addr_filter(),
+        )
+        .unwrap();
+        let request = hyper::Request::builder()
+            .uri(format!("http://localhost:{port}/"))
+            .body(
+                Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), client.request(request))
+                .await
+                .unwrap();
+        backend.abort();
+        assert!(
+            result.is_err(),
+            "HTTP connector dialed a disallowed IP/port combination"
+        );
+    }
+
     fn policy(patterns: &[&str], deny: bool) -> DialPolicy {
         let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
         DialPolicy::new(&patterns, deny).unwrap()
@@ -243,7 +283,7 @@ mod tests {
         let p = policy(&[], false);
         assert!(p.is_unrestricted());
         assert!(p.allows_target("http://169.254.169.254:80"));
-        assert!(p.allows_resolved("x", ip("169.254.169.254"), Some(80)));
+        assert!(p.allows_resolved("x", ip("169.254.169.254"), 80));
     }
 
     #[test]
@@ -260,8 +300,8 @@ mod tests {
         assert!(p.allows_target("https://api.svc.local:443"));
         assert!(!p.allows_target("http://169.254.169.254:80"));
         // With an IP rule present, other hostnames are admitted and judged by resolved IP.
-        assert!(p.allows_resolved("localhost", ip("127.0.0.1"), Some(8081)));
-        assert!(!p.allows_resolved("localhost", ip("::1"), Some(8081)));
+        assert!(p.allows_resolved("localhost", ip("127.0.0.1"), 8081));
+        assert!(!p.allows_resolved("localhost", ip("::1"), 8081));
 
         let names_only = policy(&["localhost:8080", "*.svc.local"], false);
         assert!(!names_only.allows_target("http://localhost:8081"));
@@ -274,9 +314,9 @@ mod tests {
         let p = policy(&["10.0.0.0/8:8080"], false);
         assert!(p.allows_target("api.internal:8080"));
         assert!(!p.allows_target("api.internal:9090"));
-        assert!(p.allows_resolved("api.internal", ip("10.1.2.3"), Some(8080)));
-        assert!(!p.allows_resolved("api.internal", ip("169.254.169.254"), Some(8080)));
-        assert!(!p.allows_resolved("api.internal", ip("10.1.2.3"), Some(9090)));
+        assert!(p.allows_resolved("api.internal", ip("10.1.2.3"), 8080));
+        assert!(!p.allows_resolved("api.internal", ip("169.254.169.254"), 8080));
+        assert!(!p.allows_resolved("api.internal", ip("10.1.2.3"), 9090));
         assert!(p.allows_target("10.9.9.9:8080"));
         assert!(!p.allows_target("11.0.0.1:8080"));
     }
@@ -284,13 +324,13 @@ mod tests {
     #[test]
     fn name_rules_trust_resolution_unless_guard_enabled() {
         let open = policy(&["*.svc.local"], false);
-        assert!(open.allows_resolved("evil.svc.local", ip("169.254.169.254"), None));
+        assert!(open.allows_resolved("evil.svc.local", ip("169.254.169.254"), 80));
         let guarded = policy(&["*.svc.local"], true);
-        assert!(!guarded.allows_resolved("evil.svc.local", ip("169.254.169.254"), None));
-        assert!(!guarded.allows_resolved("evil.svc.local", ip("::ffff:127.0.0.1"), None));
-        assert!(!guarded.allows_resolved("evil.svc.local", ip("fe80::1"), None));
-        assert!(guarded.allows_resolved("api.svc.local", ip("10.0.0.5"), None));
-        assert!(!guarded.allows_resolved("other.example", ip("10.0.0.5"), None));
+        assert!(!guarded.allows_resolved("evil.svc.local", ip("169.254.169.254"), 80));
+        assert!(!guarded.allows_resolved("evil.svc.local", ip("::ffff:127.0.0.1"), 80));
+        assert!(!guarded.allows_resolved("evil.svc.local", ip("fe80::1"), 80));
+        assert!(guarded.allows_resolved("api.svc.local", ip("10.0.0.5"), 80));
+        assert!(!guarded.allows_resolved("other.example", ip("10.0.0.5"), 80));
     }
 
     #[test]
@@ -298,8 +338,8 @@ mod tests {
         let p = policy(&["127.0.0.1", "*"], true);
         assert!(p.allows_target("127.0.0.1:80"));
         assert!(!p.allows_target("[::1]:80"));
-        assert!(!p.allows_resolved("anything", ip("169.254.169.254"), None));
-        assert!(p.allows_resolved("anything", ip("8.8.8.8"), None));
+        assert!(!p.allows_resolved("anything", ip("169.254.169.254"), 80));
+        assert!(p.allows_resolved("anything", ip("8.8.8.8"), 80));
     }
 
     #[test]
@@ -308,8 +348,8 @@ mod tests {
         assert!(!p.is_unrestricted());
         assert!(p.allows_target("api.example:443"));
         assert!(!p.allows_target("169.254.169.254:80"));
-        assert!(!p.allows_resolved("api.example", ip("127.0.0.1"), None));
-        assert!(p.allows_resolved("api.example", ip("93.184.216.34"), None));
+        assert!(!p.allows_resolved("api.example", ip("127.0.0.1"), 80));
+        assert!(p.allows_resolved("api.example", ip("93.184.216.34"), 80));
     }
 
     #[test]
