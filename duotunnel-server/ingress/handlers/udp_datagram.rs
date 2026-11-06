@@ -583,18 +583,10 @@ impl UdpSessionManager {
             _ = self.root_cancel.cancelled() => {
                 return Err(anyhow::anyhow!("UDP session manager is shutting down"));
             }
-            result = tokio::time::timeout(UDP_SESSION_OPERATION_TIMEOUT, UdpSocket::bind("0.0.0.0:0")) => {
-                Arc::new(result.map_err(|_| anyhow::anyhow!("UDP socket bind timed out"))??)
+            result = tokio::time::timeout(UDP_SESSION_OPERATION_TIMEOUT, connect_udp_upstream(upstream_addr)) => {
+                Arc::new(result.map_err(|_| anyhow::anyhow!("UDP upstream connect timed out"))??)
             }
         };
-        tokio::select! {
-            _ = self.root_cancel.cancelled() => {
-                return Err(anyhow::anyhow!("UDP session manager is shutting down"));
-            }
-            result = tokio::time::timeout(UDP_SESSION_OPERATION_TIMEOUT, socket.connect(upstream_addr)) => {
-                result.map_err(|_| anyhow::anyhow!("UDP upstream connect timed out"))??;
-            }
-        }
 
         if self.root_cancel.is_cancelled()
             || entry
@@ -631,15 +623,23 @@ impl UdpSessionManager {
             }
             let packets = {
                 let mut pending = entry.state.pending_packets.lock();
+                // Enqueuers recheck phase under this lock. Publish the handoff before
+                // releasing it so none can queue a packet after the final drain.
+                if pending.is_empty() {
+                    entry
+                        .state
+                        .phase
+                        .compare_exchange(
+                            SESSION_DRAINING,
+                            SESSION_CONNECTED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .map_err(|_| anyhow::anyhow!("UDP session was evicted or cancelled"))?;
+                    break;
+                }
                 std::mem::take(&mut *pending)
             };
-            if packets.is_empty() {
-                entry
-                    .state
-                    .phase
-                    .store(SESSION_CONNECTED, Ordering::Release);
-                break;
-            }
             for payload in packets {
                 self.send_session_datagram(&session, &payload)
                     .await
@@ -671,6 +671,17 @@ impl UdpSessionManager {
         });
         Ok(())
     }
+}
+
+async fn connect_udp_upstream(target: std::net::SocketAddr) -> std::io::Result<UdpSocket> {
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind).await?;
+    socket.connect(target).await?;
+    Ok(socket)
 }
 
 async fn pump_udp_replies(
@@ -710,6 +721,30 @@ async fn pump_udp_replies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn udp_upstream_roundtrip_supports_both_address_families() {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let upstream = UdpSocket::bind(bind).await.unwrap();
+            let socket = connect_udp_upstream(upstream.local_addr().unwrap())
+                .await
+                .unwrap();
+            socket.send(b"request").await.unwrap();
+            let mut buf = [0; 32];
+            let (len, peer) =
+                tokio::time::timeout(Duration::from_secs(1), upstream.recv_from(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buf[..len], b"request");
+            upstream.send_to(b"reply", peer).await.unwrap();
+            let len = tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&buf[..len], b"reply");
+        }
+    }
 
     async fn test_entry(last_activity: u64, reg_id: UdpRegId) -> Arc<SessionEntry> {
         let session_admission = AdmissionController::new(AdmissionLimits::new(Some(1)))
