@@ -458,7 +458,6 @@ pub struct UpstreamGroup {
     pub entries: Vec<Arc<BackendEntry>>,
     counter: AtomicUsize,
     health: Arc<UpstreamHealthRegistry>,
-    has_ejections: std::sync::atomic::AtomicBool,
 }
 impl UpstreamGroup {
     pub fn calculate_fingerprint(servers: &[String]) -> u64 {
@@ -494,15 +493,11 @@ impl UpstreamGroup {
             .iter()
             .map(|s| health.get_or_create_entry(&health_namespace, s, config_fingerprint))
             .collect();
-        let has_ejections = entries
-            .iter()
-            .any(|e| matches!(e.state.is_healthy(), HealthSelection::Ejected));
         Self {
             servers,
             entries,
             counter: AtomicUsize::new(0),
             health,
-            has_ejections: std::sync::atomic::AtomicBool::new(has_ejections),
         }
     }
 
@@ -512,21 +507,6 @@ impl UpstreamGroup {
         }
         let len = self.entries.len();
         let raw = self.counter.fetch_add(1, Ordering::Relaxed);
-        if !self.has_ejections.load(Ordering::Relaxed) {
-            let idx = if len.is_power_of_two() {
-                raw & (len - 1)
-            } else {
-                raw % len
-            };
-            if let Some(entry) = self.entries.get(idx) {
-                return Some(BackendRef {
-                    entry: entry.clone(),
-                    observed_epoch: entry.state.current_epoch(),
-                    is_panic_fallback: false,
-                    registry: Some(Arc::downgrade(&self.health)),
-                });
-            }
-        }
         let now_ticks = current_health_ticks();
         for i in 0..len {
             let offset = raw.wrapping_add(i);
@@ -572,15 +552,6 @@ impl UpstreamGroup {
         }
     }
 
-    pub fn sync_ejection_flag(&self) {
-        let has_ejected = self
-            .entries
-            .iter()
-            .any(|e| matches!(e.state.is_healthy(), HealthSelection::Ejected));
-        self.has_ejections
-            .store(has_ejected, std::sync::atomic::Ordering::Release);
-    }
-
     pub fn mark_unhealthy(&self, server: &str) {
         if let Some(entry) = self
             .entries
@@ -591,8 +562,6 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     if let Some(probe_token) = entry.state.mark_failure(observed_epoch) {
-                        self.has_ejections
-                            .store(true, std::sync::atomic::Ordering::Release);
                         self.health.spawn_probe_by_token(entry.clone(), probe_token);
                     }
                 }
@@ -611,7 +580,6 @@ impl UpstreamGroup {
                 HealthSelection::Healthy(observed_epoch)
                 | HealthSelection::ProbeLease(observed_epoch) => {
                     entry.state.mark_success(observed_epoch);
-                    self.sync_ejection_flag();
                 }
                 HealthSelection::Ejected => {}
             }
@@ -705,6 +673,35 @@ async fn probe_upstream(connect_addr: &str, timeout: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn recorded_failures_skip_ejected_backend_with_healthy_alternative() {
+        let group = UpstreamGroup::new(vec!["127.0.0.1:1".into(), "127.0.0.1:2".into()]);
+        for _ in 0..6 {
+            let backend = group.next_healthy_ref().unwrap();
+            if backend.address() == "127.0.0.1:1" {
+                backend.record_failure();
+            } else {
+                backend.mark_success();
+            }
+        }
+        assert!(!group.is_healthy("127.0.0.1:1"));
+        for _ in 0..6 {
+            assert_eq!(group.next_healthy_ref().unwrap().address(), "127.0.0.1:2");
+        }
+    }
+
+    #[tokio::test]
+    async fn recorded_failures_keep_single_backend_as_panic_fallback() {
+        let group = UpstreamGroup::new(vec!["127.0.0.1:1".into()]);
+        for _ in 0..3 {
+            group.next_healthy_ref().unwrap().record_failure();
+        }
+        let fallback = group.next_healthy_ref().unwrap();
+        assert_eq!(fallback.address(), "127.0.0.1:1");
+        assert!(fallback.is_panic_fallback);
+        fallback.mark_success();
+        assert!(!group.is_healthy("127.0.0.1:1"));
+    }
     trait GroupExt {
         fn force_unhealthy(&self, addr: &str);
     }
@@ -712,7 +709,6 @@ mod tests {
         fn force_unhealthy(&self, addr: &str) {
             if let Some(entry) = self.entries.iter().find(|e| e.raw_address.as_ref() == addr) {
                 entry.state.force_unhealthy();
-                self.sync_ejection_flag();
             }
         }
     }
