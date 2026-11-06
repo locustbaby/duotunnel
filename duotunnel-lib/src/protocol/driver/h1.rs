@@ -43,6 +43,7 @@ pub struct Http1Driver {
     last_http_minor: u8,
     header_buf_size: usize,
     body_chunk_size: usize,
+    response_idle_timeout: std::time::Duration,
 }
 
 const DEFAULT_HTTP_HEADER_BUF_SIZE: usize = 8192;
@@ -88,7 +89,7 @@ impl Http1Driver {
         initial_bytes: Option<Bytes>,
         params: &ProxyBufferParams,
     ) -> Self {
-        Self::new_with_buffer_sizes(
+        let mut driver = Self::new_with_buffer_sizes(
             send,
             recv,
             scheme,
@@ -96,7 +97,10 @@ impl Http1Driver {
             initial_bytes,
             params.http_header_buf_size,
             params.http_body_chunk_size,
-        )
+        );
+        driver.response_idle_timeout =
+            std::time::Duration::from_millis(params.http_response_idle_timeout_ms);
+        driver
     }
 
     pub fn new_with_buffer_sizes(
@@ -125,6 +129,9 @@ impl Http1Driver {
             last_http_minor: 1,
             header_buf_size: buffer_sizes.header,
             body_chunk_size: buffer_sizes.body_chunk,
+            response_idle_timeout: std::time::Duration::from_millis(
+                ProxyBufferParams::default().http_response_idle_timeout_ms,
+            ),
         }
     }
     pub async fn finish(&mut self) -> Result<()> {
@@ -487,6 +494,10 @@ impl ProtocolDriver for Http1Driver {
         &mut self,
         mut response: Response<BoxBody<Bytes, std::io::Error>>,
     ) -> Result<()> {
+        let mut send = ResponseWriter {
+            stream: &mut self.send,
+            idle_timeout: self.response_idle_timeout,
+        };
         let status = response.status();
         if let Some(conn) = response.headers().get(http::header::CONNECTION) {
             if let Ok(v) = conn.to_str() {
@@ -570,7 +581,7 @@ impl ProtocolDriver for Http1Driver {
                 write!(header_buf, "content-length: {}\r\n", len).unwrap();
             }
             header_buf.put_slice(b"\r\n");
-            self.send.write_all(&header_buf).await?;
+            send.write_all(&header_buf).await?;
             return Ok(());
         }
         if close_delimited {
@@ -578,14 +589,16 @@ impl ProtocolDriver for Http1Driver {
             // knows the connection is closing (it may have asked for
             // keep-alive), so say so explicitly.
             header_buf.put_slice(b"connection: close\r\n\r\n");
-            self.send.write_all(&header_buf).await?;
+            send.write_all(&header_buf).await?;
             let mut body = response.into_body();
-            while let Some(frame) = body.frame().await {
+            while let Some(frame) =
+                tokio::time::timeout(self.response_idle_timeout, body.frame()).await?
+            {
                 let frame =
                     frame.map_err(|e| anyhow::anyhow!("error reading response frame: {}", e))?;
                 if let Ok(data) = frame.into_data() {
                     if !data.is_empty() {
-                        self.send.write_chunk(data).await?;
+                        send.write_chunk(data).await?;
                     }
                 }
             }
@@ -593,10 +606,12 @@ impl ProtocolDriver for Http1Driver {
         }
         if let Some(len) = exact_len {
             write!(header_buf, "content-length: {}\r\n\r\n", len).unwrap();
-            self.send.write_all(&header_buf).await?;
+            send.write_all(&header_buf).await?;
             let mut body = response.into_body();
             let mut written: u64 = 0;
-            while let Some(frame) = body.frame().await {
+            while let Some(frame) =
+                tokio::time::timeout(self.response_idle_timeout, body.frame()).await?
+            {
                 let frame =
                     frame.map_err(|e| anyhow::anyhow!("error reading response frame: {}", e))?;
                 match frame.into_data() {
@@ -606,7 +621,7 @@ impl ProtocolDriver for Http1Driver {
                             self.should_close = true;
                             return Err(anyhow::anyhow!("response body exceeded declared length"));
                         }
-                        self.send.write_chunk(data).await?;
+                        send.write_chunk(data).await?;
                     }
                     Err(frame) => {
                         if frame.into_trailers().is_ok() {
@@ -626,11 +641,11 @@ impl ProtocolDriver for Http1Driver {
             return Ok(());
         }
         header_buf.put_slice(b"transfer-encoding: chunked\r\n\r\n");
-        self.send.write_all(&header_buf).await?;
+        send.write_all(&header_buf).await?;
         let mut body = response.into_body();
         let mut accumulated_trailers = HeaderMap::new();
         loop {
-            match body.frame().await {
+            match tokio::time::timeout(self.response_idle_timeout, body.frame()).await? {
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(chunk) => {
                         if chunk.is_empty() {
@@ -648,7 +663,7 @@ impl ProtocolDriver for Http1Driver {
                             chunk,
                             Bytes::from_static(b"\r\n"),
                         ];
-                        self.send.write_all_chunks(&mut parts).await?;
+                        send.write_all_chunks(&mut parts).await?;
                     }
                     Err(frame) => {
                         if let Ok(trailers) = frame.into_trailers() {
@@ -672,7 +687,7 @@ impl ProtocolDriver for Http1Driver {
             }
         }
         if accumulated_trailers.is_empty() {
-            self.send.write_all(b"0\r\n\r\n").await?;
+            send.write_all(b"0\r\n\r\n").await?;
         } else {
             let mut tail = BytesMut::with_capacity(8 + accumulated_trailers.len() * 48);
             tail.put_slice(b"0\r\n");
@@ -683,11 +698,41 @@ impl ProtocolDriver for Http1Driver {
                 tail.put_slice(b"\r\n");
             }
             tail.put_slice(b"\r\n");
-            self.send.write_all(&tail).await?;
+            send.write_all(&tail).await?;
         }
         Ok(())
     }
 }
+struct ResponseWriter<'a> {
+    stream: &'a mut SendStream,
+    idle_timeout: std::time::Duration,
+}
+
+impl ResponseWriter<'_> {
+    async fn write_all(&mut self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            let written =
+                tokio::time::timeout(self.idle_timeout, self.stream.write(bytes)).await??;
+            bytes = &bytes[written..];
+        }
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
+        self.write_all_chunks(&mut [chunk]).await
+    }
+
+    async fn write_all_chunks(&mut self, mut chunks: &mut [Bytes]) -> Result<()> {
+        // Reset on each accepted write, including partial writes of a large body frame.
+        while !chunks.is_empty() {
+            let written =
+                tokio::time::timeout(self.idle_timeout, self.stream.write_chunks(chunks)).await??;
+            chunks = &mut chunks[written.chunks..];
+        }
+        Ok(())
+    }
+}
+
 struct BodyState {
     recv: Option<RecvStream>,
     body_prefix: Option<Bytes>,

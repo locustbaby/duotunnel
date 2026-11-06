@@ -117,18 +117,9 @@ impl HttpPeer {
                 }
             };
             debug!(upstream = %self.spec.target_host, status = %response.status(), "H1 received response");
-            match tokio::time::timeout(UPSTREAM_REQUEST_TIMEOUT, driver.write_response(response))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    debug!(upstream = %self.spec.target_host, error = %e, "H1 write_response error, closing");
-                    break;
-                }
-                Err(_) => {
-                    debug!(upstream = %self.spec.target_host, "H1 response body timed out, closing");
-                    break;
-                }
+            if let Err(e) = driver.write_response(response).await {
+                debug!(upstream = %self.spec.target_host, error = %e, "H1 write_response error, closing");
+                break;
             }
             if driver.should_close || should_close_after {
                 debug!(upstream = %self.spec.target_host, "H1 keep-alive: Connection: close, closing");

@@ -31,6 +31,7 @@ pub struct ProxyBufferParams {
     pub http_body_chunk_size: usize,
     pub relay_buf_size: usize,
     pub sniff_timeout_ms: u64,
+    pub http_response_idle_timeout_ms: u64,
 }
 impl Default for ProxyBufferParams {
     fn default() -> Self {
@@ -40,6 +41,7 @@ impl Default for ProxyBufferParams {
             http_body_chunk_size: 8192,
             relay_buf_size: 65536,
             sniff_timeout_ms: 2500,
+            http_response_idle_timeout_ms: 60_000,
         }
     }
 }
@@ -81,6 +83,9 @@ impl ProxyBufferParams {
         }
         if self.sniff_timeout_ms == 0 {
             return Err("sniff_timeout_ms must be >= 1, got 0".to_string());
+        }
+        if self.http_response_idle_timeout_ms == 0 {
+            return Err("http_response_idle_timeout_ms must be >= 1".to_string());
         }
         Ok(())
     }

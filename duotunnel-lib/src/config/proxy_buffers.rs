@@ -18,6 +18,8 @@ pub struct ProxyBufferConfig {
     /// Default 65536 (64 KiB) matches nginx/envoy and halves syscalls vs 8 KiB.
     pub relay_buf_size: usize,
     pub sniff_timeout_ms: u64,
+    /// Maximum wait without response body or downstream write progress.
+    pub http_response_idle_timeout_ms: u64,
 }
 impl Default for ProxyBufferConfig {
     fn default() -> Self {
@@ -27,6 +29,7 @@ impl Default for ProxyBufferConfig {
             http_body_chunk_size: 8192,
             relay_buf_size: 65536,
             sniff_timeout_ms: 2500,
+            http_response_idle_timeout_ms: 60_000,
         }
     }
 }
@@ -38,6 +41,7 @@ impl From<&ProxyBufferConfig> for ProxyBufferParams {
             http_body_chunk_size: normalize_http_body_chunk_size(c.http_body_chunk_size),
             relay_buf_size: normalize_relay_buf_size(c.relay_buf_size),
             sniff_timeout_ms: c.sniff_timeout_ms,
+            http_response_idle_timeout_ms: c.http_response_idle_timeout_ms,
         }
     }
 }
@@ -83,6 +87,12 @@ mod tests {
     fn buffer_config_rejects_values_outside_supported_range() {
         let config = ProxyBufferConfig {
             peek_buf_size: 0,
+            ..ProxyBufferConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = ProxyBufferConfig {
+            http_response_idle_timeout_ms: 0,
             ..ProxyBufferConfig::default()
         };
         assert!(config.validate().is_err());
