@@ -11,4 +11,3 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 pub(crate) use bootstrap::{build_routing_snapshot_with_health, RuntimeGeneration, ServerState};
-pub(crate) use duotunnel_lib::PeekBufPool;

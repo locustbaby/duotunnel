@@ -196,7 +196,6 @@ struct IngressRuntime {
     config: Arc<ServerConfigFile>,
     tcp_params: duotunnel_lib::TcpParams,
     proxy_buffer_params: duotunnel_lib::ProxyBufferParams,
-    peek_buf_pool: crate::PeekBufPool,
     generation: Arc<ArcSwap<RuntimeGeneration>>,
     upstream_health: Arc<duotunnel_lib::proxy::upstream::UpstreamHealthRegistry>,
     listeners: listener_mgr::ListenerManager,
@@ -341,10 +340,6 @@ impl ServerState {
         std::time::Duration::from_millis(self.ingress.proxy_buffer_params.sniff_timeout_ms)
     }
 
-    pub(crate) fn peek_buf_pool(&self) -> &crate::PeekBufPool {
-        &self.ingress.peek_buf_pool
-    }
-
     pub(crate) fn plugin_registry(&self) -> &Arc<duotunnel_lib::plugin::PluginRegistry> {
         &self.ingress.plugin_registry
     }
@@ -388,7 +383,6 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
         &proxy_buffer_params,
         &duotunnel_lib::TcpParams::from(&bootstrap.config.server.tcp),
     )?;
-    let peek_buf_pool = crate::PeekBufPool::new(proxy_buffer_params.peek_buf_size);
     let max_streams = duotunnel_lib::QuicTransportParams::from(&bootstrap.config.server.quic)
         .max_concurrent_streams;
     let overload_limits = bootstrap.config.server.overload.resolve(max_streams);
@@ -467,7 +461,6 @@ pub(crate) async fn build_server_state(bootstrap: &ServerBootstrap) -> Result<Ar
             config: Arc::new(bootstrap.config.clone()),
             tcp_params: duotunnel_lib::TcpParams::from(&bootstrap.config.server.tcp),
             proxy_buffer_params,
-            peek_buf_pool,
             generation,
             upstream_health,
             listeners: listener_mgr::ListenerManager::new(),

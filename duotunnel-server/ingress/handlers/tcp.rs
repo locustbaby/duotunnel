@@ -72,40 +72,18 @@ fn observe_wait_metrics(elapsed: std::time::Duration, outcome: OpenBiOutcome) {
 
 async fn handle_tcp_connection(
     state: Arc<ServerState>,
-    mut stream: TcpStream,
+    stream: TcpStream,
     proxy_name: ProxyName,
     group_id: GroupId,
 ) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
-    let pool = state.peek_buf_pool();
-    let runtime = duotunnel_lib::SniffRuntime::new(
-        duotunnel_lib::SniffPolicy::default(),
-        duotunnel_lib::default_ingress_detectors(),
-    );
-    let sniffed =
-        match tokio::time::timeout(state.sniff_timeout(), runtime.sniff(&mut stream, pool)).await {
-            Ok(res) => res?,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "protocol sniffing timed out (Slowloris protection)"
-                ))
-            }
-        };
-    let protocol = if sniffed.bytes_read == 0 {
-        duotunnel_lib::proxy::core::Protocol::Unknown
-    } else {
-        sniffed.hint.protocol
-    };
-    let host = sniffed.hint.sni.clone().or(sniffed.hint.authority.clone());
-    let prefixed_stream = sniffed.into_stream(stream);
-    debug!(protocol = ? protocol, host = ? host, "detected protocol on tcp listener");
-
+    // A fixed TCP route must connect before reading: the upstream may speak first.
     let routing_info = duotunnel_lib::RoutingInfo {
         proxy_name,
         src_addr: peer_addr.ip(),
         src_port: peer_addr.port(),
-        protocol,
-        host,
+        protocol: duotunnel_lib::proxy::core::Protocol::Tcp,
+        host: None,
     };
 
     let mut attempts = 0;
@@ -157,5 +135,5 @@ async fn handle_tcp_connection(
     let send = opened.send;
     let recv = opened.recv;
     let _inflight_guard = opened.inflight;
-    proxy::forward_prefixed_to_client(send, recv, prefixed_stream, state.relay_buf_size()).await
+    proxy::forward_to_client(send, recv, stream, state.relay_buf_size()).await
 }
