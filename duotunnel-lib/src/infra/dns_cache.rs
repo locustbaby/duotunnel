@@ -457,6 +457,9 @@ mod tests {
                                 Instant::now() + Duration::from_secs(60),
                             ),
                         );
+                        // DashMap sums shard lengths separately; freeze insertions so
+                        // this assertion observes one consistent capacity snapshot.
+                        let _guard = cache.insertion_lock.lock();
                         assert!(cache.cache.len() <= cache.max_entries);
                     }
                 });
