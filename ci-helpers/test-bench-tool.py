@@ -30,16 +30,22 @@ class BenchmarkInputTests(unittest.TestCase):
         install.assert_called_once_with([executable, "-m", "pip", "install", "-q", "psutil"], check=False)
         restart.assert_called_once_with(executable, [executable, *argv])
 
-    def test_systemctl_receives_a_single_validated_unit_operand(self):
+    def test_systemctl_uses_fixed_arguments_and_filters_requested_units(self):
         with self.assertRaises(argparse.ArgumentTypeError):
             bench._scope_name("--all")
         with self.assertRaises(argparse.ArgumentTypeError):
             bench._scope_name("duotunnel-*.scope")
         scope = bench._scope_name("duotunnel-server.scope")
-        with patch.object(bench, "_run_capture", return_value={"status": 0, "output": "TasksCurrent=2"}) as run:
-            result = bench._systemd_scope_snapshot(scope)
-        self.assertEqual(run.call_args.args[0][-3:], ["show", "--", scope])
-        self.assertEqual(result["properties"], {"TasksCurrent": "2"})
+        output = "Id=other.scope\nTasksCurrent=1\n\nId=duotunnel-server.scope\nNames=duotunnel-server.scope\nTasksCurrent=2"
+        with patch.object(bench, "_run_capture", return_value={"status": 0, "output": output}) as run:
+            results = bench._systemd_scope_snapshots([scope, "missing.scope"])
+        command = run.call_args.args[0]
+        self.assertEqual(command[-3:], ["show", "--", "*"])
+        self.assertNotIn(scope, command)
+        self.assertEqual(results, [
+            {"scope": scope, "status": 0, "properties": {"TasksCurrent": "2"}},
+            {"scope": "missing.scope", "status": 1, "properties": {}},
+        ])
 
     def test_redaction_preserves_secret_keys_and_handles_long_inputs(self):
         large_key = 'DUOTUNNEL_' * 1000
