@@ -1479,13 +1479,8 @@ mod tests {
 
     #[tokio::test]
     async fn lkg_round_trip_verifies_hash_and_uses_envelope() {
-        let dir = std::env::temp_dir().join(format!(
-            "duotunnel-lkg-test-{}-{}",
-            std::process::id(),
-            fastrand::u64(..)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("local_snapshot.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local_snapshot.json");
         let snapshot = empty_snapshot(4);
         let lkg = make_lkg(
             Some(ControlRevision {
@@ -1505,18 +1500,12 @@ mod tests {
         assert_eq!(loaded.revision, lkg.revision);
         assert_eq!(loaded.content_hash, lkg.content_hash);
         assert_eq!(loaded.generated_at_unix_ms, lkg.generated_at_unix_ms);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn lkg_hash_corruption_is_rejected() {
-        let dir = std::env::temp_dir().join(format!(
-            "duotunnel-lkg-corrupt-test-{}-{}",
-            std::process::id(),
-            fastrand::u64(..)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("local_snapshot.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local_snapshot.json");
         let snapshot = empty_snapshot(5);
         let mut lkg = make_lkg(
             Some(ControlRevision {
@@ -1533,18 +1522,12 @@ mod tests {
         assert!(save_snapshot_to_disk(&path, &lkg).await.is_err());
         atomic_write(&path, &serde_json::to_vec(&lkg).unwrap()).unwrap();
         assert!(load_snapshot_from_disk(&path).await.is_err());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn lkg_load_selects_highest_valid_revision() {
-        let dir = std::env::temp_dir().join(format!(
-            "duotunnel-lkg-select-test-{}-{}",
-            std::process::id(),
-            fastrand::u64(..)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("local_snapshot.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local_snapshot.json");
         let primary_snapshot = empty_snapshot(6);
         let primary = make_lkg(
             Some(ControlRevision {
@@ -1577,18 +1560,12 @@ mod tests {
         let loaded = load_snapshot_from_disk(&path).await.unwrap();
 
         assert_eq!(loaded.revision.unwrap().sequence, 7);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn lkg_rotation_keeps_immediate_predecessor() {
-        let dir = std::env::temp_dir().join(format!(
-            "duotunnel-lkg-rotation-test-{}-{}",
-            std::process::id(),
-            fastrand::u64(..)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("local_snapshot.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local_snapshot.json");
         let first_snapshot = empty_snapshot(8);
         let first = make_lkg(
             Some(ControlRevision {
@@ -1621,6 +1598,5 @@ mod tests {
             .unwrap();
         assert_eq!(primary.revision.unwrap().sequence, 9);
         assert_eq!(previous.revision.unwrap().sequence, 8);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

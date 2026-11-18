@@ -519,18 +519,22 @@ impl ControlService {
         let Some(pool) = self.snapshot_pool.as_ref() else {
             return Ok(());
         };
-        let column = match source {
-            DegradedSource::Yaml => "yaml_degraded",
-            DegradedSource::Sqlite => "sqlite_degraded",
-            DegradedSource::Coordinator => "coordinator_degraded",
+        let statement = match source {
+            DegradedSource::Yaml => {
+                "UPDATE config_state SET yaml_degraded = ?1 WHERE singleton = 1"
+            }
+            DegradedSource::Sqlite => {
+                "UPDATE config_state SET sqlite_degraded = ?1 WHERE singleton = 1"
+            }
+            DegradedSource::Coordinator => {
+                "UPDATE config_state SET coordinator_degraded = ?1 WHERE singleton = 1"
+            }
         };
         let mut tx = pool.begin().await?;
-        sqlx::query(&format!(
-            "UPDATE config_state SET {column} = ?1 WHERE singleton = 1"
-        ))
-        .bind(degraded)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(statement)
+            .bind(degraded)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "UPDATE config_state SET degraded = CASE
                 WHEN yaml_degraded != 0 OR sqlite_degraded != 0 OR coordinator_degraded != 0

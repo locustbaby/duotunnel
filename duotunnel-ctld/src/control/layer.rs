@@ -104,21 +104,26 @@ async fn ensure_config_layers_schema(pool: &sqlx::SqlitePool) -> Result<()> {
     let columns = sqlx::query("PRAGMA table_info(config_layers)")
         .fetch_all(pool)
         .await?;
-    for (name, definition) in [
-        ("source", "TEXT NOT NULL DEFAULT ''"),
-        ("payload", "TEXT NOT NULL DEFAULT '{}'"),
-        ("source_revision", "TEXT NOT NULL DEFAULT ''"),
+    for (name, statement) in [
+        (
+            "source",
+            "ALTER TABLE config_layers ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "payload",
+            "ALTER TABLE config_layers ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'",
+        ),
+        (
+            "source_revision",
+            "ALTER TABLE config_layers ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''",
+        ),
     ] {
         let exists = columns.iter().any(|row| {
             row.try_get::<String, _>("name")
                 .is_ok_and(|column| column == name)
         });
         if !exists {
-            sqlx::query(&format!(
-                "ALTER TABLE config_layers ADD COLUMN {name} {definition}"
-            ))
-            .execute(pool)
-            .await?;
+            sqlx::query(statement).execute(pool).await?;
         }
     }
     sqlx::query(

@@ -4,6 +4,10 @@ use duotunnel_lib::{ClientStatus, TokenStatus};
 use sqlx::sqlite::{SqliteConnection, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use tracing::info;
+
+// RUSTSEC-2026-0459 was fixed in SQLite 3.54.0.
+const _: () = assert!(libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_054_000);
+
 pub async fn open_sqlite_pool(database_url: &str, max_connections: u32) -> Result<SqlitePool> {
     if let Some(path) = database_url
         .strip_prefix("sqlite://")
