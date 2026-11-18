@@ -3,10 +3,11 @@ use anyhow::Result;
 use duotunnel_lib::config::{HttpPoolConfig, ProxyBufferConfig, TcpConfig};
 use duotunnel_lib::transport::quic::QuicTransportParams;
 use figment::{
-    providers::{Env, Format, Yaml},
+    providers::{Env, Format},
     Figment,
 };
 use serde::Deserialize;
+use serde_saphyr::figment::Yaml;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Deserialize, Default)]

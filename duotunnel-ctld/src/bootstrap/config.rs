@@ -1,9 +1,10 @@
 use anyhow::Result;
 use figment::{
-    providers::{Env, Format, Yaml},
+    providers::{Env, Format},
     Figment,
 };
 use serde::Deserialize;
+use serde_saphyr::figment::Yaml;
 use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]

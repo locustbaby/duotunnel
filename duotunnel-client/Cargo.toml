@@ -41,7 +41,8 @@ futures-util = "0.3"
 async-trait = "0.1"
 http = "1.0"
 arc-swap = "1.9"
-figment = { version = "0.10", features = ["yaml", "env"] }
+figment = { version = "0.10", features = ["env"] }
+serde-saphyr.workspace = true
 rand = "0.9"
 mimalloc = "0.1"
 metrics = "0.24"

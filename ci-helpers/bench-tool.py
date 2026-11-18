@@ -174,23 +174,34 @@ def _scope_name(value):
     return value
 
 
-def _systemd_scope_snapshot(scope):
+def _systemd_scope_snapshots(scopes):
+    if not scopes:
+        return []
     result = _run_capture(
         [
             "systemctl",
-            "--property=ControlGroup,AllowedCPUs,CPUQuotaPerSecUSec,CPUUsageNSec,TasksCurrent",
+            "--property=Id,Names,ControlGroup,AllowedCPUs,CPUQuotaPerSecUSec,CPUUsageNSec,TasksCurrent",
+            "--all",
             "--no-pager",
             "show",
             "--",
-            scope,
+            "*",
         ]
     )
-    properties = {}
-    for line in result.get("output", "").splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            properties[key] = value
-    return {"scope": scope, "status": result.get("status"), "properties": properties}
+    requested = set(scopes)
+    matches = {}
+    for block in result.get("output", "").split("\n\n"):
+        properties = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        names = properties.pop("Names", "").split()
+        names.append(properties.pop("Id", ""))
+        names.extend(name.removesuffix(".service") for name in list(names))
+        for name in requested.intersection(names):
+            matches[name] = properties
+    status = result.get("status")
+    return [
+        {"scope": scope, "status": status if scope in matches or status != 0 else 1, "properties": matches.get(scope, {})}
+        for scope in scopes
+    ]
 
 
 def _config_snapshot(path):
@@ -265,7 +276,7 @@ def run_snapshot(args):
             "pid": _process_snapshot(pid) if pid and os.path.exists(f"/proc/{pid}") else None,
         }
 
-    scopes = [_systemd_scope_snapshot(scope) for scope in args.scope]
+    scopes = _systemd_scope_snapshots(args.scope)
     log_evidence = [_log_evidence(path) for path in args.log_file]
     cgroup_type = _run_capture(["stat", "-fc", "%T", "/sys/fs/cgroup"])
     affinity = None
@@ -512,7 +523,10 @@ def run_collect(args):
         import psutil
     except ImportError:
         print("psutil not found, attempting auto-install...", file=sys.stderr)
-        os.execvp("sh", ["sh", "-c", "pip install -q psutil && exec python3 " + " ".join(sys.argv)])
+        install = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "psutil"], check=False)
+        if install.returncode != 0:
+            return install.returncode
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
     interval = args.interval
     nproc = psutil.cpu_count(logical=True) or 1
@@ -1010,7 +1024,7 @@ def main():
     g.add_argument("--max-dropped-increase", type=float, default=0.0)
 
     args = p.parse_args()
-    if args.cmd == "collect": run_collect(args)
+    if args.cmd == "collect": return_code = run_collect(args)
     elif args.cmd == "snapshot": return_code = run_snapshot(args)
     elif args.cmd == "parse": run_parse(args)
     elif args.cmd == "inject": run_inject(args)

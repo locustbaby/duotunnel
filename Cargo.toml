@@ -10,6 +10,8 @@ members = [
 
 resolver = "2"
 
+[workspace.dependencies]
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["figment"] }
 
 [profile.release]
 lto = "fat"            # Full cross-crate LTO: enables whole-program inlining and

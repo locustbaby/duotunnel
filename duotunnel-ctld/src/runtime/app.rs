@@ -7,11 +7,9 @@ use crate::control::watch::WatchServer;
 use crate::storage::sqlite::{open_sqlite_pool, SqliteAuthStore};
 use crate::storage::sqlite_rules::SqliteRuleStore;
 use anyhow::Result;
-use figment::{
-    providers::{Format, Yaml},
-    Figment,
-};
+use figment::{providers::Format, Figment};
 use serde::Deserialize;
+use serde_saphyr::figment::Yaml;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

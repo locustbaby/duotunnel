@@ -8,10 +8,11 @@ use crate::{
 };
 use anyhow::Result;
 use figment::{
-    providers::{Env, Format, Yaml},
+    providers::{Env, Format},
     Figment,
 };
 use serde::Deserialize;
+use serde_saphyr::figment::Yaml;
 /// Parses the routing sections of a server.yaml and converts them to
 /// [`RoutingData`] that can be saved to any [`RuleStore`].
 ///
