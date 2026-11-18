@@ -512,7 +512,10 @@ def run_collect(args):
         import psutil
     except ImportError:
         print("psutil not found, attempting auto-install...", file=sys.stderr)
-        os.execvp("sh", ["sh", "-c", "pip install -q psutil && exec python3 " + " ".join(sys.argv)])
+        install = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "psutil"], check=False)
+        if install.returncode != 0:
+            return install.returncode
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
     interval = args.interval
     nproc = psutil.cpu_count(logical=True) or 1
@@ -1010,7 +1013,7 @@ def main():
     g.add_argument("--max-dropped-increase", type=float, default=0.0)
 
     args = p.parse_args()
-    if args.cmd == "collect": run_collect(args)
+    if args.cmd == "collect": return_code = run_collect(args)
     elif args.cmd == "snapshot": return_code = run_snapshot(args)
     elif args.cmd == "parse": run_parse(args)
     elif args.cmd == "inject": run_inject(args)

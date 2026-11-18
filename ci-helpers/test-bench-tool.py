@@ -14,6 +14,22 @@ spec.loader.exec_module(bench)
 
 
 class BenchmarkInputTests(unittest.TestCase):
+    def test_collector_restarts_with_the_original_argument_boundaries(self):
+        argv = ["bench-tool.py", "collect", "--output", "path with spaces.jsonl"]
+        executable = "/test path/bin/python3"
+        with (
+            patch.dict(bench.sys.modules, {"psutil": None}),
+            patch.object(bench.sys, "argv", argv),
+            patch.object(bench.sys, "executable", executable),
+            patch.object(bench.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as install,
+            patch.object(bench.os, "execv", side_effect=SystemExit) as restart,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit):
+                bench.run_collect(None)
+        install.assert_called_once_with([executable, "-m", "pip", "install", "-q", "psutil"], check=False)
+        restart.assert_called_once_with(executable, [executable, *argv])
+
     def test_systemctl_receives_a_single_validated_unit_operand(self):
         with self.assertRaises(argparse.ArgumentTypeError):
             bench._scope_name("--all")
