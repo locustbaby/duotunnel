@@ -110,6 +110,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -144,6 +147,9 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: clippy
+
+      - name: Test benchmark input validation
+        run: python3 -B ci-helpers/test-bench-tool.py
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov

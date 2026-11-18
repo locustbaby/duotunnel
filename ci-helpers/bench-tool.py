@@ -48,22 +48,38 @@ def _sha256_bytes(value):
     return hashlib.sha256(value).hexdigest()
 
 
+_SECRET_KEYS = {"auth_token", "token", "password", "secret", "private_key", "client_secret"}
+_ENV_WORD = re.compile(r"[A-Za-z0-9_]+")
+_ENV_VALUE = re.compile(r"(\s*[=:]\s*)\S+")
+
+
+def _redact_env_assignments(line):
+    parts = []
+    offset = 0
+    for word in _ENV_WORD.finditer(line):
+        if word.start() < offset:
+            continue
+        key = word.group().upper()
+        if "DUOTUNNEL_" not in key or not key.endswith(("TOKEN", "SECRET", "PASSWORD")):
+            continue
+        value = _ENV_VALUE.match(line, word.end())
+        if value:
+            parts.extend((line[offset:value.end(1)], "<redacted>"))
+            offset = value.end()
+    parts.append(line[offset:])
+    return "".join(parts)
+
+
 def _redact_text(value):
     if value is None:
         return None
     lines = []
-    secret_line = re.compile(
-        r"^(\s*(?:auth_token|token|password|secret|private_key|client_secret)\s*:\s*).*$",
-        re.IGNORECASE,
-    )
-    secret_assignment = re.compile(
-        r"(DUOTUNNEL_[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD)\s*[=:]\s*)[^\s]+",
-        re.IGNORECASE,
-    )
     for line in value.splitlines():
-        line = secret_line.sub(r"\1<redacted>", line)
-        line = secret_assignment.sub(r"\1<redacted>", line)
-        lines.append(line)
+        key, sep, rest = line.partition(":")
+        if sep and key.strip().lower() in _SECRET_KEYS:
+            whitespace = rest[:len(rest) - len(rest.lstrip())]
+            line = f"{key}:{whitespace}<redacted>"
+        lines.append(_redact_env_assignments(line))
     suffix = "\n" if value.endswith("\n") else ""
     return "\n".join(lines) + suffix
 
@@ -140,14 +156,21 @@ def _process_snapshot(pid):
     }
 
 
+def _scope_name(value):
+    if value.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_.:@\\-]{1,255}", value):
+        raise argparse.ArgumentTypeError("expected a single systemd unit name")
+    return value
+
+
 def _systemd_scope_snapshot(scope):
     result = _run_capture(
         [
             "systemctl",
-            "show",
-            scope,
             "--property=ControlGroup,AllowedCPUs,CPUQuotaPerSecUSec,CPUUsageNSec,TasksCurrent",
             "--no-pager",
+            "show",
+            "--",
+            scope,
         ]
     )
     properties = {}
@@ -810,6 +833,18 @@ def run_inject(args):
 # --- Subcommand: Publish (Merge & Update Data.js) ---
 
 def run_publish(args):
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", args.sha):
+        print("--sha must be a hexadecimal Git commit ID of at least seven characters", file=sys.stderr)
+        return 2
+    run_id = args.run_id
+    if run_id and not re.fullmatch(r"[0-9]+", run_id):
+        print("--run-id must be numeric", file=sys.stderr)
+        return 2
+    if not run_id and args.run_url:
+        match = re.search(r"/runs/([0-9]+)(?:/|\?|#|$)", args.run_url)
+        if match:
+            run_id = match.group(1)
+
     with open(args.result) as f:
         entry = json.load(f)
 
@@ -834,12 +869,6 @@ def run_publish(args):
                 except Exception: pass
 
     sha7 = args.sha[:7]
-    run_id = args.run_id if getattr(args, "run_id", None) else ""
-    if not run_id and args.run_url:
-        m = re.search(r"/runs/(\d+)", args.run_url)
-        if m:
-            run_id = m.group(1)
-
     run_key = f"{sha7}-{run_id}" if run_id else sha7
     entry["id"] = run_key
 
@@ -920,7 +949,7 @@ def main():
     s.add_argument("--case-name", required=True)
     s.add_argument("--plan", default="")
     s.add_argument("--config", action="append", default=[])
-    s.add_argument("--scope", action="append", default=[])
+    s.add_argument("--scope", type=_scope_name, action="append", default=[])
     s.add_argument("--pid-file", action="append", default=[])
     s.add_argument("--log-file", action="append", default=[])
 
@@ -975,7 +1004,7 @@ def main():
     elif args.cmd == "inject": run_inject(args)
     elif args.cmd == "attach": return_code = run_attach(args)
     elif args.cmd == "gate": return_code = run_gate(args)
-    elif args.cmd == "publish": run_publish(args)
+    elif args.cmd == "publish": return_code = run_publish(args)
     else: return_code = 0
     if "return_code" in locals():
         sys.exit(return_code)
