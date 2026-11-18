@@ -50,7 +50,12 @@ def _sha256_bytes(value):
 
 _SECRET_KEYS = {"auth_token", "token", "password", "secret", "private_key", "client_secret"}
 _ENV_WORD = re.compile(r"[A-Za-z0-9_]+")
-_ENV_VALUE = re.compile(r"(\s*[=:]\s*)\S+")
+
+
+def _skip_spaces(line, pos):
+    while pos < len(line) and line[pos].isspace():
+        pos += 1
+    return pos
 
 
 def _redact_env_assignments(line):
@@ -62,10 +67,17 @@ def _redact_env_assignments(line):
         key = word.group().upper()
         if "DUOTUNNEL_" not in key or not key.endswith(("TOKEN", "SECRET", "PASSWORD")):
             continue
-        value = _ENV_VALUE.match(line, word.end())
-        if value:
-            parts.extend((line[offset:value.end(1)], "<redacted>"))
-            offset = value.end()
+        separator = _skip_spaces(line, word.end())
+        if separator == len(line) or line[separator] not in "=:":
+            continue
+        start = _skip_spaces(line, separator + 1)
+        if start == len(line):
+            continue
+        end = start + 1
+        while end < len(line) and not line[end].isspace():
+            end += 1
+        parts.extend((line[offset:start], "<redacted>"))
+        offset = end
     parts.append(line[offset:])
     return "".join(parts)
 

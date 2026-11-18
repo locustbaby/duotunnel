@@ -31,6 +31,12 @@ class BenchmarkInputTests(unittest.TestCase):
         expected = f"  token: <redacted>\nDUOTUNNEL_CLIENT__AUTH_TOKEN=<redacted>\n{large_key}\n"
         self.assertEqual(bench._redact_text(value), expected)
         self.assertEqual(bench._redact_text("OTHER_DUOTUNNEL_SECRET=discard"), "OTHER_DUOTUNNEL_SECRET=<redacted>")
+        spaces = " " * 10000
+        self.assertEqual(bench._redact_text(f"DUOTUNNEL_TOKEN={spaces}"), f"DUOTUNNEL_TOKEN={spaces}")
+        self.assertEqual(
+            bench._redact_text(f"DUOTUNNEL_TOKEN={spaces}discard DUOTUNNEL_PASSWORD: other"),
+            f"DUOTUNNEL_TOKEN={spaces}<redacted> DUOTUNNEL_PASSWORD: <redacted>",
+        )
 
     def test_invalid_publish_ids_are_rejected_before_any_file_access(self):
         for sha, run_id in [("../invalid", "1"), ("abcdef1", "../invalid")]:
