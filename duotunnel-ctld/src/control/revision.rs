@@ -106,26 +106,24 @@ impl SqliteControlRevisionStore {
         let columns = sqlx::query("PRAGMA table_info(config_state)")
             .fetch_all(pool)
             .await?;
-        for (name, definition) in [
-            ("singleton", "INTEGER NOT NULL DEFAULT 1"),
-            ("yaml_source_revision", "TEXT NOT NULL DEFAULT ''"),
-            ("sqlite_source_revision", "TEXT NOT NULL DEFAULT ''"),
-            ("effective_revision", "INTEGER NOT NULL DEFAULT 0"),
-            ("effective_hash", "TEXT NOT NULL DEFAULT ''"),
-            ("initialized", "INTEGER NOT NULL DEFAULT 0"),
-            ("degraded", "INTEGER NOT NULL DEFAULT 0"),
-            ("yaml_degraded", "INTEGER NOT NULL DEFAULT 0"),
-            ("sqlite_degraded", "INTEGER NOT NULL DEFAULT 0"),
-            ("coordinator_degraded", "INTEGER NOT NULL DEFAULT 0"),
+        for (name, statement) in [
+            ("singleton", "ALTER TABLE config_state ADD COLUMN singleton INTEGER NOT NULL DEFAULT 1"),
+            ("yaml_source_revision", "ALTER TABLE config_state ADD COLUMN yaml_source_revision TEXT NOT NULL DEFAULT ''"),
+            ("sqlite_source_revision", "ALTER TABLE config_state ADD COLUMN sqlite_source_revision TEXT NOT NULL DEFAULT ''"),
+            ("effective_revision", "ALTER TABLE config_state ADD COLUMN effective_revision INTEGER NOT NULL DEFAULT 0"),
+            ("effective_hash", "ALTER TABLE config_state ADD COLUMN effective_hash TEXT NOT NULL DEFAULT ''"),
+            ("initialized", "ALTER TABLE config_state ADD COLUMN initialized INTEGER NOT NULL DEFAULT 0"),
+            ("degraded", "ALTER TABLE config_state ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0"),
+            ("yaml_degraded", "ALTER TABLE config_state ADD COLUMN yaml_degraded INTEGER NOT NULL DEFAULT 0"),
+            ("sqlite_degraded", "ALTER TABLE config_state ADD COLUMN sqlite_degraded INTEGER NOT NULL DEFAULT 0"),
+            ("coordinator_degraded", "ALTER TABLE config_state ADD COLUMN coordinator_degraded INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists = columns.iter().any(|row| {
                 row.try_get::<String, _>("name")
                     .is_ok_and(|column| column == name)
             });
             if !exists {
-                sqlx::query(&format!(
-                    "ALTER TABLE config_state ADD COLUMN {name} {definition}"
-                ))
+                sqlx::query(statement)
                 .execute(pool)
                 .await?;
             }

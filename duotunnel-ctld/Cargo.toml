@@ -13,7 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 duotunnel-lib = { path = "../duotunnel-lib" }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# The published SQLx 0.9 release cannot resolve a patched SQLite wrapper.
+sqlx = { git = "https://github.com/transact-rs/sqlx.git", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c", default-features = false, features = ["runtime-tokio", "sqlite"] }
+libsqlite3-sys = { version = "0.39.1", default-features = false }
 tokio = { version = "1.52", features = ["full"] }
 async-trait = "0.1"
 anyhow = "1.0"
